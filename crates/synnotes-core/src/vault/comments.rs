@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
-use crate::ipc::types::NoteComment;
+use crate::types::NoteComment;
 use crate::vault::layout::INTERNAL_VAULT_DIR;
 use crate::vault::notes::to_posix;
 

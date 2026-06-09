@@ -9,7 +9,7 @@ use std::path::Path;
 use serde::Deserialize;
 use std::sync::LazyLock;
 
-use crate::ipc::types::VaultDemoTourResult;
+use crate::types::VaultDemoTourResult;
 use crate::vault::layout::ensure_vault_layout;
 use crate::vault::notes::resolve_safe;
 
