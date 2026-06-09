@@ -8,7 +8,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::types::{PeriodicNotesSettings, VaultSettings};
+use crate::ipc::types::{PeriodicNotesSettings, VaultSettings};
 use crate::vault::layout::{
     is_reserved_root_name, INTERNAL_VAULT_DIR, VAULT_SETTINGS_FILE,
 };

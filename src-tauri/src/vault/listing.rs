@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::fs::{self, DirEntry, FileType};
 use std::path::{Path, PathBuf};
 
-use crate::types::{FolderEntry, NoteMeta};
+use crate::ipc::types::{FolderEntry, NoteMeta};
 use crate::vault::config::resolve_path;
 use crate::vault::layout::{self, FOLDERS};
 use crate::vault::notes;

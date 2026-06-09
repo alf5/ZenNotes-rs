@@ -14,7 +14,7 @@ use std::process;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::types::{LocalVaultEntry, VaultInfo};
+use crate::ipc::types::{LocalVaultEntry, VaultInfo};
 
 pub const CONFIG_FILE: &str = "synnotes.config.json";
 pub const DEFAULT_QUICK_CAPTURE_HOTKEY: &str = "CommandOrControl+Shift+Space";

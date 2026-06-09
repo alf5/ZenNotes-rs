@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::types::NoteMeta;
+use crate::ipc::types::NoteMeta;
 use crate::vault::comments;
 use crate::vault::layout;
 use crate::vault::notes::{self, folder_for_relative_path, read_meta, resolve_safe, to_posix};

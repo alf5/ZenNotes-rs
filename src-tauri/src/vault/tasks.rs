@@ -9,7 +9,7 @@ use std::sync::LazyLock;
 
 use fancy_regex::Regex;
 
-use crate::types::VaultTask;
+use crate::ipc::types::VaultTask;
 use crate::vault::listing::list_notes;
 use crate::vault::notes::{folder_for_relative_path, title_from_path, to_posix};
 
