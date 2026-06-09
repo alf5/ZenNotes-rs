@@ -1,18 +1,52 @@
 name: Release
 
-# Publishes desktop bundles to a GitHub Release whenever a v* tag is pushed.
+# Publishes desktop bundles to a GitHub Release on every v* tag.
 # Builds run on native runners (the only reliable way to build a Tauri app per
 # platform): macOS for both arches, Ubuntu for Linux (AppImage + .deb).
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and publish a release for
+        required: true
+        default: v2.1.0
 
 permissions:
   contents: write
 
+# The release tag: the pushed tag, or the manually-dispatched one.
+env:
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
 jobs:
-  release:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create the GitHub release (idempotent)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists."
+          else
+            gh release create "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" \
+              --title "SynNotes $RELEASE_TAG" \
+              --notes "SynNotes $RELEASE_TAG — a Tauri v2 desktop build.
+
+          Downloads:
+          - macOS (Apple Silicon): \`*_aarch64.dmg\`
+          - macOS (Intel): \`*_x64.dmg\`
+          - Linux: \`*.AppImage\` and \`*.deb\`
+
+          macOS builds are unsigned/un-notarized — on first launch, right-click → Open (or run \`xattr -dr com.apple.quarantine /Applications/SynNotes.app\`)."
+          fi
+
+  build:
+    needs: create-release
     strategy:
       fail-fast: false
       matrix:
@@ -26,7 +60,6 @@ jobs:
           - platform: ubuntu-22.04
             target: ''
             args: ''
-
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -47,41 +80,41 @@ jobs:
           workspaces: ./src-tauri -> target
 
       - name: Install Linux dependencies
-        if: matrix.platform == 'ubuntu-22.04'
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
+            libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf \
             build-essential \
             curl wget file \
             libxdo-dev \
             libssl-dev \
-            libayatana-appindicator3-dev \
             libgtk-3-dev
 
       - name: Install frontend dependencies
         run: npm install
 
-      - name: Build and publish to release
-        uses: tauri-apps/tauri-action@v0
+      - name: Build the app (npm runner — avoids tauri-action's bun autodetect)
+        run: npm run tauri build -- ${{ matrix.args }}
+
+      - name: Upload macOS bundles
+        if: runner.os == 'macOS'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: SynNotes ${{ github.ref_name }}
-          releaseBody: |
-            SynNotes ${{ github.ref_name }} — a Tauri v2 desktop build.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "$RELEASE_TAG" \
+            src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg \
+            -R "$GITHUB_REPOSITORY" --clobber
 
-            Downloads:
-            - macOS (Apple Silicon): `*_aarch64.dmg`
-            - macOS (Intel): `*_x64.dmg`
-            - Linux: `*.AppImage` and `*.deb`
-
-            macOS builds are unsigned/un-notarized — on first launch, right-click → Open
-            (or `xattr -dr com.apple.quarantine /Applications/SynNotes.app`).
-          releaseDraft: false
-          prerelease: false
-          args: ${{ matrix.args }}
+      - name: Upload Linux bundles
+        if: runner.os == 'Linux'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "$RELEASE_TAG" \
+            src-tauri/target/release/bundle/appimage/*.AppImage \
+            src-tauri/target/release/bundle/deb/*.deb \
+            -R "$GITHUB_REPOSITORY" --clobber
