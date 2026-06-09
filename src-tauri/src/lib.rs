@@ -174,12 +174,15 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building SynNotes")
-        .run(|app, event| {
-            // macOS delivers "open file"/"open URL" (file associations and
-            // deep links) through the Opened run event.
-            if let tauri::RunEvent::Opened { urls } = event {
+        .run(|_app, _event| {
+            // macOS/iOS deliver "open file"/"open URL" (file associations and
+            // deep links) through the Opened run event. That variant only
+            // exists on Apple platforms; on Linux/Windows these arrive via the
+            // deep-link plugin + single-instance, so gate it by target.
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
+            if let tauri::RunEvent::Opened { urls } = _event {
                 for url in urls {
-                    deep_links::handle_url_or_path(app, url.as_str());
+                    deep_links::handle_url_or_path(_app, url.as_str());
                 }
             }
         });
