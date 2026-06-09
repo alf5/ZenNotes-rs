@@ -4,7 +4,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::types::VaultInfo;
+use crate::ipc::types::VaultInfo;
 
 pub const FOLDERS: [&str; 4] = ["inbox", "quick", "archive", "trash"];
 pub const INTERNAL_VAULT_DIR: &str = ".zennotes";

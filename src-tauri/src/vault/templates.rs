@@ -5,7 +5,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::types::{CustomTemplateFile, WriteTemplateInput};
+use crate::ipc::types::{CustomTemplateFile, WriteTemplateInput};
 
 const TEMPLATES_REL_DIR: &str = ".zennotes/templates";
 

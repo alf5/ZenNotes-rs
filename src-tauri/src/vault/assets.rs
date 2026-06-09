@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::types::{AssetMeta, DeletedAsset, ImportedAsset};
+use crate::ipc::types::{AssetMeta, DeletedAsset, ImportedAsset};
 use crate::vault::config::resolve_path;
 use crate::vault::layout::{INTERNAL_VAULT_DIR, LEGACY_ATTACHMENTS_DIRS, PRIMARY_ATTACHMENTS_DIR};
 use crate::vault::metadata::{classify_imported_asset, pasted_image_extension};

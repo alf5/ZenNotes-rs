@@ -1,0 +1,47 @@
+# Maintainer: alf5 <alf5@users.noreply.github.com>
+pkgname=syncnotes
+pkgver=2.1.0
+pkgrel=1
+pkgdesc="A calm, file-based markdown notes app (Tauri desktop client)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/alf5/SyncNotes"
+license=('MIT')
+# Runtime: the Tauri webview + GTK stack, from Arch's own packages.
+depends=('webkit2gtk-4.1' 'gtk3' 'hicolor-icon-theme')
+# Build: Rust toolchain (rust provides cargo), Node/npm for the Vite frontend,
+# pkgconf to locate webkit2gtk-4.1/gtk3, git for the source clone.
+makedepends=('rust' 'npm' 'nodejs' 'pkgconf' 'git')
+source=("$pkgname::git+https://github.com/alf5/SyncNotes.git#tag=v$pkgver"
+        "syncnotes.desktop")
+sha256sums=('SKIP'
+            'add9b34b9846b44b60bd017753710e5ec839bf794a7b6fc35070123eb5ade6fe')
+
+build() {
+  cd "$srcdir/$pkgname"
+
+  # Keep npm + cargo caches inside the build dir.
+  export npm_config_cache="$srcdir/npm-cache"
+  export CARGO_HOME="${CARGO_HOME:-$srcdir/cargo-home}"
+
+  # Install the JS deps (vendored frontend workspace + Tauri CLI).
+  npm ci
+
+  # Build the frontend (Vite, embedded into the binary) and the Rust app,
+  # without producing a bundle/installer — we install files ourselves below.
+  npm run tauri build -- --no-bundle
+}
+
+package() {
+  cd "$srcdir/$pkgname"
+
+  # The executable (frontend is embedded; the system WebKitGTK provides the engine).
+  install -Dm755 "src-tauri/target/release/syncnotes" "$pkgdir/usr/bin/syncnotes"
+
+  # Desktop entry + icons.
+  install -Dm644 "$srcdir/syncnotes.desktop" "$pkgdir/usr/share/applications/syncnotes.desktop"
+  install -Dm644 "src-tauri/icons/32x32.png"      "$pkgdir/usr/share/icons/hicolor/32x32/apps/syncnotes.png"
+  install -Dm644 "src-tauri/icons/128x128.png"    "$pkgdir/usr/share/icons/hicolor/128x128/apps/syncnotes.png"
+  install -Dm644 "src-tauri/icons/128x128@2x.png" "$pkgdir/usr/share/icons/hicolor/256x256/apps/syncnotes.png"
+
+  install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

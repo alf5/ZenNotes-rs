@@ -1,5 +1,5 @@
 [package]
-name = "synnotes"
+name = "syncnotes"
 version = "2.1.0"
 description = "SynNotes desktop — a Tauri port of ZenNotes"
 authors = ["SynNotes"]
@@ -14,7 +14,6 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-synnotes-core = { path = "../crates/synnotes-core" }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
@@ -23,8 +22,10 @@ tauri-plugin-deep-link = "2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+fancy-regex = "0.14"
 notify-debouncer-full = "0.3"
 uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 urlencoding = "2"
 font-kit = "0.14"
 base64 = "0.22"
