@@ -1,0 +1,23 @@
+[package]
+name = "zen-cli"
+version = "2.1.0"
+description = "zen — the SynNotes command-line client"
+edition = "2021"
+rust-version = "1.77"
+
+[[bin]]
+name = "zen"
+path = "src/main.rs"
+
+[dependencies]
+synnotes-core = { path = "../synnotes-core" }
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
+dirs = "5"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1

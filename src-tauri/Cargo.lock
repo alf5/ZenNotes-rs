@@ -3661,13 +3661,12 @@ name = "synnotes"
 version = "2.1.0"
 dependencies = [
  "base64 0.22.1",
- "chrono",
- "fancy-regex",
  "font-kit",
  "keyring",
  "notify-debouncer-full",
  "serde",
  "serde_json",
+ "synnotes-core",
  "tauri",
  "tauri-build",
  "tauri-plugin-deep-link",
@@ -3677,6 +3676,17 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tempfile",
  "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "synnotes-core"
+version = "2.1.0"
+dependencies = [
+ "chrono",
+ "fancy-regex",
+ "serde",
+ "serde_json",
  "uuid",
 ]
 
