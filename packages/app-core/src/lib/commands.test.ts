@@ -1,0 +1,97 @@
+// @vitest-environment jsdom
+
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+function installZen(): void {
+  Object.defineProperty(window, 'zen', {
+    configurable: true,
+    value: {
+      getAppInfo: vi.fn().mockReturnValue({ runtime: 'desktop' }),
+      getCapabilities: vi.fn().mockReturnValue({
+        supportsUpdater: false,
+        supportsNativeMenus: false,
+        supportsFloatingWindows: false,
+        supportsLocalFilesystemPickers: true,
+        supportsRemoteWorkspace: false,
+        supportsCliInstall: false,
+        supportsCustomTemplates: false
+      }),
+      closeVault: vi.fn(),
+      openVaultWindow: vi.fn()
+    }
+  })
+}
+
+async function loadCommands() {
+  vi.resetModules()
+  localStorage.clear()
+  return {
+    ...(await import('../store')),
+    ...(await import('./commands'))
+  }
+}
+
+beforeEach(() => {
+  vi.restoreAllMocks()
+  installZen()
+})
+
+describe('vault commands', () => {
+  it('exposes one switch-vault picker command', async () => {
+    const { buildCommands, useStore } = await loadCommands()
+    useStore.setState({
+      workspaceMode: 'local',
+      vault: { root: '/Users/test/Notes', name: 'Notes' },
+      localVaults: [
+        { root: '/Users/test/Notes', name: 'Notes', lastOpenedAt: 2 },
+        { root: '/Users/test/Work', name: 'Work', lastOpenedAt: 1 }
+      ]
+    })
+
+    const commands = buildCommands()
+    const switchCommand = commands.find((cmd) => cmd.id === 'app.vault.switch')
+    const closeCommand = commands.find((cmd) => cmd.id === 'app.vault.close')
+
+    expect(switchCommand?.title).toBe('Switch Vault…')
+    expect(closeCommand?.title).toBe('Close Current Vault')
+    expect(commands.some((cmd) => cmd.id.startsWith('app.vault.local.'))).toBe(false)
+  })
+
+  it('keeps the switch-vault picker available for remote workspace profiles', async () => {
+    Object.defineProperty(window, 'zen', {
+      configurable: true,
+      value: {
+        getAppInfo: vi.fn().mockReturnValue({ runtime: 'desktop' }),
+        getCapabilities: vi.fn().mockReturnValue({
+          supportsUpdater: false,
+          supportsNativeMenus: false,
+          supportsFloatingWindows: false,
+          supportsLocalFilesystemPickers: false,
+          supportsRemoteWorkspace: true,
+          supportsCliInstall: false,
+          supportsCustomTemplates: false
+        }),
+        openVaultWindow: vi.fn()
+      }
+    })
+
+    const { buildCommands, useStore } = await loadCommands()
+    useStore.setState({
+      workspaceMode: 'remote',
+      remoteWorkspaceProfiles: [
+        {
+          id: 'remote-1',
+          name: 'Remote Notes',
+          baseUrl: 'https://notes.example.com',
+          hasCredential: true,
+          vaultPath: '/team',
+          lastConnectedAt: 1
+        }
+      ]
+    })
+
+    const commands = buildCommands()
+
+    expect(commands.some((cmd) => cmd.id === 'app.vault.switch')).toBe(true)
+  })
+})
