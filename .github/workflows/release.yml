@@ -1,0 +1,87 @@
+name: Release
+
+# Publishes desktop bundles to a GitHub Release whenever a v* tag is pushed.
+# Builds run on native runners (the only reliable way to build a Tauri app per
+# platform): macOS for both arches, Ubuntu for Linux (AppImage + .deb).
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            args: --target aarch64-apple-darwin
+          - platform: macos-latest
+            target: x86_64-apple-darwin
+            args: --target x86_64-apple-darwin
+          - platform: ubuntu-22.04
+            target: ''
+            args: ''
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            build-essential \
+            curl wget file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            libgtk-3-dev
+
+      - name: Install frontend dependencies
+        run: npm install
+
+      - name: Build and publish to release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: SynNotes ${{ github.ref_name }}
+          releaseBody: |
+            SynNotes ${{ github.ref_name }} — a Tauri v2 desktop build.
+
+            Downloads:
+            - macOS (Apple Silicon): `*_aarch64.dmg`
+            - macOS (Intel): `*_x64.dmg`
+            - Linux: `*.AppImage` and `*.deb`
+
+            macOS builds are unsigned/un-notarized — on first launch, right-click → Open
+            (or `xattr -dr com.apple.quarantine /Applications/SynNotes.app`).
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}
