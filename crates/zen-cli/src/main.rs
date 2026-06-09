@@ -1,4 +1,4 @@
-//! `zen` — the SynNotes command-line client.
+//! `syncnotes` — the SynNotes command-line client.
 //!
 //! A small, dependency-light binary that shares all vault logic with the
 //! desktop app via `synnotes-core` (no Tauri/WebKit), so it builds as a fully
@@ -18,7 +18,7 @@ use synnotes_core::vault::{config, crud, listing, notes, settings, tasks};
 const APP_IDENTIFIER: &str = "com.synnotes.app";
 
 #[derive(Parser)]
-#[command(name = "zen", version, about = "SynNotes command-line client", long_about = None)]
+#[command(name = "syncnotes", version, about = "SynNotes command-line client", long_about = None)]
 struct Cli {
     /// Vault path (overrides the vault configured in the SynNotes app).
     #[arg(long, global = true)]
@@ -326,7 +326,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("zen: {e}");
+            eprintln!("syncnotes: {e}");
             ExitCode::FAILURE
         }
     }

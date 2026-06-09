@@ -6,7 +6,7 @@ edition = "2021"
 rust-version = "1.77"
 
 [[bin]]
-name = "zen"
+name = "syncnotes"
 path = "src/main.rs"
 
 [dependencies]
