@@ -130,13 +130,13 @@ jobs:
         include:
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-musl
-            asset: zen-x86_64-unknown-linux-musl
+            asset: syncnotes-x86_64-unknown-linux-musl
           - platform: macos-latest
             target: aarch64-apple-darwin
-            asset: zen-aarch64-apple-darwin
+            asset: syncnotes-aarch64-apple-darwin
           - platform: macos-latest
             target: x86_64-apple-darwin
-            asset: zen-x86_64-apple-darwin
+            asset: syncnotes-x86_64-apple-darwin
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -163,6 +163,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cp "crates/zen-cli/target/${{ matrix.target }}/release/zen" "${{ matrix.asset }}"
+          cp "crates/zen-cli/target/${{ matrix.target }}/release/syncnotes" "${{ matrix.asset }}"
           file "${{ matrix.asset }}"
           gh release upload "$RELEASE_TAG" "${{ matrix.asset }}" -R "$GITHUB_REPOSITORY" --clobber
