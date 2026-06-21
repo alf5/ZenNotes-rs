@@ -24,11 +24,11 @@ function renderBootError(message: string): void {
 }
 
 window.addEventListener('error', (event) => {
-  console.error('[synnotes-renderer] uncaught error', event.error ?? event.message)
+  console.error('[zennotes-rs-renderer] uncaught error', event.error ?? event.message)
 })
 
 window.addEventListener('unhandledrejection', (event) => {
-  console.error('[synnotes-renderer] unhandled rejection', event.reason)
+  console.error('[zennotes-rs-renderer] unhandled rejection', event.reason)
 })
 
 try {
@@ -43,6 +43,6 @@ try {
     renderZenNotesApp(root)
   }
 } catch (error) {
-  console.error('[synnotes-renderer] boot failed', error)
+  console.error('[zennotes-rs-renderer] boot failed', error)
   renderBootError(String(error instanceof Error ? error.stack ?? error.message : error))
 }

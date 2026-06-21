@@ -76,7 +76,7 @@ fn assert_asset_file(root: &Path, rel: &str) -> Result<(String, PathBuf), String
         return Err("Asset path is required.".into());
     }
     if normalized.split('/').any(|c| c == INTERNAL_VAULT_DIR) {
-        return Err("Cannot modify internal SynNotes files.".into());
+        return Err("Cannot modify internal ZenNotes-rs files.".into());
     }
     if normalized.to_lowercase().ends_with(".md") {
         return Err("Use note actions to modify markdown notes.".into());
@@ -197,7 +197,7 @@ pub fn move_asset(root: &Path, rel: &str, target_dir: &str) -> Result<AssetMeta,
     let normalized = normalize_vault_relative_path(target_dir);
     let normalized = normalized.trim_matches('/');
     if normalized.split('/').any(|c| c == INTERNAL_VAULT_DIR) {
-        return Err("Cannot move assets into internal SynNotes files.".into());
+        return Err("Cannot move assets into internal ZenNotes-rs files.".into());
     }
     let dest_dir = if normalized.is_empty() {
         root.to_path_buf()
@@ -246,7 +246,7 @@ pub fn delete_asset(root: &Path, rel: &str) -> Result<DeletedAsset, String> {
 pub fn restore_deleted_asset(root: &Path, deleted: &DeletedAsset) -> Result<AssetMeta, String> {
     let target_rel = normalize_vault_relative_path(&deleted.path);
     if target_rel.is_empty() || target_rel.split('/').any(|c| c == INTERNAL_VAULT_DIR) {
-        return Err("Cannot restore internal SynNotes files.".into());
+        return Err("Cannot restore internal ZenNotes-rs files.".into());
     }
     if target_rel.to_lowercase().ends_with(".md") {
         return Err("Use note actions to restore markdown notes.".into());

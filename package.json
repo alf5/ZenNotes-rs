@@ -1,11 +1,11 @@
 {
-  "name": "synnotes",
-  "productName": "SynNotes",
+  "name": "zennotes-rs",
+  "productName": "ZenNotes-rs",
   "private": true,
   "version": "2.1.0",
-  "description": "SynNotes desktop — a Tauri port of the ZenNotes markdown notes app",
+  "description": "ZenNotes-rs desktop — a Tauri port of the ZenNotes markdown notes app",
   "type": "module",
-  "homepage": "https://github.com/synnotes/synnotes",
+  "homepage": "https://github.com/alf5/ZenNotes-rs",
   "workspaces": [
     "packages/*"
   ],
@@ -17,7 +17,7 @@
     "typecheck": "tsc --noEmit",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "NO_STRIP=true tauri build"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.0",

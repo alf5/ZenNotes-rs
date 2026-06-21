@@ -1,4 +1,4 @@
-//! SynNotes — Tauri (Rust) backend.
+//! ZenNotes-rs — Tauri (Rust) backend.
 //!
 //! Reimplements the ZenNotes Electron `main/` process as Tauri commands.
 //! The frontend talks to this backend through the same ZenBridge contract
@@ -173,7 +173,7 @@ pub fn run() {
             workspace_cmds::workspace_browse_server_directories,
         ])
         .build(tauri::generate_context!())
-        .expect("error while building SynNotes")
+        .expect("error while building ZenNotes-rs")
         .run(|_app, _event| {
             // macOS/iOS deliver "open file"/"open URL" (file associations and
             // deep links) through the Opened run event. That variant only

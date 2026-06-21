@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use base64::Engine;
 
-const SERVICE: &str = "com.synnotes.app";
+const SERVICE: &str = "com.zennotes-rs.app";
 const ACCOUNT_PREFIX: &str = "remote-workspace:";
 
 fn account(id: &str) -> String {

@@ -1,8 +1,8 @@
-pkgbase = syncnotes
+pkgbase = zennotes-rs
 	pkgdesc = A calm, file-based markdown notes app (Tauri desktop client)
 	pkgver = 2.1.0
 	pkgrel = 1
-	url = https://github.com/alf5/SyncNotes
+	url = https://github.com/alf5/ZenNotes-rs
 	arch = x86_64
 	arch = aarch64
 	license = MIT
@@ -14,9 +14,9 @@ pkgbase = syncnotes
 	depends = webkit2gtk-4.1
 	depends = gtk3
 	depends = hicolor-icon-theme
-	source = syncnotes::git+https://github.com/alf5/SyncNotes.git#tag=v2.1.0
-	source = syncnotes.desktop
+	source = zennotes-rs::git+https://github.com/alf5/ZenNotes-rs.git#tag=v2.1.0
+	source = zennotes-rs.desktop
 	sha256sums = SKIP
-	sha256sums = add9b34b9846b44b60bd017753710e5ec839bf794a7b6fc35070123eb5ade6fe
+	sha256sums = 29d0643953714a755f9da9aea4236b4630d22a66956ba8bddbc428ebddb2a82d
 
-pkgname = syncnotes
+pkgname = zennotes-rs

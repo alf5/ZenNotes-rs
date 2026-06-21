@@ -1,20 +1,20 @@
 # Maintainer: alf5 <alf5@users.noreply.github.com>
-pkgname=syncnotes
+pkgname=zennotes-rs
 pkgver=2.1.0
 pkgrel=1
 pkgdesc="A calm, file-based markdown notes app (Tauri desktop client)"
 arch=('x86_64' 'aarch64')
-url="https://github.com/alf5/SyncNotes"
+url="https://github.com/alf5/ZenNotes-rs"
 license=('MIT')
 # Runtime: the Tauri webview + GTK stack, from Arch's own packages.
 depends=('webkit2gtk-4.1' 'gtk3' 'hicolor-icon-theme')
 # Build: Rust toolchain (rust provides cargo), Node/npm for the Vite frontend,
 # pkgconf to locate webkit2gtk-4.1/gtk3, git for the source clone.
 makedepends=('rust' 'npm' 'nodejs' 'pkgconf' 'git')
-source=("$pkgname::git+https://github.com/alf5/SyncNotes.git#tag=v$pkgver"
-        "syncnotes.desktop")
+source=("$pkgname::git+https://github.com/alf5/ZenNotes-rs.git#tag=v$pkgver"
+  "zennotes-rs.desktop")
 sha256sums=('SKIP'
-            'add9b34b9846b44b60bd017753710e5ec839bf794a7b6fc35070123eb5ade6fe')
+  '29d0643953714a755f9da9aea4236b4630d22a66956ba8bddbc428ebddb2a82d')
 
 build() {
   cd "$srcdir/$pkgname"
@@ -35,13 +35,13 @@ package() {
   cd "$srcdir/$pkgname"
 
   # The executable (frontend is embedded; the system WebKitGTK provides the engine).
-  install -Dm755 "src-tauri/target/release/syncnotes" "$pkgdir/usr/bin/syncnotes"
+  install -Dm755 "src-tauri/target/release/zennotes-rs" "$pkgdir/usr/bin/zennotes-rs"
 
   # Desktop entry + icons.
-  install -Dm644 "$srcdir/syncnotes.desktop" "$pkgdir/usr/share/applications/syncnotes.desktop"
-  install -Dm644 "src-tauri/icons/32x32.png"      "$pkgdir/usr/share/icons/hicolor/32x32/apps/syncnotes.png"
-  install -Dm644 "src-tauri/icons/128x128.png"    "$pkgdir/usr/share/icons/hicolor/128x128/apps/syncnotes.png"
-  install -Dm644 "src-tauri/icons/128x128@2x.png" "$pkgdir/usr/share/icons/hicolor/256x256/apps/syncnotes.png"
+  install -Dm644 "$srcdir/zennotes-rs.desktop" "$pkgdir/usr/share/applications/zennotes-rs.desktop"
+  install -Dm644 "src-tauri/icons/32x32.png" "$pkgdir/usr/share/icons/hicolor/32x32/apps/zennotes-rs.png"
+  install -Dm644 "src-tauri/icons/128x128.png" "$pkgdir/usr/share/icons/hicolor/128x128/apps/zennotes-rs.png"
+  install -Dm644 "src-tauri/icons/128x128@2x.png" "$pkgdir/usr/share/icons/hicolor/256x256/apps/zennotes-rs.png"
 
   install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

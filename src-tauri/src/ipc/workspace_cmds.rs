@@ -15,7 +15,7 @@ fn config_dir(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 const UNSUPPORTED: &str =
-    "Remote workspaces require the SynNotes server client, which is not in this build yet.";
+    "Remote workspaces require the ZenNotes-rs server client, which is not in this build yet.";
 
 #[tauri::command]
 pub fn workspace_list_remote_profiles(app: AppHandle) -> Result<Vec<RemoteWorkspaceProfile>, String> {

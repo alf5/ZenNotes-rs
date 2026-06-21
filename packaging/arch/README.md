@@ -1,39 +1,47 @@
-# Arch Linux packaging (`syncnotes`)
+# Arch Linux packaging (`zennotes-rs`)
 
-A `makepkg`/AUR setup that builds the **SynNotes** Tauri desktop app from source and
+A `makepkg`/AUR setup that builds the **ZenNotes-rs** Tauri desktop app from source and
 links against Arch's own system libraries (`webkit2gtk-4.1`, `gtk3`) — nothing is bundled.
 
-The binary is installed as **`/usr/bin/syncnotes`**.
+The binary is installed as **`/usr/bin/zennotes-rs`**.
 
 ## Files
+
 - `PKGBUILD` — builds the app (Rust + Vite frontend) and installs the binary, `.desktop`, icons, and license.
-- `syncnotes.desktop` — application launcher entry.
+- `zennotes-rs.desktop` — application launcher entry.
 - `.SRCINFO` — AUR metadata (regenerate with `makepkg --printsrcinfo > .SRCINFO` if you edit the PKGBUILD).
 
 ## Dependencies (Arch packages)
+
 - **Runtime:** `webkit2gtk-4.1`, `gtk3`, `hicolor-icon-theme`
 - **Build:** `rust` (provides cargo), `npm`, `nodejs`, `pkgconf`, `git`
 
 ## Build & install locally
+
 ```bash
 cd packaging/arch
 makepkg -si        # build + install (pulls deps via pacman)
 ```
 
 ## Publish to the AUR
+
 The AUR repo for a package contains just the `PKGBUILD`, `.SRCINFO`, and any local
-source files (here, `syncnotes.desktop`) at its root:
+source files (here, `zennotes-rs.desktop`) at its root:
+
 ```bash
-git clone ssh://aur@aur.archlinux.org/syncnotes.git
-cp PKGBUILD .SRCINFO syncnotes.desktop syncnotes/
-cd syncnotes && git add -A && git commit -m "syncnotes 2.1.0-1" && git push
+git clone ssh://aur@aur.archlinux.org/zennotes-rs.git
+cp PKGBUILD .SRCINFO zennotes-rs.desktop zennotes-rs/
+cd zennotes-rs && git add -A && git commit -m "zennotes-rs 2.1.0-1" && git push
 ```
+
 Users then install with an AUR helper:
+
 ```bash
-paru -S syncnotes      # or: yay -S syncnotes
+paru -S zennotes-rs      # or: yay -S zennotes-rs
 ```
 
 ## Notes
+
 - The source is pinned to the **`v2.1.0` git tag** (`git+…#tag=v2.1.0`), so the hash is `SKIP`
   (git sources are verified by the tag/commit, not a tarball checksum).
 - This is a **from-source** package — building compiles Rust + the frontend (a few minutes).

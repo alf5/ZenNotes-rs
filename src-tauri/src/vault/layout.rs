@@ -46,10 +46,10 @@ pub fn folder_root(root: &Path, folder: &str) -> PathBuf {
     }
 }
 
-/// First-run welcome note (rebranded for SynNotes).
-const WELCOME_NOTE: &str = r#"# Welcome to SynNotes
+/// First-run welcome note (rebranded for ZenNotes-rs).
+const WELCOME_NOTE: &str = r#"# Welcome to ZenNotes-rs
 
-SynNotes is a **file-based** markdown notes app made for focus and deep work. Every note is a plain `.md` file in your vault — yours to keep, sync, and version however you like.
+ZenNotes-rs is a **file-based** markdown notes app made for focus and deep work. Every note is a plain `.md` file in your vault — yours to keep, sync, and version however you like.
 
 ## What you get
 
