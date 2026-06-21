@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=ZenNotes-rs
+GenericName=Markdown Notes
+Comment=A calm, file-based markdown notes app
+Exec=zennotes-rs %F
+Icon=zennotes-rs
+Terminal=false
+Categories=Office;Utility;TextEditor;
+MimeType=text/markdown;
+Keywords=notes;markdown;vault;
+StartupNotify=true
+StartupWMClass=ZenNotes-rs
