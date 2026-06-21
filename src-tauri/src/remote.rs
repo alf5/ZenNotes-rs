@@ -1,7 +1,7 @@
 //! Remote-workspace profile management — the persistence half of the remote
 //! workspace feature (apps/desktop/src/main/index.ts remote-profile handlers).
 //!
-//! Profiles persist in `synnotes.config.json` (`remoteWorkspaceProfiles`); auth
+//! Profiles persist in `zennotes-rs.config.json` (`remoteWorkspaceProfiles`); auth
 //! tokens live in the OS keychain via `secrets`. The live HTTP/WebSocket server
 //! client (connect/disconnect/browse/select over the self-hosted Go server) is
 //! NOT ported in this build — those commands return an unsupported error and

@@ -73,11 +73,11 @@ import { TAURI_CAPABILITIES } from './capabilities'
 import { resolveLocalAssetUrl, resolveVaultAssetUrl } from './asset-url'
 
 const APP_INFO: ZenAppInfo = {
-  name: 'synnotes',
-  productName: 'SynNotes',
+  name: 'zennotes-rs',
+  productName: 'ZenNotes-rs',
   version: '2.1.0',
-  description: 'SynNotes desktop',
-  homepage: 'https://github.com/synnotes/synnotes',
+  description: 'ZenNotes-rs desktop',
+  homepage: 'https://github.com/alf5/ZenNotes-rs',
   runtime: 'desktop'
 }
 
@@ -105,7 +105,7 @@ function subscribe<T>(event: string, cb: (payload: T) => void): () => void {
 }
 
 function notImplemented(name: string): Promise<never> {
-  return Promise.reject(new Error(`SynNotes: "${name}" is not implemented yet`))
+  return Promise.reject(new Error(`ZenNotes-rs: "${name}" is not implemented yet`))
 }
 
 function unsupportedUpdateState(): AppUpdateState {
@@ -133,7 +133,7 @@ const SESSION_OK: ServerSessionStatus = {
 function unavailableCliStatus(): CliInstallStatus {
   return {
     available: false,
-    reason: 'The SynNotes CLI is not bundled in this build yet.',
+    reason: 'The ZenNotes-rs CLI is not bundled in this build yet.',
     defaultTarget: '',
     requiresSudo: false,
     targetOnPath: false,

@@ -1,13 +1,13 @@
 [package]
-name = "syncnotes"
+name = "zennotes-rs"
 version = "2.1.0"
-description = "SynNotes desktop — a Tauri port of ZenNotes"
-authors = ["SynNotes"]
+description = "ZenNotes-rs desktop — a Tauri port of ZenNotes"
+authors = ["ZenNotes-rs"]
 edition = "2021"
 rust-version = "1.77"
 
 [lib]
-name = "synnotes_lib"
+name = "zennotes_rs_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

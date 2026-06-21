@@ -1,10 +1,10 @@
-# SynNotes
+# ZenNotes-rs
 
 <p align="center">
-  <img src="src-tauri/icons/128x128.png" alt="SynNotes app icon" width="128">
+  <img src="src-tauri/icons/128x128.png" alt="ZenNotes-rs app icon" width="128">
 </p>
 
-**SynNotes** is a desktop Markdown notes app — a port of **ZenNotes** (the original project's
+**ZenNotes-rs** is a desktop Markdown notes app — a port of **ZenNotes** (the original project's
 README is reproduced in full below) from **Electron** to **[Tauri v2](https://v2.tauri.app/) +
 Rust**. It reuses ZenNotes' React frontend unchanged and reimplements the Electron `main`
 process as a native Rust backend, so the app ships as a small (~6 MB) binary that uses the
@@ -22,11 +22,11 @@ produced the Arch Linux packaging — iterating against real builds and tests at
 ## What's different from upstream ZenNotes
 
 - **Runtime:** Tauri v2 + Rust backend (instead of Electron); the React/CodeMirror frontend is reused as-is.
-- **Binary:** installs as `syncnotes`.
-- **Downloads:** prebuilt bundles are on [GitHub Releases](https://github.com/alf5/SyncNotes/releases/latest) — macOS `.dmg` (Apple Silicon + Intel) and Linux `.AppImage` / `.deb`.
+- **Binary:** installs as `zennotes-rs`.
+- **Downloads:** prebuilt bundles are on [GitHub Releases](https://github.com/alf5/ZenNotes-rs/releases/latest) — macOS `.dmg` (Apple Silicon + Intel) and Linux `.AppImage` / `.deb`.
 - **Arch Linux:** a `makepkg`/AUR setup lives in [`packaging/arch/`](packaging/arch/) and builds from source against Arch's own `webkit2gtk-4.1` / `gtk3` packages.
 - **Scope:** desktop app only. The original's web/server/self-hosted modes — and some desktop peripherals (auto-updater, MCP install, Raycast, TikZ) — are not part of this port.
-- **Identity:** application id `com.synnotes.app`, deep-link scheme `synnotes://`.
+- **Identity:** application id `com.zennotes-rs.app`, deep-link scheme `zennotes-rs://`.
 
 Licensed **MIT** (see [LICENSE](LICENSE)), the same as the upstream project.
 
@@ -78,27 +78,37 @@ Download and run `ZenNotes-<version>-win-x64.exe`.
 Pick whatever suits your distro:
 
 - **Arch / CachyOS / Manjaro — AUR (recommended):**
+
   ```sh
   yay -S zennotes-bin     # or: paru -S zennotes-bin
   ```
+
   Installs cleanly without `libfuse2`.
 - **Arch — native package:**
+
   ```sh
   sudo pacman -U ZenNotes-<version>-linux-x86_64.pacman
   ```
+
 - **Debian / Ubuntu:**
+
   ```sh
   sudo apt install ./ZenNotes-<version>-linux-amd64.deb
   ```
+
 - **Any distro — AppImage:**
+
   ```sh
   chmod +x ZenNotes-<version>-linux-x86_64.AppImage
   ./ZenNotes-<version>-linux-x86_64.AppImage
   ```
+
   AppImages need **FUSE 2**. On distros that ship only FUSE 3 (Arch, CachyOS, Fedora), either install it (`sudo pacman -S fuse2`, `sudo dnf install fuse`) or run without FUSE:
+
   ```sh
   ./ZenNotes-<version>-linux-x86_64.AppImage --appimage-extract-and-run
   ```
+
   (Or just use the AUR / `.pacman` / `.deb` package, which sidestep this entirely.)
 
 ### `zen` CLI

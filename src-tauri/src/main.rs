@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    synnotes_lib::run()
+    zennotes_rs_lib::run()
 }

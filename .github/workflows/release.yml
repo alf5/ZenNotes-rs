@@ -34,15 +34,15 @@ jobs:
             echo "Release $RELEASE_TAG already exists."
           else
             gh release create "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" \
-              --title "SynNotes $RELEASE_TAG" \
-              --notes "SynNotes $RELEASE_TAG — a Tauri v2 desktop build.
+              --title "ZenNotes-rs $RELEASE_TAG" \
+              --notes "ZenNotes-rs $RELEASE_TAG — a Tauri v2 desktop build.
 
           Downloads:
           - macOS (Apple Silicon): \`*_aarch64.dmg\`
           - macOS (Intel): \`*_x64.dmg\`
           - Linux: \`*.AppImage\` and \`*.deb\`
 
-          macOS builds are unsigned/un-notarized — on first launch, right-click → Open (or run \`xattr -dr com.apple.quarantine /Applications/SynNotes.app\`)."
+          macOS builds are unsigned/un-notarized — on first launch, right-click → Open (or run \`xattr -dr com.apple.quarantine /Applications/ZenNotes-rs.app\`)."
           fi
 
   build:

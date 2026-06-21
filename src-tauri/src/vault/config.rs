@@ -1,8 +1,8 @@
 //! Persisted application config — port of the `PersistedConfig` logic in
 //! ZenNotes' apps/desktop/src/main/vault.ts.
 //!
-//! Stored as `synnotes.config.json` in the OS app-config dir
-//! (`~/Library/Application Support/com.synnotes.app` on macOS). Unknown
+//! Stored as `zennotes-rs.config.json` in the OS app-config dir
+//! (`~/Library/Application Support/com.zennotes-rs.app` on macOS). Unknown
 //! fields round-trip untouched so future-version configs aren't clobbered.
 //! A `.bak` sibling is kept for crash recovery (matches the Electron
 //! backup-on-save behaviour the config tests assert).
@@ -16,7 +16,7 @@ use serde_json::{Map, Value};
 
 use crate::ipc::types::{LocalVaultEntry, VaultInfo};
 
-pub const CONFIG_FILE: &str = "synnotes.config.json";
+pub const CONFIG_FILE: &str = "zennotes-rs.config.json";
 pub const DEFAULT_QUICK_CAPTURE_HOTKEY: &str = "CommandOrControl+Shift+Space";
 const MAX_REMEMBERED_VAULTS: usize = 20;
 

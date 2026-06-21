@@ -38,7 +38,7 @@ pub fn open_note_window(app: &AppHandle, rel_path: &str) -> Result<(), String> {
 /// `window:open-vault` — open another workspace window on the active vault.
 pub fn open_vault_window(app: &AppHandle, state: &AppState) -> Result<Option<VaultInfo>, String> {
     WebviewWindowBuilder::new(app, unique_label("workspace"), WebviewUrl::App("index.html".into()))
-        .title("SynNotes")
+        .title("ZenNotes-rs")
         .inner_size(1200.0, 800.0)
         .build()
         .map_err(|e| format!("Failed to open vault window: {e}"))?;

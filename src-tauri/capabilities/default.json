@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability set for SynNotes windows",
+  "description": "Default capability set for ZenNotes-rs windows",
   "windows": ["main", "*"],
   "permissions": [
     "core:default",

@@ -1,11 +1,11 @@
-//! Deep links (`synnotes://`) + file-open routing — port of
+//! Deep links (`zennotes-rs://`) + file-open routing — port of
 //! apps/desktop/src/main/deep-links.ts (rebranded scheme).
 
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::state::AppState;
 
-pub const DEEP_LINK_SCHEME: &str = "synnotes";
+pub const DEEP_LINK_SCHEME: &str = "zennotes-rs";
 
 #[derive(Debug, PartialEq)]
 pub enum DeepLinkTarget {
@@ -93,7 +93,7 @@ pub fn open_note_request(app: &AppHandle, req: OpenNoteRequest) {
     }
 }
 
-/// Route a raw URL/file argument: a `synnotes://` deep link, a `file://` URL,
+/// Route a raw URL/file argument: a `zennotes-rs://` deep link, a `file://` URL,
 /// or a plain path. Returns true when handled.
 pub fn handle_url_or_path(app: &AppHandle, raw: &str) -> bool {
     if raw.starts_with(&format!("{DEEP_LINK_SCHEME}://")) {
@@ -121,23 +121,23 @@ mod tests {
 
     #[test]
     fn parses_open_tab() {
-        let req = parse_open_note_deep_link("synnotes://open?path=inbox/A.md").unwrap();
+        let req = parse_open_note_deep_link("zennotes-rs://open?path=inbox/A.md").unwrap();
         assert_eq!(req.target, DeepLinkTarget::Tab);
         assert_eq!(req.path, "inbox/A.md");
     }
 
     #[test]
     fn parses_open_window() {
-        let req = parse_open_note_deep_link("synnotes://open-window?path=inbox%2FB.md").unwrap();
+        let req = parse_open_note_deep_link("zennotes-rs://open-window?path=inbox%2FB.md").unwrap();
         assert_eq!(req.target, DeepLinkTarget::Window);
         assert_eq!(req.path, "inbox/B.md");
     }
 
     #[test]
     fn rejects_bad_paths_and_actions() {
-        assert!(parse_open_note_deep_link("synnotes://open?path=../escape.md").is_none());
-        assert!(parse_open_note_deep_link("synnotes://open?path=/abs.md").is_none());
-        assert!(parse_open_note_deep_link("synnotes://bogus?path=inbox/A.md").is_none());
+        assert!(parse_open_note_deep_link("zennotes-rs://open?path=../escape.md").is_none());
+        assert!(parse_open_note_deep_link("zennotes-rs://open?path=/abs.md").is_none());
+        assert!(parse_open_note_deep_link("zennotes-rs://bogus?path=inbox/A.md").is_none());
         assert!(parse_open_note_deep_link("https://example.com").is_none());
     }
 }
