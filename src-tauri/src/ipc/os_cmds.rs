@@ -94,6 +94,17 @@ pub fn vault_open_external_file(app: AppHandle, href: String) -> OpenExternalFil
     }
 }
 
+/// `vault:fetch-link-metadata` — open-graph fetch for bookmark cards. Runs
+/// the blocking HTTP client off the async runtime; never errors (the
+/// `{ok:false}` shape drives the renderer's bare-card fallback).
+#[tauri::command]
+pub async fn vault_fetch_link_metadata(url: String) -> crate::ipc::types::LinkMetadata {
+    let for_fail = url.clone();
+    tauri::async_runtime::spawn_blocking(move || crate::link_metadata::fetch_link_metadata(&url))
+        .await
+        .unwrap_or_else(|_| crate::ipc::types::LinkMetadata::fail(for_fail))
+}
+
 /// `devtools:toggle` — Settings → Developer tools. Tauri only compiles
 /// devtools into debug builds (or with the `devtools` feature); release
 /// builds no-op, matching the button's best-effort contract.

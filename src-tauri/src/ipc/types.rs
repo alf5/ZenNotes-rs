@@ -188,6 +188,38 @@ pub struct DeletedAsset {
     pub deleted_at: Option<String>,
 }
 
+/// v2.15 bookmark-card metadata (`vault:fetch-link-metadata`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkMetadata {
+    pub url: String,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub favicon: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub site_name: Option<String>,
+}
+
+impl LinkMetadata {
+    pub fn fail(url: String) -> Self {
+        Self {
+            url,
+            ok: false,
+            title: None,
+            description: None,
+            image: None,
+            favicon: None,
+            site_name: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenExternalFileResult {
     pub ok: bool,

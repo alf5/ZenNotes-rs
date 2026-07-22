@@ -83,11 +83,20 @@ fn open_vault(
 
 // ---- v2.15 phase A: workspace state, drawings, deleted assets -------------
 
+/// Whether the active vault is an ephemeral "open folder temporarily"
+/// session — those never get `.zennotes` state written into them.
+fn active_vault_is_temporary(state: &AppState) -> bool {
+    state.current().and_then(|v| v.temporary).unwrap_or(false)
+}
+
 /// `workspace-state:read` — raw `<vault>/.zennotes/workspace.json` contents.
 /// Never parsed here; the renderer owns the schema. No vault → null, matching
 /// upstream's remote/ephemeral null path.
 #[tauri::command]
 pub fn workspace_state_read(state: State<AppState>) -> Result<Option<String>, String> {
+    if active_vault_is_temporary(&state) {
+        return Ok(None);
+    }
     let Ok(root) = require_root(&state) else {
         return Ok(None);
     };
@@ -101,6 +110,9 @@ pub fn workspace_state_read(state: State<AppState>) -> Result<Option<String>, St
 /// `workspace-state:write` — persist the renderer's snapshot verbatim.
 #[tauri::command]
 pub fn workspace_state_write(state: State<AppState>, json: String) -> Result<(), String> {
+    if active_vault_is_temporary(&state) {
+        return Ok(());
+    }
     let Ok(root) = require_root(&state) else {
         return Ok(());
     };
@@ -239,6 +251,68 @@ pub fn db_create_record_page(
 ) -> Result<String, String> {
     let root = require_root(&state)?;
     crud::create_database_record_page(&root, &form_dir_rel, &title, &body)
+}
+
+/// `vault:convert-obsidian-excalidraw` write half: the frontend extracts the
+/// scene (shared-domain, lz-string) and this persists it as a sibling
+/// `.excalidraw`, returning the new file's meta.
+#[tauri::command]
+pub fn vault_write_drawing(
+    state: State<AppState>,
+    dir_rel: String,
+    base_title: String,
+    body: String,
+) -> Result<NoteMeta, String> {
+    let root = require_root(&state)?;
+    crud::write_drawing_file(&root, &dir_rel, &base_title, &body)
+}
+
+/// `app:open-folder-temporary` — open a folder as an ephemeral session:
+/// no vault scaffolding, no `.zennotes` writes, not remembered across
+/// restarts (config.vaultRoot is left untouched). This backend keeps a
+/// single active vault shared by all windows, so the session replaces the
+/// active vault until the app restarts or another vault is opened; the
+/// `VaultInfo.temporary` flag drives the renderer's banner.
+#[tauri::command]
+pub fn app_open_folder_temporary(
+    app: AppHandle,
+    state: State<AppState>,
+    raw_path: String,
+) -> Result<(), String> {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() {
+        return Err("Folder path is required.".into());
+    }
+    let resolved = PathBuf::from(config::resolve_path(trimmed));
+    let md = std::fs::metadata(&resolved).map_err(|e| format!("Not a readable folder: {e}"))?;
+    if !md.is_dir() {
+        return Err("Not a folder.".into());
+    }
+    // Already the active root → just focus.
+    if let Some(current) = state.current() {
+        if config::resolve_path(&current.root) == resolved.to_string_lossy() {
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.set_focus();
+            }
+            return Ok(());
+        }
+    }
+    // An empty folder doesn't spawn a session (upstream parity).
+    if !listing::folder_has_markdown(&resolved) {
+        return Ok(());
+    }
+    let mut vault = layout::vault_info(&resolved);
+    vault.temporary = Some(true);
+    state.set_current(Some(vault));
+    match crate::watcher::spawn(app.clone(), resolved.clone()) {
+        Ok(debouncer) => state.set_watcher(Some(debouncer)),
+        Err(err) => {
+            eprintln!("vault watcher failed to start: {err}");
+            state.set_watcher(None);
+        }
+    }
+    crate::windows::open_vault_window(&app, &state)?;
+    Ok(())
 }
 
 /// v2.15 `openVaultWindow(root?)` support: open `root` as the active vault
@@ -635,7 +709,14 @@ pub fn vault_get_settings(state: State<AppState>) -> Result<VaultSettings, Strin
 
 #[tauri::command]
 pub fn vault_set_settings(state: State<AppState>, next: serde_json::Value) -> Result<VaultSettings, String> {
-    settings::set_vault_settings(&require_root(&state)?, &next)
+    let root = require_root(&state)?;
+    // Ephemeral session: apply for this run but never write .zennotes state
+    // into a temporarily-opened folder (upstream ephemeral-vaults contract).
+    if active_vault_is_temporary(&state) {
+        let fallback = settings::infer_primary_notes_location(&root);
+        return Ok(settings::normalize_vault_settings(Some(&next), &fallback));
+    }
+    settings::set_vault_settings(&root, &next)
 }
 
 #[tauri::command]

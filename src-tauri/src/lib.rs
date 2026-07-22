@@ -10,6 +10,7 @@ mod asset_protocol;
 mod custom_css;
 mod deep_links;
 mod ipc;
+mod link_metadata;
 mod os;
 mod remote;
 mod search;
@@ -215,6 +216,9 @@ pub fn run() {
             vault_cmds::db_rename,
             vault_cmds::db_folder_root_rel,
             vault_cmds::db_create_record_page,
+            vault_cmds::vault_write_drawing,
+            vault_cmds::app_open_folder_temporary,
+            os_cmds::vault_fetch_link_metadata,
             workspace_cmds::workspace_list_remote_profiles,
             workspace_cmds::workspace_save_remote_profile,
             workspace_cmds::workspace_delete_remote_profile,
