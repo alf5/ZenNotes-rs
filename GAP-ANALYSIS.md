@@ -82,7 +82,17 @@ E stragglers (link metadata, Obsidian import, ephemeral vaults).
 | Deleted assets: `listDeletedAssets` / `purgeDeletedAsset` / `emptyDeletedAssets` | trivial | `vault.ts:3477-3517` | Store: `<vault>/.zennotes/deleted-assets/<uuid-token>/` + `.zn-deleted.json` sidecar `{path,name,deletedAt}`. Token regex `^[0-9a-f-]{36}$`. Separate mechanism from the notes `trash/` folder. Also add `deletedAt` when `deleteAsset` writes the sidecar. |
 | `openExternalFile` | easy | `index.ts:2606` | Resolve `file://` / `~` / absolute → open with OS default app; return `{ok,error}` — never throw. The confirm dialog + link filtering live in app-core (free). Keep `'desktop-only'` sentinel semantics if stubbed. |
 
-### B. Custom themes + overrides (moderate, one shared watcher pattern)
+### B. Custom themes + overrides — ✅ DONE (2026-07-22)
+
+Implemented: `src-tauri/src/custom_css.rs` (scan/watch/delete/reveal/reserve
+with traversal guards) + `src/bridge/custom-css.ts` (vendored
+`parseThemeManifest` / `scaffoldThemeCss`; watcher pings fan out fresh
+lists). Verified live: an external override file + config.toml enablement
+restyled the running app. Deferred polish: first-run Soft Paper/README
+seeding; `zen-theme://` protocol for assets referenced inside theme CSS.
+Original notes below.
+
+#### (original plan)
 
 Spec: `apps/desktop/src/main/custom-themes.ts` (440 lines), `overrides.ts` (193
 lines); pure helpers in `shared-domain/custom-themes.ts` are frontend-reusable.
