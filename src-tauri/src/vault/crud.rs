@@ -162,6 +162,23 @@ pub fn create_excalidraw(
     read_meta(root, &abs, folder, None, None)
 }
 
+/// Create a database record page (`<Name>.base/<title>.md`) with the caller's
+/// pre-composed body; returns its vault-relative path (upstream
+/// databases.ts:305). The sidecar's `pages` map is updated by the frontend.
+pub fn create_database_record_page(
+    root: &Path,
+    form_dir_rel: &str,
+    title: &str,
+    body: &str,
+) -> Result<String, String> {
+    let dir_abs = resolve_safe(root, form_dir_rel)?;
+    fs::create_dir_all(&dir_abs).map_err(|e| format!("mkdir failed: {e}"))?;
+    let final_title = unique_title(&dir_abs, &sanitize_note_title(Some(title)), "md");
+    let abs = dir_abs.join(format!("{final_title}.md"));
+    fs::write(&abs, body).map_err(|e| format!("write failed: {e}"))?;
+    Ok(format!("{}/{final_title}.md", form_dir_rel.trim_matches('/')))
+}
+
 pub fn rename_note(root: &Path, rel: &str, next_title: &str) -> Result<NoteMeta, String> {
     let abs = resolve_safe(root, rel)?;
     let folder = folder_of(root, &abs).ok_or_else(|| format!("Note not in a known folder: {rel}"))?;

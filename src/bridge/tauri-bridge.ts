@@ -65,7 +65,12 @@ import {
 import type { CustomTemplateFile, WriteTemplateInput } from '@zennotes/bridge-contract/templates'
 import type { AppConfigPortable } from '@zennotes/shared-domain/app-config'
 import type { CustomTheme } from '@zennotes/shared-domain/custom-themes'
-import type { DatabaseDoc, DatabaseSummary } from '@zennotes/shared-domain/databases'
+import type {
+  DatabaseDoc,
+  DatabaseSidecar,
+  DatabaseSummary,
+  DbRow
+} from '@zennotes/shared-domain/databases'
 import type { Override } from '@zennotes/shared-domain/overrides'
 import type { VaultTask } from '@zennotes/shared-domain/tasks'
 import type {
@@ -84,6 +89,7 @@ import {
   subscribeConfigChange
 } from './portable-config'
 import * as customCss from './custom-css'
+import * as databases from './databases'
 
 const APP_INFO: ZenAppInfo = {
   name: 'zennotes-rs',
@@ -477,14 +483,24 @@ const bridge: ZenBridge = {
   onConfigChange: (cb: (next: AppConfigPortable) => void): (() => void) =>
     subscribeConfigChange(cb),
 
-  // CSV databases: openDatabase -> null makes app-core forget the tab
-  // gracefully; the mutators reject and every caller try/catches.
-  openDatabase: async (): Promise<DatabaseDoc | null> => null,
-  writeDatabaseRows: (): Promise<DatabaseDoc> => notImplemented('writeDatabaseRows'),
-  writeDatabaseSchema: (): Promise<DatabaseDoc> => notImplemented('writeDatabaseSchema'),
-  createDatabase: (): Promise<DatabaseDoc> => notImplemented('createDatabase'),
-  renameDatabase: (): Promise<string> => notImplemented('renameDatabase'),
-  createRecordPage: (): Promise<string> => notImplemented('createRecordPage'),
+  // CSV databases. The parse/infer/serialize logic runs in databases.ts via
+  // the vendored shared-domain functions; Rust does the vault file IO.
+  // listDatabases stays a stub: nothing in app-core ever calls it (upstream
+  // only wires it for the web bridge).
+  openDatabase: (relPath: string): Promise<DatabaseDoc | null> => databases.openDatabase(relPath),
+  writeDatabaseRows: (relPath: string, rows: DbRow[]): Promise<DatabaseDoc> =>
+    databases.writeDatabaseRows(relPath, rows),
+  writeDatabaseSchema: (
+    relPath: string,
+    sidecar: DatabaseSidecar,
+    rows: DbRow[]
+  ): Promise<DatabaseDoc> => databases.writeDatabaseSchema(relPath, sidecar, rows),
+  createDatabase: (folder: NoteFolder, subpath: string, title?: string): Promise<DatabaseDoc> =>
+    databases.createDatabase(folder, subpath, title),
+  renameDatabase: (csvPath: string, newTitle: string): Promise<string> =>
+    databases.renameDatabase(csvPath, newTitle),
+  createRecordPage: (csvPath: string, title: string, body: string): Promise<string> =>
+    databases.createRecordPage(csvPath, title, body),
   listDatabases: async (): Promise<DatabaseSummary[]> => [],
 
   // Excalidraw drawings (.excalidraw files; editing goes through the
