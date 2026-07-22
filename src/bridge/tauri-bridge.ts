@@ -65,6 +65,11 @@ import {
 import type { CustomTemplateFile, WriteTemplateInput } from '@zennotes/bridge-contract/templates'
 import type { AppConfigPortable } from '@zennotes/shared-domain/app-config'
 import type { CustomTheme } from '@zennotes/shared-domain/custom-themes'
+import {
+  extractObsidianExcalidrawScene,
+  isObsidianExcalidrawMarkdown,
+  isObsidianExcalidrawPath
+} from '@zennotes/shared-domain/excalidraw'
 import type {
   DatabaseDoc,
   DatabaseSidecar,
@@ -454,12 +459,9 @@ const bridge: ZenBridge = {
   clipboardReadText: (): string => '', // M12 (sync read is not available in the webview)
 
   // ---- v2.15 contract surface (M17) --------------------------------------
-  // Added by the v2.1.0 -> v2.15.0 re-vendor. Methods still awaiting their
-  // Rust backend return the web bridge's degradation values, so the UI
-  // renders and fails soft; the rest invoke their phase-A commands. See
-  // GAP-ANALYSIS.md for the per-method plan. `convertObsidianExcalidraw`
-  // (optional in the contract) is deliberately omitted: app-core
-  // feature-detects it.
+  // Added by the v2.1.0 -> v2.15.0 re-vendor; the whole surface is
+  // implemented (see GAP-ANALYSIS.md for the per-method history). The one
+  // intentional stub left is `listDatabases` — dead code upstream.
 
   // Workspace state (<vault>/.zennotes/workspace.json, raw JSON strings —
   // the renderer owns the schema and reconciles newest-wins vs localStorage).
@@ -511,6 +513,30 @@ const bridge: ZenBridge = {
       subpath: subpath ?? null,
       title: title ?? null
     }),
+  // Obsidian `.excalidraw.md` conversion (upstream vault.ts:3184). The scene
+  // extraction (incl. lz-string decompression) is vendored pure TS; Rust
+  // writes the deduped sibling `.excalidraw` and returns its meta. The
+  // original markdown is left intact.
+  convertObsidianExcalidraw: async (relPath: string): Promise<NoteMeta> => {
+    const markdown = await invoke<string | null>('db_read_text', { relPath })
+    if (markdown === null) throw new Error(`Drawing not found: ${relPath}`)
+    if (!isObsidianExcalidrawPath(relPath) && !isObsidianExcalidrawMarkdown(markdown)) {
+      throw new Error('This file is not an Obsidian Excalidraw drawing.')
+    }
+    const scene = extractObsidianExcalidrawScene(markdown)
+    if (!scene) throw new Error('Could not read an Excalidraw scene from this file.')
+    const fileName = relPath.split('/').pop() ?? relPath
+    const base =
+      (fileName.toLowerCase().endsWith('.excalidraw.md')
+        ? fileName.slice(0, -'.excalidraw.md'.length)
+        : fileName.replace(/\.[^.]*$/, '')) || 'Untitled drawing'
+    const dirRel = relPath.includes('/') ? relPath.slice(0, relPath.lastIndexOf('/')) : ''
+    return invoke('vault_write_drawing', {
+      dirRel,
+      baseTitle: base,
+      body: JSON.stringify(scene, null, 2)
+    })
+  },
 
   // Deleted-assets store (.zennotes/deleted-assets/<uuid>/ + sidecar).
   listDeletedAssets: (): Promise<DeletedAsset[]> => invoke('vault_list_deleted_assets'),
@@ -535,14 +561,15 @@ const bridge: ZenBridge = {
   onOverridesChange: (cb: (next: Override[]) => void): (() => void) =>
     customCss.subscribeOverridesChange(cb),
 
-  // Misc desktop surface. fetchLinkMetadata's {ok:false} stub is the exact
-  // web-bridge degradation (bare bookmark card) until the Rust fetcher lands.
+  // Misc desktop surface.
   revealFilePath: (absPath: string): Promise<void> =>
     invoke('vault_reveal_file_path', { absPath }),
   openExternalFile: (href: string): Promise<{ ok: boolean; error?: string }> =>
     invoke('vault_open_external_file', { href }),
-  fetchLinkMetadata: async (url: string): Promise<LinkMetadata> => ({ url, ok: false }),
-  openFolderTemporary: async (): Promise<void> => {},
+  fetchLinkMetadata: (url: string): Promise<LinkMetadata> =>
+    invoke('vault_fetch_link_metadata', { url }),
+  openFolderTemporary: (absPath: string): Promise<void> =>
+    invoke('app_open_folder_temporary', { rawPath: absPath }),
   toggleDevTools: (): Promise<void> => invoke('devtools_toggle')
 }
 

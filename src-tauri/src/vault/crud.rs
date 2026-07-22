@@ -179,6 +179,37 @@ pub fn create_database_record_page(
     Ok(format!("{}/{final_title}.md", form_dir_rel.trim_matches('/')))
 }
 
+/// Write a native `.excalidraw` drawing next to its source (used by the
+/// Obsidian conversion, upstream vault.ts:3184): dedupe `<base>.excalidraw`
+/// in `dir_rel`, write the scene body, return the new file's meta.
+pub fn write_drawing_file(
+    root: &Path,
+    dir_rel: &str,
+    base_title: &str,
+    body: &str,
+) -> Result<NoteMeta, String> {
+    let clean_dir = dir_rel.trim_matches('/');
+    let dir_abs = if clean_dir.is_empty() {
+        root.to_path_buf()
+    } else {
+        resolve_safe(root, clean_dir)?
+    };
+    fs::create_dir_all(&dir_abs).map_err(|e| format!("mkdir failed: {e}"))?;
+    let base = base_title.trim();
+    let base = if base.is_empty() { "Untitled drawing" } else { base };
+    let final_title = unique_title(&dir_abs, base, "excalidraw");
+    let abs = dir_abs.join(format!("{final_title}.excalidraw"));
+    fs::write(&abs, body).map_err(|e| format!("write failed: {e}"))?;
+    let rel = if clean_dir.is_empty() {
+        format!("{final_title}.excalidraw")
+    } else {
+        format!("{clean_dir}/{final_title}.excalidraw")
+    };
+    let folder = notes::folder_for_relative_path(&rel)
+        .ok_or_else(|| format!("Drawing is not in a known folder: {rel}"))?;
+    read_meta(root, &abs, &folder, None, None)
+}
+
 pub fn rename_note(root: &Path, rel: &str, next_title: &str) -> Result<NoteMeta, String> {
     let abs = resolve_safe(root, rel)?;
     let folder = folder_of(root, &abs).ok_or_else(|| format!("Note not in a known folder: {rel}"))?;
