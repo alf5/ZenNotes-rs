@@ -2,7 +2,7 @@
   "name": "zennotes-rs",
   "productName": "ZenNotes-rs",
   "private": true,
-  "version": "2.1.0",
+  "version": "2.15.0",
   "description": "ZenNotes-rs desktop — a Tauri port of the ZenNotes markdown notes app",
   "type": "module",
   "homepage": "https://github.com/alf5/ZenNotes-rs",
