@@ -83,6 +83,7 @@ import {
   setPortableConfig,
   subscribeConfigChange
 } from './portable-config'
+import * as customCss from './custom-css'
 
 const APP_INFO: ZenAppInfo = {
   name: 'zennotes-rs',
@@ -501,18 +502,22 @@ const bridge: ZenBridge = {
     invoke('vault_purge_deleted_asset', { undoToken }),
   emptyDeletedAssets: (): Promise<void> => invoke('vault_empty_deleted_assets'),
 
-  // Custom themes + CSS overrides (~/.config/zennotes/{themes,overrides}):
-  // empty lists render the Settings empty-state placeholders.
-  listCustomThemes: async (): Promise<CustomTheme[]> => [],
-  getCustomThemesDir: async (): Promise<string | null> => null,
-  revealCustomThemesDir: async (): Promise<void> => {},
-  deleteCustomTheme: async (): Promise<void> => {},
-  createCustomTheme: async (): Promise<string | null> => null,
-  onCustomThemesChange: (): (() => void) => () => {},
-  listOverrides: async (): Promise<Override[]> => [],
-  revealOverridesDir: async (): Promise<void> => {},
-  deleteOverride: async (): Promise<void> => {},
-  onOverridesChange: (): (() => void) => () => {},
+  // Custom themes + CSS overrides (~/.config/zennotes/{themes,overrides}).
+  // Rust scans/watches; parsing + scaffolding run in custom-css.ts through
+  // the vendored shared-domain functions.
+  listCustomThemes: (): Promise<CustomTheme[]> => customCss.listCustomThemes(),
+  getCustomThemesDir: (): Promise<string | null> => customCss.getCustomThemesDir(),
+  revealCustomThemesDir: (slug?: string): Promise<void> => customCss.revealCustomThemesDir(slug),
+  deleteCustomTheme: (slug: string): Promise<void> => customCss.deleteCustomTheme(slug),
+  createCustomTheme: (input: { name?: string }): Promise<string | null> =>
+    customCss.createCustomTheme(input),
+  onCustomThemesChange: (cb: (next: CustomTheme[]) => void): (() => void) =>
+    customCss.subscribeCustomThemesChange(cb),
+  listOverrides: (): Promise<Override[]> => customCss.listOverrides(),
+  revealOverridesDir: (name?: string): Promise<void> => customCss.revealOverridesDir(name),
+  deleteOverride: (name: string): Promise<void> => customCss.deleteOverride(name),
+  onOverridesChange: (cb: (next: Override[]) => void): (() => void) =>
+    customCss.subscribeOverridesChange(cb),
 
   // Misc desktop surface. fetchLinkMetadata's {ok:false} stub is the exact
   // web-bridge degradation (bare bookmark card) until the Rust fetcher lands.
