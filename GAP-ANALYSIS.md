@@ -113,7 +113,19 @@ lines); pure helpers in `shared-domain/custom-themes.ts` are frontend-reusable.
   *inside* theme CSS (sandboxed to the theme folder, mirror `resolveThemeAssetPath`).
   Themes without embedded assets work without it.
 
-### C. CSV databases (the biggest cluster — go thin)
+### C. CSV databases — ✅ DONE (2026-07-22)
+
+Implemented with the thin-backend split as planned: `src/bridge/databases.ts`
+(upstream orchestration + vendored shared-domain CSV/inference logic) over
+generic vault file commands in `vault_cmds.rs` (`db_read_text` /
+`db_write_text` atomic / `db_exists` / `db_mkdir` / `db_rename` /
+`db_folder_root_rel` / `db_create_record_page`). The watcher normalizes
+database files to the canonical `data.csv` path with scope `database`
+(Rust port of `databaseCsvPathFor`). `listDatabases` stays a stub (dead
+code upstream). Verified live: palette "New Database" produced the exact
+upstream on-disk layout. Original notes below.
+
+#### (original plan)
 
 Spec: `apps/desktop/src/main/databases.ts` (399 lines). **Architecture
 decision: thin backend.** All heavy logic (`parseCsv`/`serializeRows`/
