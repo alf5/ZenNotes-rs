@@ -31,7 +31,7 @@ source files (here, `zennotes-rs.desktop`) at its root:
 ```bash
 git clone ssh://aur@aur.archlinux.org/zennotes-rs.git
 cp PKGBUILD .SRCINFO zennotes-rs.desktop zennotes-rs/
-cd zennotes-rs && git add -A && git commit -m "zennotes-rs 2.1.0-1" && git push
+cd zennotes-rs && git add -A && git commit -m "zennotes-rs 2.15.0-1" && git push
 ```
 
 Users then install with an AUR helper:
@@ -42,7 +42,7 @@ paru -S zennotes-rs      # or: yay -S zennotes-rs
 
 ## Notes
 
-- The source is pinned to the **`v2.1.0` git tag** (`git+…#tag=v2.1.0`), so the hash is `SKIP`
+- The source is pinned to the **`v2.15.0` git tag** (`git+…#tag=v2.15.0`), so the hash is `SKIP`
   (git sources are verified by the tag/commit, not a tarball checksum).
 - This is a **from-source** package — building compiles Rust + the frontend (a few minutes).
   WebKitGTK cannot be statically linked, so there is no fully self-contained single binary;
