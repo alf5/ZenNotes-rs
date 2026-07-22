@@ -1,4 +1,6 @@
 import { useStore } from '../store'
+import { externalLinkUrl } from './internal-links'
+import { isExcalidrawPath, isObsidianExcalidrawPath } from '@shared/excalidraw'
 
 const IMAGE_EXTENSIONS = new Set([
   '.apng',
@@ -14,10 +16,15 @@ const PDF_EXTENSIONS = new Set(['.pdf'])
 const AUDIO_EXTENSIONS = new Set(['.aac', '.flac', '.m4a', '.mp3', '.ogg', '.wav'])
 const VIDEO_EXTENSIONS = new Set(['.m4v', '.mov', '.mp4', '.ogv', '.webm'])
 
-export type LocalAssetKind = 'image' | 'pdf' | 'audio' | 'video' | 'file'
+export type LocalAssetKind = 'image' | 'pdf' | 'audio' | 'video' | 'excalidraw' | 'file'
 
 function stripQueryAndHash(href: string): string {
   return href.split('#')[0]?.split('?')[0] ?? href
+}
+
+export function hrefFragment(href: string): string {
+  const hashIdx = href.indexOf('#')
+  return hashIdx >= 0 ? href.slice(hashIdx) : ''
 }
 
 function decodeHrefPath(value: string): string {
@@ -60,6 +67,7 @@ function assetExtension(href: string): string {
 export function classifyLocalAssetHref(href: string): LocalAssetKind | null {
   if (!href || href.startsWith('#') || href.startsWith('//')) return null
   if (/^[a-zA-Z][a-zA-Z\d+.-]*:/.test(href)) return null
+  if (isExcalidrawPath(href) || isObsidianExcalidrawPath(href)) return 'excalidraw'
   const ext = assetExtension(href)
   if (IMAGE_EXTENSIONS.has(ext)) return 'image'
   if (PDF_EXTENSIONS.has(ext)) return 'pdf'
@@ -231,7 +239,7 @@ function buildImageEmbed(
 }
 
 function buildEmbed(
-  kind: Exclude<LocalAssetKind, 'image' | 'file'>,
+  kind: Exclude<LocalAssetKind, 'image' | 'file' | 'excalidraw'>,
   url: string,
   label: string,
   href: string,
@@ -279,7 +287,7 @@ function buildEmbed(
   if (kind === 'pdf') {
     const frame = document.createElement('iframe')
     frame.className = 'local-asset-embed-frame'
-    frame.src = url
+    frame.src = url + hrefFragment(href)
     frame.title = label
     figure.append(frame)
     return figure
@@ -398,12 +406,16 @@ export function enhanceLocalAssetNodes(
   root.querySelectorAll<HTMLAnchorElement>('a[href]').forEach((anchor) => {
     if (anchor.classList.contains('wikilink') || anchor.classList.contains('hashtag')) return
     const raw = anchor.getAttribute('href') || ''
+    // A `.md` link is a note link, and an external web link (`google.com`,
+    // `https://…`) isn't a vault asset — leave both for the link-navigation
+    // handlers instead of rewriting them to a zen-asset URL. (#201)
+    if (/\.md(?:[#?].*)?$/i.test(raw.trim()) || externalLinkUrl(raw)) return
     const resolved = resolveLocalAssetUrl(vaultRoot, notePath, raw)
     if (!resolved) return
 
     const assetVaultRel = resolveAssetVaultRelativePath(vaultRoot, notePath, raw)
     const kind = classifyLocalAssetHref(raw) ?? 'file'
-    anchor.href = resolved
+    anchor.href = resolved + hrefFragment(raw)
     anchor.dataset.localAssetUrl = resolved
     anchor.dataset.localAssetKind = kind
     anchor.dataset.localAssetHref = raw
@@ -417,7 +429,7 @@ export function enhanceLocalAssetNodes(
       })
     }
 
-    if (kind === 'file' || kind === 'image') return
+    if (kind === 'file' || kind === 'image' || kind === 'excalidraw') return
 
     const paragraph = isStandaloneAnchorParagraph(anchor)
     if (!paragraph || paragraph.dataset.assetEmbed === 'true') return

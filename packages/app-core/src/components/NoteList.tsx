@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useStore } from '../store'
 import type { AssetMeta, NoteMeta } from '@shared/ipc'
+import { isDatabaseCsvPath } from '@shared/databases'
+import { DENSITY, densityFromTweaks } from '@shared/overrides'
 import {
   ArchiveIcon,
   ArrowUpRightIcon,
@@ -10,8 +12,10 @@ import {
 } from './icons'
 import { ContextMenu, type ContextMenuItem } from './ContextMenu'
 import { ResizeHandle } from './ResizeHandle'
+import { Button, IconButton } from './ui/Button'
 import { confirmMoveToTrash } from '../lib/confirm-trash'
 import { buildMoveNotePrompt, parseMoveNoteTarget } from '../lib/move-note'
+import { naturalCompare } from '../lib/natural-sort'
 import { extractTags } from '../lib/tags'
 import { setDragPayload } from '../lib/dnd'
 import { promptApp } from '../lib/prompt-requests'
@@ -50,7 +54,6 @@ type AssetLayout = 'grid' | 'list'
 type FolderEntry = { type: 'note'; note: NoteMeta } | { type: 'asset'; asset: AssetMeta }
 
 const VIRTUAL_OVERSCAN_ROWS = 8
-const FOLDER_ENTRY_ROW_HEIGHT = 76
 const ASSET_LIST_ROW_HEIGHT = 64
 const ASSET_GRID_ROW_HEIGHT = 166
 
@@ -64,6 +67,11 @@ export function NoteList(): JSX.Element {
   const folders = useStore((s) => s.folders)
   const assetFiles = useStore((s) => s.assetFiles)
   const activeNote = useStore((s) => s.activeNote)
+  // Note-list row slot height tracks the Density tweak; the same DENSITY number
+  // feeds the virtualizer itemSize so windowing matches the painted rows. At
+  // compact the row card also drops to a single excerpt line so it doesn't clip.
+  const rowDensity = useStore((s) => densityFromTweaks(s.themeTweaks))
+  const noteRowH = DENSITY[rowDensity].noteRow
   const view = useStore((s) => s.view)
   const vaultSettings = useStore((s) => s.vaultSettings)
   const selectedPath = useStore((s) => s.selectedPath)
@@ -81,6 +89,7 @@ export function NoteList(): JSX.Element {
   const moveNote = useStore((s) => s.moveNote)
   const tabsEnabled = useStore((s) => s.tabsEnabled)
   const openNoteInTab = useStore((s) => s.openNoteInTab)
+  const openDatabase = useStore((s) => s.openDatabase)
   const prefetchNotes = useStore((s) => s.prefetchNotes)
   const focusedPanel = useStore((s) => s.focusedPanel)
   const noteListCursorIndex = useStore((s) => s.noteListCursorIndex)
@@ -200,7 +209,7 @@ export function NoteList(): JSX.Element {
     const onNew = async (): Promise<void> => {
       await useStore
         .getState()
-        .createAndOpen(n.folder === 'trash' ? 'inbox' : n.folder)
+        .createAndOpen(n.folder === 'trash' ? 'inbox' : n.folder, '', { focusTitle: true })
     }
 
     const items: ContextMenuItem[] = []
@@ -304,6 +313,10 @@ export function NoteList(): JSX.Element {
     const abs = [root.replace(/[\\/]+$/, ''), ...asset.path.split('/').filter(Boolean)].join(sep)
     const currentDir = asset.path.split('/').slice(0, -1).join('/')
     const openAsset = async (): Promise<void> => {
+      if (isDatabaseCsvPath(asset.path)) {
+        await openDatabase(asset.path)
+        return
+      }
       await openNoteInTab(assetTabPath(asset.path))
     }
 
@@ -482,11 +495,9 @@ export function NoteList(): JSX.Element {
       case 'created-asc':
         return (a: NoteMeta, b: NoteMeta) => a.createdAt - b.createdAt
       case 'name-asc':
-        return (a: NoteMeta, b: NoteMeta) =>
-          a.title.localeCompare(b.title, undefined, { sensitivity: 'base' })
+        return (a: NoteMeta, b: NoteMeta) => naturalCompare(a.title, b.title)
       case 'name-desc':
-        return (a: NoteMeta, b: NoteMeta) =>
-          b.title.localeCompare(a.title, undefined, { sensitivity: 'base' })
+        return (a: NoteMeta, b: NoteMeta) => naturalCompare(b.title, a.title)
       case 'updated-desc':
       default:
         return (a: NoteMeta, b: NoteMeta) => b.updatedAt - a.updatedAt
@@ -505,11 +516,9 @@ export function NoteList(): JSX.Element {
       case 'created-asc':
         return (a: AssetMeta, b: AssetMeta) => a.updatedAt - b.updatedAt
       case 'name-asc':
-        return (a: AssetMeta, b: AssetMeta) =>
-          a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+        return (a: AssetMeta, b: AssetMeta) => naturalCompare(a.name, b.name)
       case 'name-desc':
-        return (a: AssetMeta, b: AssetMeta) =>
-          b.name.localeCompare(a.name, undefined, { sensitivity: 'base' })
+        return (a: AssetMeta, b: AssetMeta) => naturalCompare(b.name, a.name)
       default:
         return (a: AssetMeta, b: AssetMeta) => b.updatedAt - a.updatedAt
     }
@@ -605,12 +614,12 @@ export function NoteList(): JSX.Element {
     () =>
       getVirtualRange({
         itemCount: orderedFolderEntries.length,
-        itemSize: FOLDER_ENTRY_ROW_HEIGHT,
+        itemSize: noteRowH,
         scrollTop: listScrollTop,
         viewportHeight: listViewportHeight,
         overscan: VIRTUAL_OVERSCAN_ROWS
       }),
-    [listScrollTop, listViewportHeight, orderedFolderEntries.length]
+    [listScrollTop, listViewportHeight, orderedFolderEntries.length, noteRowH]
   )
   const visibleFolderEntries = useMemo(
     () => orderedFolderEntries.slice(folderEntryRange.start, folderEntryRange.end),
@@ -681,7 +690,7 @@ export function NoteList(): JSX.Element {
     const nextScrollTop = getScrollTopForVirtualIndex({
       index,
       itemCount: orderedFolderEntries.length,
-      itemSize: FOLDER_ENTRY_ROW_HEIGHT,
+      itemSize: noteRowH,
       currentScrollTop: node.scrollTop,
       viewportHeight: node.clientHeight
     })
@@ -723,7 +732,7 @@ export function NoteList(): JSX.Element {
       <header className="glass-header flex h-12 shrink-0 items-center justify-between px-4">
         <div className="flex items-baseline gap-2">
           <h2 className="text-sm font-semibold text-ink-900">{heading}</h2>
-          <span className="text-xs text-ink-400">
+          <span className="text-xs text-ink-500">
             {view.kind === 'assets' ? assetFiles.length : orderedFolderEntries.length}
           </span>
         </div>
@@ -746,29 +755,22 @@ export function NoteList(): JSX.Element {
               ))}
             </div>
           ) : view.kind === 'folder' && view.folder === 'trash' && filtered.length > 0 && (
-            <button
-              onClick={() => void emptyTrash()}
-              className="rounded-md px-2 py-1 text-xs text-ink-500 hover:bg-paper-200 hover:text-ink-800"
-            >
+            <Button variant="ghost" size="sm" onClick={() => void emptyTrash()}>
               Empty
-            </button>
+            </Button>
           )}
           {view.kind !== 'assets' && (
-            <button
-              className="flex h-6 w-6 items-center justify-center rounded-md text-ink-500 hover:bg-paper-200 hover:text-ink-800"
+            <IconButton
+              size="sm"
               title="New note"
-              onClick={() => void createAndOpen(newTarget.folder, newTarget.subpath)}
+              onClick={() => void createAndOpen(newTarget.folder, newTarget.subpath, { focusTitle: true })}
             >
               <PlusIcon />
-            </button>
+            </IconButton>
           )}
-          <button
-            className="flex h-6 w-6 items-center justify-center rounded-md text-ink-500 hover:bg-paper-200 hover:text-ink-800"
-            title="Hide note list"
-            onClick={toggleNoteList}
-          >
+          <IconButton size="sm" title="Hide note list" onClick={toggleNoteList}>
             <ColumnsIcon />
-          </button>
+          </IconButton>
         </div>
       </header>
 
@@ -780,7 +782,7 @@ export function NoteList(): JSX.Element {
       >
         {view.kind === 'assets' ? (
           assetFiles.length === 0 ? (
-            <div className="px-4 py-10 text-center text-sm text-ink-400">
+            <div className="px-4 py-10 text-center text-sm text-ink-500">
               No files yet. Files anywhere inside the vault show up here.
             </div>
           ) : assetLayout === 'grid' ? (
@@ -799,7 +801,11 @@ export function NoteList(): JSX.Element {
                       key={asset.path}
                       asset={asset}
                       vaultRoot={vault?.root ?? null}
-                      onOpen={() => void openNoteInTab(assetTabPath(asset.path))}
+                      onOpen={() =>
+                        void (isDatabaseCsvPath(asset.path)
+                          ? openDatabase(asset.path)
+                          : openNoteInTab(assetTabPath(asset.path)))
+                      }
                       onContextMenu={(e) => {
                         e.preventDefault()
                         setAssetMenu({ x: e.clientX, y: e.clientY, path: asset.path })
@@ -834,7 +840,7 @@ export function NoteList(): JSX.Element {
             </div>
           )
         ) : orderedFolderEntries.length === 0 ? (
-          <div className="px-4 py-10 text-center text-sm text-ink-400">
+          <div className="px-4 py-10 text-center text-sm text-ink-500">
             {view.kind === 'folder' && view.folder === 'trash'
               ? `${folderLabels.trash} is empty.`
               : 'No files here yet.'}
@@ -849,14 +855,15 @@ export function NoteList(): JSX.Element {
                   key={path}
                   className="absolute inset-x-0"
                   style={{
-                    height: FOLDER_ENTRY_ROW_HEIGHT,
-                    transform: `translateY(${i * FOLDER_ENTRY_ROW_HEIGHT}px)`
+                    height: noteRowH,
+                    transform: `translateY(${i * noteRowH}px)`
                   }}
                 >
                   {entry.type === 'note' ? (
                     <NoteRow
                       note={entry.note}
                       active={entry.note.path === selectedPath}
+                      compact={rowDensity === 'compact'}
                       onSelect={() =>
                         void (tabsEnabled ? previewNote : selectNote)(entry.note.path)
                       }
@@ -922,7 +929,8 @@ function NoteRow({
   onOpenPermanent,
   onContextMenu,
   noteListIdx,
-  vimHighlight
+  vimHighlight,
+  compact
 }: {
   note: NoteMeta
   active: boolean
@@ -932,6 +940,8 @@ function NoteRow({
   onContextMenu: (e: React.MouseEvent) => void
   noteListIdx?: number
   vimHighlight?: boolean
+  /** Compact density → single-line excerpt so the shorter row doesn't clip. */
+  compact?: boolean
 }): JSX.Element {
   return (
     <button
@@ -941,7 +951,7 @@ function NoteRow({
       draggable
       onDragStart={(e) => setDragPayload(e, { kind: 'note', path: note.path })}
       className={[
-        'list-row flex h-[72px] w-full flex-col gap-1 rounded-lg px-3 py-2 text-left outline-none focus:outline-none',
+        'list-row flex h-[calc(var(--z-note-row-h)_-_4px)] w-full flex-col gap-1 rounded-lg px-3 py-2 text-left outline-none focus:outline-none',
         active
           ? `${vimHighlight ? 'vim-cursor-on-selected ' : ''}bg-paper-200`
           : vimHighlight
@@ -966,9 +976,9 @@ function NoteRow({
     >
       <div className="flex items-center justify-between gap-2">
         <span className="truncate text-sm font-medium text-ink-900">{note.title}</span>
-        <span className="shrink-0 text-[11px] text-ink-400">{formatDate(note.updatedAt)}</span>
+        <span className="shrink-0 text-xs text-ink-500">{formatDate(note.updatedAt)}</span>
       </div>
-      <span className="line-clamp-2 text-xs text-ink-500">
+      <span className={`${compact ? 'line-clamp-1' : 'line-clamp-2'} text-xs text-ink-500`}>
         {note.excerpt || 'Empty note'}
       </span>
     </button>
@@ -1001,7 +1011,7 @@ function FolderAssetRow({
       draggable
       onDragStart={(e) => setDragPayload(e, { kind: 'asset', path: asset.path })}
       className={[
-        'list-row flex h-[72px] w-full items-center gap-3 rounded-lg px-3 py-2 text-left outline-none focus:outline-none',
+        'list-row flex h-[calc(var(--z-note-row-h)_-_4px)] w-full items-center gap-3 rounded-lg px-3 py-2 text-left outline-none focus:outline-none',
         vimHighlight ? 'vim-cursor' : 'hover:bg-paper-200/60'
       ].join(' ')}
       style={vimHighlight ? { boxShadow: 'inset 0 0 0 1px rgb(var(--z-accent) / 0.35)' } : undefined}
@@ -1021,7 +1031,7 @@ function FolderAssetRow({
             loading="lazy"
           />
         ) : (
-          <span className="text-[10px] uppercase tracking-[0.16em] text-ink-500">
+          <span className="text-2xs uppercase tracking-[0.16em] text-ink-500">
             {asset.kind}
           </span>
         )}
@@ -1030,7 +1040,7 @@ function FolderAssetRow({
         <div className="truncate text-sm font-medium text-ink-900">{asset.name}</div>
         <div className="truncate text-xs text-ink-500">{asset.path}</div>
       </div>
-      <div className="shrink-0 text-[10px] uppercase tracking-wide text-ink-400">
+      <div className="form-label shrink-0">
         {extension || formatBytes(asset.size)}
       </div>
     </button>
@@ -1073,14 +1083,14 @@ function AssetCard({
             loading="lazy"
           />
         ) : (
-          <div className="px-4 text-xs uppercase tracking-[0.18em] text-ink-400">
+          <div className="px-4 text-xs uppercase tracking-[0.18em] text-ink-500">
             {asset.kind}
           </div>
         )}
       </div>
       <div className="border-t border-paper-300/70 px-3 py-2">
         <div className="truncate text-sm font-medium text-ink-900">{asset.name}</div>
-        <div className="mt-0.5 flex items-center justify-between gap-2 text-[11px] text-ink-500">
+        <div className="mt-0.5 flex items-center justify-between gap-2 text-xs text-ink-500">
           <span className="truncate">{asset.path}</span>
           <span className="shrink-0">{formatBytes(asset.size)}</span>
         </div>
@@ -1120,14 +1130,14 @@ function AssetRow({
             loading="lazy"
           />
         ) : (
-          <span className="text-[10px] uppercase tracking-[0.16em] text-ink-500">{asset.kind}</span>
+          <span className="text-2xs uppercase tracking-[0.16em] text-ink-500">{asset.kind}</span>
         )}
       </div>
       <div className="min-w-0 flex-1">
         <div className="truncate text-sm font-medium text-ink-900">{asset.name}</div>
         <div className="truncate text-xs text-ink-500">{asset.path}</div>
       </div>
-      <div className="shrink-0 text-[11px] text-ink-400">
+      <div className="shrink-0 text-xs text-ink-500">
         {formatBytes(asset.size)}
       </div>
     </button>

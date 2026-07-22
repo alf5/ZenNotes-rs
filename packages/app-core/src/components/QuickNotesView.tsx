@@ -5,6 +5,7 @@ import { CollectionViewHeader } from './CollectionViewHeader'
 import { resolveQuickNoteTitle } from '../lib/quick-note-title'
 import { advanceSequence, getKeymapBinding, matchesSequenceToken } from '../lib/keymaps'
 import { getSystemFolderLabel } from '../lib/system-folder-labels'
+import { isAppOverlayOpen } from '../lib/overlay-open'
 
 function formatDate(ms: number): string {
   const d = new Date(ms)
@@ -30,6 +31,7 @@ export function QuickNotesView(): JSX.Element {
   const quickNoteDateTitle = useStore((s) => s.quickNoteDateTitle)
   const quickNoteTitlePrefix = useStore((s) => s.quickNoteTitlePrefix)
   const keymapOverrides = useStore((s) => s.keymapOverrides)
+  const vimMode = useStore((s) => s.vimMode)
   const setFocusedPanel = useStore((s) => s.setFocusedPanel)
   const systemFolderLabels = useStore((s) => s.systemFolderLabels)
   const amActive = useStore(isQuickNotesViewActive)
@@ -97,6 +99,9 @@ export function QuickNotesView(): JSX.Element {
   useEffect(() => {
     if (!amActive) return
     const handler = (e: KeyboardEvent): void => {
+      // A modal/menu owns the keyboard while open — don't fire list shortcuts
+      // through it. (songgenqing report)
+      if (isAppOverlayOpen()) return
       const active = document.activeElement as HTMLElement | null
       if (active) {
         const tag = active.tagName
@@ -106,6 +111,10 @@ export function QuickNotesView(): JSX.Element {
 
       const key = e.key
       const overrides = keymapOverrides
+      // When Vim mode is off, the single-key Vim shortcuts (j/k/gg/G/o//…) are
+      // disabled — only arrows/Enter/Escape navigate. (songgenqing report)
+      const seq = (id: Parameters<typeof matchesSequenceToken>[2]): boolean =>
+        vimMode && matchesSequenceToken(e, overrides, id)
       const consume = (): void => {
         e.preventDefault()
         e.stopImmediatePropagation()
@@ -122,35 +131,36 @@ export function QuickNotesView(): JSX.Element {
         return
       }
 
-      if (matchesSequenceToken(e, overrides, 'nav.filter')) {
+      if (seq('nav.filter')) {
         consume()
         filterRef.current?.focus()
         filterRef.current?.select()
         return
       }
 
-      if (matchesSequenceToken(e, overrides, 'nav.newQuickNote')) {
+      if (seq('nav.newQuickNote')) {
         consume()
         void createQuickNote()
         return
       }
 
-      if (matchesSequenceToken(e, overrides, 'nav.moveDown') || key === 'ArrowDown') {
+      if (seq('nav.moveDown') || key === 'ArrowDown') {
         consume()
         setCursorIndex((i) => Math.max(0, Math.min(filtered.length - 1, i + 1)))
         return
       }
-      if (matchesSequenceToken(e, overrides, 'nav.moveUp') || key === 'ArrowUp') {
+      if (seq('nav.moveUp') || key === 'ArrowUp') {
         consume()
         setCursorIndex((i) => Math.max(0, Math.min(filtered.length - 1, i - 1)))
         return
       }
-      if (matchesSequenceToken(e, overrides, 'nav.jumpBottom')) {
+      if (seq('nav.jumpBottom')) {
         consume()
         setCursorIndex(filtered.length - 1)
         return
       }
       if (
+        vimMode &&
         advanceSequence(
           e,
           getKeymapBinding(overrides, 'nav.jumpTop'),
@@ -163,7 +173,7 @@ export function QuickNotesView(): JSX.Element {
       ) {
         return
       }
-      if ((key === 'Enter' || matchesSequenceToken(e, overrides, 'nav.openResult')) && current) {
+      if ((key === 'Enter' || seq('nav.openResult')) && current) {
         consume()
         void openNote(current.path)
       }
@@ -174,7 +184,7 @@ export function QuickNotesView(): JSX.Element {
       if (gTimer.current) clearTimeout(gTimer.current)
       window.removeEventListener('keydown', handler, true)
     }
-  }, [amActive, closeActiveNote, createQuickNote, current, filter, filtered.length, keymapOverrides, openNote])
+  }, [amActive, closeActiveNote, createQuickNote, current, filter, filtered.length, keymapOverrides, vimMode, openNote])
 
   return (
     <div
@@ -209,7 +219,7 @@ export function QuickNotesView(): JSX.Element {
 
         <section
           ref={rootRef}
-          className="overflow-hidden rounded-[24px] border border-paper-300/70 bg-paper-50/34 shadow-[0_12px_42px_rgba(15,23,42,0.06)]"
+          className="overflow-hidden rounded-3xl border border-paper-300/70 bg-paper-50/34 shadow-[0_12px_42px_rgba(15,23,42,0.06)]"
         >
           {filtered.length === 0 ? (
             <div className="flex flex-col items-center justify-center gap-3 px-6 py-16 text-center">
@@ -250,12 +260,12 @@ export function QuickNotesView(): JSX.Element {
                     <div className="min-w-0 flex-1 pt-0.5">
                       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5">
                         <span className="truncate text-sm font-medium text-ink-900">{note.title}</span>
-                        <span className="text-[11px] uppercase tracking-[0.16em] text-ink-400">
+                        <span className="text-xs uppercase tracking-[0.16em] text-ink-500">
                           {formatDate(note.updatedAt)}
                         </span>
                       </div>
-                      <div className="mt-0.5 truncate text-[11px] text-ink-400">{note.path}</div>
-                      <div className="mt-1 line-clamp-1 text-[13px] leading-5 text-ink-600">
+                      <div className="mt-0.5 truncate text-xs text-ink-500">{note.path}</div>
+                      <div className="mt-1 line-clamp-1 text-sm leading-5 text-ink-600">
                         {note.excerpt || 'Empty note'}
                       </div>
                     </div>
@@ -266,7 +276,7 @@ export function QuickNotesView(): JSX.Element {
                           e.stopPropagation()
                           void openNote(note.path)
                         }}
-                        className="inline-flex items-center gap-1.5 rounded-lg bg-paper-100/85 px-2.5 py-1 text-[11px] font-medium text-ink-700 transition-colors hover:bg-paper-200 hover:text-ink-900"
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-paper-100/85 px-2.5 py-1 text-xs font-medium text-ink-700 transition-colors hover:bg-paper-200 hover:text-ink-900"
                       >
                         <ArrowUpRightIcon width={13} height={13} />
                         Open

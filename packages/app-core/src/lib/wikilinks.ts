@@ -4,13 +4,44 @@ type NoteRef = Pick<NoteMeta, 'path' | 'title' | 'folder'>
 
 const TOP_FOLDERS: NoteFolder[] = ['inbox', 'quick', 'archive', 'trash']
 const INVALID_NOTE_PATH_CHARS = /[\\:*?"<>|#^\[\]]/
-const FENCED_CODE_BLOCK_RE = /(^|\n)```[^\n]*\n[\s\S]*?\n```[ \t]*(?=\n|$)/g
-
+/**
+ * Blank out fenced and inline code so [[wikilink]] / mention scanning never
+ * reads code as a link. Line-based and indentation-tolerant: a fence nested
+ * under a list item is still a code block (#293). Mirrors `stripCodeContent` in
+ * tags.ts, apps/desktop/src/main/vault.ts, apps/desktop/src/mcp/vault-ops.ts,
+ * and apps/server/internal/vault/parse.go — keep all five in sync.
+ */
 function stripCodeContent(body: string): string {
-  return body
-    // Only treat line-start triple backticks as real fenced code blocks.
-    .replace(FENCED_CODE_BLOCK_RE, '$1 ')
-    .replace(/`[^`\n]*`/g, ' ')
+  if (!body.includes('`') && !body.includes('~')) return body
+  const lines = body.split('\n')
+  let inFence = false
+  let fenceChar = ''
+  let fenceLen = 0
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] as string
+    const m = /^[ \t]*(`{3,}|~{3,})(.*)$/.exec(line)
+    if (m) {
+      const marker = m[1] as string
+      const char = marker[0] as string
+      const rest = m[2] as string
+      if (!inFence) {
+        // A backtick fence's info string may not contain a backtick (CommonMark).
+        if (char === '~' || !rest.includes('`')) {
+          inFence = true
+          fenceChar = char
+          fenceLen = marker.length
+          lines[i] = ' '
+          continue
+        }
+      } else if (char === fenceChar && marker.length >= fenceLen && rest.trim() === '') {
+        inFence = false
+        lines[i] = ' '
+        continue
+      }
+    }
+    if (inFence) lines[i] = ' '
+  }
+  return lines.join('\n').replace(/`[^`\n]*`/g, ' ')
 }
 
 function normalizeSlashes(value: string): string {
@@ -28,6 +59,40 @@ function normalizeForCompare(value: string): string {
 export function isPathLikeWikilinkTarget(target: string): boolean {
   const trimmed = target.trim()
   return trimmed.startsWith('/') || trimmed.includes('/') || /\.md$/i.test(trimmed)
+}
+
+/**
+ * Strip a `#heading` / `^block` anchor off a wikilink target — it points within
+ * the note, not at the note name. `[[Doc#Heading]]` resolves to `Doc`. Note
+ * names can't contain `#` or `^` (see INVALID_NOTE_PATH_CHARS), so the first one
+ * always starts the anchor. (#196)
+ */
+export function stripWikilinkAnchor(target: string): string {
+  const anchor = target.search(/[#^]/)
+  return anchor === -1 ? target : target.slice(0, anchor)
+}
+
+/**
+ * The `#heading` text from a wikilink target, or null when there's no heading
+ * anchor. `[[Doc#My Heading]]` → `My Heading`; `[[Doc^block]]` / `[[Doc]]` →
+ * null (block refs aren't headings). Used to scroll to the heading on click. (#196)
+ */
+export function wikilinkHeadingAnchor(target: string): string | null {
+  const hash = target.indexOf('#')
+  if (hash < 0) return null
+  const caret = target.indexOf('^')
+  if (caret >= 0 && caret < hash) return null // a ^block anchor comes first
+  return target.slice(hash + 1).trim() || null
+}
+
+/**
+ * True for `[[#heading]]` (optionally `[[#heading|label]]`) — a wikilink whose
+ * note part is empty, so it targets a heading *in the current note*. Callers
+ * resolve it against the note being viewed/edited instead of searching for a
+ * note by name (which would fail for an empty name). (#291)
+ */
+export function isSameFileHeadingLink(target: string): boolean {
+  return stripWikilinkAnchor(target).trim() === '' && wikilinkHeadingAnchor(target) != null
 }
 
 function resolveExplicitPath(notes: NoteRef[], target: string): NoteRef | null {
@@ -65,13 +130,17 @@ function resolvePathSuffix(notes: NoteRef[], target: string): NoteRef | null {
 }
 
 export function resolveWikilinkTarget<T extends NoteRef>(notes: T[], target: string): T | null {
+  // `[[Doc#Heading]]` / `[[Doc^block]]` point at a spot inside Doc — resolve the
+  // document, ignoring the anchor. (#196)
+  const doc = stripWikilinkAnchor(target)
   const visible = notes.filter((note) => note.folder !== 'trash')
-  if (isPathLikeWikilinkTarget(target)) {
-    return (resolveExplicitPath(visible, target) ??
-      resolvePathSuffix(visible, target)) as T | null
+  if (isPathLikeWikilinkTarget(doc)) {
+    return (resolveExplicitPath(visible, doc) ??
+      resolvePathSuffix(visible, doc)) as T | null
   }
 
-  const needle = normalizeForCompare(stripMdExtension(target))
+  const needle = normalizeForCompare(stripMdExtension(doc))
+  if (!needle) return null
   return visible.find((note) => normalizeForCompare(note.title) === needle) ?? null
 }
 
@@ -101,8 +170,37 @@ export function extractWikilinkTargets(body: string): string[] {
   return [...seen]
 }
 
+/**
+ * Href targets of standard Markdown links `[text](href)` (and the angle-bracket
+ * form `[text](<href>)`) in a note body, outside code. Deduped raw hrefs — resolve
+ * each with `resolveInternalNoteHref` to a note. Powers markdown-link connections
+ * in the sidebar for people who don't use wikilinks. (#70dark)
+ */
+export function extractMarkdownLinkHrefs(body: string): string[] {
+  const stripped = stripCodeContent(body)
+  const seen = new Set<string>()
+  let m: RegExpExecArray | null
+  // Angle-bracket hrefs (may contain spaces): [x](<a b.md>)
+  const angleRe = /\[[^\]]*\]\(<([^>]+)>\)/g
+  while ((m = angleRe.exec(stripped)) !== null) {
+    const href = m[1].trim()
+    if (href) seen.add(href)
+  }
+  // Plain hrefs: [x](href) or [x](href "title")
+  const re = /\[[^\]]*\]\(([^)]+)\)/g
+  while ((m = re.exec(stripped)) !== null) {
+    let href = m[1].trim()
+    if (href.startsWith('<')) continue // angle form, already captured above
+    const sp = href.search(/\s/)
+    if (sp >= 0) href = href.slice(0, sp) // drop an optional "title"
+    if (href) seen.add(href)
+  }
+  return [...seen]
+}
+
 export function suggestCreateNotePath(target: string): string {
-  const trimmed = normalizeSlashes(target.trim()).replace(/\/+$/, '')
+  // Creating from `[[Doc#Heading]]` makes `Doc`, not the invalid `Doc#Heading`. (#196)
+  const trimmed = normalizeSlashes(stripWikilinkAnchor(target).trim()).replace(/\/+$/, '')
   if (!trimmed) return '/Untitled.md'
 
   if (trimmed.startsWith('/')) {
@@ -158,10 +256,7 @@ export function parseCreateNotePath(input: string): {
 }
 
 export function stripMarkdownForMentions(body: string): string {
-  return body
-    .replace(/^---\n[\s\S]*?\n---\n/, ' ')
-    .replace(FENCED_CODE_BLOCK_RE, '$1 ')
-    .replace(/`[^`\n]*`/g, ' ')
+  return stripCodeContent(body.replace(/^---\n[\s\S]*?\n---\n/, ' '))
     .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
     .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
     // Wikilinks are already actual links, so they should not count as

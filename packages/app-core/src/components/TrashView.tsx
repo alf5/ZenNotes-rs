@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { NoteMeta } from '@shared/ipc'
+import type { DeletedAsset, NoteMeta } from '@shared/ipc'
 import { isTrashViewActive, useStore } from '../store'
 import { ArrowUpRightIcon, TrashIcon } from './icons'
 import { CollectionViewHeader } from './CollectionViewHeader'
 import { advanceSequence, getKeymapBinding, matchesSequenceToken } from '../lib/keymaps'
 import { getSystemFolderLabel } from '../lib/system-folder-labels'
 import { confirmApp } from '../lib/confirm-requests'
+import { isAppOverlayOpen } from '../lib/overlay-open'
 
 function formatDate(ms: number): string {
   const d = new Date(ms)
@@ -26,9 +27,11 @@ function cssEscape(value: string): string {
 export function TrashView(): JSX.Element {
   const notes = useStore((s) => s.notes)
   const refreshNotes = useStore((s) => s.refreshNotes)
+  const refreshAssets = useStore((s) => s.refreshAssets)
   const selectNote = useStore((s) => s.selectNote)
   const closeActiveNote = useStore((s) => s.closeActiveNote)
   const keymapOverrides = useStore((s) => s.keymapOverrides)
+  const vimMode = useStore((s) => s.vimMode)
   const setFocusedPanel = useStore((s) => s.setFocusedPanel)
   const systemFolderLabels = useStore((s) => s.systemFolderLabels)
   const amActive = useStore(isTrashViewActive)
@@ -36,6 +39,7 @@ export function TrashView(): JSX.Element {
 
   const [filter, setFilter] = useState('')
   const [cursorIndex, setCursorIndex] = useState(0)
+  const [deletedAssets, setDeletedAssets] = useState<DeletedAsset[]>([])
   const filterRef = useRef<HTMLInputElement>(null)
   const rootRef = useRef<HTMLDivElement>(null)
   const gPending = useRef(0)
@@ -122,9 +126,79 @@ export function TrashView(): JSX.Element {
     await refreshNotes()
   }, [refreshNotes, trashed.length])
 
+  // Deleted assets live in a separate on-disk store (.zennotes/deleted-assets),
+  // surfaced here so they're recoverable like notes rather than lost after the
+  // session-length undo expires. Fetched locally when the view is active.
+  const loadDeletedAssets = useCallback(async () => {
+    if (typeof window.zen.listDeletedAssets !== 'function') return
+    try {
+      setDeletedAssets(await window.zen.listDeletedAssets())
+    } catch (err) {
+      console.error('list deleted assets failed', err)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (amActive) void loadDeletedAssets()
+  }, [amActive, loadDeletedAssets])
+
+  const restoreAsset = useCallback(
+    async (asset: DeletedAsset) => {
+      try {
+        await window.zen.restoreDeletedAsset(asset)
+        await Promise.all([loadDeletedAssets(), refreshAssets()])
+      } catch (err) {
+        console.error('restore asset failed', err)
+        window.alert(err instanceof Error ? err.message : String(err))
+      }
+    },
+    [loadDeletedAssets, refreshAssets]
+  )
+
+  const purgeAsset = useCallback(
+    async (asset: DeletedAsset) => {
+      const ok = await confirmApp({
+        title: `Delete "${asset.name}" permanently?`,
+        description: 'This cannot be undone.',
+        confirmLabel: 'Delete permanently',
+        danger: true
+      })
+      if (!ok) return
+      try {
+        await window.zen.purgeDeletedAsset(asset.undoToken)
+        await loadDeletedAssets()
+      } catch (err) {
+        console.error('purge asset failed', err)
+        window.alert(err instanceof Error ? err.message : String(err))
+      }
+    },
+    [loadDeletedAssets]
+  )
+
+  const emptyDeletedAssets = useCallback(async () => {
+    if (deletedAssets.length === 0) return
+    const ok = await confirmApp({
+      title: `Delete ${deletedAssets.length} deleted asset${deletedAssets.length === 1 ? '' : 's'} permanently?`,
+      description: 'This cannot be undone.',
+      confirmLabel: 'Delete permanently',
+      danger: true
+    })
+    if (!ok) return
+    try {
+      await window.zen.emptyDeletedAssets()
+      await loadDeletedAssets()
+    } catch (err) {
+      console.error('empty deleted assets failed', err)
+      window.alert(err instanceof Error ? err.message : String(err))
+    }
+  }, [deletedAssets.length, loadDeletedAssets])
+
   useEffect(() => {
     if (!amActive) return
     const handler = (e: KeyboardEvent): void => {
+      // A modal/menu (e.g. the delete-confirm dialog) owns the keyboard while
+      // open — don't let list shortcuts fire through it. (songgenqing report)
+      if (isAppOverlayOpen()) return
       const active = document.activeElement as HTMLElement | null
       if (active) {
         const tag = active.tagName
@@ -134,6 +208,10 @@ export function TrashView(): JSX.Element {
 
       const key = e.key
       const overrides = keymapOverrides
+      // When Vim mode is off, the single-key Vim shortcuts (j/k/x/d/gg/G/o/r//…)
+      // are disabled — only arrows/Enter/Escape navigate. (songgenqing report)
+      const seq = (id: Parameters<typeof matchesSequenceToken>[2]): boolean =>
+        vimMode && matchesSequenceToken(e, overrides, id)
       const consume = (): void => {
         e.preventDefault()
         e.stopImmediatePropagation()
@@ -150,29 +228,30 @@ export function TrashView(): JSX.Element {
         return
       }
 
-      if (matchesSequenceToken(e, overrides, 'nav.filter')) {
+      if (seq('nav.filter')) {
         consume()
         filterRef.current?.focus()
         filterRef.current?.select()
         return
       }
 
-      if (matchesSequenceToken(e, overrides, 'nav.moveDown') || key === 'ArrowDown') {
+      if (seq('nav.moveDown') || key === 'ArrowDown') {
         consume()
         setCursorIndex((i) => Math.max(0, Math.min(filtered.length - 1, i + 1)))
         return
       }
-      if (matchesSequenceToken(e, overrides, 'nav.moveUp') || key === 'ArrowUp') {
+      if (seq('nav.moveUp') || key === 'ArrowUp') {
         consume()
         setCursorIndex((i) => Math.max(0, Math.min(filtered.length - 1, i - 1)))
         return
       }
-      if (matchesSequenceToken(e, overrides, 'nav.jumpBottom')) {
+      if (seq('nav.jumpBottom')) {
         consume()
         setCursorIndex(filtered.length - 1)
         return
       }
       if (
+        vimMode &&
         advanceSequence(
           e,
           getKeymapBinding(overrides, 'nav.jumpTop'),
@@ -185,17 +264,17 @@ export function TrashView(): JSX.Element {
       ) {
         return
       }
-      if ((key === 'Enter' || matchesSequenceToken(e, overrides, 'nav.openResult')) && current) {
+      if ((key === 'Enter' || seq('nav.openResult')) && current) {
         consume()
         void openCurrent()
         return
       }
-      if (matchesSequenceToken(e, overrides, 'nav.restore') && current) {
+      if (seq('nav.restore') && current) {
         consume()
         void restoreNote(current)
         return
       }
-      if ((matchesSequenceToken(e, overrides, 'nav.delete') || key === 'd') && current) {
+      if ((seq('nav.delete') || (vimMode && key === 'd')) && current) {
         consume()
         void deleteNoteForever(current)
       }
@@ -213,6 +292,7 @@ export function TrashView(): JSX.Element {
     filter,
     filtered.length,
     keymapOverrides,
+    vimMode,
     openCurrent,
     restoreNote
   ])
@@ -256,7 +336,7 @@ export function TrashView(): JSX.Element {
 
         <section
           ref={rootRef}
-          className="overflow-hidden rounded-[24px] border border-paper-300/70 bg-paper-50/34 shadow-[0_12px_42px_rgba(15,23,42,0.06)]"
+          className="overflow-hidden rounded-3xl border border-paper-300/70 bg-paper-50/34 shadow-[0_12px_42px_rgba(15,23,42,0.06)]"
         >
           {filtered.length === 0 ? (
             <div className="flex flex-col items-center justify-center gap-3 px-6 py-16 text-center">
@@ -297,12 +377,12 @@ export function TrashView(): JSX.Element {
                     <div className="min-w-0 flex-1 pt-0.5">
                       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5">
                         <span className="truncate text-sm font-medium text-ink-900">{note.title}</span>
-                        <span className="text-[11px] uppercase tracking-[0.16em] text-ink-400">
+                        <span className="text-xs uppercase tracking-[0.16em] text-ink-500">
                           {formatDate(note.updatedAt)}
                         </span>
                       </div>
-                      <div className="mt-0.5 truncate text-[11px] text-ink-400">{note.path}</div>
-                      <div className="mt-1 line-clamp-1 text-[13px] leading-5 text-ink-600">
+                      <div className="mt-0.5 truncate text-xs text-ink-500">{note.path}</div>
+                      <div className="mt-1 line-clamp-1 text-sm leading-5 text-ink-600">
                         {note.excerpt || 'Empty note'}
                       </div>
                     </div>
@@ -313,7 +393,7 @@ export function TrashView(): JSX.Element {
                           e.stopPropagation()
                           void restoreNote(note)
                         }}
-                        className="inline-flex items-center gap-1.5 rounded-lg bg-paper-100/85 px-2.5 py-1 text-[11px] font-medium text-ink-700 transition-colors hover:bg-paper-200 hover:text-ink-900"
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-paper-100/85 px-2.5 py-1 text-xs font-medium text-ink-700 transition-colors hover:bg-paper-200 hover:text-ink-900"
                       >
                         <ArrowUpRightIcon width={13} height={13} />
                         Restore
@@ -324,7 +404,7 @@ export function TrashView(): JSX.Element {
                           e.stopPropagation()
                           void deleteNoteForever(note)
                         }}
-                        className="inline-flex items-center gap-1.5 rounded-lg bg-red-500/10 px-2.5 py-1 text-[11px] font-medium text-[rgb(var(--z-red))] transition-colors hover:bg-red-500/16"
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-red-500/10 px-2.5 py-1 text-xs font-medium text-[rgb(var(--z-red))] transition-colors hover:bg-red-500/16"
                       >
                         <TrashIcon width={13} height={13} />
                         Delete
@@ -336,6 +416,66 @@ export function TrashView(): JSX.Element {
             </div>
           )}
         </section>
+
+        {deletedAssets.length > 0 && (
+          <section className="overflow-hidden rounded-3xl border border-paper-300/70 bg-paper-50/34 shadow-[0_12px_42px_rgba(15,23,42,0.06)]">
+            <div className="flex items-center justify-between gap-3 border-b border-paper-300/60 px-4 py-3">
+              <div className="flex items-center gap-2 text-sm font-medium text-ink-900">
+                <span>Deleted assets</span>
+                <span className="text-xs text-ink-500">{deletedAssets.length}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => void emptyDeletedAssets()}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-red-500/10 px-2.5 py-1 text-xs font-medium text-[rgb(var(--z-red))] transition-colors hover:bg-red-500/16"
+              >
+                <TrashIcon width={13} height={13} />
+                Delete all
+              </button>
+            </div>
+            <div className="divide-y divide-paper-300/60">
+              {deletedAssets.map((asset) => (
+                <div
+                  key={asset.undoToken}
+                  className="group flex w-full items-start gap-3 px-4 py-3 text-left transition-colors hover:bg-paper-100/80"
+                >
+                  <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-paper-300/70 bg-paper-100/85 text-ink-500">
+                    <TrashIcon width={15} height={15} />
+                  </div>
+                  <div className="min-w-0 flex-1 pt-0.5">
+                    <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5">
+                      <span className="truncate text-sm font-medium text-ink-900">{asset.name}</span>
+                      {asset.deletedAt ? (
+                        <span className="text-xs uppercase tracking-[0.16em] text-ink-500">
+                          {formatDate(new Date(asset.deletedAt).getTime())}
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="mt-0.5 truncate text-xs text-ink-500">{asset.path}</div>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1.5 self-center opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100">
+                    <button
+                      type="button"
+                      onClick={() => void restoreAsset(asset)}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-paper-100/85 px-2.5 py-1 text-xs font-medium text-ink-700 transition-colors hover:bg-paper-200 hover:text-ink-900"
+                    >
+                      <ArrowUpRightIcon width={13} height={13} />
+                      Restore
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void purgeAsset(asset)}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-red-500/10 px-2.5 py-1 text-xs font-medium text-[rgb(var(--z-red))] transition-colors hover:bg-red-500/16"
+                    >
+                      <TrashIcon width={13} height={13} />
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
       </div>
     </div>
   )

@@ -18,6 +18,11 @@ export type ThemeFamily =
   | 'one'
   | 'nord'
   | 'tokyo-night'
+  | 'kanagawa'
+  | 'black-metal'
+  | 'rose-pine'
+  // User-authored themes loaded from ~/.config/zennotes/themes (see lib/custom-themes).
+  | 'custom'
 export type ThemeMode = 'light' | 'dark' | 'auto'
 
 export interface ThemeOption {
@@ -91,7 +96,29 @@ export const THEMES: ThemeOption[] = [
 
   // --- Tokyo Night (enkia) --------------------------------------------
   { id: 'tokyo-night-day', label: 'Day', family: 'tokyo-night', mode: 'light' },
-  { id: 'tokyo-night-storm', label: 'Storm', family: 'tokyo-night', mode: 'dark' }
+  { id: 'tokyo-night-storm', label: 'Storm', family: 'tokyo-night', mode: 'dark' },
+
+  // --- Kanagawa (rebelot/kanagawa.nvim) -------------------------------
+  // Inspired by Hokusai's "The Great Wave off Kanagawa". Wave is the warm
+  // default dark, Dragon a darker/cooler dark, Paper Ink a custom muted
+  // variant with a very dark purple canvas, Lotus the light variant.
+  { id: 'kanagawa-wave', label: 'Wave', family: 'kanagawa', mode: 'dark', variant: 'wave' },
+  { id: 'kanagawa-dragon', label: 'Dragon', family: 'kanagawa', mode: 'dark', variant: 'dragon' },
+  { id: 'kanagawa-paper-ink', label: 'Paper Ink (Custom)', family: 'kanagawa', mode: 'dark', variant: 'paper-ink' },
+  { id: 'kanagawa-lotus', label: 'Lotus', family: 'kanagawa', mode: 'light', variant: 'lotus' },
+
+  // --- Black Metal (metalelf0/black-metal-theme-neovim) ---------------
+  // Monochrome: true-black background, soft grey text, a single muted
+  // teal accent. The dark variant follows the repo's default (bathory).
+  { id: 'black-metal', label: 'Black', family: 'black-metal', mode: 'dark' },
+  { id: 'black-metal-day', label: 'Day', family: 'black-metal', mode: 'light' },
+
+  // --- Rosé Pine (rose-pine/neovim) -----------------------------------
+  // "All natural pine, faux fur and a bit of soho vibes." Main + Moon are the
+  // two dark variants; Dawn is the light one.
+  { id: 'rose-pine-main', label: 'Rosé Pine', family: 'rose-pine', mode: 'dark', variant: 'main' },
+  { id: 'rose-pine-moon', label: 'Moon', family: 'rose-pine', mode: 'dark', variant: 'moon' },
+  { id: 'rose-pine-dawn', label: 'Dawn', family: 'rose-pine', mode: 'light', variant: 'dawn' }
 ]
 
 export const DEFAULT_THEME_ID = 'dark-hard'
@@ -149,6 +176,15 @@ export function resolveAuto(
   }
   if (family === 'tokyo-night') {
     return targetMode === 'dark' ? 'tokyo-night-storm' : 'tokyo-night-day'
+  }
+  if (family === 'kanagawa') {
+    return targetMode === 'dark' ? 'kanagawa-wave' : 'kanagawa-lotus'
+  }
+  if (family === 'black-metal') {
+    return targetMode === 'dark' ? 'black-metal' : 'black-metal-day'
+  }
+  if (family === 'rose-pine') {
+    return targetMode === 'dark' ? 'rose-pine-main' : 'rose-pine-dawn'
   }
   // github
   return targetMode === 'dark' ? 'github-dark' : 'github-light'

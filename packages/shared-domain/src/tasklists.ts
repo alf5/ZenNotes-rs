@@ -4,7 +4,10 @@
 // to round-trip a toggle — see `src/shared/tasks.ts`.
 
 export const FENCE_RE = /^(\s*)(```|~~~)/
-export const TASK_LINE_RE = /^(\s*(?:>\s*)*(?:[-+*]|\d+[.)])\s+\[)( |x|X)(\].*)$/
+// Group 2 is the checkbox state char: space (open), x/X (done), or `>` (forwarded
+// to another note, #316). The leading `(?:>\s*)*` is a blockquote prefix — a
+// different `>`, unrelated to the state char inside the brackets.
+export const TASK_LINE_RE = /^(\s*(?:>\s*)*(?:[-+*]|\d+[.)])\s+\[)( |x|X|>)(\].*)$/
 
 export type TaskPriority = 'high' | 'med' | 'low'
 
@@ -53,6 +56,62 @@ function editTaskAtIndex(
     return lines.join('\n')
   }
   return markdown
+}
+
+/** Line numbers (0-based) of every task line, indexed by task index. Counts
+ *  exactly like `editTaskAtIndex` / `parseTasksFromBody` (fence-aware) so the
+ *  positions line up with a `VaultTask.taskIndex`. */
+function taskLineNumbers(lines: string[]): number[] {
+  const out: number[] = []
+  let inFence = false
+  let fenceMarker: string | null = null
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    const fenceMatch = line.match(FENCE_RE)
+    if (fenceMatch) {
+      const marker = fenceMatch[2]
+      if (!inFence) {
+        inFence = true
+        fenceMarker = marker
+      } else if (marker === fenceMarker) {
+        inFence = false
+        fenceMarker = null
+      }
+      continue
+    }
+    if (inFence) continue
+    if (TASK_LINE_RE.test(line)) out.push(i)
+  }
+  return out
+}
+
+/**
+ * Relocate the task line at `fromTaskIndex` to just before/after the task line
+ * at `targetTaskIndex`, moving the whole markdown line. Used to reorder tasks
+ * from the Tasks list (the note's line order is the source of truth). Returns
+ * the markdown unchanged if either index is out of range or it's a no-op.
+ */
+export function moveTaskLine(
+  markdown: string,
+  fromTaskIndex: number,
+  targetTaskIndex: number,
+  position: 'before' | 'after'
+): string {
+  if (fromTaskIndex < 0 || targetTaskIndex < 0 || fromTaskIndex === targetTaskIndex) {
+    return markdown
+  }
+  const lines = markdown.split('\n')
+  const taskLines = taskLineNumbers(lines)
+  const fromLine = taskLines[fromTaskIndex]
+  const targetLine = taskLines[targetTaskIndex]
+  if (fromLine == null || targetLine == null) return markdown
+
+  const [content] = lines.splice(fromLine, 1)
+  // Removing the source line shifts every later index down by one.
+  const shiftedTarget = fromLine < targetLine ? targetLine - 1 : targetLine
+  const insertAt = position === 'before' ? shiftedTarget : shiftedTarget + 1
+  lines.splice(insertAt, 0, content)
+  return lines.join('\n')
 }
 
 export function toggleTaskAtIndex(
@@ -108,7 +167,9 @@ export function setTaskWaitingAtIndex(
 }
 
 const PRIORITY_TOKEN_RE = /(^|\s)!(?:high|med|medium|low|h|m|l)\b/i
-const DUE_TOKEN_RE = /(^|\s)due:\S+/i
+// Optional whitespace after the colon so a spaced `due: 2026-01-01` token is
+// stripped/replaced as one unit when rescheduling, matching the parser. (#343)
+const DUE_TOKEN_RE = /(^|\s)due:\s*\S+/i
 
 /** Replace, insert, or remove the priority token (`!high|!med|!low`)
  *  on the task line at `taskIndex`. Pass `null` to clear. */
@@ -159,4 +220,196 @@ export function setTaskDueAtIndex(
     }
     return `${prefix}${checkChar}]${nextTail}`
   })
+}
+
+// A valid inline-field key is a lowercase slug (mirrors INLINE_FIELD_RE in
+// tasks.ts). Guarding here keeps the dynamic RegExp safe and predictable.
+const FIELD_KEY_RE = /^[a-z][a-z0-9_-]*$/
+
+/** Replace, insert, or remove an inline `@<key>:<value>` field token on the
+ *  task line at `taskIndex`. Pass `value = null` to clear it. Generalizes the
+ *  status token so any field (`status`, `sprint`, `area`, …) round-trips the
+ *  same way. (#354) */
+export function setTaskFieldAtIndex(
+  markdown: string,
+  taskIndex: number,
+  key: string,
+  value: string | null
+): string {
+  if (!FIELD_KEY_RE.test(key)) return markdown
+  const tokenRe = new RegExp(`(^|\\s)@${key}:\\S+`, 'i')
+  return editTaskAtIndex(markdown, taskIndex, (match) => {
+    const prefix = match[1]
+    const checkChar = match[2]
+    const tailWithBracket = match[3]
+    if (!tailWithBracket.startsWith(']')) return null
+    const tail = tailWithBracket.slice(1)
+    const cleaned = tail.replace(tokenRe, '$1').replace(/\s{2,}/g, ' ')
+    const nextTail = value
+      ? `${cleaned.replace(/\s+$/u, '')} @${key}:${value}`
+      : cleaned.replace(/\s+$/u, '')
+    return `${prefix}${checkChar}]${nextTail}`
+  })
+}
+
+/** Replace, insert, or remove the `@status:<id>` token. Thin wrapper over
+ *  {@link setTaskFieldAtIndex} for the default `status` field. (#354) */
+export function setTaskStatusAtIndex(
+  markdown: string,
+  taskIndex: number,
+  status: string | null
+): string {
+  return setTaskFieldAtIndex(markdown, taskIndex, 'status', status)
+}
+
+/** Replace everything after the checkbox on the task line at `taskIndex` with
+ *  `text` (verbatim — the caller owns any `due:`/`!priority` tokens). Used by
+ *  inline task editing. */
+export function setTaskTextAtIndex(
+  markdown: string,
+  taskIndex: number,
+  text: string
+): string {
+  return editTaskAtIndex(markdown, taskIndex, (match) => {
+    const prefix = match[1]
+    const checkChar = match[2]
+    const tailWithBracket = match[3]
+    if (!tailWithBracket.startsWith(']')) return null
+    const trimmed = text.trim()
+    return `${prefix}${checkChar}]${trimmed ? ` ${trimmed}` : ''}`
+  })
+}
+
+/** Mark the task line at `taskIndex` as forwarded (`[>]`) and append `linkToken`
+ *  (a wikilink to the note it was forwarded to) if not already present. Used by
+ *  task forwarding (#316). Pass `linkToken = ''` to only flip the state. */
+export function setTaskForwardedAtIndex(
+  markdown: string,
+  taskIndex: number,
+  linkToken: string
+): string {
+  return editTaskAtIndex(markdown, taskIndex, (match) => {
+    const prefix = match[1]
+    const tailWithBracket = match[3]
+    if (!tailWithBracket.startsWith(']')) return null
+    const tail = tailWithBracket.slice(1).replace(/\s+$/u, '')
+    const nextTail = !linkToken || tail.includes(linkToken) ? tail : `${tail} ${linkToken}`
+    return `${prefix}>]${nextTail}`
+  })
+}
+
+/** Remove the task line at `taskIndex` and return both the removed line and the
+ *  remaining body. `line` is null when the index is out of range. Fence-aware,
+ *  counting tasks the same way the parser does so the index stays in lockstep.
+ *  Used to move a task to another note. */
+export function takeTaskLineAtIndex(
+  markdown: string,
+  taskIndex: number
+): { line: string | null; body: string } {
+  if (taskIndex < 0) return { line: null, body: markdown }
+  const lines = markdown.split('\n')
+  let currentTaskIndex = 0
+  let inFence = false
+  let fenceMarker: string | null = null
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    const fenceMatch = line.match(FENCE_RE)
+    if (fenceMatch) {
+      const marker = fenceMatch[2]
+      if (!inFence) {
+        inFence = true
+        fenceMarker = marker
+      } else if (marker === fenceMarker) {
+        inFence = false
+        fenceMarker = null
+      }
+      continue
+    }
+    if (inFence) continue
+    if (!TASK_LINE_RE.test(line)) continue
+    if (currentTaskIndex !== taskIndex) {
+      currentTaskIndex += 1
+      continue
+    }
+    const removed = lines[i]
+    lines.splice(i, 1)
+    return { line: removed, body: lines.join('\n') }
+  }
+  return { line: null, body: markdown }
+}
+
+/** Delete the task line at `taskIndex` entirely. */
+export function removeTaskAtIndex(markdown: string, taskIndex: number): string {
+  return takeTaskLineAtIndex(markdown, taskIndex).body
+}
+
+function leadingIndentWidth(line: string): number {
+  return line.match(/^[ \t]*/)?.[0].length ?? 0
+}
+
+/**
+ * Pull every UNCHECKED task line — together with its indented continuation /
+ * child lines — out of `markdown`. Used to roll unfinished tasks forward from
+ * past daily notes into today's note.
+ *
+ * - Lines are moved verbatim, so any `due:`/`!priority`/`#tag` tokens travel
+ *   with the task unchanged.
+ * - Checked tasks (`- [x]`) stay put — they're history.
+ * - `- [ ]` inside fenced code blocks is ignored (never a real task).
+ * - A task's indented children (deeper-indented following lines, up to the
+ *   first blank line, dedent, or fence) move with it so sub-bullets aren't
+ *   orphaned.
+ *
+ * Returns the moved raw lines (in document order) and the remaining body.
+ */
+export function extractUncheckedTaskBlocks(markdown: string): {
+  moved: string[]
+  rest: string
+} {
+  const lines = markdown.split('\n')
+  const consumed = new Array<boolean>(lines.length).fill(false)
+  const moved: string[] = []
+  let inFence = false
+  let fenceMarker: string | null = null
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    const fenceMatch = line.match(FENCE_RE)
+    if (fenceMatch) {
+      const marker = fenceMatch[2]
+      if (!inFence) {
+        inFence = true
+        fenceMarker = marker
+      } else if (marker === fenceMarker) {
+        inFence = false
+        fenceMarker = null
+      }
+      continue
+    }
+    if (inFence) continue
+
+    const taskMatch = line.match(TASK_LINE_RE)
+    if (!taskMatch) continue
+    if (taskMatch[2] !== ' ') continue // only unchecked tasks roll over
+
+    const baseIndent = leadingIndentWidth(line)
+    moved.push(line)
+    consumed[i] = true
+
+    // Carry indented continuation/child lines along with the task.
+    let j = i + 1
+    while (j < lines.length) {
+      const next = lines[j]
+      if (next.trim() === '') break
+      if (FENCE_RE.test(next)) break
+      if (leadingIndentWidth(next) <= baseIndent) break
+      moved.push(next)
+      consumed[j] = true
+      j++
+    }
+    i = j - 1 // skip the consumed block (its children are not new tasks)
+  }
+
+  const rest = lines.filter((_, idx) => !consumed[idx]).join('\n')
+  return { moved, rest }
 }
