@@ -8,9 +8,11 @@ url="https://github.com/alf5/ZenNotes-rs"
 license=('MIT')
 # Runtime: the Tauri webview + GTK stack, from Arch's own packages.
 depends=('webkit2gtk-4.1' 'gtk3' 'hicolor-icon-theme')
-# Build: Rust toolchain (rust provides cargo), Node/npm for the Vite frontend,
-# pkgconf to locate webkit2gtk-4.1/gtk3, git for the source clone.
-makedepends=('rust' 'npm' 'nodejs' 'pkgconf' 'git')
+# Build: Rust toolchain (rust provides cargo), bun to install/run the Vite
+# frontend from the repo's committed bun.lock, nodejs as a fallback for tooling
+# that shells out to `node`, pkgconf to locate webkit2gtk-4.1/gtk3, git for the
+# source clone.
+makedepends=('rust' 'bun' 'nodejs' 'pkgconf' 'git')
 source=("$pkgname::git+https://github.com/alf5/ZenNotes-rs.git#tag=v$pkgver"
   "zennotes-rs.desktop")
 sha256sums=('SKIP'
@@ -19,18 +21,19 @@ sha256sums=('SKIP'
 build() {
   cd "$srcdir/$pkgname"
 
-  # Keep npm + cargo caches inside the build dir.
-  export npm_config_cache="$srcdir/npm-cache"
+  # Keep bun + cargo caches inside the build dir.
+  export BUN_INSTALL_CACHE_DIR="$srcdir/bun-cache"
   export CARGO_HOME="${CARGO_HOME:-$srcdir/cargo-home}"
 
-  # Install the JS deps (vendored frontend workspace + Tauri CLI).
-  # `npm install`, not `npm ci`: the repo's lockfile is bun.lock, so there is
-  # no package-lock.json for `npm ci` to require. This matches the CI build.
-  npm install
+  # Install the JS deps (vendored frontend workspace + Tauri CLI) from the
+  # committed bun.lock. bun (not npm) because bun.lock is the repo's real
+  # lockfile; --frozen-lockfile pins the exact, integrity-checked dependency
+  # tree and fails rather than resolving fresh, so the build is reproducible.
+  bun install --frozen-lockfile
 
   # Build the frontend (Vite, embedded into the binary) and the Rust app,
   # without producing a bundle/installer — we install files ourselves below.
-  npm run tauri build -- --no-bundle
+  bun run tauri build -- --no-bundle
 }
 
 package() {
