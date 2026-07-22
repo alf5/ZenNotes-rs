@@ -21,7 +21,18 @@ pub fn window_open_note(app: AppHandle, rel_path: String) -> Result<(), String> 
 }
 
 #[tauri::command]
-pub fn window_open_vault(app: AppHandle, state: State<AppState>) -> Result<Option<VaultInfo>, String> {
+pub fn window_open_vault(
+    app: AppHandle,
+    state: State<AppState>,
+    root: Option<String>,
+) -> Result<Option<VaultInfo>, String> {
+    // v2.15 contract: an explicit root opens that vault directly (no picker).
+    // This backend keeps a single active vault shared by all windows, so
+    // switch first, then open the new window — existing windows follow.
+    // Per-window vault sessions are a later milestone (see GAP-ANALYSIS.md).
+    if let Some(root) = root.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
+        crate::ipc::vault_cmds::open_local_vault_root(&app, &state, root)?;
+    }
     windows::open_vault_window(&app, &state)
 }
 
