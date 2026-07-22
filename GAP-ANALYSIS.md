@@ -126,7 +126,20 @@ and avoids reimplementing schema-inference heuristics.
   `renameDatabase` is trivial (folder rename). `listDatabases` is **dead code**
   upstream (nothing calls it) — keep the `[]` stub.
 
-### D. Portable config (`config.toml`) — the subtle one
+### D. Portable config (`config.toml`) — ✅ DONE (2026-07-22)
+
+Implemented as a thin-backend split: `src/bridge/portable-config.ts` holds
+upstream's annotated TOML serializer/deserializer nearly verbatim (byte-
+compatible config files; own-write guard + write queue included), while
+`src-tauri/src/app_config.rs` does XDG dir resolution, atomic writes, and the
+debounced watcher (`config://file-changed` carries raw text). `getConfigSync`
+stays synchronous because `main.tsx` awaits the config bootstrap and then
+imports app-core **dynamically** — a static import would evaluate the store
+before the top-level await resolves (the one Tauri-specific trap here).
+Verified live: seed-from-localStorage on first boot, external hand-edits
+apply without restart. Original notes kept below for reference.
+
+#### (original plan)
 
 Spec: `apps/desktop/src/main/app-config.ts` (746 lines); schema in
 `shared-domain/app-config.ts`.
