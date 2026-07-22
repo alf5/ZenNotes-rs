@@ -7,6 +7,7 @@
 
 mod app_config;
 mod asset_protocol;
+mod custom_css;
 mod deep_links;
 mod ipc;
 mod os;
@@ -80,6 +81,15 @@ pub fn run() {
                     )));
                 }
                 Err(err) => eprintln!("config watcher failed to start: {err}"),
+            }
+            // Watch the custom-themes + overrides dirs for edits.
+            match custom_css::spawn_watchers(app.handle().clone()) {
+                Ok(debouncers) => {
+                    app.manage(custom_css::CustomCssWatchers(std::sync::Mutex::new(
+                        debouncers,
+                    )));
+                }
+                Err(err) => eprintln!("custom-css watchers failed to start: {err}"),
             }
             // Register the persisted quick-capture global shortcut.
             if let Ok(dir) = app.path().app_config_dir() {
@@ -182,6 +192,15 @@ pub fn run() {
             app_config::config_file_path,
             app_config::config_file_read,
             app_config::config_file_write,
+            custom_css::custom_themes_scan,
+            custom_css::custom_themes_dir_path,
+            custom_css::custom_themes_reveal,
+            custom_css::custom_themes_delete,
+            custom_css::custom_themes_reserve,
+            custom_css::custom_themes_write_files,
+            custom_css::overrides_list,
+            custom_css::overrides_reveal,
+            custom_css::overrides_delete,
             vault_cmds::workspace_state_read,
             vault_cmds::workspace_state_write,
             vault_cmds::vault_root_content_hidden,
