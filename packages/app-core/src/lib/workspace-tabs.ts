@@ -4,6 +4,8 @@ import { isQuickNotesTabPath } from '@shared/quick-notes'
 import { isTagsTabPath } from '@shared/tags'
 import { isTasksTabPath } from '@shared/tasks'
 import { isTrashTabPath } from '@shared/trash'
+import { isDatabaseTabPath } from '@shared/databases'
+import { isAssetsViewTabPath } from '@shared/assets-view'
 import { isAssetTabPath } from './asset-tabs'
 import { isDiagramTabPath } from './diagram-tabs'
 import { allLeaves, type PaneLayout } from './pane-layout'
@@ -16,8 +18,10 @@ export function isWorkspaceVirtualTabPath(path: string): boolean {
     isHelpTabPath(path) ||
     isArchiveTabPath(path) ||
     isTrashTabPath(path) ||
+    isAssetsViewTabPath(path) ||
     isAssetTabPath(path) ||
-    isDiagramTabPath(path)
+    isDiagramTabPath(path) ||
+    isDatabaseTabPath(path)
   )
 }
 

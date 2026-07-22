@@ -305,7 +305,7 @@ mod tests {
     use super::*;
 
     fn vault(root: &str) -> VaultInfo {
-        VaultInfo { root: root.into(), name: basename(&resolve_path(root)) }
+        VaultInfo { root: root.into(), name: basename(&resolve_path(root)), temporary: None }
     }
 
     #[test]

@@ -104,3 +104,20 @@ bundle targets in `src-tauri/tauri.conf.json`:
 ```
 
 Arch users are served by the AUR package in `packaging/arch/` regardless.
+
+## Blank window / instant crash on Wayland (Hyprland, NVIDIA)
+
+If `bun run tauri:dev` dies immediately with:
+
+```
+Gdk-Message: Error 71 (Protocol error) dispatching to Wayland display.
+```
+
+that's the well-known WebKitGTK DMA-BUF renderer issue on some Wayland
+compositor/GPU combinations (observed here on Hyprland). Launch with:
+
+```sh
+WEBKIT_DISABLE_DMABUF_RENDERER=1 bun run tauri:dev
+```
+
+The same variable works for the packaged binary if it hits the same crash.

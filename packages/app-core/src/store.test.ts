@@ -2,7 +2,10 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { TASKS_TAB_PATH, type VaultTask } from '@shared/tasks'
+import { databaseTabPath, type DatabaseDoc } from '@shared/databases'
+import { assetTabPath } from './lib/asset-tabs'
 import { findLeaf, type PaneLayout, type PaneLeaf } from './lib/pane-layout'
+import { NO_VALUE_COLUMN_ID } from './components/TasksKanban'
 
 function makeTask(content: string, taskIndex = 0): VaultTask {
   return {
@@ -15,15 +18,19 @@ function makeTask(content: string, taskIndex = 0): VaultTask {
     rawText: `- [ ] ${content}`,
     content,
     checked: false,
+    forwarded: false,
     waiting: false,
     tags: []
   }
 }
 
-function makeNote(body: string) {
+// Some store flows validate tabs against `state.notes` by path, so tests that
+// open multiple tabs need note fixtures whose metadata matches each tab path.
+function makeNote(body: string, path = 'inbox/Note.md') {
+  const title = path.split('/').pop()?.replace(/\.md$/i, '') || 'Note'
   return {
-    path: 'inbox/Note.md',
-    title: 'Note',
+    path,
+    title,
     folder: 'inbox' as const,
     siblingOrder: 0,
     createdAt: 0,
@@ -31,6 +38,7 @@ function makeNote(body: string) {
     size: body.length,
     tags: [],
     wikilinks: [],
+    assetEmbeds: [],
     hasAttachments: false,
     excerpt: body,
     body
@@ -136,6 +144,252 @@ describe('tasks cache freshness', () => {
   })
 })
 
+describe('closed tab history', () => {
+  it('reopens closed tabs in reverse close order', async () => {
+    installZen({
+      readNote: vi.fn((path: string) => Promise.resolve(makeNote(`# ${path}`, path)))
+    })
+
+    const { useStore } = await loadStore()
+    const paneId = useStore.getState().activePaneId
+    useStore.setState({
+      notes: [makeNote('A', 'inbox/A.md'), makeNote('B', 'inbox/B.md')]
+    })
+
+    await useStore.getState().openNoteInPane(paneId, 'inbox/A.md')
+    await useStore.getState().openNoteInPane(paneId, 'inbox/B.md')
+    await useStore.getState().closeTabInPane(paneId, 'inbox/A.md')
+    await useStore.getState().closeTabInPane(paneId, 'inbox/B.md')
+
+    await useStore.getState().reopenLastClosedTab()
+    const reopenedPaneId = useStore.getState().activePaneId
+    expect(findLeaf(useStore.getState().paneLayout, reopenedPaneId)?.activeTab).toBe('inbox/B.md')
+
+    await useStore.getState().reopenLastClosedTab()
+    const leaf = findLeaf(useStore.getState().paneLayout, reopenedPaneId)
+    expect(leaf?.tabs).toEqual(['inbox/A.md', 'inbox/B.md'])
+    expect(leaf?.activeTab).toBe('inbox/A.md')
+  })
+})
+
+describe('daily note patterns', () => {
+  it('creates daily notes using the configured directory and title patterns', async () => {
+    const created = {
+      ...makeNote(''),
+      path: 'inbox/2026/06-Jun/2026-06-09-Tue.md',
+      title: '2026-06-09-Tue'
+    }
+    const createNote = vi.fn().mockResolvedValue(created)
+    installZen({
+      createNote,
+      listNotes: vi.fn().mockResolvedValue([created]),
+      readNote: vi.fn().mockResolvedValue({ ...created, body: '' })
+    })
+
+    const { useStore } = await loadStore()
+    useStore.setState({
+      notes: [],
+      customTemplates: [],
+      vaultSettings: {
+        primaryNotesLocation: 'inbox',
+        dailyNotes: {
+          enabled: true,
+          directory: 'yyyy/MM-MMM',
+          titlePattern: 'yyyy-MM-dd-EEE',
+          locale: 'en-US'
+        },
+        weeklyNotes: { enabled: false, directory: 'Weekly Notes' },
+        monthlyNotes: { enabled: false, directory: 'Monthly Notes' },
+        folderIcons: {},
+        folderColors: {},
+        favorites: []
+      }
+    })
+
+    await useStore.getState().openDailyNoteForDate(new Date(2026, 5, 9))
+
+    expect(createNote).toHaveBeenCalledWith('inbox', '2026-06-09-Tue', '2026/06-Jun')
+  })
+})
+
+describe('weekly note patterns', () => {
+  it('creates weekly notes using the configured directory and title patterns', async () => {
+    const created = {
+      ...makeNote(''),
+      path: 'inbox/2026/06-Jun/2026-W24-Mon.md',
+      title: '2026-W24-Mon'
+    }
+    const createNote = vi.fn().mockResolvedValue(created)
+    installZen({
+      createNote,
+      listNotes: vi.fn().mockResolvedValue([created]),
+      readNote: vi.fn().mockResolvedValue({ ...created, body: '' })
+    })
+
+    const { useStore } = await loadStore()
+    useStore.setState({
+      notes: [],
+      customTemplates: [],
+      vaultSettings: {
+        primaryNotesLocation: 'inbox',
+        dailyNotes: { enabled: false, directory: 'Daily Notes' },
+        weeklyNotes: {
+          enabled: true,
+          directory: 'yyyy/MM-MMM',
+          titlePattern: "yyyy-'W'ww-EEE",
+          locale: 'en-US'
+        },
+        monthlyNotes: { enabled: false, directory: 'Monthly Notes' },
+        folderIcons: {},
+        folderColors: {},
+        favorites: []
+      }
+    })
+
+    await useStore.getState().openWeeklyNoteForDate(new Date(2026, 5, 9))
+
+    expect(createNote).toHaveBeenCalledWith('inbox', '2026-W24-Mon', '2026/06-Jun')
+  })
+})
+
+describe('date note pattern history', () => {
+  it('keeps existing daily notes dynamic when the daily pattern changes', async () => {
+    const oldSettings = {
+      primaryNotesLocation: 'inbox' as const,
+      dailyNotes: {
+        enabled: true,
+        directory: 'Daily Notes',
+        titlePattern: 'yyyy-MM-dd',
+        locale: 'en-US'
+      },
+      weeklyNotes: { enabled: false, directory: 'Weekly Notes' },
+      monthlyNotes: { enabled: false, directory: 'Monthly Notes' },
+      folderIcons: {},
+      folderColors: {},
+      favorites: []
+    }
+    const nextSettings = {
+      ...oldSettings,
+      dailyNotes: {
+        ...oldSettings.dailyNotes,
+        directory: 'yyyy/MM-MMM',
+        titlePattern: 'yyyy-MM-dd-EEE'
+      }
+    }
+    const existing = {
+      ...makeNote('daily'),
+      path: 'inbox/Daily Notes/2026-06-12.md',
+      title: '2026-06-12',
+      body: '# 2026-06-12\n'
+    }
+    const setVaultSettings = vi.fn().mockImplementation(async (settings) => settings)
+    const moveNote = vi.fn()
+    const renameNote = vi.fn()
+    const createNote = vi.fn()
+    installZen({
+      setVaultSettings,
+      moveNote,
+      renameNote,
+      createNote,
+      listNotes: vi.fn().mockResolvedValue([existing]),
+      readNote: vi.fn().mockResolvedValue(existing)
+    })
+
+    const { useStore } = await loadStore()
+    useStore.setState({
+      notes: [existing],
+      vaultSettings: oldSettings
+    })
+
+    await useStore.getState().setVaultSettings(nextSettings)
+    await useStore.getState().openDailyNoteForDate(new Date(2026, 5, 12))
+
+    expect(setVaultSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dailyNotes: expect.objectContaining({
+          directory: 'yyyy/MM-MMM',
+          titlePattern: 'yyyy-MM-dd-EEE',
+          legacyPatterns: [
+            { directory: 'Daily Notes', titlePattern: 'yyyy-MM-dd', locale: 'en-US' }
+          ]
+        })
+      })
+    )
+    expect(moveNote).not.toHaveBeenCalled()
+    expect(renameNote).not.toHaveBeenCalled()
+    expect(createNote).not.toHaveBeenCalled()
+    expect(useStore.getState().selectedPath).toBe(existing.path)
+  })
+
+  it('keeps existing weekly notes dynamic when the weekly pattern changes', async () => {
+    const oldSettings = {
+      primaryNotesLocation: 'inbox' as const,
+      dailyNotes: { enabled: false, directory: 'Daily Notes' },
+      weeklyNotes: {
+        enabled: true,
+        directory: 'Weekly Notes',
+        titlePattern: "yyyy-'W'ww",
+        locale: 'en-US'
+      },
+      monthlyNotes: { enabled: false, directory: 'Monthly Notes' },
+      folderIcons: {},
+      folderColors: {},
+      favorites: []
+    }
+    const nextSettings = {
+      ...oldSettings,
+      weeklyNotes: {
+        ...oldSettings.weeklyNotes,
+        directory: 'yyyy/MM-MMM',
+        titlePattern: "yyyy-'W'ww-EEE"
+      }
+    }
+    const existing = {
+      ...makeNote('weekly'),
+      path: 'inbox/Weekly Notes/2026-W24.md',
+      title: '2026-W24',
+      body: '# 2026-W24\n'
+    }
+    const setVaultSettings = vi.fn().mockImplementation(async (settings) => settings)
+    const moveNote = vi.fn()
+    const renameNote = vi.fn()
+    const createNote = vi.fn()
+    installZen({
+      setVaultSettings,
+      moveNote,
+      renameNote,
+      createNote,
+      listNotes: vi.fn().mockResolvedValue([existing]),
+      readNote: vi.fn().mockResolvedValue(existing)
+    })
+
+    const { useStore } = await loadStore()
+    useStore.setState({
+      notes: [existing],
+      vaultSettings: oldSettings
+    })
+
+    await useStore.getState().setVaultSettings(nextSettings)
+    await useStore.getState().openWeeklyNoteForDate(new Date(2026, 5, 12))
+
+    expect(setVaultSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        weeklyNotes: expect.objectContaining({
+          directory: 'yyyy/MM-MMM',
+          titlePattern: "yyyy-'W'ww-EEE",
+          legacyPatterns: [
+            { directory: 'Weekly Notes', titlePattern: "yyyy-'W'ww", locale: 'en-US' }
+          ]
+        })
+      })
+    )
+    expect(moveNote).not.toHaveBeenCalled()
+    expect(renameNote).not.toHaveBeenCalled()
+    expect(createNote).not.toHaveBeenCalled()
+    expect(useStore.getState().selectedPath).toBe(existing.path)
+  })
+})
+
 describe('local vault shortcuts', () => {
   it('stores known local vaults for the sidebar switcher', async () => {
     const localVaults = [
@@ -181,6 +435,53 @@ describe('local vault shortcuts', () => {
     expect(listAssets).toHaveBeenCalledTimes(1)
     expect(useStore.getState().assetFiles).toEqual(assetFiles)
     expect(useStore.getState().hasAssetsDir).toBe(true)
+  })
+
+  it('switches from a remote workspace to a local vault that shares the server path', async () => {
+    // A localhost server reports the served folder's real on-disk path as the
+    // vault root, so the current remote vault.root can equal a local vault's
+    // path. Switching back to local must not be blocked by that coincidence.
+    const sharedRoot = '/Users/test/Shared'
+    const openLocalVault = vi
+      .fn()
+      .mockResolvedValue({ root: sharedRoot, name: 'Shared' })
+    installZen({
+      openLocalVault,
+      getRemoteWorkspaceInfo: vi.fn().mockResolvedValue(null),
+      getVaultSettings: vi.fn().mockResolvedValue({}),
+      listLocalVaults: vi.fn().mockResolvedValue([]),
+      listAssets: vi.fn().mockResolvedValue([]),
+      hasAssetsDir: vi.fn().mockResolvedValue(false)
+    })
+
+    const { useStore } = await loadStore()
+    useStore.setState({
+      vault: { root: sharedRoot, name: 'Shared' },
+      workspaceMode: 'remote'
+    })
+
+    await useStore.getState().openLocalVault(sharedRoot)
+
+    expect(openLocalVault).toHaveBeenCalledWith(sharedRoot)
+    expect(useStore.getState().workspaceMode).toBe('local')
+    expect(useStore.getState().vault).toEqual({ root: sharedRoot, name: 'Shared' })
+  })
+
+  it('ignores reopening the current local vault', async () => {
+    const openLocalVault = vi
+      .fn()
+      .mockResolvedValue({ root: '/Users/test/Notes', name: 'Notes' })
+    installZen({ openLocalVault })
+
+    const { useStore } = await loadStore()
+    useStore.setState({
+      vault: { root: '/Users/test/Notes', name: 'Notes' },
+      workspaceMode: 'local'
+    })
+
+    await useStore.getState().openLocalVault('/Users/test/Notes')
+
+    expect(openLocalVault).not.toHaveBeenCalled()
   })
 
   it('closes the current local vault and clears workspace state', async () => {
@@ -454,5 +755,376 @@ describe('preview tabs (VS Code-style open flow)', () => {
 
     useStore.getState().updateNoteBody('inbox/A.md', 'alpha edited')
     expect(activeLeaf(useStore.getState()).previewTab).toBeNull()
+  })
+})
+
+describe('note jump history with database tabs', () => {
+  // A database can be the active tab two ways: the `zen://database/…` tab
+  // ("New Database"), or a `.csv` opened directly as an asset tab
+  // (`zen://asset/Foo.csv`) that renders as a grid. Both must round-trip so
+  // Ctrl+O from a record page returns to the grid.
+  it.each([
+    ['database tab', databaseTabPath('Projects.csv')],
+    ['csv asset tab', assetTabPath('Projects.csv')]
+  ])('Ctrl+O (jumpToPreviousNote) returns to the %s a record page was opened from', async (_label, dbTab) => {
+    installZen()
+    const { useStore } = await loadStore()
+
+    // Open the database surface, then open a record page note from it.
+    await useStore.getState().selectNote(dbTab)
+    expect(useStore.getState().selectedPath).toBe(dbTab)
+
+    await useStore.getState().selectNote('inbox/Note.md')
+    expect(useStore.getState().selectedPath).toBe('inbox/Note.md')
+    // The database must be recorded as a back-target (it is a virtual tab, so
+    // without the database-surface exception it would be dropped here).
+    expect(useStore.getState().noteBackstack.map((l) => l.path)).toContain(dbTab)
+
+    // Ctrl+O → jump back to the grid.
+    await useStore.getState().jumpToPreviousNote()
+    expect(useStore.getState().selectedPath).toBe(dbTab)
+  })
+})
+
+describe('database deletion', () => {
+  it('forgets a deleted database instead of re-reading the gone file', async () => {
+    const csvPath = 'quick/Untitled Database.csv'
+    const doc = { path: csvPath, title: 'Untitled Database', rows: [], columns: [], views: [] }
+    const openDatabase = vi.fn().mockResolvedValue(doc)
+    installZen({ openDatabase })
+
+    const { useStore } = await loadStore()
+    const paneId = useStore.getState().activePaneId
+    const tabPath = databaseTabPath(csvPath)
+
+    // Open the database: caches the doc and opens its tab.
+    await useStore.getState().openDatabase(csvPath)
+    expect(useStore.getState().databases[csvPath]).toBeTruthy()
+    expect(findLeaf(useStore.getState().paneLayout, paneId)?.tabs).toContain(tabPath)
+
+    openDatabase.mockClear()
+
+    // The watcher reports the .csv was deleted (the user removed the database).
+    await useStore.getState().applyChange({
+      kind: 'unlink',
+      path: csvPath,
+      folder: 'quick',
+      scope: 'database'
+    })
+
+    // It must NOT re-read the gone file (that throws "Database not found" and
+    // logs an Electron handler error in the terminal).
+    expect(openDatabase).not.toHaveBeenCalled()
+    // The cached doc is dropped and its tab is closed.
+    expect(useStore.getState().databases[csvPath]).toBeUndefined()
+    expect(findLeaf(useStore.getState().paneLayout, paneId)?.tabs ?? []).not.toContain(tabPath)
+  })
+
+  it('still re-reads on a non-delete database change', async () => {
+    const csvPath = 'quick/Live.csv'
+    const v1 = { path: csvPath, title: 'Live', rows: [], columns: [], views: [] }
+    const v2 = { ...v1, rows: [{ id: 'r1' }] }
+    const openDatabase = vi.fn().mockResolvedValueOnce(v1).mockResolvedValue(v2)
+    installZen({ openDatabase })
+
+    const { useStore } = await loadStore()
+    await useStore.getState().openDatabase(csvPath)
+    openDatabase.mockClear()
+
+    // A change (not a delete) more than the write-echo window ago re-syncs.
+    await useStore.getState().applyChange({
+      kind: 'change',
+      path: csvPath,
+      folder: 'quick',
+      scope: 'database'
+    })
+
+    expect(openDatabase).toHaveBeenCalledWith(csvPath)
+    expect(useStore.getState().databases[csvPath]).toBeTruthy()
+  })
+
+  it('closes a stale tab when the database no longer exists (open returns null)', async () => {
+    // Simulates a database tab restored on startup after its .csv was deleted:
+    // DatabaseView calls loadDatabase, the main process returns null (no throw),
+    // and the renderer forgets the tab instead of looping on a missing file.
+    const csvPath = 'inbox/Gone.csv'
+    const openDatabase = vi.fn().mockResolvedValue(null)
+    installZen({ openDatabase })
+
+    const { useStore } = await loadStore()
+    const paneId = useStore.getState().activePaneId
+    const tabPath = databaseTabPath(csvPath)
+
+    // Restore the tab directly (as the persisted layout would on launch).
+    await useStore.getState().openNoteInPane(paneId, tabPath)
+    expect(findLeaf(useStore.getState().paneLayout, paneId)?.tabs).toContain(tabPath)
+
+    // DatabaseView's effect fires this when it has no cached doc.
+    await useStore.getState().loadDatabase(csvPath)
+
+    expect(useStore.getState().databases[csvPath]).toBeUndefined()
+    expect(findLeaf(useStore.getState().paneLayout, paneId)?.tabs ?? []).not.toContain(tabPath)
+  })
+})
+
+describe('viewPrefsFromVault (#292 — per-vault view overlay)', () => {
+  type ViewArg = Parameters<Awaited<ReturnType<typeof loadStore>>['viewPrefsFromVault']>[0]
+
+  it('overlays valid view overrides onto the prefs patch', async () => {
+    installZen()
+    const { viewPrefsFromVault } = await loadStore()
+    const patch = viewPrefsFromVault({
+      view: {
+        noteSortOrder: 'name-asc',
+        groupByKind: false,
+        tasksViewMode: 'kanban',
+        kanbanGroupBy: 'priority',
+        autoReveal: true,
+        unifiedSidebar: true
+      }
+    } as unknown as ViewArg)
+    expect(patch.noteSortOrder).toBe('name-asc')
+    expect(patch.groupByKind).toBe(false)
+    expect(patch.tasksViewMode).toBe('kanban')
+    expect(patch.kanbanGroupBy).toBe('priority')
+    expect(patch.autoReveal).toBe(true)
+    expect(patch.unifiedSidebar).toBe(true)
+  })
+
+  it('drops invalid enum values (they stay out of the patch → keep the global)', async () => {
+    installZen()
+    const { viewPrefsFromVault } = await loadStore()
+    const patch = viewPrefsFromVault({
+      view: { noteSortOrder: 'totally-invalid', tasksViewMode: 'nope' }
+    } as unknown as ViewArg)
+    expect('noteSortOrder' in patch).toBe(false)
+    expect('tasksViewMode' in patch).toBe(false)
+  })
+
+  it('returns an empty patch when there is no view block', async () => {
+    installZen()
+    const { viewPrefsFromVault } = await loadStore()
+    expect(viewPrefsFromVault({} as unknown as ViewArg)).toEqual({})
+    expect(viewPrefsFromVault(null)).toEqual({})
+  })
+
+  it('overlays and normalizes kanbanColumnOrder (#389)', async () => {
+    installZen()
+    const { viewPrefsFromVault } = await loadStore()
+    const patch = viewPrefsFromVault({
+      view: {
+        kanbanColumnOrder: {
+          'field:status': ['review', 'backlog', 'review', 42, 'done'],
+          'not-a-groupby': ['x'],
+          priority: []
+        }
+      }
+    } as unknown as ViewArg)
+    // Dedupes, drops non-strings, drops unknown group-bys, drops empty arrays.
+    expect(patch.kanbanColumnOrder).toEqual({ 'field:status': ['review', 'backlog', 'done'] })
+  })
+
+  it('keeps a renamed No-value bucket title through normalization (#389)', async () => {
+    installZen()
+    const { viewPrefsFromVault } = await loadStore()
+    // The "No <field>" bucket's title key ends in the __none__ sentinel; its
+    // underscore prefix must not be rejected, or the rename would silently vanish.
+    const key = `field:status:${NO_VALUE_COLUMN_ID}`
+    const patch = viewPrefsFromVault({
+      view: { kanbanColumnTitles: { [key]: 'Unassigned', 'field:status:review': 'In review' } }
+    } as unknown as ViewArg)
+    expect(patch.kanbanColumnTitles).toEqual({ [key]: 'Unassigned', 'field:status:review': 'In review' })
+  })
+})
+
+describe('setKanbanColumnOrder (#389 — manual Kanban column order)', () => {
+  it('stores a trimmed, deduped order per board and clears it on empty', async () => {
+    installZen()
+    const { useStore } = await loadStore()
+    useStore
+      .getState()
+      .setKanbanColumnOrder('field:status', ['review', 'backlog', 'review', ' done '])
+    expect(useStore.getState().kanbanColumnOrder['field:status']).toEqual([
+      'review',
+      'backlog',
+      'done'
+    ])
+    useStore.getState().setKanbanColumnOrder('field:status', [])
+    expect(useStore.getState().kanbanColumnOrder['field:status']).toBeUndefined()
+  })
+})
+
+describe('viewSettingsScope (#292 — global vs per-vault)', () => {
+  it('overlays the vault view when switching to per-vault, not when switching to global', async () => {
+    installZen()
+    const { useStore } = await loadStore()
+    // A vault override that differs from the live (global) prefs.
+    useStore.setState({
+      vaultSettings: {
+        ...useStore.getState().vaultSettings,
+        view: { groupByKind: false, noteSortOrder: 'name-asc' }
+      },
+      groupByKind: true,
+      noteSortOrder: 'none',
+      viewSettingsScope: 'global'
+    })
+    // Global scope leaves the live (global) prefs alone.
+    useStore.getState().setViewSettingsScope('global')
+    expect(useStore.getState().groupByKind).toBe(true)
+    expect(useStore.getState().noteSortOrder).toBe('none')
+    // Per-vault scope overlays the vault's saved view immediately (no reopen).
+    useStore.getState().setViewSettingsScope('vault')
+    expect(useStore.getState().groupByKind).toBe(false)
+    expect(useStore.getState().noteSortOrder).toBe('name-asc')
+  })
+})
+
+describe('pdfExportUseTheme — theme in PDF export', () => {
+  it('defaults off and round-trips through persistence', async () => {
+    installZen()
+    const { useStore } = await loadStore()
+    expect(useStore.getState().pdfExportUseTheme).toBe(false)
+
+    useStore.getState().setPdfExportUseTheme(true)
+    expect(useStore.getState().pdfExportUseTheme).toBe(true)
+    // collectPrefs persisted it to localStorage.
+    const saved = JSON.parse(localStorage.getItem('zen:prefs:v2') ?? '{}')
+    expect(saved.pdfExportUseTheme).toBe(true)
+
+    // A fresh module instance reads it back via loadPrefs → normalizePrefs.
+    vi.resetModules()
+    const reloaded = await import('./store')
+    expect(reloaded.useStore.getState().pdfExportUseTheme).toBe(true)
+  })
+
+  it('normalizes missing and non-boolean stored values to false', async () => {
+    installZen()
+    await loadStore() // fresh module + cleared storage
+
+    // Non-boolean → default.
+    localStorage.setItem('zen:prefs:v2', JSON.stringify({ pdfExportUseTheme: 'yes' }))
+    vi.resetModules()
+    const bad = await import('./store')
+    expect(bad.useStore.getState().pdfExportUseTheme).toBe(false)
+
+    // Missing → default.
+    localStorage.setItem('zen:prefs:v2', JSON.stringify({ themeId: 'dark-hard' }))
+    vi.resetModules()
+    const missing = await import('./store')
+    expect(missing.useStore.getState().pdfExportUseTheme).toBe(false)
+  })
+})
+
+describe('date-nav expand state (#301)', () => {
+  it('expand/collapse/toggle add and remove keys', async () => {
+    installZen()
+    const { useStore } = await loadStore()
+    const s = () => useStore.getState()
+
+    expect(s().dateNavExpanded).toEqual([])
+
+    s().expandDateNav('d:2026')
+    expect(s().dateNavExpanded).toContain('d:2026')
+
+    // idempotent — expanding an already-open group adds no duplicate
+    s().expandDateNav('d:2026')
+    expect(s().dateNavExpanded.filter((k) => k === 'd:2026')).toHaveLength(1)
+
+    s().expandDateNav('d:2026:7')
+    expect(s().dateNavExpanded).toEqual(['d:2026', 'd:2026:7'])
+
+    s().collapseDateNav('d:2026')
+    expect(s().dateNavExpanded).toEqual(['d:2026:7'])
+
+    // collapsing an absent key is a no-op
+    s().collapseDateNav('nope')
+    expect(s().dateNavExpanded).toEqual(['d:2026:7'])
+
+    s().toggleDateNav('w:2026')
+    expect(s().dateNavExpanded).toContain('w:2026')
+    s().toggleDateNav('w:2026')
+    expect(s().dateNavExpanded).not.toContain('w:2026')
+  })
+})
+
+describe('deleteDatabaseRows (#391 — purge record-page schema mappings)', () => {
+  const CSV = 'db.base/data.csv'
+  function makeDbDoc(): DatabaseDoc {
+    return {
+      version: 1,
+      idFieldId: 'f_id',
+      fields: [],
+      views: [],
+      activeViewId: 'v1',
+      path: CSV,
+      title: 'db',
+      rows: [
+        { id: 'r1', cells: { f_id: 'r1' } },
+        { id: 'r2', cells: { f_id: 'r2' } }
+      ],
+      pages: { r1: 'db.base/pages/r1.md' },
+      pageHasContent: { r1: true }
+    } as unknown as DatabaseDoc
+  }
+
+  it('purges the deleted row page mapping and trashes the note on confirm', async () => {
+    const moveToTrash = vi.fn().mockResolvedValue({})
+    installZen({
+      moveToTrash,
+      writeDatabaseSchema: vi.fn().mockResolvedValue(undefined),
+      writeDatabaseRows: vi.fn().mockResolvedValue(undefined)
+    })
+    const { useStore } = await loadStore()
+    const { getConfirmRequest, settleConfirmRequest } = await import('./lib/confirm-requests')
+    useStore.setState({ databases: { [CSV]: makeDbDoc() } })
+
+    const p = useStore.getState().deleteDatabaseRows(CSV, ['r1'])
+    const req = getConfirmRequest()
+    expect(req).toBeTruthy() // prompted because r1 has a linked page
+    settleConfirmRequest(req!, true) // "Delete row + note"
+    await p
+
+    const doc = useStore.getState().databases[CSV]!
+    expect(doc.rows.map((r) => r.id)).toEqual(['r2'])
+    expect(doc.pages).toEqual({})
+    expect(doc.pageHasContent).toEqual({})
+    expect(moveToTrash).toHaveBeenCalledWith('db.base/pages/r1.md')
+  })
+
+  it('keeps the note on cancel but still purges the stale mapping', async () => {
+    const moveToTrash = vi.fn().mockResolvedValue({})
+    installZen({
+      moveToTrash,
+      writeDatabaseSchema: vi.fn().mockResolvedValue(undefined),
+      writeDatabaseRows: vi.fn().mockResolvedValue(undefined)
+    })
+    const { useStore } = await loadStore()
+    const { getConfirmRequest, settleConfirmRequest } = await import('./lib/confirm-requests')
+    useStore.setState({ databases: { [CSV]: makeDbDoc() } })
+
+    const p = useStore.getState().deleteDatabaseRows(CSV, ['r1'])
+    settleConfirmRequest(getConfirmRequest()!, false) // "Keep note"
+    await p
+
+    const doc = useStore.getState().databases[CSV]!
+    expect(doc.rows.map((r) => r.id)).toEqual(['r2'])
+    expect(doc.pages).toEqual({}) // stale mapping purged even when the note is kept
+    expect(moveToTrash).not.toHaveBeenCalled()
+  })
+
+  it('deletes a page-less row without prompting', async () => {
+    installZen({
+      writeDatabaseRows: vi.fn().mockResolvedValue(undefined),
+      writeDatabaseSchema: vi.fn().mockResolvedValue(undefined)
+    })
+    const { useStore } = await loadStore()
+    const { getConfirmRequest } = await import('./lib/confirm-requests')
+    useStore.setState({ databases: { [CSV]: makeDbDoc() } })
+
+    await useStore.getState().deleteDatabaseRows(CSV, ['r2']) // r2 has no linked page
+    expect(getConfirmRequest()).toBeNull() // no prompt
+    const doc = useStore.getState().databases[CSV]!
+    expect(doc.rows.map((r) => r.id)).toEqual(['r1'])
+    expect(doc.pages).toEqual({ r1: 'db.base/pages/r1.md' })
   })
 })

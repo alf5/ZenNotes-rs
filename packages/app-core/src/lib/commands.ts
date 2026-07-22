@@ -14,10 +14,11 @@ import { focusPaneInDirection } from './pane-nav'
 import { findLeaf } from './pane-layout'
 import { requestPaneMode } from './pane-mode'
 import { resolveQuickNoteTitle } from './quick-note-title'
+import { forwardTaskWithPicker, taskAtEditorCursor } from './forward-task'
 import { getKeymapDisplay, type KeymapId } from './keymaps'
 import { dispatchKeyboardContextMenu, findTabContextMenuTarget } from './keyboard-context-menu'
 import { resolveSystemFolderLabels } from './system-folder-labels'
-import { normalizeVaultSettings } from './vault-layout'
+import { isCalendarToggleAvailable, noteFolderSubpath } from './vault-layout'
 import { DEMO_TOUR_START_PATH } from '@shared/demo-tour'
 
 const APP_WEBSITE_URL = 'https://zennotes.org'
@@ -103,6 +104,27 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       run: () => getState().createAndOpen('inbox', '', { focusTitle: true })
     },
     {
+      id: 'database.new',
+      title: 'New Database',
+      category: 'Note',
+      keywords: 'database table csv records spreadsheet board kanban base',
+      run: () => void getState().newDatabase()
+    },
+    {
+      id: 'task.new',
+      title: 'New Task',
+      category: 'Note',
+      keywords: 'task todo checkbox tasknotes taskforge new add create file due priority',
+      run: () => void getState().newTaskFile()
+    },
+    {
+      id: 'task.new.folder',
+      title: 'New Task in Folder…',
+      category: 'Note',
+      keywords: 'task todo new create folder project location directory organize where place',
+      run: () => void getState().newTaskFileInChosenFolder()
+    },
+    {
       id: 'note.daily.today',
       title: "Open Today's Daily Note",
       category: 'Note',
@@ -112,6 +134,16 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       run: () => getState().openTodayDailyNote()
     },
     {
+      id: 'note.daily.rollover',
+      title: 'Roll Over Unfinished Tasks to Today',
+      category: 'Note',
+      keywords: 'daily tasks rollover roll over migrate unfinished carry forward today',
+      when: () => getState().vaultSettings.dailyNotes.enabled,
+      run: () => {
+        void getState().rolloverUnfinishedTasksIntoToday({ force: true, open: true })
+      }
+    },
+    {
       id: 'note.weekly.thisWeek',
       title: "Open This Week's Note",
       category: 'Note',
@@ -119,6 +151,15 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       shortcut: leaderShortcut('vim.leaderWeeklyNote'),
       when: () => getState().vaultSettings.weeklyNotes.enabled,
       run: () => getState().openThisWeekWeeklyNote()
+    },
+    {
+      id: 'note.monthly.thisMonth',
+      title: "Open This Month's Note",
+      category: 'Note',
+      keywords: 'monthly month review reflection date log',
+      shortcut: leaderShortcut('vim.leaderMonthlyNote'),
+      when: () => getState().vaultSettings.monthlyNotes.enabled,
+      run: () => getState().openThisMonthMonthlyNote()
     },
     {
       id: 'template.create',
@@ -138,6 +179,55 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       run: () => getState().openTemplatePaletteForInsert()
     },
     {
+      id: 'drawing.new',
+      title: 'New Drawing',
+      category: 'Note',
+      keywords: 'excalidraw drawing diagram sketch create new canvas',
+      run: () => void getState().newDrawing()
+    },
+    {
+      id: 'embed.drawing.existing',
+      title: 'Embed Existing Drawing…',
+      category: 'Note',
+      keywords: 'excalidraw drawing diagram sketch insert embed image picture canvas',
+      when: () => !!getState().activeNote,
+      run: () => getState().setEmbedDrawingPaletteOpen(true)
+    },
+    {
+      id: 'embed.drawing.new',
+      title: 'Embed New Drawing',
+      category: 'Note',
+      keywords: 'excalidraw drawing diagram sketch create new insert embed canvas',
+      when: () => !!getState().activeNote,
+      run: () => void getState().embedNewDrawing()
+    },
+    {
+      id: 'template.removeBuiltins',
+      title: 'Remove Built-in Templates',
+      category: 'Note',
+      keywords: 'template built-in builtin remove hide delete clear shipped default',
+      when: () => !getState().hideBuiltinTemplates,
+      run: async () => {
+        const ok = await confirmApp({
+          title: 'Remove all built-in templates?',
+          description:
+            'The shipped templates will be hidden from the picker and palette. Your custom templates are unaffected, and you can restore the built-ins anytime.',
+          confirmLabel: 'Remove',
+          danger: true
+        })
+        if (!ok) return
+        getState().setHideBuiltinTemplates(true)
+      }
+    },
+    {
+      id: 'template.restoreBuiltins',
+      title: 'Restore Built-in Templates',
+      category: 'Note',
+      keywords: 'template built-in builtin restore bring back show shipped default',
+      when: () => getState().hideBuiltinTemplates,
+      run: () => getState().setHideBuiltinTemplates(false)
+    },
+    {
       id: 'template.saveCurrent',
       title: 'Save Current Note as Template…',
       category: 'Note',
@@ -151,14 +241,28 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       category: 'Note',
       keywords: 'create add write',
       when: () => {
-        const v = getState().view
-        return v.kind === 'folder' && v.folder !== 'trash' && !isTrashViewActive(getState())
+        const s = getState()
+        if (isTrashViewActive(s)) return false
+        if (s.activeNote && s.activeNote.folder !== 'trash') return true
+        return s.view.kind === 'folder' && s.view.folder !== 'trash'
       },
       run: () => {
-        if (isTrashViewActive(getState())) return
-        const v = getState().view
-        if (v.kind !== 'folder') return
-        return getState().createAndOpen(v.folder, v.subpath, { focusTitle: true })
+        const s = getState()
+        if (isTrashViewActive(s)) return
+        // "Current folder" is the folder of the active note (the one you're
+        // editing), not the sidebar's browse view. Those drift apart when notes
+        // from different folders are open, since switching tabs doesn't move the
+        // view, so reading the view created the note in the wrong directory.
+        // (#403) Fall back to the browsed folder only when no note is open.
+        const active = s.activeNote
+        if (active && active.folder !== 'trash') {
+          return s.createAndOpen(active.folder, noteFolderSubpath(active, s.vaultSettings), {
+            focusTitle: true
+          })
+        }
+        const v = s.view
+        if (v.kind !== 'folder' || v.folder === 'trash') return
+        return s.createAndOpen(v.folder, v.subpath, { focusTitle: true })
       }
     },
     {
@@ -238,6 +342,16 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
         if (!active) return
         const title = active.title || active.path.split('/').pop()?.replace(/\.md$/i, '') || ''
         window.zen.clipboardWriteText(`[[${title}]]`)
+      }
+    },
+    {
+      id: 'note.copy-markdown',
+      title: 'Copy Note as Markdown',
+      category: 'Note',
+      keywords: 'copy clipboard markdown source document whole content text yank',
+      when: () => !!getState().activeNote,
+      run: async () => {
+        await getState().copyActiveNoteAsMarkdown()
       }
     },
     {
@@ -395,9 +509,22 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       id: 'tab.close',
       title: 'Close Tab',
       category: 'Tabs',
-      shortcut: shortcut('global.closeActiveTab'),
+      // In Vim mode the Mod+W binding resolves to Ctrl+W on Linux/Windows, which
+      // is the pane-command prefix — not close-tab — so showing it is misleading
+      // (#242). Vim closes the tab with `:q` (→ closeActiveNote), matching how
+      // save shows `:w`. Outside Vim, the real Mod+W binding is correct.
+      shortcut: getState().vimMode ? ':q' : shortcut('global.closeActiveTab'),
       when: () => !!getState().selectedPath,
       run: () => getState().closeActiveNote()
+    },
+    {
+      id: 'tab.reopen',
+      title: 'Reopen Closed Tab',
+      category: 'Tabs',
+      keywords: 'restore last undo closed reopen',
+      shortcut: shortcut('global.reopenClosedTab'),
+      when: () => getState().closedTabStack.length > 0,
+      run: () => getState().reopenLastClosedTab()
     },
     {
       id: 'tab.pin',
@@ -487,10 +614,22 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       id: 'view.comments-panel',
       title: 'Toggle Comments Panel',
       category: 'View',
+      shortcut: shortcut('global.toggleCommentsPanel'),
       keywords: 'comments annotations discussion margin review',
       when: () => !!getState().activeNote,
       run: () => {
         window.dispatchEvent(new Event('zen:toggle-comments'))
+      }
+    },
+    {
+      id: 'editor.add-comment',
+      title: 'Add Comment to Selection',
+      category: 'Editor',
+      shortcut: shortcut('global.addComment'),
+      keywords: 'comment annotate selection note review',
+      when: () => !!getState().activeNote,
+      run: () => {
+        window.dispatchEvent(new Event('zen:add-comment'))
       }
     },
     {
@@ -499,12 +638,21 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       category: 'View',
       shortcut: getState().vimMode ? leaderShortcut('vim.leaderCalendar') : undefined,
       keywords: 'calendar daily weekly date navigate month week',
-      when: () => {
-        const s = normalizeVaultSettings(getState().vaultSettings)
-        return s.dailyNotes.enabled || s.weeklyNotes.enabled
-      },
+      // The calendar attaches to a note in the pane, so it's unavailable in the
+      // note-less Tasks/Tags views and the Quick Notes scratchpad. (#413)
+      when: () => isCalendarToggleAvailable(getState().vaultSettings, getState().activeNote),
       run: () => {
         window.dispatchEvent(new Event('zen:toggle-calendar'))
+      }
+    },
+    {
+      id: 'view.close-right-panel',
+      title: 'Close Right Panel',
+      category: 'View',
+      keywords: 'close hide dismiss right panel pane connections comments outline calendar',
+      when: () => !!getState().activeNote,
+      run: () => {
+        window.dispatchEvent(new Event('zen:close-right-panel'))
       }
     },
     {
@@ -643,6 +791,26 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       keywords: 'expand unfold all every reset',
       when: () => !!getState().editorViewRef && !!getState().activeNote,
       run: () => runFoldCommand('unfoldAll')
+    },
+    {
+      id: 'task.forward',
+      title: 'Forward Task to Note…',
+      category: 'Editor',
+      keywords: 'forward task move migrate rollover bullet journal due',
+      when: () => {
+        const view = getState().editorViewRef
+        return !!view && !!getState().activeNote && !!taskAtEditorCursor(view)
+      },
+      run: async () => {
+        const view = getState().editorViewRef
+        if (!view) return
+        const task = taskAtEditorCursor(view)
+        if (!task) {
+          window.alert('Put the cursor on a task line to forward it.')
+          return
+        }
+        await forwardTaskWithPicker(task)
+      }
     },
     {
       id: 'nav.back',
@@ -820,10 +988,10 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
   cmds.push(
     {
       id: 'view.tasks',
-      title: 'Open Tasks',
+      title: `Open ${labels().tasks}`,
       category: 'View',
       shortcut: ':tasks',
-      keywords: 'todo checklist due waiting done vault',
+      keywords: 'tasks todo checklist due waiting done vault',
       when: () => !isTasksViewActive(getState()),
       run: () => getState().openTasksView()
     },
@@ -954,7 +1122,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       })(),
       category: 'View',
       shortcut: shortcut('global.toggleZenMode'),
-      keywords: 'zen distraction-free focus',
+      keywords: 'zn distraction-free focus',
       run: () => {
         const st = getState()
         st.setFocusMode(!st.zenMode)
@@ -996,6 +1164,34 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       title: getState().vimMode ? 'Disable Vim Mode' : 'Enable Vim Mode',
       category: 'Editor',
       run: () => getState().setVimMode(!getState().vimMode)
+    },
+    {
+      id: 'editor.completed-task.none',
+      title: 'Completed Tasks: No Style',
+      category: 'Editor',
+      when: () => getState().completedTaskStyle !== 'none',
+      run: () => getState().setCompletedTaskStyle('none')
+    },
+    {
+      id: 'editor.completed-task.strikethrough',
+      title: 'Completed Tasks: Strikethrough',
+      category: 'Editor',
+      when: () => getState().completedTaskStyle !== 'strikethrough',
+      run: () => getState().setCompletedTaskStyle('strikethrough')
+    },
+    {
+      id: 'editor.completed-task.gray',
+      title: 'Completed Tasks: Gray',
+      category: 'Editor',
+      when: () => getState().completedTaskStyle !== 'gray',
+      run: () => getState().setCompletedTaskStyle('gray')
+    },
+    {
+      id: 'editor.completed-task.gray-strikethrough',
+      title: 'Completed Tasks: Strikethrough + Gray',
+      category: 'Editor',
+      when: () => getState().completedTaskStyle !== 'gray-strikethrough',
+      run: () => getState().setCompletedTaskStyle('gray-strikethrough')
     },
     {
       id: 'editor.which-key.toggle',
@@ -1124,6 +1320,33 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     run: () => {
       /* handled by CommandPalette */
     }
+  })
+  cmds.push({
+    id: 'ui.newTheme',
+    title: 'New Custom Theme…',
+    category: 'UI',
+    keywords: 'custom theme create css appearance author new',
+    when: () => window.zen.getAppInfo().runtime === 'desktop',
+    run: async () => {
+      const name = await promptApp({
+        title: 'New theme',
+        description: 'Creates a folder with a manifest.json and theme.css you can edit.',
+        placeholder: 'My Theme',
+        initialValue: 'My Theme',
+        okLabel: 'Create'
+      })
+      if (name === null) return
+      const slug = await window.zen.createCustomTheme?.({ name: name.trim() || 'My Theme' })
+      if (slug) void window.zen.revealCustomThemesDir?.(slug)
+    }
+  })
+  cmds.push({
+    id: 'ui.overrides',
+    title: 'Overrides…',
+    category: 'UI',
+    keywords: 'css override tweak override theme appearance customize color',
+    when: () => window.zen.getAppInfo().runtime === 'desktop',
+    run: () => getState().setSettingsOpen(true)
   })
 
   /* ---------------- Tags ---------------- */
@@ -1319,9 +1542,9 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'cli.install',
-      title: 'Install Command-Line Tool (zen)',
+      title: 'Install Command-Line Tool (zn)',
       category: 'CLI',
-      keywords: 'cli zen terminal shell command line install symlink path bin',
+      keywords: 'cli zn terminal shell command line install symlink path bin',
       when: () =>
         window.zen.getAppInfo().runtime === 'desktop' &&
         window.zen.getCapabilities().supportsCliInstall,
@@ -1348,8 +1571,8 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
         }
         if (status.installedAt && status.installedByThisApp) {
           await confirmApp({
-            title: 'zen is already installed',
-            description: `Installed at ${status.installedAt}. Run \`zen --help\` from any terminal.`,
+            title: 'zn is already installed',
+            description: `Installed at ${status.installedAt}. Run \`zn --help\` from any terminal.`,
             confirmLabel: 'OK',
             cancelLabel: 'Close'
           })
@@ -1357,7 +1580,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
         }
         if (status.installedAt && !status.installedByThisApp) {
           await confirmApp({
-            title: 'A different `zen` already exists',
+            title: 'A different `zn` already exists',
             description: `${status.installedAt} is not managed by ZenNotes. Remove it manually if you want ZenNotes to take over.`,
             confirmLabel: 'OK',
             cancelLabel: 'Close'
@@ -1372,11 +1595,11 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
         }
         if (status.pathHint) {
           lines.push(
-            `Heads up: ${status.defaultTarget.replace(/\/[^/]+$/, '')} is not on your PATH yet. Settings → CLI shows the one-line shell snippet you'll need to add after install.`
+            `Heads up: ${status.defaultTarget.replace(/\/[^/]+$/, '')} is not on your PATH yet. Settings → CLI shows the one-line shell override you'll need to add after install.`
           )
         }
         const ok = await confirmApp({
-          title: `Install zen to ${status.defaultTarget}?`,
+          title: `Install zn to ${status.defaultTarget}?`,
           description: lines.join('\n\n') || undefined,
           confirmLabel: 'Install'
         })
@@ -1387,8 +1610,8 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
             ? `\n\nAdd ${next.defaultTarget.replace(/\/[^/]+$/, '')} to your PATH so the shell can find it:\n${next.pathHint}`
             : ''
           await confirmApp({
-            title: 'zen installed',
-            description: `Symlink created at ${next.installedAt ?? next.defaultTarget}. Open a fresh terminal and run \`zen --help\` to start.${followUp}`,
+            title: 'zn installed',
+            description: `Symlink created at ${next.installedAt ?? next.defaultTarget}. Open a fresh terminal and run \`zn --help\` to start.${followUp}`,
             confirmLabel: 'OK',
             cancelLabel: 'Close'
           })
@@ -1407,9 +1630,9 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'cli.uninstall',
-      title: 'Uninstall Command-Line Tool (zen)',
+      title: 'Uninstall Command-Line Tool (zn)',
       category: 'CLI',
-      keywords: 'cli zen terminal shell command line uninstall remove symlink',
+      keywords: 'cli zn terminal shell command line uninstall remove symlink',
       when: () =>
         window.zen.getAppInfo().runtime === 'desktop' &&
         window.zen.getCapabilities().supportsCliInstall,
@@ -1417,7 +1640,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
         const status = await window.zen.cliGetStatus()
         if (!status.installedAt) {
           await confirmApp({
-            title: 'zen is not installed',
+            title: 'zn is not installed',
             description: 'There is nothing to uninstall.',
             confirmLabel: 'OK',
             cancelLabel: 'Close'
@@ -1434,7 +1657,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
           return
         }
         const ok = await confirmApp({
-          title: `Remove zen from ${status.installedAt}?`,
+          title: `Remove zn from ${status.installedAt}?`,
           description:
             'macOS may prompt for an admin password to remove the symlink. The CLI binary inside the app stays bundled — you can reinstall any time.',
           confirmLabel: 'Uninstall',
@@ -1460,7 +1683,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       id: 'cli.openSettings',
       title: 'Open CLI Settings',
       category: 'CLI',
-      keywords: 'cli zen terminal settings command line preferences',
+      keywords: 'cli zn terminal settings command line preferences',
       when: () =>
         window.zen.getAppInfo().runtime === 'desktop' &&
         window.zen.getCapabilities().supportsCliInstall,

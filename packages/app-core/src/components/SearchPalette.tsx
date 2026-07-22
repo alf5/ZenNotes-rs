@@ -2,12 +2,14 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useStore } from '../store'
 import type { NoteMeta } from '@shared/ipc'
 import { isPaletteNextKey, isPalettePreviousKey } from '../lib/palette-nav'
+import { isImeComposing } from '../lib/ime'
 import {
   buildNoteSearchIndex,
   parseNoteSearchQuery,
   searchNoteIndex
 } from '../lib/note-search'
 import { focusEditorNormalMode } from '../lib/editor-focus'
+import { Modal } from './ui/Modal'
 
 export function SearchPalette(): JSX.Element {
   const notes = useStore((s) => s.notes)
@@ -53,26 +55,23 @@ export function SearchPalette(): JSX.Element {
   }
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/45 pt-[15vh] backdrop-blur-sm"
-      onClick={close}
-    >
-      <div
-        className="w-[min(560px,90vw)] overflow-hidden rounded-xl bg-paper-100 shadow-float ring-1 ring-paper-300/70"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="border-b border-paper-300/70 px-4 py-3">
+    <Modal size="md" layer="palette" onClose={close} closeOnEsc={false}>
+      <div className="border-b border-paper-300/70 px-4 py-3">
           <input
             ref={inputRef}
             value={query}
             placeholder="Search notes…  ·  use #tag to filter"
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
+              // While composing (IME), let the input own Enter/Arrows. (#183)
+              if (isImeComposing(e)) return
               if (isPaletteNextKey(e)) {
                 e.preventDefault()
+                e.stopPropagation()
                 setActive((a) => Math.min(results.length - 1, a + 1))
               } else if (isPalettePreviousKey(e)) {
                 e.preventDefault()
+                e.stopPropagation()
                 setActive((a) => Math.max(0, a - 1))
               } else if (e.key === 'Enter') {
                 e.preventDefault()
@@ -91,12 +90,12 @@ export function SearchPalette(): JSX.Element {
               {tagTokens.map((t) => (
                 <span
                   key={t}
-                  className="rounded-full bg-accent/15 px-2 py-0.5 text-[11px] text-accent"
+                  className="rounded-full bg-accent/15 px-2 py-0.5 text-xs font-medium text-accent ring-1 ring-accent/30"
                 >
                   #{t}
                 </span>
               ))}
-              <span className="text-[11px] text-ink-500">
+              <span className="text-xs text-ink-500">
                 notes must carry {tagTokens.length === 1 ? 'this tag' : 'all of these tags'}
               </span>
             </div>
@@ -120,17 +119,18 @@ export function SearchPalette(): JSX.Element {
                 <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-900">
                   {n.title}
                 </span>
-                <span className="shrink-0 text-[11px] uppercase tracking-wide text-ink-400">
+                <span className="shrink-0 text-xs uppercase tracking-wide text-ink-400">
                   {n.folder}
                 </span>
               </button>
             ))
           )}
         </div>
-        <div className="flex items-center justify-end gap-4 border-t border-paper-300/70 bg-paper-100 px-4 py-2 text-[11px] text-ink-500">
+        <div className="flex items-center justify-end gap-4 border-t border-paper-300/70 bg-paper-100 px-4 py-2 text-xs text-ink-500">
           <span>
             <kbd className="rounded bg-paper-200 px-1">↑↓</kbd>{' '}
-            <kbd className="rounded bg-paper-200 px-1">Ctrl+N/P</kbd> move
+            <kbd className="rounded bg-paper-200 px-1">Ctrl+N/P</kbd>{' '}
+            <kbd className="rounded bg-paper-200 px-1">Ctrl+J/K</kbd> move
           </span>
           <span>
             <kbd className="rounded bg-paper-200 px-1">↵</kbd> open
@@ -139,7 +139,6 @@ export function SearchPalette(): JSX.Element {
             <kbd className="rounded bg-paper-200 px-1">esc</kbd> close
           </span>
         </div>
-      </div>
-    </div>
+    </Modal>
   )
 }

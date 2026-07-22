@@ -6,6 +6,7 @@ import type {
   ExternalFileContent,
   FolderEntry,
   ImportedAsset,
+  LinkMetadata,
   LocalVaultEntry,
   MoveExternalFileResult,
   ListNotesPageRequest,
@@ -36,11 +37,20 @@ import type {
 import type { CustomTemplateFile, WriteTemplateInput } from './templates'
 import type { VaultTask } from '@zennotes/shared-domain/tasks'
 import type {
+  DatabaseDoc,
+  DatabaseSidecar,
+  DatabaseSummary,
+  DbRow
+} from '@zennotes/shared-domain/databases'
+import type {
   McpClientId,
   McpClientStatus,
   McpInstructionsPayload,
   McpServerRuntime
 } from '@zennotes/shared-domain/mcp-clients'
+import type { AppConfigPortable } from '@zennotes/shared-domain/app-config'
+import type { CustomTheme } from '@zennotes/shared-domain/custom-themes'
+import type { Override } from '@zennotes/shared-domain/overrides'
 
 export interface ZenCapabilities {
   supportsUpdater: boolean
@@ -104,6 +114,14 @@ export interface ZenBridge {
   browseServerDirectories(path?: string): Promise<DirectoryBrowseResult>
   getVaultSettings(): Promise<VaultSettings>
   setVaultSettings(next: VaultSettings): Promise<VaultSettings>
+  /** Read the current vault's `.zennotes/workspace.json` (open tabs, layout,
+   *  cursor) as a raw JSON string, or null when absent. Syncs with the vault. (#292) */
+  readWorkspaceState(): Promise<string | null>
+  /** Write the current vault's `.zennotes/workspace.json` (raw JSON string). (#292) */
+  writeWorkspaceState(json: string): Promise<void>
+  /** True when the vault is in `inbox` mode but its root holds notes that only
+   *  `root` mode would surface (drives the "Switch to Vault root" banner). */
+  rootContentHiddenByInboxMode(): Promise<boolean>
 
   listNotes(): Promise<NoteMeta[]>
   listNotesPage?(request: ListNotesPageRequest): Promise<ListNotesPageResponse>
@@ -129,9 +147,23 @@ export interface ZenBridge {
   writeNoteComments(relPath: string, comments: NoteCommentInput[]): Promise<NoteComment[]>
   scanTasks(): Promise<VaultTask[]>
   scanTasksForPath(relPath: string): Promise<VaultTask[]>
+  /** Resolves to null when the `.csv` no longer exists (e.g. a stale tab). */
+  openDatabase(relPath: string): Promise<DatabaseDoc | null>
+  writeDatabaseRows(relPath: string, rows: DbRow[]): Promise<DatabaseDoc>
+  writeDatabaseSchema(relPath: string, sidecar: DatabaseSidecar, rows: DbRow[]): Promise<DatabaseDoc>
+  createDatabase(folder: NoteFolder, subpath: string, title?: string): Promise<DatabaseDoc>
+  /** Rename a database's `.base` folder; resolves to the new `data.csv` path. */
+  renameDatabase(csvPath: string, newTitle: string): Promise<string>
+  /** Create a record's "page" note (returns its vault-relative path). */
+  createRecordPage(csvPath: string, title: string, body: string): Promise<string>
+  listDatabases(): Promise<DatabaseSummary[]>
   writeNote(relPath: string, body: string): Promise<NoteMeta>
   appendToNote(relPath: string, body: string, position: 'start' | 'end'): Promise<NoteMeta>
   createNote(folder: NoteFolder, title?: string, subpath?: string): Promise<NoteMeta>
+  /** Create a new `.excalidraw` drawing seeded with an empty scene. */
+  createExcalidraw(folder: NoteFolder, subpath?: string, title?: string): Promise<NoteMeta>
+  /** Convert an Obsidian Excalidraw markdown drawing into a native `.excalidraw`. (#266) */
+  convertObsidianExcalidraw?(relPath: string): Promise<NoteMeta>
   renameNote(relPath: string, nextTitle: string): Promise<NoteMeta>
   deleteNote(relPath: string): Promise<void>
   moveToTrash(relPath: string): Promise<NoteMeta>
@@ -144,6 +176,21 @@ export interface ZenBridge {
   revealNote(relPath: string): Promise<void>
   /** Reveal the original target of a symlinked note in the OS file manager. */
   revealNoteTarget(relPath: string): Promise<void>
+  /** Reveal an arbitrary file path in the OS file manager (desktop only). */
+  revealFilePath(absPath: string): Promise<void>
+  /**
+   * Open a file that lives outside the vault with the OS default app (desktop
+   * only). Accepts a raw markdown-link href: a `file://` URL, a `~/…` home path,
+   * or an absolute path. Returns `{ ok: false, error }` on the web (no OS) or
+   * when the open fails, so callers can surface a message.
+   */
+  openExternalFile(href: string): Promise<{ ok: boolean; error?: string }>
+  /**
+   * Fetch open-graph metadata for a URL to render a bookmark card. Desktop
+   * fetches and parses the page in the main process; the web build returns a
+   * minimal record. Never throws — `ok: false` on failure.
+   */
+  fetchLinkMetadata(url: string): Promise<LinkMetadata>
   moveNote(relPath: string, targetFolder: NoteFolder, targetSubpath: string): Promise<NoteMeta>
   importFilesToNote(notePath: string, sourcePaths: string[]): Promise<ImportedAsset[]>
   importPastedImage(input: PastedImageInput): Promise<ImportedAsset>
@@ -152,6 +199,9 @@ export interface ZenBridge {
   duplicateAsset(relPath: string): Promise<AssetMeta>
   deleteAsset(relPath: string): Promise<DeletedAsset>
   restoreDeletedAsset(asset: DeletedAsset): Promise<AssetMeta>
+  listDeletedAssets(): Promise<DeletedAsset[]>
+  purgeDeletedAsset(undoToken: string): Promise<void>
+  emptyDeletedAssets(): Promise<void>
   createFolder(folder: NoteFolder, subpath: string): Promise<void>
   renameFolder(folder: NoteFolder, oldSubpath: string, newSubpath: string): Promise<string>
   deleteFolder(folder: NoteFolder, subpath: string): Promise<void>
@@ -161,6 +211,9 @@ export interface ZenBridge {
   revealFolderTarget(folder: NoteFolder, subpath: string): Promise<void>
   revealAssetsDir(): Promise<void>
   getPathForFile(file: File): string | null
+  /** Open a folder as a temporary session (drag a folder onto the app to read
+   *  it without turning it into a vault). Desktop-only. */
+  openFolderTemporary(absPath: string): Promise<void>
   resolveLocalAssetUrl(vaultRoot: string, notePath: string, href: string): string | null
   resolveVaultAssetUrl(vaultRoot: string, assetPath: string): string | null
 
@@ -174,7 +227,9 @@ export interface ZenBridge {
   windowToggleMaximize(): void
   windowClose(): void
   openNoteWindow(relPath: string): Promise<void>
-  openVaultWindow(): Promise<VaultInfo | null>
+  /** Open a vault in a new window. With a `root`, opens that known vault
+   *  directly; without one, prompts with the folder picker. */
+  openVaultWindow(root?: string): Promise<VaultInfo | null>
 
   /** Read the markdown file bound to the current standalone editor window. */
   readExternalFile(): Promise<ExternalFileContent>
@@ -211,6 +266,50 @@ export interface ZenBridge {
   raycastInstall(): Promise<RaycastExtensionStatus>
   clipboardWriteText(text: string): void
   clipboardReadText(): string
+
+  /**
+   * Portable preferences read synchronously from the on-disk config file at
+   * startup (desktop). Returns null on platforms without a config file (web),
+   * where the renderer falls back to localStorage. An empty object means the
+   * file doesn't exist yet — the renderer seeds it from current prefs.
+   */
+  getConfigSync(): AppConfigPortable | null
+  /** Persist the portable preferences subset to the config file (debounced by
+   *  the caller). No-op on web. */
+  setConfig(next: AppConfigPortable): Promise<void>
+  /** Absolute path of the config file, or null when unsupported (web). */
+  getConfigPath(): Promise<string | null>
+  /** Create the config file if needed and reveal it in the OS file manager. */
+  revealConfigFile(): Promise<void>
+  /** Subscribe to external edits of the config file (e.g. a synced dotfile or
+   *  a hand-edit). The callback receives the new portable config. */
+  onConfigChange(cb: (next: AppConfigPortable) => void): () => void
+  /** User themes loaded from `~/.config/zennotes/themes/<slug>/`. Empty on web. */
+  listCustomThemes(): Promise<CustomTheme[]>
+  /** Absolute path of the custom-themes directory, or null when unsupported. */
+  getCustomThemesDir(): Promise<string | null>
+  /** Reveal the themes directory in the file manager — or a specific theme's
+   *  `theme.css` when a slug is given (creating the dir if needed). */
+  revealCustomThemesDir(slug?: string): Promise<void>
+  /** Delete a custom theme's folder (`<slug>/`) from the themes directory. */
+  deleteCustomTheme(slug: string): Promise<void>
+  /** Scaffold a new theme folder from a starter palette. Resolves to the new
+   *  slug, or null on failure / when unsupported (web). */
+  createCustomTheme(input: { name?: string }): Promise<string | null>
+  /** Subscribe to changes in the themes directory (file added/edited/removed). */
+  onCustomThemesChange(cb: (next: CustomTheme[]) => void): () => void
+  /** CSS overrides from `~/.config/zennotes/overrides/*.css`. Empty on web. */
+  listOverrides(): Promise<Override[]>
+  /** Reveal the overrides directory — or a specific override file when a name is
+   *  given (creating the dir if needed). */
+  revealOverridesDir(name?: string): Promise<void>
+  /** Delete a override file (`<name>`) from the overrides directory. */
+  deleteOverride(name: string): Promise<void>
+  /** Subscribe to changes in the overrides directory. */
+  onOverridesChange(cb: (next: Override[]) => void): () => void
+  /** Open/close the renderer's developer tools (for inspecting elements while
+   *  authoring themes/overrides). No-op on web. */
+  toggleDevTools(): Promise<void>
 }
 
 let installedBridge: ZenBridge | null = null

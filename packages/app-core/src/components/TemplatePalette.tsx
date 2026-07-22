@@ -10,20 +10,23 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useStore } from '../store'
 import { rankItems } from '../lib/fuzzy-score'
 import { isPaletteNextKey, isPalettePreviousKey } from '../lib/palette-nav'
+import { isImeComposing } from '../lib/ime'
 import { focusEditorNormalMode } from '../lib/editor-focus'
 import { BUILTIN_TEMPLATES } from '@shared/builtin-templates'
 import { mergeTemplates } from '@shared/template-files'
 import type { NoteTemplate } from '@bridge-contract/templates'
+import { Modal } from './ui/Modal'
 
 export function TemplatePalette(): JSX.Element {
   const setOpen = useStore((s) => s.setTemplatePaletteOpen)
   const createFromTemplate = useStore((s) => s.createFromTemplate)
   const customTemplates = useStore((s) => s.customTemplates)
+  const hideBuiltinTemplates = useStore((s) => s.hideBuiltinTemplates)
   const mode = useStore((s) => s.templatePaletteMode)
 
   const templates = useMemo(
-    () => mergeTemplates(BUILTIN_TEMPLATES, customTemplates),
-    [customTemplates]
+    () => mergeTemplates(hideBuiltinTemplates ? [] : BUILTIN_TEMPLATES, customTemplates),
+    [customTemplates, hideBuiltinTemplates]
   )
 
   const [query, setQuery] = useState('')
@@ -71,26 +74,23 @@ export function TemplatePalette(): JSX.Element {
   }
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/45 pt-[15vh] backdrop-blur-sm"
-      onClick={close}
-    >
-      <div
-        className="w-[min(560px,90vw)] overflow-hidden rounded-xl bg-paper-100 shadow-float ring-1 ring-paper-300/70"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="border-b border-paper-300/70 px-4 py-3">
+    <Modal size="md" layer="palette" onClose={close} closeOnEsc={false}>
+      <div className="border-b border-paper-300/70 px-4 py-3">
           <input
             ref={inputRef}
             value={query}
             placeholder={mode === 'insert' ? 'Insert template into note…' : 'Create note from template…'}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
+              // While composing (IME), let the input own Enter/Arrows. (#183)
+              if (isImeComposing(e)) return
               if (isPaletteNextKey(e)) {
                 e.preventDefault()
+                e.stopPropagation()
                 setActive((a) => Math.min(results.length - 1, a + 1))
               } else if (isPalettePreviousKey(e)) {
                 e.preventDefault()
+                e.stopPropagation()
                 setActive((a) => Math.max(0, a - 1))
               } else if (e.key === 'Enter') {
                 e.preventDefault()
@@ -123,17 +123,17 @@ export function TemplatePalette(): JSX.Element {
                 <span className="flex min-w-0 flex-1 flex-col">
                   <span className="truncate text-sm font-medium text-ink-900">{template.name}</span>
                   {template.description && (
-                    <span className="truncate text-[11px] text-ink-400">{template.description}</span>
+                    <span className="truncate text-xs text-ink-400">{template.description}</span>
                   )}
                 </span>
-                <span className="shrink-0 text-[11px] uppercase tracking-wide text-ink-400">
+                <span className="shrink-0 text-xs uppercase tracking-wide text-ink-400">
                   {template.category}
                 </span>
               </button>
             ))
           )}
         </div>
-        <div className="flex items-center justify-end gap-4 border-t border-paper-300/70 bg-paper-100 px-4 py-2 text-[11px] text-ink-500">
+        <div className="flex items-center justify-end gap-4 border-t border-paper-300/70 bg-paper-100 px-4 py-2 text-xs text-ink-500">
           <span>
             <kbd className="rounded bg-paper-200 px-1">↑↓</kbd>{' '}
             <kbd className="rounded bg-paper-200 px-1">Ctrl+N/P</kbd> move
@@ -145,7 +145,6 @@ export function TemplatePalette(): JSX.Element {
             <kbd className="rounded bg-paper-200 px-1">esc</kbd> close
           </span>
         </div>
-      </div>
-    </div>
+    </Modal>
   )
 }

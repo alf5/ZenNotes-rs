@@ -95,3 +95,92 @@ describe('vault commands', () => {
     expect(commands.some((cmd) => cmd.id === 'app.vault.switch')).toBe(true)
   })
 })
+
+describe('built-in template commands (#112)', () => {
+  it('offers Remove when built-ins show, and Restore once they are hidden', async () => {
+    const { buildCommands, useStore } = await loadCommands()
+
+    useStore.setState({ hideBuiltinTemplates: false })
+    const shown = buildCommands()
+    expect(shown.find((c) => c.id === 'template.removeBuiltins')?.title).toBe(
+      'Remove Built-in Templates'
+    )
+    expect(shown.some((c) => c.id === 'template.restoreBuiltins')).toBe(false)
+
+    useStore.setState({ hideBuiltinTemplates: true })
+    const hidden = buildCommands()
+    expect(hidden.find((c) => c.id === 'template.restoreBuiltins')?.title).toBe(
+      'Restore Built-in Templates'
+    )
+    expect(hidden.some((c) => c.id === 'template.removeBuiltins')).toBe(false)
+  })
+
+  it('Restore brings the built-ins back (no confirmation)', async () => {
+    const { buildCommands, useStore } = await loadCommands()
+    useStore.setState({ hideBuiltinTemplates: true })
+    await buildCommands()
+      .find((c) => c.id === 'template.restoreBuiltins')
+      ?.run()
+    expect(useStore.getState().hideBuiltinTemplates).toBe(false)
+  })
+})
+
+describe('close-tab command shortcut', () => {
+  // #242: in Vim mode Ctrl+W is the pane prefix, so the Mod+W label was wrong.
+  it('shows :q in Vim mode and the Mod+W binding otherwise', async () => {
+    const { buildCommands, useStore } = await loadCommands()
+
+    useStore.setState({ vimMode: true, selectedPath: 'inbox/n.md' })
+    expect(buildCommands().find((c) => c.id === 'tab.close')?.shortcut).toBe(':q')
+
+    useStore.setState({ vimMode: false })
+    const shortcut = buildCommands().find((c) => c.id === 'tab.close')?.shortcut
+    expect(shortcut).not.toBe(':q')
+    expect(shortcut).toMatch(/W/)
+  })
+})
+
+describe('New Note in Current Folder (#403)', () => {
+  it('creates in the active note folder, not the sidebar browse view', async () => {
+    const { buildCommands, useStore } = await loadCommands()
+    const createAndOpen = vi.fn()
+    useStore.setState({
+      activeNote: { folder: 'inbox', path: 'inbox/ProjA/Alpha.md', title: 'Alpha', body: '' } as never,
+      // The sidebar is browsing a different folder; the pre-#403 bug used this.
+      view: { kind: 'folder', folder: 'archive', subpath: 'Old' },
+      createAndOpen
+    })
+    const cmd = buildCommands().find((c) => c.id === 'note.new.here')
+    expect(cmd?.when?.()).toBe(true)
+    cmd?.run()
+    expect(createAndOpen).toHaveBeenCalledWith('inbox', 'ProjA', { focusTitle: true })
+  })
+
+  it('falls back to the browsed folder when no note is open', async () => {
+    const { buildCommands, useStore } = await loadCommands()
+    const createAndOpen = vi.fn()
+    useStore.setState({
+      activeNote: null,
+      view: { kind: 'folder', folder: 'inbox', subpath: 'Projects' },
+      createAndOpen
+    })
+    const cmd = buildCommands().find((c) => c.id === 'note.new.here')
+    expect(cmd?.when?.()).toBe(true)
+    cmd?.run()
+    expect(createAndOpen).toHaveBeenCalledWith('inbox', 'Projects', { focusTitle: true })
+  })
+
+  it('does not target Trash even if the active note is in Trash', async () => {
+    const { buildCommands, useStore } = await loadCommands()
+    const createAndOpen = vi.fn()
+    useStore.setState({
+      activeNote: { folder: 'trash', path: 'trash/Gone.md', title: 'Gone', body: '' } as never,
+      view: { kind: 'folder', folder: 'inbox', subpath: '' },
+      createAndOpen
+    })
+    const cmd = buildCommands().find((c) => c.id === 'note.new.here')
+    cmd?.run()
+    // Falls through to the (non-trash) browse view, never creates in trash.
+    expect(createAndOpen).toHaveBeenCalledWith('inbox', '', { focusTitle: true })
+  })
+})

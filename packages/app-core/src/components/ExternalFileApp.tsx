@@ -14,11 +14,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Annotation, Compartment, EditorState, type Transaction } from '@codemirror/state'
 import { EditorView, drawSelection, highlightActiveLine, keymap } from '@codemirror/view'
 import { Vim, vim } from '@replit/codemirror-vim'
-import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
+import { history, historyKeymap, indentWithTab } from '@codemirror/commands'
+import { vimAwareDefaultKeymap, vimAwareMarkdownKeymap } from '../lib/cm-vim-default-keymap'
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
 import { resolveCodeLanguage } from '../lib/cm-code-languages'
 import { applyVimInsertEscape } from '../lib/vim-insert-escape'
 import { markdownListIndentPlugin } from '../lib/cm-markdown-list-indent'
+import { appMarkdownSnippetExtension } from '../lib/markdown-snippets-config'
 import { syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language'
 import { searchKeymap } from '@codemirror/search'
 import type { ExternalFileContent } from '@shared/ipc'
@@ -108,19 +110,26 @@ export function ExternalFileApp(): JSX.Element {
         // ref keeps the current text when the editor remounts on toggles.
         doc: bodyRef.current ?? '',
         extensions: [
+          appMarkdownSnippetExtension(),
           new Compartment().of(prefs.vimMode ? vim() : []),
           history(),
           drawSelection(),
           highlightActiveLine(),
           prefs.wordWrap ? EditorView.lineWrapping : [],
-          markdown({ base: markdownLanguage, codeLanguages: resolveCodeLanguage, addKeymap: true }),
+          markdown({ base: markdownLanguage, codeLanguages: resolveCodeLanguage, addKeymap: false }),
+          vimAwareMarkdownKeymap,
           markdownListIndentPlugin,
           headingFolding(),
           syntaxHighlighting(paperHighlight),
           syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
           prefs.livePreview ? livePreviewPlugin : [],
           lineNumberExtension(prefs.lineNumberMode),
-          keymap.of([indentWithTab, ...defaultKeymap, ...historyKeymap, ...searchKeymap]),
+          keymap.of([
+            indentWithTab,
+            ...vimAwareDefaultKeymap(prefs.vimMode),
+            ...historyKeymap,
+            ...searchKeymap
+          ]),
           EditorView.updateListener.of((upd) => {
             if (!upd.docChanged) return
             if (upd.transactions.some((tr: Transaction) => tr.annotation(programmatic))) return
@@ -241,7 +250,7 @@ export function ExternalFileApp(): JSX.Element {
               className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent/80"
             />
           )}
-          <span className="truncate text-[11px] text-ink-400">Not in a vault</span>
+          <span className="truncate text-xs text-ink-400">Not in a vault</span>
         </div>
         <div
           className="flex shrink-0 items-center gap-1"
@@ -252,12 +261,12 @@ export function ExternalFileApp(): JSX.Element {
             onClick={moveToVault}
             disabled={moving}
             title="Move this file into your vault"
-            className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-ink-600 hover:bg-paper-200 hover:text-ink-900 disabled:opacity-50"
+            className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-ink-600 hover:bg-paper-200 hover:text-ink-900 disabled:opacity-50"
           >
             <InboxIcon width={13} height={13} />
             {moving ? 'Moving…' : 'Move to Vault'}
           </button>
-          <div className="flex items-center gap-1 rounded-md bg-paper-200/70 p-0.5 text-[11px]">
+          <div className="flex items-center gap-1 rounded-md bg-paper-200/70 p-0.5 text-xs">
             {(['edit', 'preview'] as const).map((m) => (
               <button
                 key={m}
@@ -285,7 +294,7 @@ export function ExternalFileApp(): JSX.Element {
       </header>
 
       {moveError && (
-        <div className="shrink-0 border-b border-paper-300/70 bg-rose-500/10 px-4 py-1.5 text-[12px] text-rose-600">
+        <div className="shrink-0 border-b border-paper-300/70 bg-rose-500/10 px-4 py-1.5 text-xs text-rose-600">
           {moveError}
         </div>
       )}

@@ -57,7 +57,17 @@ fn normalize_periodic(value: Option<&Value>, default_dir: &str) -> PeriodicNotes
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-    PeriodicNotesSettings { enabled, directory, template_id }
+    // Carry every other key verbatim (titlePattern, locale, legacyPatterns,
+    // tasksDueOnNoteDate, …) — the renderer's normalizer owns their validation.
+    let mut extra = serde_json::Map::new();
+    if let Some(o) = obj {
+        for (key, value) in o {
+            if !matches!(key.as_str(), "enabled" | "directory" | "templateId") {
+                extra.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    PeriodicNotesSettings { enabled, directory, template_id, extra }
 }
 
 /// Port of `normalizeVaultSettings`.
@@ -70,13 +80,16 @@ pub fn normalize_vault_settings(value: Option<&Value>, fallback_primary: &str) -
                 enabled: false,
                 directory: DEFAULT_DAILY_NOTES_DIRECTORY.into(),
                 template_id: None,
+                extra: serde_json::Map::new(),
             },
             weekly_notes: PeriodicNotesSettings {
                 enabled: false,
                 directory: DEFAULT_WEEKLY_NOTES_DIRECTORY.into(),
                 template_id: None,
+                extra: serde_json::Map::new(),
             },
             folder_icons: BTreeMap::new(),
+            extra: serde_json::Map::new(),
         };
     };
 
@@ -100,11 +113,25 @@ pub fn normalize_vault_settings(value: Option<&Value>, fallback_primary: &str) -
         None => fallback_primary,
     };
 
+    // v2.15+ keys this backend doesn't interpret (monthlyNotes, folderColors,
+    // favorites, view, *Location, …) pass through verbatim so a get → set
+    // round-trip never drops them.
+    let mut extra = serde_json::Map::new();
+    for (key, value) in obj {
+        if !matches!(
+            key.as_str(),
+            "primaryNotesLocation" | "dailyNotes" | "weeklyNotes" | "folderIcons"
+        ) {
+            extra.insert(key.clone(), value.clone());
+        }
+    }
+
     VaultSettings {
         primary_notes_location: primary.to_string(),
         daily_notes: normalize_periodic(obj.get("dailyNotes"), DEFAULT_DAILY_NOTES_DIRECTORY),
         weekly_notes: normalize_periodic(obj.get("weeklyNotes"), DEFAULT_WEEKLY_NOTES_DIRECTORY),
         folder_icons,
+        extra,
     }
 }
 
@@ -251,6 +278,28 @@ mod tests {
         assert_eq!(next.get("inbox:Job").map(String::as_str), Some("briefcase"));
         assert_eq!(next.get("inbox:Job/Sub").map(String::as_str), Some("bolt"));
         assert_eq!(next.get("inbox:Other").map(String::as_str), Some("star"));
+    }
+
+    #[test]
+    fn v215_keys_survive_a_set_get_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = serde_json::json!({
+            "primaryNotesLocation": "root",
+            "dailyNotes": { "enabled": true, "directory": "Daily", "titlePattern": "yyyy-MM-dd" },
+            "weeklyNotes": { "enabled": false, "directory": "Weekly Notes" },
+            "monthlyNotes": { "enabled": false, "directory": "Monthly Notes" },
+            "folderIcons": {},
+            "folderColors": { "inbox:Projects": "teal" },
+            "favorites": ["inbox/Idea.md", "inbox:Projects"],
+            "view": { "noteSortOrder": "title" }
+        });
+        set_vault_settings(dir.path(), &input).unwrap();
+        let out = serde_json::to_value(get_vault_settings(dir.path())).unwrap();
+        assert_eq!(out["monthlyNotes"]["directory"], "Monthly Notes");
+        assert_eq!(out["folderColors"]["inbox:Projects"], "teal");
+        assert_eq!(out["favorites"][0], "inbox/Idea.md");
+        assert_eq!(out["view"]["noteSortOrder"], "title");
+        assert_eq!(out["dailyNotes"]["titlePattern"], "yyyy-MM-dd");
     }
 
     #[test]

@@ -17,7 +17,7 @@ export function filterTasks(tasks: VaultTask[], query: string): VaultTask[] {
 export interface FlattenedTaskRow {
   kind: 'header' | 'task'
   /** Group the row belongs to — drives the collapse state for 'task' rows. */
-  group: 'today' | 'upcoming' | 'waiting' | 'done'
+  group: 'today' | 'upcoming' | 'waiting' | 'forwarded' | 'done'
   /** Only set when kind === 'task'. */
   task?: VaultTask
   /** Only set when kind === 'header'. */
@@ -30,7 +30,13 @@ export interface FlattenedTaskRow {
  *  groups still show a header but no task rows. */
 export function flattenRows(
   groups: VaultTaskGroups,
-  collapsed: { today: boolean; upcoming: boolean; waiting: boolean; done: boolean }
+  collapsed: {
+    today: boolean
+    upcoming: boolean
+    waiting: boolean
+    forwarded: boolean
+    done: boolean
+  }
 ): FlattenedTaskRow[] {
   const rows: FlattenedTaskRow[] = []
   const push = (
@@ -51,6 +57,7 @@ export function flattenRows(
   push('today', groups.today, { overdueCount: groups.overdueCount })
   push('upcoming', groups.upcoming)
   push('waiting', groups.waiting)
+  push('forwarded', groups.forwarded)
   push('done', groups.done)
   return rows
 }
@@ -61,16 +68,46 @@ export interface TasksRender {
   filtered: VaultTask[]
 }
 
+/** Order tasks by their note's line order — grouped by note (path), then by
+ *  task index within the note. The note's markdown is the single source of
+ *  truth for task order, so reordering lines in a note (or from the Tasks list)
+ *  is reflected here directly. */
+function sortByFileOrder(tasks: VaultTask[]): VaultTask[] {
+  return tasks.slice().sort((a, b) => {
+    if (a.sourcePath !== b.sourcePath) return a.sourcePath < b.sourcePath ? -1 : 1
+    return a.taskIndex - b.taskIndex
+  })
+}
+
+/** Re-sort every group by file order (see `sortByFileOrder`). */
+export function applyFileOrder(groups: VaultTaskGroups): VaultTaskGroups {
+  return {
+    ...groups,
+    today: sortByFileOrder(groups.today),
+    upcoming: sortByFileOrder(groups.upcoming),
+    waiting: sortByFileOrder(groups.waiting),
+    forwarded: sortByFileOrder(groups.forwarded),
+    done: sortByFileOrder(groups.done)
+  }
+}
+
 /** One-stop computation used by TasksView — takes raw tasks + filter + today
- *  and returns everything the view needs. */
+ *  and returns everything the view needs. Within each group, tasks follow the
+ *  note's line order so editor / list reordering is reflected. */
 export function computeTasksRender(
   tasks: VaultTask[],
   filter: string,
   today: Date,
-  collapsed: { today: boolean; upcoming: boolean; waiting: boolean; done: boolean }
+  collapsed: {
+    today: boolean
+    upcoming: boolean
+    waiting: boolean
+    forwarded: boolean
+    done: boolean
+  }
 ): TasksRender {
   const filtered = filterTasks(tasks, filter)
-  const groups = groupTasks(filtered, today)
+  const groups = applyFileOrder(groupTasks(filtered, today))
   const rows = flattenRows(groups, collapsed)
   return { rows, groups, filtered }
 }

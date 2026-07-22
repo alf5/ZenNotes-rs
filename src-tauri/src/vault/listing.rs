@@ -43,8 +43,55 @@ fn resolve_dir_descent(
     }
 }
 
+/// Whether a folder contains at least one markdown note — bounded BFS (up to
+/// 4000 entries, skipping dotfiles and node_modules) so dropping a huge
+/// non-vault folder onto the app stays cheap (upstream index.ts:561).
+pub fn folder_has_markdown(root: &Path) -> bool {
+    let mut queue = vec![root.to_path_buf()];
+    let mut seen = 0usize;
+    while let Some(dir) = queue.pop() {
+        let Ok(rd) = fs::read_dir(&dir) else { continue };
+        for entry in rd.flatten() {
+            seen += 1;
+            if seen > 4000 {
+                return false;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') || name == "node_modules" {
+                continue;
+            }
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir() {
+                queue.push(entry.path());
+            } else if name.to_lowercase().ends_with(".md") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod folder_scan_tests {
+    use super::*;
+
+    #[test]
+    fn folder_has_markdown_finds_nested_and_skips_hidden() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!folder_has_markdown(dir.path()));
+        std::fs::create_dir_all(dir.path().join(".hidden")).unwrap();
+        std::fs::write(dir.path().join(".hidden/x.md"), "hi").unwrap();
+        assert!(!folder_has_markdown(dir.path()));
+        std::fs::create_dir_all(dir.path().join("sub/deeper")).unwrap();
+        std::fs::write(dir.path().join("sub/deeper/note.md"), "hi").unwrap();
+        assert!(folder_has_markdown(dir.path()));
+    }
+}
+
 fn is_markdown_note_entry(full: &Path, file_type: &FileType, name: &str) -> bool {
-    if !name.to_lowercase().ends_with(".md") {
+    let lower = name.to_lowercase();
+    // `.excalidraw` drawings are note-like vault files (v2.15).
+    if !lower.ends_with(".md") && !lower.ends_with(".excalidraw") {
         return false;
     }
     if file_type.is_file() {

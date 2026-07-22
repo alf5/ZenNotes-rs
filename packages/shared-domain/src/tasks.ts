@@ -39,13 +39,37 @@ export interface VaultTask {
   /** Display content (checkbox prefix + metadata tokens stripped). */
   content: string
   checked: boolean
+  /** True for a `[>]` task forwarded to another note (#316). Mutually
+   *  exclusive with `checked`; kept out of the today/upcoming/done buckets. */
+  forwarded: boolean
   /** ISO YYYY-MM-DD, validated via Date round-trip. */
   due?: string
+  /** True when `due` was *derived* from the containing daily note's date
+   *  rather than written on the line. Lets UIs tell an implicit due apart
+   *  from an explicit `due:` token. See `inferDailyTaskDueDates`. */
+  dueInferred?: boolean
   priority?: TaskPriority
   /** True if `@waiting` appears anywhere on the line. */
   waiting: boolean
+  /** All inline `@key:value` fields on the line (lower-cased), e.g.
+   *  `@status:review @sprint:24`. Any key can drive a Kanban group-by. Optional
+   *  so hand-built task fixtures stay terse; the parser always sets it. (#354) */
+  fields?: Record<string, string>
+  /** Convenience accessor for `fields.status`, falling back to the note's
+   *  `status:` frontmatter. The default Kanban custom field. (#354) */
+  status?: string
   /** Inline `#tags` found on the line. */
   tags: string[]
+  /** How this task is stored. `'file'` is a whole-note task (TaskNotes-style:
+   *  a `.md` file tagged `#task`, metadata in frontmatter); `'inline'` (the
+   *  default when absent) is a classic `- [ ]` checkbox line. File-tasks
+   *  round-trip through frontmatter, not the checkbox, so mutators branch on
+   *  this. */
+  kind?: 'inline' | 'file'
+  /** ISO YYYY-MM-DD start/scheduled date (frontmatter `scheduled`). File-tasks. */
+  scheduled?: string
+  /** ISO YYYY-MM-DD completion date (frontmatter `completedDate`). File-tasks. */
+  completedDate?: string
 }
 
 export interface VaultTaskGroups {
@@ -53,6 +77,7 @@ export interface VaultTaskGroups {
   upcoming: VaultTask[]
   waiting: VaultTask[]
   done: VaultTask[]
+  forwarded: VaultTask[]
   overdueCount: number
 }
 
@@ -84,7 +109,8 @@ function normalizePriority(raw: string | undefined): TaskPriority | undefined {
   if (!raw) return undefined
   const v = raw.toLowerCase().trim()
   if (v === 'high' || v === 'h') return 'high'
-  if (v === 'med' || v === 'medium' || v === 'm') return 'med'
+  // `normal` is the TaskNotes default priority; map it onto ZenNotes' `med`.
+  if (v === 'med' || v === 'medium' || v === 'normal' || v === 'm') return 'med'
   if (v === 'low' || v === 'l') return 'low'
   return undefined
 }
@@ -131,17 +157,27 @@ function parseNoteDefaults(body: string): { defaults: NoteDefaults; fmEndOffset:
 // Inline token extraction
 // ---------------------------------------------------------------------------
 
-// Word-boundary anchored so `due:` inside a URL-ish blob won't match.
-const INLINE_DUE_RE = /(?:^|\s)due:(\S+)/i
+// Word-boundary anchored so `due:` inside a URL-ish blob won't match. Optional
+// whitespace after the colon so a `due: 2026-01-01` written (or inserted by the
+// @-date completion) with a space parses the same as `due:2026-01-01`. (#343)
+const INLINE_DUE_RE = /(?:^|\s)due:\s*(\S+)/i
 const INLINE_PRIORITY_RE = /(?:^|\s)!(high|med|medium|low|h|m|l)\b/i
 const INLINE_WAITING_RE = /(?:^|\s)@waiting\b/i
+// Inline free-form task fields: `@<key>:<value>`, e.g. `@status:review` or
+// `@sprint:24`. The colon distinguishes them from `@waiting` and the
+// `@today`/`@tomorrow` date helpers (which have no colon). Any field can drive a
+// Kanban group-by; `status` is simply the default one. Global so a line can
+// carry several fields. (#354)
+const INLINE_FIELD_RE = /(?:^|\s)@([a-z][a-z0-9_-]*):([\p{L}\d][\p{L}\d/_-]*)/giu
 // Match #tag-like tokens but only when preceded by start-of-string/whitespace.
-const INLINE_TAG_RE = /(?:^|\s)#([a-z0-9][a-z0-9/_-]*)/gi
+// Letters in any script (Cyrillic/CJK/…) plus digits, `_`, `-`, `/` (#205).
+const INLINE_TAG_RE = /(?:^|\s)#([\p{L}\d][\p{L}\d/_-]*)/gu
 
 interface ExtractedTokens {
   due?: string
   priority?: TaskPriority
   waiting: boolean
+  fields: Record<string, string>
   tags: string[]
   /** Tail with matched tokens stripped, for clean display. */
   stripped: string
@@ -151,6 +187,7 @@ function extractTokens(tail: string): ExtractedTokens {
   let due: string | undefined
   let priority: TaskPriority | undefined
   let waiting = false
+  const fields: Record<string, string> = {}
   const tags: string[] = []
   let stripped = tail
 
@@ -172,6 +209,17 @@ function extractTokens(tail: string): ExtractedTokens {
     stripped = stripped.replace(INLINE_WAITING_RE, ' ')
   }
 
+  INLINE_FIELD_RE.lastIndex = 0
+  let fieldMatch: RegExpExecArray | null
+  while ((fieldMatch = INLINE_FIELD_RE.exec(stripped))) {
+    const key = fieldMatch[1].toLowerCase()
+    const value = fieldMatch[2].toLowerCase()
+    if (!(key in fields)) fields[key] = value
+  }
+  if (Object.keys(fields).length > 0) {
+    stripped = stripped.replace(INLINE_FIELD_RE, ' ')
+  }
+
   INLINE_TAG_RE.lastIndex = 0
   let tm: RegExpExecArray | null
   while ((tm = INLINE_TAG_RE.exec(tail))) {
@@ -183,6 +231,7 @@ function extractTokens(tail: string): ExtractedTokens {
     due,
     priority,
     waiting,
+    fields,
     tags,
     stripped: stripped.replace(/\s+/g, ' ').trim()
   }
@@ -236,6 +285,7 @@ export function parseTasksFromBody(body: string, ctx: ParseTasksContext): VaultT
     const checkedChar = taskMatch[2]
     const tail = taskMatch[3].replace(/^\]/, '') // drop the closing `]` of the checkbox
     const checked = checkedChar === 'x' || checkedChar === 'X'
+    const forwarded = checkedChar === '>'
 
     const tokens = extractTokens(tail)
 
@@ -249,9 +299,17 @@ export function parseTasksFromBody(body: string, ctx: ParseTasksContext): VaultT
       rawText: line,
       content: tokens.stripped || tail.trim(),
       checked,
+      forwarded,
       due: tokens.due ?? defaults.due,
       priority: tokens.priority ?? defaults.priority,
       waiting: tokens.waiting,
+      // Fold the note's frontmatter `status:` default into the fields map so the
+      // board can group by `fields.status` uniformly.
+      fields:
+        defaults.status && !tokens.fields.status
+          ? { ...tokens.fields, status: defaults.status }
+          : tokens.fields,
+      status: tokens.fields.status ?? defaults.status,
       tags: tokens.tags
     })
 
@@ -259,6 +317,111 @@ export function parseTasksFromBody(body: string, ctx: ParseTasksContext): VaultT
   }
 
   return tasks
+}
+
+// ---------------------------------------------------------------------------
+// File tasks (TaskNotes-style: one task per note, metadata in frontmatter)
+// ---------------------------------------------------------------------------
+
+/** The frontmatter tag that marks a whole note as a task (TaskNotes
+ *  convention, interoperable with TaskForge / Obsidian TaskNotes). */
+export const TASK_FILE_TAG = 'task'
+
+/** Frontmatter `status:` values treated as complete (checked). */
+const DONE_STATUSES = new Set(['done', 'complete', 'completed', 'x'])
+
+/** Parse a leading frontmatter block into flat fields, handling scalars, inline
+ *  arrays (`tags: [a, b]`) and block lists (`tags:` then `  - a`). Keys are
+ *  lower-cased; values are a string, or string[] for a list. Best-effort and
+ *  never throws — just enough YAML for task files, not a full parser. */
+function parseTaskFrontmatter(block: string): Record<string, string | string[]> {
+  const data: Record<string, string | string[]> = {}
+  let listKey: string | null = null
+  for (const rawLine of block.split('\n')) {
+    if (!rawLine.trim() || rawLine.trim().startsWith('#')) continue
+    const item = rawLine.match(/^\s*-\s+(.*)$/)
+    if (listKey && /^\s/.test(rawLine) && item) {
+      const arr = data[listKey]
+      if (Array.isArray(arr)) arr.push(unquote(item[1]))
+      continue
+    }
+    const kv = rawLine.match(/^([A-Za-z0-9_][\w-]*)\s*:\s*(.*)$/)
+    if (!kv) {
+      listKey = null
+      continue
+    }
+    const key = kv[1].toLowerCase()
+    const rest = kv[2].trim()
+    if (rest === '') {
+      // Bare key: a block list may follow on indented `- item` lines.
+      listKey = key
+      data[key] = []
+      continue
+    }
+    listKey = null
+    if (rest.startsWith('[') && rest.endsWith(']')) {
+      data[key] = rest
+        .slice(1, -1)
+        .split(',')
+        .map((s) => unquote(s))
+        .filter((s) => s.length > 0)
+    } else {
+      data[key] = unquote(rest)
+    }
+  }
+  return data
+}
+
+function asArray(v: string | string[] | undefined): string[] {
+  if (v == null) return []
+  return Array.isArray(v) ? v : [v]
+}
+
+function firstScalar(v: string | string[] | undefined): string | undefined {
+  if (v == null) return undefined
+  return Array.isArray(v) ? v[0] : v
+}
+
+/**
+ * Parse a whole-note "file task" from `body`, or return null when the note is
+ * not a task file (its frontmatter `tags` don't include `task`). All metadata
+ * comes from frontmatter; the note body is free-form notes about the task. This
+ * is emitted *in addition* to any inline `- [ ]` checkboxes in the same body
+ * (which act as subtasks), each keeping its own id.
+ */
+export function parseTaskFile(body: string, ctx: ParseTasksContext): VaultTask | null {
+  const normalized = body.replace(/\r\n/g, '\n')
+  const m = normalized.match(FRONTMATTER_RE)
+  if (!m) return null
+  const fm = parseTaskFrontmatter(m[1])
+
+  const tags = asArray(fm.tags).map((t) => t.replace(/^#/, '').toLowerCase())
+  if (!tags.includes(TASK_FILE_TAG)) return null
+
+  const status = (firstScalar(fm.status) ?? 'open').toLowerCase()
+  const title = firstScalar(fm.title)?.trim() || ctx.title
+
+  return {
+    id: `${ctx.path}#task`,
+    sourcePath: ctx.path,
+    noteTitle: ctx.title,
+    noteFolder: ctx.folder,
+    lineNumber: 0,
+    taskIndex: -1,
+    rawText: '',
+    content: title,
+    checked: DONE_STATUSES.has(status),
+    forwarded: false,
+    due: normalizeDueDate(firstScalar(fm.due)),
+    priority: normalizePriority(firstScalar(fm.priority)),
+    waiting: status === 'waiting',
+    fields: { status },
+    status,
+    tags: tags.filter((t) => t !== TASK_FILE_TAG),
+    kind: 'file',
+    scheduled: normalizeDueDate(firstScalar(fm.scheduled)),
+    completedDate: normalizeDueDate(firstScalar(fm.completeddate))
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -281,9 +444,14 @@ export function groupTasks(tasks: VaultTask[], today: Date): VaultTaskGroups {
   const upcoming: VaultTask[] = []
   const waiting: VaultTask[] = []
   const done: VaultTask[] = []
+  const forwarded: VaultTask[] = []
   let overdueCount = 0
 
   for (const task of tasks) {
+    if (task.forwarded) {
+      forwarded.push(task)
+      continue
+    }
     if (task.checked) {
       done.push(task)
       continue
@@ -331,8 +499,9 @@ export function groupTasks(tasks: VaultTask[], today: Date): VaultTaskGroups {
     if (a.sourcePath !== b.sourcePath) return a.sourcePath < b.sourcePath ? -1 : 1
     return a.taskIndex - b.taskIndex
   })
+  forwarded.sort(byDueThenPath)
 
-  return { today: today_, upcoming, waiting, done, overdueCount }
+  return { today: today_, upcoming, waiting, done, forwarded, overdueCount }
 }
 
 /** Helper for UIs that need to know whether a task is overdue relative to now. */
@@ -348,22 +517,49 @@ export function toIsoDateLocal(d: Date): string {
   return toIsoDate(d)
 }
 
-/** Tasks scheduled for the given local date (ISO YYYY-MM-DD). Excludes
- *  done and waiting tasks. */
+/** Tasks scheduled for the given local date (ISO YYYY-MM-DD). Excludes done
+ *  (checked) tasks but KEEPS `@waiting` tasks, so a waiting task with a due date
+ *  still appears on its date — matching `bucketTasksByDueDate` and the Tasks
+ *  calendar. Without this the sidepanel calendar under-counted `@waiting` tasks
+ *  the Tasks calendar showed. (#311, complementing #236) */
 export function tasksDueOn(tasks: VaultTask[], iso: string): VaultTask[] {
-  return tasks.filter(
-    (t) => !t.checked && !t.waiting && t.due === iso
-  )
+  return tasks.filter((t) => !t.checked && t.due === iso)
 }
 
-/** Bucket tasks by `due` ISO date. Done and waiting tasks are skipped.
- *  Tasks without a due date land in the special `'unscheduled'` key. */
+/**
+ * Give undated tasks that live in a daily note an *implicit* due date equal to
+ * that note's own date, using a precomputed `sourcePath -> ISO date` map (built
+ * in app-core from the daily-note pattern). An explicit `due:` token always
+ * wins, so only tasks with no `due` are touched; the result is flagged
+ * `dueInferred` so UIs can distinguish it. Returns the same array instance when
+ * nothing changed (cheap to call from a memo).
+ */
+export function inferDailyTaskDueDates(
+  tasks: VaultTask[],
+  dueByPath: ReadonlyMap<string, string>
+): VaultTask[] {
+  if (dueByPath.size === 0) return tasks
+  let changed = false
+  const out = tasks.map((task) => {
+    if (task.due) return task
+    const iso = dueByPath.get(task.sourcePath)
+    if (!iso) return task
+    changed = true
+    return { ...task, due: iso, dueInferred: true }
+  })
+  return changed ? out : tasks
+}
+
+/** Bucket tasks by `due` ISO date. Done (checked) tasks are skipped; waiting
+ *  tasks are kept so a `@waiting` task with a due date still appears on the
+ *  calendar on its date (#236). Tasks without a due date land in the special
+ *  `'unscheduled'` key. */
 export function bucketTasksByDueDate(
   tasks: VaultTask[]
 ): Map<string, VaultTask[]> {
   const map = new Map<string, VaultTask[]>()
   for (const task of tasks) {
-    if (task.checked || task.waiting) continue
+    if (task.checked) continue
     const key = task.due ?? 'unscheduled'
     const list = map.get(key)
     if (list) list.push(task)

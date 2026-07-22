@@ -13,35 +13,47 @@ export type KeymapId =
   | "global.searchNotesNonVim"
   | "global.commandPalette"
   | "global.newQuickNote"
-  | "global.openQuickCapture"
   | "global.openSettings"
   | "global.toggleSidebar"
   | "global.toggleConnections"
   | "global.toggleOutlinePanel"
+  | "global.toggleCommentsPanel"
+  | "global.addComment"
+  | "global.focusPaneLeft"
+  | "global.focusPaneRight"
+  | "global.focusPaneUp"
+  | "global.focusPaneDown"
   | "global.modeEdit"
   | "global.modeSplit"
   | "global.modePreview"
   | "global.toggleZenMode"
   | "global.closeActiveTab"
+  | "global.reopenClosedTab"
   | "global.toggleWordWrap"
   | "global.exportNotePdf"
   | "global.zoomIn"
   | "global.zoomOut"
   | "global.zoomReset"
+  | "global.historyBack"
+  | "global.historyForward"
   | "vim.leaderPrefix"
   | "vim.leaderOpenBuffers"
   | "vim.leaderSearchNotes"
+  | "vim.leaderSearchGroup"
   | "vim.leaderSearchVaultText"
   | "vim.leaderToggleSidebar"
   | "vim.leaderNoteOutline"
   | "vim.leaderSwitchVault"
   | "vim.leaderNoteActions"
   | "vim.leaderFormatNote"
+  | "vim.leaderCopyMarkdown"
+  | "vim.leaderToggleFavorite"
   | "vim.leaderQuickCapture"
   | "vim.leaderTemplatePicker"
   | "vim.leaderInsertTemplate"
   | "vim.leaderDailyNote"
   | "vim.leaderWeeklyNote"
+  | "vim.leaderMonthlyNote"
   | "vim.leaderCalendar"
   | "vim.panePrefix"
   | "vim.paneFocusLeft"
@@ -54,6 +66,8 @@ export type KeymapId =
   | "vim.historyForward"
   | "vim.bufferPrevious"
   | "vim.bufferNext"
+  | "vim.tabPrevious"
+  | "vim.tabNext"
   | "vim.hintMode"
   | "vim.goToDefinition"
   | "vim.foldCurrent"
@@ -62,6 +76,8 @@ export type KeymapId =
   | "vim.unfoldAll"
   | "nav.moveDown"
   | "nav.moveUp"
+  | "nav.moveLeft"
+  | "nav.moveRight"
   | "nav.jumpTop"
   | "nav.jumpBottom"
   | "nav.halfPageDown"
@@ -78,7 +94,11 @@ export type KeymapId =
   | "nav.toggleTask"
   | "nav.localEx"
   | "nav.newQuickNote"
-  | "nav.unarchive";
+  | "nav.unarchive"
+  | "tasks.moveTaskUp"
+  | "tasks.moveTaskDown"
+  | "editor.moveLineUp"
+  | "editor.moveLineDown";
 
 export type KeymapOverrides = Partial<Record<KeymapId, string>>;
 
@@ -134,16 +154,6 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     defaultBinding: "Shift+Mod+N",
   },
   {
-    id: "global.openQuickCapture",
-    kind: "shortcut",
-    scope: "app",
-    group: "global",
-    title: "Open quick capture window",
-    description:
-      "Open the floating capture window. Also bound system-wide; configure that hotkey under Settings → Editor.",
-    defaultBinding: "Shift+Mod+Space",
-  },
-  {
     id: "global.openSettings",
     kind: "shortcut",
     scope: "app",
@@ -178,6 +188,60 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     title: "Toggle outline panel",
     description: "Toggle the outline panel in the active pane.",
     defaultBinding: "Mod+3",
+  },
+  {
+    id: "global.toggleCommentsPanel",
+    kind: "shortcut",
+    scope: "app",
+    group: "global",
+    title: "Toggle comments panel",
+    description: "Toggle the comments panel in the active pane.",
+    defaultBinding: "Mod+Shift+C",
+  },
+  {
+    id: "global.addComment",
+    kind: "shortcut",
+    scope: "app",
+    group: "global",
+    title: "Add comment to selection",
+    description: "Start a comment on the selected text (or current line).",
+    defaultBinding: "Mod+Alt+M",
+  },
+  {
+    id: "global.focusPaneLeft",
+    kind: "shortcut",
+    scope: "app",
+    group: "global",
+    title: "Focus pane left",
+    description: "Move focus to the pane/panel on the left. Works without vim mode.",
+    defaultBinding: "Alt+H",
+  },
+  {
+    id: "global.focusPaneDown",
+    kind: "shortcut",
+    scope: "app",
+    group: "global",
+    title: "Focus pane down",
+    description: "Move focus to the pane/panel below. Works without vim mode.",
+    defaultBinding: "Alt+J",
+  },
+  {
+    id: "global.focusPaneUp",
+    kind: "shortcut",
+    scope: "app",
+    group: "global",
+    title: "Focus pane up",
+    description: "Move focus to the pane/panel above. Works without vim mode.",
+    defaultBinding: "Alt+K",
+  },
+  {
+    id: "global.focusPaneRight",
+    kind: "shortcut",
+    scope: "app",
+    group: "global",
+    title: "Focus pane right",
+    description: "Move focus to the pane/panel on the right. Works without vim mode.",
+    defaultBinding: "Alt+L",
   },
   {
     id: "global.modeEdit",
@@ -225,6 +289,15 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     defaultBinding: "Mod+W",
   },
   {
+    id: "global.reopenClosedTab",
+    kind: "shortcut",
+    scope: "app",
+    group: "global",
+    title: "Reopen closed tab",
+    description: "Reopen the most recently closed tab.",
+    defaultBinding: "Shift+Mod+T",
+  },
+  {
     id: "global.toggleWordWrap",
     kind: "shortcut",
     scope: "app",
@@ -270,6 +343,24 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     defaultBinding: "Mod+0",
   },
   {
+    id: "global.historyBack",
+    kind: "shortcut",
+    scope: "app",
+    group: "global",
+    title: "Go back in note history",
+    description: "Jump to the previous note location in history. Works in any mode.",
+    defaultBinding: "Alt+ArrowLeft",
+  },
+  {
+    id: "global.historyForward",
+    kind: "shortcut",
+    scope: "app",
+    group: "global",
+    title: "Go forward in note history",
+    description: "Jump forward in note history. Works in any mode.",
+    defaultBinding: "Alt+ArrowRight",
+  },
+  {
     id: "vim.leaderPrefix",
     kind: "sequence",
     scope: "leader",
@@ -303,15 +394,26 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     maxTokens: 1,
   },
   {
+    id: "vim.leaderSearchGroup",
+    kind: "sequence",
+    scope: "leader",
+    group: "vim",
+    title: "Leader: search…",
+    description: "Open the search leader group (text search, etc.).",
+    defaultBinding: "s",
+    vimOnly: true,
+    maxTokens: 1,
+  },
+  {
     id: "vim.leaderSearchVaultText",
     kind: "sequence",
     scope: "leader",
     group: "vim",
-    title: "Leader: search vault text",
-    description: "Open fuzzy vault text search across note contents.",
-    defaultBinding: "s t",
+    title: "Leader search: vault text",
+    description: "Open fuzzy vault text search across note contents (under the search group).",
+    defaultBinding: "t",
     vimOnly: true,
-    maxTokens: 2,
+    maxTokens: 1,
   },
   {
     id: "vim.leaderToggleSidebar",
@@ -369,6 +471,28 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     maxTokens: 1,
   },
   {
+    id: "vim.leaderCopyMarkdown",
+    kind: "sequence",
+    scope: "leader",
+    group: "vim",
+    title: "Leader note action: copy note as Markdown",
+    description: "Copy the whole note's Markdown source to the clipboard.",
+    defaultBinding: "y",
+    vimOnly: true,
+    maxTokens: 1,
+  },
+  {
+    id: "vim.leaderToggleFavorite",
+    kind: "sequence",
+    scope: "leader",
+    group: "vim",
+    title: "Leader note action: toggle favorite",
+    description: "Add or remove the active note from Favorites.",
+    defaultBinding: "s",
+    vimOnly: true,
+    maxTokens: 1,
+  },
+  {
     id: "vim.leaderQuickCapture",
     kind: "sequence",
     scope: "leader",
@@ -420,6 +544,17 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     title: "Leader: this week's note",
     description: "Open or create this week's weekly note.",
     defaultBinding: "w",
+    vimOnly: true,
+    maxTokens: 1,
+  },
+  {
+    id: "vim.leaderMonthlyNote",
+    kind: "sequence",
+    scope: "leader",
+    group: "vim",
+    title: "Leader: this month's note",
+    description: "Open or create this month's monthly note.",
+    defaultBinding: "m",
     vimOnly: true,
     maxTokens: 1,
   },
@@ -556,13 +691,35 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     maxTokens: 2,
   },
   {
-    id: "vim.hintMode",
+    id: "vim.tabPrevious",
     kind: "sequence",
     scope: "vim-editor",
     group: "vim",
-    title: "Hint mode",
-    description: "Show jump labels for clickable targets.",
-    defaultBinding: "f",
+    title: "Previous tab",
+    description: "Go to the previous tab in the active pane (Vim-style gT).",
+    defaultBinding: "g T",
+    vimOnly: true,
+    maxTokens: 2,
+  },
+  {
+    id: "vim.tabNext",
+    kind: "sequence",
+    scope: "vim-editor",
+    group: "vim",
+    title: "Next tab",
+    description: "Go to the next tab in the active pane (Vim-style gt).",
+    defaultBinding: "g t",
+    vimOnly: true,
+    maxTokens: 2,
+  },
+  {
+    id: "vim.hintMode",
+    kind: "sequence",
+    scope: "leader",
+    group: "vim",
+    title: "Leader: hint mode",
+    description: "Show jump labels for clickable targets (jump to any button or link).",
+    defaultBinding: "h",
     vimOnly: true,
     maxTokens: 1,
   },
@@ -639,6 +796,26 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     title: "Move selection up",
     description: "Move the current row cursor or panel selection up.",
     defaultBinding: "k",
+    maxTokens: 1,
+  },
+  {
+    id: "nav.moveLeft",
+    kind: "sequence",
+    scope: "lists",
+    group: "navigation",
+    title: "Move selection left",
+    description: "Move left between cells in a WYSIWYG table (and within cell text).",
+    defaultBinding: "h",
+    maxTokens: 1,
+  },
+  {
+    id: "nav.moveRight",
+    kind: "sequence",
+    scope: "lists",
+    group: "navigation",
+    title: "Move selection right",
+    description: "Move right between cells in a WYSIWYG table (and within cell text).",
+    defaultBinding: "l",
     maxTokens: 1,
   },
   {
@@ -784,6 +961,48 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     description: "Check or uncheck the selected task.",
     defaultBinding: "x",
     maxTokens: 1,
+  },
+  {
+    id: "tasks.moveTaskUp",
+    kind: "sequence",
+    scope: "views",
+    group: "view-actions",
+    title: "Move task up",
+    description:
+      "Move the selected task up within its group (Tasks list view). Works with Vim mode on or off.",
+    defaultBinding: "K",
+    maxTokens: 1,
+  },
+  {
+    id: "tasks.moveTaskDown",
+    kind: "sequence",
+    scope: "views",
+    group: "view-actions",
+    title: "Move task down",
+    description:
+      "Move the selected task down within its group (Tasks list view). Works with Vim mode on or off.",
+    defaultBinding: "J",
+    maxTokens: 1,
+  },
+  {
+    id: "editor.moveLineUp",
+    kind: "shortcut",
+    scope: "vim-editor",
+    group: "view-actions",
+    title: "Move line up",
+    description:
+      "Move the current line (or selected lines) up in the note editor — reorders the markdown, so it sticks in the file. Works with Vim mode on or off.",
+    defaultBinding: "Alt+ArrowUp",
+  },
+  {
+    id: "editor.moveLineDown",
+    kind: "shortcut",
+    scope: "vim-editor",
+    group: "view-actions",
+    title: "Move line down",
+    description:
+      "Move the current line (or selected lines) down in the note editor — reorders the markdown, so it sticks in the file. Works with Vim mode on or off.",
+    defaultBinding: "Alt+ArrowDown",
   },
   {
     id: "nav.localEx",
@@ -1113,6 +1332,33 @@ export function normalizeKeymapBinding(
     }
   }
   return normalized;
+}
+
+/**
+ * Global shortcuts share one always-active namespace, so two actions bound to
+ * the same combination silently shadow each other (#298). Return the OTHER
+ * global-shortcut definition that `binding` would collide with under the given
+ * overrides, or null when there's no conflict.
+ *
+ * Only `app`-scope shortcuts are checked: the sequence-based groups (vim / nav /
+ * view) reuse keys by design — disambiguated at runtime by the focused surface
+ * (e.g. `x` deletes in Trash but toggles a task in Tasks) — so a shared key
+ * there is not a conflict and the shipped defaults must not be flagged.
+ */
+export function findKeymapConflict(
+  overrides: KeymapOverrides | null | undefined,
+  id: KeymapId,
+  binding: string,
+): KeymapDefinition | null {
+  const definition = getKeymapDefinition(id);
+  if (definition.scope !== "app") return null;
+  const normalized = normalizeKeymapBinding(id, binding);
+  if (!normalized) return null;
+  for (const other of KEYMAP_DEFINITIONS) {
+    if (other.id === id || other.scope !== "app") continue;
+    if (getKeymapBinding(overrides, other.id) === normalized) return other;
+  }
+  return null;
 }
 
 export function normalizeKeymapOverrides(input: unknown): KeymapOverrides {

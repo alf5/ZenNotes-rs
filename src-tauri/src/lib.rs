@@ -5,9 +5,12 @@
 //! it used with Electron; each Electron IPC channel maps to a `#[command]`
 //! here (see src/bridge/tauri-bridge.ts on the frontend side).
 
+mod app_config;
 mod asset_protocol;
+mod custom_css;
 mod deep_links;
 mod ipc;
+mod link_metadata;
 mod os;
 mod remote;
 mod search;
@@ -70,6 +73,25 @@ pub fn run() {
         })
         .manage(AppState::default())
         .setup(|app| {
+            // Watch the portable config.toml for external edits (synced
+            // dotfiles / hand-edits) and push changes to every window.
+            match app_config::spawn_watcher(app.handle().clone()) {
+                Ok(debouncer) => {
+                    app.manage(app_config::PortableConfigWatcher(std::sync::Mutex::new(
+                        Some(debouncer),
+                    )));
+                }
+                Err(err) => eprintln!("config watcher failed to start: {err}"),
+            }
+            // Watch the custom-themes + overrides dirs for edits.
+            match custom_css::spawn_watchers(app.handle().clone()) {
+                Ok(debouncers) => {
+                    app.manage(custom_css::CustomCssWatchers(std::sync::Mutex::new(
+                        debouncers,
+                    )));
+                }
+                Err(err) => eprintln!("custom-css watchers failed to start: {err}"),
+            }
             // Register the persisted quick-capture global shortcut.
             if let Ok(dir) = app.path().app_config_dir() {
                 let hotkey = vault::config::load_config(&dir).quick_capture_hotkey;
@@ -165,6 +187,38 @@ pub fn run() {
             os_cmds::vault_reveal_folder,
             os_cmds::vault_reveal_folder_target,
             os_cmds::vault_reveal_assets_dir,
+            os_cmds::vault_reveal_file_path,
+            os_cmds::vault_open_external_file,
+            os_cmds::devtools_toggle,
+            app_config::config_file_path,
+            app_config::config_file_read,
+            app_config::config_file_write,
+            custom_css::custom_themes_scan,
+            custom_css::custom_themes_dir_path,
+            custom_css::custom_themes_reveal,
+            custom_css::custom_themes_delete,
+            custom_css::custom_themes_reserve,
+            custom_css::custom_themes_write_files,
+            custom_css::overrides_list,
+            custom_css::overrides_reveal,
+            custom_css::overrides_delete,
+            vault_cmds::workspace_state_read,
+            vault_cmds::workspace_state_write,
+            vault_cmds::vault_root_content_hidden,
+            vault_cmds::vault_create_excalidraw,
+            vault_cmds::vault_list_deleted_assets,
+            vault_cmds::vault_purge_deleted_asset,
+            vault_cmds::vault_empty_deleted_assets,
+            vault_cmds::db_read_text,
+            vault_cmds::db_write_text,
+            vault_cmds::db_exists,
+            vault_cmds::db_mkdir,
+            vault_cmds::db_rename,
+            vault_cmds::db_folder_root_rel,
+            vault_cmds::db_create_record_page,
+            vault_cmds::vault_write_drawing,
+            vault_cmds::app_open_folder_temporary,
+            os_cmds::vault_fetch_link_metadata,
             workspace_cmds::workspace_list_remote_profiles,
             workspace_cmds::workspace_save_remote_profile,
             workspace_cmds::workspace_delete_remote_profile,

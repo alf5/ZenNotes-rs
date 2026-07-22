@@ -10,6 +10,8 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import type { EditorView } from '@codemirror/view'
 import { Vim, getCM } from '@replit/codemirror-vim'
+import { registerDisplayLineMotion } from '../lib/cm-vim-display-line'
+import { moveLineDown, moveLineUp } from '@codemirror/commands'
 import { foldAll, unfoldAll, foldCode, unfoldCode } from '@codemirror/language'
 import { isTagsViewActive, isTasksViewActive, useStore } from '../store'
 import { buildCommands, type Command } from '../lib/commands'
@@ -20,15 +22,20 @@ import type { PaneLayout, PaneSplit } from '../lib/pane-layout'
 import {
   parseCreateNotePath,
   resolveWikilinkTarget,
-  suggestCreateNotePath
+  wikilinkHeadingAnchor
 } from '../lib/wikilinks'
-import { classifyLocalAssetHref, resolveAssetVaultRelativePath } from '../lib/local-assets'
+import { openDatabaseFromWikilink, openWikilinkHeading } from '../lib/wikilink-navigation'
+import { classifyLocalAssetHref, hrefFragment, resolveAssetVaultRelativePath } from '../lib/local-assets'
+import { externalLinkUrl, extractLinkAtCursor, resolveInternalNoteHref } from '../lib/internal-links'
 import {
   buildMoveNotePrompt,
   parseMoveNoteTarget,
+  parseTemplateDestination,
   validateMoveNoteTarget
 } from '../lib/move-note'
 import { promptApp } from '../lib/prompt-requests'
+import { offerCreateNoteFromLink } from '../lib/create-note-from-link'
+import { externalFileLink, openExternalFileLink } from '../lib/external-file-link'
 import { StatusBar } from './StatusBar'
 import { EditorPane } from './EditorPane'
 import { focusPaneInDirection, focusPaneOrEdgePanel } from '../lib/pane-nav'
@@ -41,6 +48,9 @@ import {
 } from '../lib/keymaps'
 import { navigateActiveBuffer } from '../lib/buffer-navigation'
 import { applyVimInsertEscape } from '../lib/vim-insert-escape'
+import { listContinuationPrefix } from '../lib/list-continuation'
+import { focusEditorNormalMode } from '../lib/editor-focus'
+import { toVimSequence } from '../lib/vim-key-sequence'
 
 let vimCommandsRegistered = false
 let syncedVimBindings: Partial<Record<KeymapId, string[]>> = {}
@@ -69,54 +79,6 @@ function clearKnownVimMappings(): void {
       /* ignore */
     }
   }
-}
-
-function toVimKeyName(base: string): string {
-  if (base === 'Space') return 'Space'
-  if (base === 'Enter') return 'CR'
-  if (base === 'Esc' || base === 'Escape') return 'Esc'
-  if (base === 'Tab') return 'Tab'
-  if (base === 'ArrowUp') return 'Up'
-  if (base === 'ArrowDown') return 'Down'
-  if (base === 'ArrowLeft') return 'Left'
-  if (base === 'ArrowRight') return 'Right'
-  return base
-}
-
-function toVimSequenceToken(token: string): string | null {
-  const parts = token
-    .split('+')
-    .map((part) => part.trim())
-    .filter(Boolean)
-  if (parts.length === 0) return null
-  const base = parts.pop()
-  if (!base) return null
-  const keyName = toVimKeyName(base)
-  if (parts.length === 0) {
-    if (base.length === 1) return base
-    return `<${keyName}>`
-  }
-  const modifiers = parts
-    .map((part) => {
-      if (part === 'Ctrl') return 'C'
-      if (part === 'Alt') return 'A'
-      if (part === 'Shift') return 'S'
-      if (part === 'Meta' || part === 'Mod') return 'D'
-      return null
-    })
-    .filter(Boolean) as string[]
-  const normalizedKey = base.length === 1 ? base.toLowerCase() : keyName
-  return `<${[...modifiers, normalizedKey].join('-')}>`
-}
-
-function toVimSequence(binding: string): string | null {
-  const tokens = binding
-    .split(/\s+/)
-    .map((token) => token.trim())
-    .filter(Boolean)
-    .map((token) => toVimSequenceToken(token))
-  if (tokens.length === 0 || tokens.some((token) => !token)) return null
-  return tokens.join('')
 }
 
 function paneMapBindings(overrides: KeymapOverrides, actionId: KeymapId): string[] {
@@ -210,6 +172,20 @@ function syncVimKeymaps(overrides: KeymapOverrides): void {
       )
     },
     {
+      id: 'vim.tabPrevious',
+      action: 'previousBuffer',
+      bindings: [toVimSequence(getKeymapBinding(overrides, 'vim.tabPrevious'))].filter(
+        (binding): binding is string => !!binding
+      )
+    },
+    {
+      id: 'vim.tabNext',
+      action: 'nextBuffer',
+      bindings: [toVimSequence(getKeymapBinding(overrides, 'vim.tabNext'))].filter(
+        (binding): binding is string => !!binding
+      )
+    },
+    {
       id: 'vim.foldCurrent',
       action: 'foldHeadingAtCursor',
       bindings: [toVimSequence(getKeymapBinding(overrides, 'vim.foldCurrent'))].filter(
@@ -268,38 +244,42 @@ function syncVimKeymaps(overrides: KeymapOverrides): void {
   }
 }
 
-function unwrapMdUrl(url: string): string {
-  // Markdown wraps URLs with spaces in angle brackets: `[x](<a b.pdf>)`.
-  const trimmed = url.trim()
-  if (trimmed.startsWith('<') && trimmed.endsWith('>')) return trimmed.slice(1, -1)
-  return trimmed
+// `extractLinkAtCursor` lives in ../lib/internal-links so the editor, the
+// preview, and the Cmd/Ctrl-click handler can all share it.
+
+/**
+ * Report an ex-command error as a non-blocking, in-editor notification — the
+ * same red bottom-of-editor message codemirror-vim uses for its own errors
+ * (e.g. an unknown `:command`). The previous native `window.alert` blurred
+ * CodeMirror, leaving Vim users unable to type until the editor was refocused.
+ * Falls back to an alert (then refocuses) if the editor notification is
+ * unavailable. (#173)
+ */
+function alertEditorError(message: string): void {
+  const view = useStore.getState().editorViewRef
+  const cm = view ? getCM(view) : null
+  const openNotification = (
+    cm as unknown as {
+      openNotification?: (node: Node, opts: { bottom?: boolean; duration?: number }) => void
+    } | null
+  )?.openNotification
+  if (cm && typeof openNotification === 'function') {
+    const el = document.createElement('div')
+    el.className = 'cm-vim-message'
+    el.style.color = 'red'
+    el.style.whiteSpace = 'pre'
+    el.textContent = message
+    openNotification.call(cm, el, { bottom: true, duration: 4000 })
+    return
+  }
+  window.alert(message)
+  focusEditorNormalMode()
 }
 
-function extractLinkAtCursor(doc: string, pos: number): string | null {
-  const lineStart = doc.lastIndexOf('\n', pos - 1) + 1
-  const lineEnd = doc.indexOf('\n', pos)
-  const line = doc.slice(lineStart, lineEnd === -1 ? undefined : lineEnd)
-  const col = pos - lineStart
-  const wikiRe = /\[\[([^\]|]+?)(?:\|[^\]]+)?\]\]/g
-  let m: RegExpExecArray | null
-  while ((m = wikiRe.exec(line)) !== null) {
-    if (col >= m.index && col < m.index + m[0].length) return m[1]
-  }
-  // Angle-bracketed URLs can contain `)` so match them specifically first.
-  const mdAngleRe = /\[([^\]]*)\]\(<([^>]+)>\)/g
-  while ((m = mdAngleRe.exec(line)) !== null) {
-    if (col >= m.index && col < m.index + m[0].length) return m[2]
-  }
-  const mdRe = /\[([^\]]*)\]\(([^)]+)\)/g
-  while ((m = mdRe.exec(line)) !== null) {
-    if (col >= m.index && col < m.index + m[0].length) return unwrapMdUrl(m[2])
-  }
-  const urlRe = /https?:\/\/[^\s)>\]]+/g
-  while ((m = urlRe.exec(line)) !== null) {
-    if (col >= m.index && col < m.index + m[0].length) return m[0]
-  }
-  return null
-}
+// Minimal shape of the CodeMirror-Vim adapter + state the display-line motion
+// touches (the package's own types don't surface these helpers).
+// The j/k display-line motion (#290) now lives in lib/cm-vim-display-line.ts,
+// shared with the Quick Note window so both editors behave identically (#312).
 
 function registerVimCommands(): void {
   if (vimCommandsRegistered) return
@@ -315,8 +295,90 @@ function registerVimCommands(): void {
   }
   clearKnownVimMappings()
 
+  // Visual-line reorder: select line(s) with Shift+V, then Shift+J / Shift+K
+  // move the selection down / up — the well-known Vim "move selected lines"
+  // mapping. Overrides J/K in *visual* mode only; normal-mode join (J) and
+  // keyword-lookup (K) are left untouched. moveLineDown/Up act on every line
+  // the selection spans and keep it selected.
+  Vim.defineAction('zenMoveSelectionDown', (cm: ReturnType<typeof getCM>) => {
+    const view = (cm as unknown as { cm6?: EditorView }).cm6
+    if (view) moveLineDown(view)
+  })
+  Vim.defineAction('zenMoveSelectionUp', (cm: ReturnType<typeof getCM>) => {
+    const view = (cm as unknown as { cm6?: EditorView }).cm6
+    if (view) moveLineUp(view)
+  })
+  Vim.mapCommand('J', 'action', 'zenMoveSelectionDown', {}, { context: 'visual' })
+  Vim.mapCommand('K', 'action', 'zenMoveSelectionUp', {}, { context: 'visual' })
+
+  // #320: opening a line with o/O on a list item carries the marker forward —
+  // like pressing Enter — so bullets repeat, ordered numbers advance (the
+  // renumber pass fixes the exact value for both o and O), indentation is
+  // preserved, and a checkbox continues as a fresh unchecked box. Non-list lines
+  // fall back to Vim's built-in open-line. The handler runs as `actions[name]`,
+  // so `this` is Vim's action table — reuse its open-line + insert-mode entry.
+  type VimActionTable = {
+    newLineAndEnterInsertMode: (cm: unknown, args: unknown, vim: unknown) => void
+    enterInsertMode: (cm: unknown, args: unknown, vim: unknown) => void
+  }
+  Vim.defineAction(
+    'zenOpenLineContinuingList',
+    function (
+      this: VimActionTable,
+      cm: ReturnType<typeof getCM>,
+      actionArgs: { after?: boolean; repeat?: number },
+      vim: { insertMode?: boolean }
+    ) {
+      const view = (cm as unknown as { cm6?: EditorView }).cm6
+      const prefix = view
+        ? listContinuationPrefix(view.state.doc.lineAt(view.state.selection.main.head).text)
+        : null
+      if (!view || prefix == null) {
+        this.newLineAndEnterInsertMode(cm, actionArgs, vim)
+        return
+      }
+      const line = view.state.doc.lineAt(view.state.selection.main.head)
+      vim.insertMode = true
+      if (actionArgs.after) {
+        view.dispatch({
+          changes: { from: line.to, insert: `\n${prefix}` },
+          selection: { anchor: line.to + 1 + prefix.length }
+        })
+      } else {
+        view.dispatch({
+          changes: { from: line.from, insert: `${prefix}\n` },
+          selection: { anchor: line.from + prefix.length }
+        })
+      }
+      this.enterInsertMode(cm, { repeat: actionArgs.repeat }, vim)
+    } as unknown as Parameters<typeof Vim.defineAction>[1]
+  )
+  Vim.mapCommand(
+    'o',
+    'action',
+    'zenOpenLineContinuingList',
+    { after: true },
+    { context: 'normal', isEdit: true, interlaceInsertRepeat: true }
+  )
+  Vim.mapCommand(
+    'O',
+    'action',
+    'zenOpenLineContinuingList',
+    { after: false },
+    { context: 'normal', isEdit: true, interlaceInsertRepeat: true }
+  )
+
+  // #290/#312: make j/k move by display line through soft-wrapped content.
+  // Shared with the Quick Note window (QuickCaptureApp) via the same helper.
+  registerDisplayLineMotion()
+
   Vim.defineEx('write', 'w', () => {
     void useStore.getState().persistActive()
+  })
+  Vim.defineEx('saveas', 'sav', (_cm: unknown, params: { argString?: string } | undefined) => {
+    const newName = (params?.argString ?? '').trim()
+    if (!newName) return
+    void useStore.getState().saveActiveNoteAs(newName)
   })
   Vim.defineEx('format', 'format', () => {
     void useStore.getState().formatActiveNote()
@@ -353,6 +415,25 @@ function registerVimCommands(): void {
     void useStore.getState().openTasksView()
   })
 
+  // Quick-add a whole-note task file. `:newtask` (or `:task`) prompts for a
+  // title and creates it at the configured tasks location; `:newtask <folder>`
+  // targets a specific folder so per-project tasks stay organized (e.g.
+  // `:newtask Projects/Website`). Short name `newt` is a prefix of `newtask`.
+  const runNewTaskEx = (
+    _cm: unknown,
+    params: { argString?: string } | undefined
+  ): void => {
+    const arg = (params?.argString ?? '').trim()
+    if (!arg) {
+      void useStore.getState().newTaskFile()
+      return
+    }
+    const dest = parseTemplateDestination(arg)
+    void useStore.getState().newTaskFile({ folder: dest.folder, subpath: dest.subpath })
+  }
+  Vim.defineEx('newtask', 'newt', runNewTaskEx)
+  Vim.defineEx('task', 'task', runNewTaskEx)
+
   // `:template` / `:tmpl` opens the template picker. `:template <name>` skips
   // the picker and creates directly from the best name/id match. CM-Vim
   // requires a short name to be a prefix of the full name, so `tmpl` (not a
@@ -367,7 +448,10 @@ function registerVimCommands(): void {
       state.setTemplatePaletteOpen(true)
       return
     }
-    const all = mergeTemplates(BUILTIN_TEMPLATES, state.customTemplates)
+    const all = mergeTemplates(
+      state.hideBuiltinTemplates ? [] : BUILTIN_TEMPLATES,
+      state.customTemplates
+    )
     const lower = arg.toLowerCase()
     const match =
       all.find((t) => t.name.toLowerCase() === lower) ??
@@ -385,6 +469,10 @@ function registerVimCommands(): void {
 
   Vim.defineEx('weekly', 'weekly', () => {
     void useStore.getState().openThisWeekWeeklyNote()
+  })
+
+  Vim.defineEx('monthly', 'monthly', () => {
+    void useStore.getState().openThisMonthMonthlyNote()
   })
 
   // `:tag foo` starts (or updates) the Tags view with `foo` selected.
@@ -457,8 +545,9 @@ function registerVimCommands(): void {
     const target = extractLinkAtCursor(doc, pos)
     if (!target) return
 
-    if (/^https?:\/\//i.test(target)) {
-      window.open(target, '_blank')
+    const external = externalLinkUrl(target)
+    if (external) {
+      window.open(external, '_blank')
       return
     }
 
@@ -472,7 +561,8 @@ function registerVimCommands(): void {
       if (activePath && vaultRoot) {
         const abs = resolveAssetVaultRelativePath(vaultRoot, activePath, target)
         if (abs) {
-          state.pinAssetReferenceForNote(activePath, abs)
+          const fragment = hrefFragment(target)
+          state.pinAssetReferenceForNote(activePath, abs, fragment || null)
           return
         }
       }
@@ -481,48 +571,51 @@ function registerVimCommands(): void {
     const notes = state.notes
     const resolved = resolveWikilinkTarget(notes, target)
     if (resolved) {
-      void state.selectNote(resolved.path).then(() => {
+      const focusEditorSoon = (): void => {
         state.setFocusedPanel('editor')
         requestAnimationFrame(() => useStore.getState().editorViewRef?.focus())
-      })
+      }
+      const headingAnchor = wikilinkHeadingAnchor(target)
+      if (headingAnchor) {
+        void openWikilinkHeading(resolved.path, headingAnchor).then(focusEditorSoon)
+      } else {
+        void state.selectNote(resolved.path).then(focusEditorSoon)
+      }
       return
     }
 
-    void promptApp({
-      title: `Create note for "${target}"?`,
-      description:
-        'No matching note exists. Use /my/path/note.md for Inbox-relative paths, or inbox/my/path/note.md for an explicit top folder.',
-      initialValue: suggestCreateNotePath(target),
-      placeholder: '/my/path/note.md',
-      okLabel: 'Create',
-      validate: (value) => {
-        try {
-          parseCreateNotePath(value)
-          return null
-        } catch (err) {
-          return (err as Error).message
-        }
-      }
-    }).then(async (value) => {
-      if (!value) return
-      try {
-        const parsed = parseCreateNotePath(value)
-        const existing = state.notes.find(
-          (note) => note.folder !== 'trash' && note.path.toLowerCase() === parsed.relPath.toLowerCase()
-        )
-        if (existing) {
-          await state.selectNote(existing.path)
-          state.setFocusedPanel('editor')
-          requestAnimationFrame(() => useStore.getState().editorViewRef?.focus())
-          return
-        }
-        await state.createAndOpen(parsed.folder, parsed.subpath, { title: parsed.title })
+    // A standard Markdown link whose href resolves relative to this note —
+    // e.g. `[text](../Projects/plan.md)` — that wikilink name matching can't
+    // reach. (#201)
+    const internal = resolveInternalNoteHref(state.selectedPath, target, notes)
+    if (internal) {
+      const focusEditorSoon = (): void => {
         state.setFocusedPanel('editor')
         requestAnimationFrame(() => useStore.getState().editorViewRef?.focus())
-      } catch (err) {
-        window.alert((err as Error).message)
       }
-    })
+      if (internal.heading) {
+        void openWikilinkHeading(internal.path, internal.heading).then(focusEditorSoon)
+      } else {
+        void state.selectNote(internal.path).then(focusEditorSoon)
+      }
+      return
+    }
+
+    // Not a note — maybe a `.base` database link.
+    if (openDatabaseFromWikilink(target)) {
+      state.setFocusedPanel('editor')
+      requestAnimationFrame(() => useStore.getState().editorViewRef?.focus())
+      return
+    }
+
+    // A link to a file outside the vault: open it with the OS default app. (#424)
+    if (externalFileLink(target)) {
+      void openExternalFileLink(target)
+      return
+    }
+
+    // Dead link — confirm, then create the note (shared with the cmd-click path).
+    void offerCreateNoteFromLink(target)
   })
 
   // Vim-style pane navigation actions are registered here, but their
@@ -560,9 +653,12 @@ function registerVimCommands(): void {
  * - `:mv`, `:move`       move the active note to another Inbox/Archive path
  * - `:bn[ext]`           next tab in the active pane
  * - `:bp[rev]`           previous tab in the active pane
+ * - `:tabn[ext]`         next tab (alias of :bn; also gt)
+ * - `:tabp[revious]`     previous tab (alias of :bp; also gT)
  * - `:bd[elete]`, `:bc`  close the active tab (alias for `:q` on notes)
  * - `:buffers`, `:ls`    open the buffer switcher
  * - `:outline`            open the heading outline palette
+ * - `:closepanel`, `:closep`  close the open right-hand panel
  * - `:trash`              open the Trash view
  * - `:only`              close every other tab in the active pane
  * - `:qa[ll]`            close every tab, everywhere
@@ -582,7 +678,7 @@ function registerVimNoteCommands(): void {
     try {
       parsed = parseCreateNotePath(value)
     } catch (err) {
-      window.alert((err as Error).message)
+      alertEditorError((err as Error).message)
       return
     }
     const state = useStore.getState()
@@ -643,7 +739,7 @@ function registerVimNoteCommands(): void {
 
     const error = validateMoveNoteTarget(target)
     if (error) {
-      window.alert(error)
+      alertEditorError(error)
       return
     }
     const dest = parseMoveNoteTarget(target)
@@ -659,6 +755,9 @@ function registerVimNoteCommands(): void {
 
   Vim.defineEx('bnext', 'bn', () => navigateActiveBuffer(useStore.getState(), 1))
   Vim.defineEx('bprev', 'bp', () => navigateActiveBuffer(useStore.getState(), -1))
+  // Vim tab aliases over the same active-pane tab navigation.
+  Vim.defineEx('tabnext', 'tabn', () => navigateActiveBuffer(useStore.getState(), 1))
+  Vim.defineEx('tabprevious', 'tabp', () => navigateActiveBuffer(useStore.getState(), -1))
   // Vim aliases: :bNext and :bfirst/:blast — rare, skipped.
 
   const closeActiveTabLikeQuit = (): void => {
@@ -688,6 +787,11 @@ function registerVimNoteCommands(): void {
     })
   }
   Vim.defineEx('outline', 'outline', openOutline)
+  // `:closepanel` / `:closep` closes whichever right-hand panel (connections,
+  // outline, comments, or calendar) is open in the active pane.
+  Vim.defineEx('closepanel', 'closep', () => {
+    window.dispatchEvent(new Event('zen:close-right-panel'))
+  })
   const setZenMode = (next: 'toggle' | 'on' | 'off'): void => {
     requestAnimationFrame(() => {
       const state = useStore.getState()
@@ -830,6 +934,10 @@ const MANUAL_EX_NAMES = new Set([
   'bn',
   'bprev',
   'bp',
+  'tabnext',
+  'tabn',
+  'tabprevious',
+  'tabp',
   'bdelete',
   'bd',
   'bclose',
@@ -842,6 +950,8 @@ const MANUAL_EX_NAMES = new Set([
   'zenmode',
   'editmode',
   'splitmode',
+  'saveas',
+  'sav',
   'previewmode',
   'trash',
   'fold',

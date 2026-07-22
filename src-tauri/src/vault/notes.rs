@@ -102,6 +102,22 @@ fn created_at_ms(md: &fs::Metadata, modified_ms: i64) -> i64 {
 }
 
 /// File name without its last extension. Mirrors `path.basename(abs, extname)`.
+/// Whether a note-like path is an Excalidraw drawing (v2.15). Drawings share
+/// the note CRUD surface but their JSON body is never parsed for metadata.
+pub fn is_excalidraw_path(path: &str) -> bool {
+    path.to_lowercase().ends_with(".excalidraw")
+}
+
+/// The note-like extension of `path` — "md" or "excalidraw" — used to
+/// preserve the extension across rename/move/duplicate (upstream parity).
+pub fn note_extension(path: &str) -> &'static str {
+    if is_excalidraw_path(path) {
+        "excalidraw"
+    } else {
+        "md"
+    }
+}
+
 pub fn title_from_path(abs: &Path) -> String {
     let name = abs
         .file_name()
@@ -157,7 +173,13 @@ pub fn read_meta(
     let resolved_sibling = sibling_order.unwrap_or_else(|| read_sibling_order(abs));
 
     let modified_ms = md.modified().map(system_time_to_ms).unwrap_or(0);
-    let body = fs::read_to_string(abs).unwrap_or_default();
+    // Drawings: never parse the Excalidraw JSON body for tags/links/excerpt
+    // (upstream vault.ts:2524) — an empty body makes every extractor a no-op.
+    let body = if is_excalidraw_path(&rel_path) {
+        String::new()
+    } else {
+        fs::read_to_string(abs).unwrap_or_default()
+    };
 
     Ok(NoteMeta {
         path: rel_path,
@@ -169,6 +191,7 @@ pub fn read_meta(
         size: md.len(),
         tags: metadata::extract_tags(&body),
         wikilinks: metadata::extract_wikilinks(&body),
+        asset_embeds: metadata::extract_asset_embeds(&body),
         has_attachments: metadata::body_has_local_asset(&body),
         excerpt: metadata::build_excerpt(&body),
         is_symlink: linked,

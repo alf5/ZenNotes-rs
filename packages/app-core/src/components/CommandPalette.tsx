@@ -13,14 +13,22 @@ import {
 } from '../lib/command-history'
 import { rankItems } from '../lib/fuzzy-score'
 import { isPaletteNextKey, isPalettePreviousKey } from '../lib/palette-nav'
+import { isImeComposing } from '../lib/ime'
+import { canReturnToCommandList } from '../lib/command-palette-mode'
 import { THEMES, type ThemeFamily, type ThemeMode, type ThemeOption } from '../lib/themes'
 import {
   buildVaultSwitcherEntries,
+  newWindowVaultRows,
+  type BrowseVaultSwitcherEntry,
   type VaultSwitcherEntry
 } from '../lib/vault-switcher'
 import { focusEditorNormalMode } from '../lib/editor-focus'
+import { Modal } from './ui/Modal'
 
 type Mode = 'main' | 'theme' | 'vault'
+
+/** Picker rows: known vaults, plus the synthetic "Browse…" row (new-window mode). */
+type VaultRow = VaultSwitcherEntry | BrowseVaultSwitcherEntry
 
 interface ThemeSnapshot {
   id: string
@@ -46,6 +54,8 @@ export function CommandPalette(): JSX.Element {
     window.zen.getCapabilities().supportsRemoteWorkspace
 
   const [mode, setMode] = useState<Mode>(initialMode)
+  // Whether the vault picker switches the current window or opens a new one (#244).
+  const [vaultAction, setVaultAction] = useState<'switch' | 'new-window'>('switch')
   const [query, setQuery] = useState('')
   const [active, setActive] = useState(0)
   const [recentIds, setRecentIds] = useState<string[]>(() => loadRecentCommandIds())
@@ -96,19 +106,28 @@ export function CommandPalette(): JSX.Element {
     [query]
   )
 
-  const vaultOptions = useMemo<VaultSwitcherEntry[]>(
-    () =>
-      buildVaultSwitcherEntries({
-        localVaults,
-        remoteProfiles: remoteWorkspaceProfiles,
-        currentVault,
-        workspaceMode,
-        remoteWorkspaceInfo
-      }),
-    [currentVault, localVaults, remoteWorkspaceInfo, remoteWorkspaceProfiles, workspaceMode]
-  )
+  const vaultOptions = useMemo<VaultRow[]>(() => {
+    const entries = buildVaultSwitcherEntries({
+      localVaults,
+      remoteProfiles: remoteWorkspaceProfiles,
+      currentVault,
+      workspaceMode,
+      remoteWorkspaceInfo
+    })
+    // The new-window picker lists known local vaults (most-recent first) plus a
+    // "Browse…" fallback to the folder picker. Remote workspaces don't apply.
+    if (vaultAction === 'new-window') return newWindowVaultRows(entries)
+    return entries
+  }, [
+    vaultAction,
+    currentVault,
+    localVaults,
+    remoteWorkspaceInfo,
+    remoteWorkspaceProfiles,
+    workspaceMode
+  ])
 
-  const vaultResults = useMemo<VaultSwitcherEntry[]>(
+  const vaultResults = useMemo<VaultRow[]>(
     () =>
       rankItems(vaultOptions, query, [
         { get: (v) => v.name, weight: 1 },
@@ -186,12 +205,13 @@ export function CommandPalette(): JSX.Element {
     // the currently-applied theme, so no setActive needed here.
   }
 
-  const enterVaultMode = (): void => {
+  const enterVaultMode = (action: 'switch' | 'new-window' = 'switch'): void => {
+    setVaultAction(action)
     setMode('vault')
     setQuery('')
     setActive(0)
     void refreshLocalVaults()
-    if (supportsRemoteWorkspace) void refreshRemoteWorkspaceProfiles()
+    if (action === 'switch' && supportsRemoteWorkspace) void refreshRemoteWorkspaceProfiles()
     inputRef.current?.focus()
   }
 
@@ -227,12 +247,32 @@ export function CommandPalette(): JSX.Element {
       return
     }
     if (cmd.id === 'app.vault.switch') {
-      enterVaultMode()
+      enterVaultMode('switch')
+      return
+    }
+    if (cmd.id === 'app.vault.openWindow') {
+      enterVaultMode('new-window')
       return
     }
     setOpen(false)
     try {
       await cmd.run()
+      // A command that opens a note (or otherwise lands on the editor) should
+      // move DOM focus there — not just set focusedPanel. Closing the palette
+      // otherwise leaves focus on whatever was focused before (e.g. the
+      // explorer), and the editor's own focus-on-`focusedPanel` effect is a
+      // single, no-retry `view.focus()` that races the palette unmount. Mirror
+      // closePalette's focus restore; the retry wins that race. Skipped when the
+      // command opened the Settings modal so we don't pull focus behind it.
+      const s = useStore.getState()
+      if (
+        s.focusedPanel === 'editor' &&
+        !s.settingsOpen &&
+        !s.embedDrawingPaletteOpen &&
+        !s.templatePaletteOpen &&
+        !s.bufferPaletteOpen
+      )
+        focusEditorNormalMode()
     } catch (err) {
       console.error('command failed', cmd.id, err)
     }
@@ -245,14 +285,20 @@ export function CommandPalette(): JSX.Element {
     focusEditorNormalMode()
   }
 
-  const switchVault = async (entry: VaultSwitcherEntry): Promise<void> => {
+  const switchVault = async (entry: VaultRow): Promise<void> => {
     setOpen(false)
+    if (vaultAction === 'new-window') {
+      // Open a known vault directly, or fall back to the folder picker.
+      if (entry.kind === 'browse') await window.zen.openVaultWindow()
+      else if (entry.kind === 'local') await window.zen.openVaultWindow(entry.root)
+      return
+    }
     if (entry.current) return
     if (entry.kind === 'local') {
       await openLocalVault(entry.root)
       return
     }
-    if (entry.id) await connectRemoteWorkspaceProfile(entry.id)
+    if (entry.kind === 'remote' && entry.id) await connectRemoteWorkspaceProfile(entry.id)
   }
 
   const inputPlaceholder =
@@ -260,19 +306,14 @@ export function CommandPalette(): JSX.Element {
       ? 'Type a command…'
       : mode === 'theme'
         ? 'Pick a color theme'
-        : 'Pick a vault'
+        : vaultAction === 'new-window'
+          ? 'Open a vault in a new window…'
+          : 'Pick a vault'
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/45 pt-[12vh] backdrop-blur-sm"
-      onClick={() => closePalette()}
-    >
-      <div
-        className="w-[min(640px,92vw)] overflow-hidden rounded-xl bg-paper-100 shadow-float ring-1 ring-paper-300/70"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {mode !== 'main' && (
-          <div className="flex items-center gap-2 border-b border-paper-300/70 bg-paper-200/40 px-4 py-2 text-[11px] text-ink-500">
+    <Modal size="md" layer="palette" onClose={() => closePalette()} closeOnEsc={false}>
+      {canReturnToCommandList(mode, initialMode) && (
+          <div className="flex items-center gap-2 border-b border-paper-300/70 bg-paper-200/40 px-4 py-2 text-xs text-ink-500">
             <button
               type="button"
               onClick={returnToMain}
@@ -285,7 +326,9 @@ export function CommandPalette(): JSX.Element {
             <span className="uppercase tracking-wide">
               {mode === 'theme'
                 ? 'Theme preview — ↵ to keep, esc to revert'
-                : 'Switch vault — ↵ to open, esc to return'}
+                : vaultAction === 'new-window'
+                  ? 'Open vault in new window — ↵ to open, esc to return'
+                  : 'Switch vault — ↵ to open, esc to return'}
             </span>
           </div>
         )}
@@ -296,11 +339,15 @@ export function CommandPalette(): JSX.Element {
             placeholder={inputPlaceholder}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
+              // While composing (IME), let the input own Enter/Arrows. (#183)
+              if (isImeComposing(e)) return
               if (isPaletteNextKey(e)) {
                 e.preventDefault()
+                e.stopPropagation()
                 setActive((a) => Math.min(resultsLength - 1, a + 1))
               } else if (isPalettePreviousKey(e)) {
                 e.preventDefault()
+                e.stopPropagation()
                 setActive((a) => Math.max(0, a - 1))
               } else if (e.key === 'Enter') {
                 e.preventDefault()
@@ -317,7 +364,7 @@ export function CommandPalette(): JSX.Element {
               } else if (e.key === 'Escape') {
                 e.preventDefault()
                 e.stopPropagation()
-                if (mode !== 'main') {
+                if (canReturnToCommandList(mode, initialMode)) {
                   returnToMain()
                   return
                 }
@@ -343,12 +390,12 @@ export function CommandPalette(): JSX.Element {
             commandResults.map((cmd, i) => (
               <Fragment key={cmd.id}>
                 {recentCommands.length > 0 && i === 0 && (
-                  <div className="px-4 pb-1 pt-2 text-[11px] font-medium uppercase tracking-wide text-ink-400">
+                  <div className="px-4 pb-1 pt-2 text-xs font-medium uppercase tracking-wide text-ink-400">
                     Recent
                   </div>
                 )}
                 {recentCommands.length > 0 && i === recentCommands.length && (
-                  <div className="mt-1 border-t border-paper-300/60 px-4 pb-1 pt-2 text-[11px] font-medium uppercase tracking-wide text-ink-400">
+                  <div className="mt-1 border-t border-paper-300/60 px-4 pb-1 pt-2 text-xs font-medium uppercase tracking-wide text-ink-400">
                     All Commands
                   </div>
                 )}
@@ -361,14 +408,14 @@ export function CommandPalette(): JSX.Element {
                     i === active ? 'bg-paper-200' : 'hover:bg-paper-200/70'
                   ].join(' ')}
                 >
-                  <span className="shrink-0 text-[11px] uppercase tracking-wide text-ink-400">
+                  <span className="shrink-0 text-xs uppercase tracking-wide text-ink-400">
                     {cmd.category}
                   </span>
                   <span className="min-w-0 flex-1 truncate text-sm text-ink-900">
                     {cmd.title}
                   </span>
                   {cmd.shortcut && (
-                    <span className="shrink-0 rounded bg-paper-200/80 px-1.5 py-0.5 text-[11px] text-ink-500">
+                    <span className="shrink-0 rounded bg-paper-200/80 px-1.5 py-0.5 text-xs text-ink-500">
                       {cmd.shortcut}
                     </span>
                   )}
@@ -391,19 +438,19 @@ export function CommandPalette(): JSX.Element {
                     i === active ? 'bg-paper-200' : 'hover:bg-paper-200/70'
                   ].join(' ')}
                 >
-                  <span className="shrink-0 text-[11px] uppercase tracking-wide text-ink-400">
+                  <span className="shrink-0 text-xs uppercase tracking-wide text-ink-400">
                     {familyTitle}
                   </span>
                   <span className="min-w-0 flex-1 truncate text-sm text-ink-900">
                     {theme.label}
                   </span>
-                  <span className="shrink-0 text-[11px] text-ink-400">
+                  <span className="shrink-0 text-xs text-ink-400">
                     {theme.mode}
                   </span>
                   {isOriginal && (
                     <span
                       aria-label="Active before preview"
-                      className="shrink-0 text-[11px] text-accent"
+                      className="shrink-0 text-xs text-accent"
                     >
                       current
                     </span>
@@ -414,7 +461,13 @@ export function CommandPalette(): JSX.Element {
           ) : (
             vaultResults.map((entry, i) => (
               <button
-                key={`${entry.kind}-${entry.kind === 'local' ? entry.root : entry.id ?? entry.location}`}
+                key={`${entry.kind}-${
+                  entry.kind === 'local'
+                    ? entry.root
+                    : entry.kind === 'remote'
+                      ? entry.id ?? entry.location
+                      : 'browse'
+                }`}
                 data-cmd-idx={i}
                 onClick={() => void switchVault(entry)}
                 onMouseMove={() => setActive(i)}
@@ -423,17 +476,17 @@ export function CommandPalette(): JSX.Element {
                   i === active ? 'bg-paper-200' : 'hover:bg-paper-200/70'
                 ].join(' ')}
               >
-                <span className="shrink-0 text-[11px] uppercase tracking-wide text-ink-400">
-                  {entry.kind === 'local' ? 'Local' : 'Remote'}
+                <span className="shrink-0 text-xs uppercase tracking-wide text-ink-400">
+                  {entry.kind === 'local' ? 'Local' : entry.kind === 'remote' ? 'Remote' : 'Browse'}
                 </span>
                 <span className="min-w-0 flex-1 truncate text-sm text-ink-900">
                   {entry.name}
                 </span>
-                <span className="min-w-0 max-w-[45%] truncate text-[11px] text-ink-400">
+                <span className="min-w-0 max-w-[45%] truncate text-xs text-ink-400">
                   {entry.location}
                 </span>
                 {entry.current && (
-                  <span className="shrink-0 text-[11px] text-accent">
+                  <span className="shrink-0 text-xs text-accent">
                     current
                   </span>
                 )}
@@ -441,7 +494,7 @@ export function CommandPalette(): JSX.Element {
             ))
           )}
         </div>
-        <div className="flex items-center justify-end gap-4 border-t border-paper-300/70 bg-paper-100 px-4 py-2 text-[11px] text-ink-500">
+        <div className="flex items-center justify-end gap-4 border-t border-paper-300/70 bg-paper-100 px-4 py-2 text-xs text-ink-500">
           <span>
             <kbd className="rounded bg-paper-200 px-1">↑↓</kbd>{' '}
             <kbd className="rounded bg-paper-200 px-1">Ctrl+N/P</kbd> move
@@ -452,10 +505,13 @@ export function CommandPalette(): JSX.Element {
           </span>
           <span>
             <kbd className="rounded bg-paper-200 px-1">esc</kbd>{' '}
-            {mode === 'main' ? 'close' : mode === 'theme' ? 'revert' : 'back'}
+            {!canReturnToCommandList(mode, initialMode)
+              ? 'close'
+              : mode === 'theme'
+                ? 'revert'
+                : 'back'}
           </span>
         </div>
-      </div>
-    </div>
+    </Modal>
   )
 }
