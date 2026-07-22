@@ -439,20 +439,19 @@ const bridge: ZenBridge = {
   },
   clipboardReadText: (): string => '', // M12 (sync read is not available in the webview)
 
-  // ---- v2.15 contract surface (M17, stubs) -------------------------------
-  // Added by the v2.1.0 -> v2.15.0 re-vendor. Every stub below honors the
-  // degradation contract app-core expects from a platform without the
-  // feature (the web bridge's stub values), so the UI renders and fails
-  // soft until the Rust command lands. See GAP-ANALYSIS.md for the
-  // per-method implementation plan. `convertObsidianExcalidraw` (optional
-  // in the contract) is deliberately omitted: app-core feature-detects it.
+  // ---- v2.15 contract surface (M17) --------------------------------------
+  // Added by the v2.1.0 -> v2.15.0 re-vendor. Methods still awaiting their
+  // Rust backend return the web bridge's degradation values, so the UI
+  // renders and fails soft; the rest invoke their phase-A commands. See
+  // GAP-ANALYSIS.md for the per-method plan. `convertObsidianExcalidraw`
+  // (optional in the contract) is deliberately omitted: app-core
+  // feature-detects it.
 
-  // Workspace state: null/no-op keeps the v2.1.0 localStorage-only behavior;
-  // app-core's newest-wins reconciliation adopts the file transparently once
-  // the Rust side ships.
-  readWorkspaceState: async (): Promise<string | null> => null,
-  writeWorkspaceState: async (): Promise<void> => {},
-  rootContentHiddenByInboxMode: async (): Promise<boolean> => false,
+  // Workspace state (<vault>/.zennotes/workspace.json, raw JSON strings —
+  // the renderer owns the schema and reconciles newest-wins vs localStorage).
+  readWorkspaceState: (): Promise<string | null> => invoke('workspace_state_read'),
+  writeWorkspaceState: (json: string): Promise<void> => invoke('workspace_state_write', { json }),
+  rootContentHiddenByInboxMode: (): Promise<boolean> => invoke('vault_root_content_hidden'),
 
   // Portable config (config.toml): null = "no config file on this platform",
   // which app-core answers with pure-localStorage prefs — exactly the
@@ -475,14 +474,20 @@ const bridge: ZenBridge = {
   createRecordPage: (): Promise<string> => notImplemented('createRecordPage'),
   listDatabases: async (): Promise<DatabaseSummary[]> => [],
 
-  // Excalidraw drawings ("New Drawing" command surfaces the rejection as a
-  // logged error until the Rust command lands).
-  createExcalidraw: (): Promise<NoteMeta> => notImplemented('createExcalidraw'),
+  // Excalidraw drawings (.excalidraw files; editing goes through the
+  // ordinary readNote/writeNote path).
+  createExcalidraw: (folder: NoteFolder, subpath?: string, title?: string): Promise<NoteMeta> =>
+    invoke('vault_create_excalidraw', {
+      folder,
+      subpath: subpath ?? null,
+      title: title ?? null
+    }),
 
-  // Deleted-assets store (.zennotes/deleted-assets/): reads as empty.
-  listDeletedAssets: async (): Promise<DeletedAsset[]> => [],
-  purgeDeletedAsset: async (): Promise<void> => {},
-  emptyDeletedAssets: async (): Promise<void> => {},
+  // Deleted-assets store (.zennotes/deleted-assets/<uuid>/ + sidecar).
+  listDeletedAssets: (): Promise<DeletedAsset[]> => invoke('vault_list_deleted_assets'),
+  purgeDeletedAsset: (undoToken: string): Promise<void> =>
+    invoke('vault_purge_deleted_asset', { undoToken }),
+  emptyDeletedAssets: (): Promise<void> => invoke('vault_empty_deleted_assets'),
 
   // Custom themes + CSS overrides (~/.config/zennotes/{themes,overrides}):
   // empty lists render the Settings empty-state placeholders.
@@ -497,17 +502,15 @@ const bridge: ZenBridge = {
   deleteOverride: async (): Promise<void> => {},
   onOverridesChange: (): (() => void) => () => {},
 
-  // Misc desktop surface. openExternalFile's 'desktop-only' sentinel and
-  // fetchLinkMetadata's {ok:false} are the exact web-bridge degradations
-  // (toast / bare bookmark card).
-  revealFilePath: async (): Promise<void> => {},
-  openExternalFile: async (): Promise<{ ok: boolean; error?: string }> => ({
-    ok: false,
-    error: 'desktop-only'
-  }),
+  // Misc desktop surface. fetchLinkMetadata's {ok:false} stub is the exact
+  // web-bridge degradation (bare bookmark card) until the Rust fetcher lands.
+  revealFilePath: (absPath: string): Promise<void> =>
+    invoke('vault_reveal_file_path', { absPath }),
+  openExternalFile: (href: string): Promise<{ ok: boolean; error?: string }> =>
+    invoke('vault_open_external_file', { href }),
   fetchLinkMetadata: async (url: string): Promise<LinkMetadata> => ({ url, ok: false }),
   openFolderTemporary: async (): Promise<void> => {},
-  toggleDevTools: async (): Promise<void> => {}
+  toggleDevTools: (): Promise<void> => invoke('devtools_toggle')
 }
 
 export function createTauriBridge(): ZenBridge {

@@ -58,7 +58,19 @@ drag shim (`src/bridge/drag-region.ts`) replacing Electron's
 
 Difficulty labels are for the Rust implementation. "Spec" = upstream file.
 
-### A. Quick wins (each ≤ ~1 day, high user value)
+### A. Quick wins — ✅ DONE (2026-07-22)
+
+All items below are implemented and wired (commands in `vault_cmds.rs` /
+`os_cmds.rs`, helpers in the matching `vault/` modules; stubs in
+`tauri-bridge.ts` replaced with invokes). `.excalidraw` files are now
+note-like across listing/meta/rename/move/duplicate (extension preserved;
+JSON body never parsed for metadata; task scans skip drawings). Verified
+end-to-end in the running app: "New Drawing" opens a live Excalidraw canvas
+and `.zennotes/workspace.json` persists the pane layout. `openExternalFile`
+and `revealFilePath`/`toggleDevTools` are code-reviewed + typechecked only.
+
+Remaining phase-2 clusters: B themes/overrides, C databases, D config,
+E stragglers (link metadata, Obsidian import, ephemeral vaults).
 
 | Method | Difficulty | Spec | Notes |
 |---|---|---|---|

@@ -189,6 +189,13 @@ pub struct DeletedAsset {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenExternalFileResult {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportedAsset {
     pub name: String,

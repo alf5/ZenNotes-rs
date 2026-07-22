@@ -253,6 +253,68 @@ pub fn delete_asset(root: &Path, rel: &str) -> Result<DeletedAsset, String> {
     Ok(DeletedAsset { path: rel_norm, name, undo_token, deleted_at: Some(deleted_at) })
 }
 
+/// `vault:list-deleted-assets` — scan `.zennotes/deleted-assets/*` token dirs,
+/// read each `.zn-deleted.json` sidecar, and skip entries whose metadata or
+/// stored file is missing (pre-sidecar deletes). Newest first.
+pub fn list_deleted_assets(root: &Path) -> Vec<DeletedAsset> {
+    let dir = root.join(INTERNAL_VAULT_DIR).join(DELETED_ASSETS_DIR);
+    let Ok(rd) = fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in rd.flatten() {
+        let token = entry.file_name().to_string_lossy().to_string();
+        if uuid::Uuid::parse_str(&token).is_err() || !entry.path().is_dir() {
+            continue;
+        }
+        let token_dir = entry.path();
+        let Ok(raw) = fs::read_to_string(token_dir.join(DELETED_ASSET_META)) else {
+            continue;
+        };
+        let Ok(meta) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        let (Some(path), Some(name)) = (
+            meta.get("path").and_then(serde_json::Value::as_str),
+            meta.get("name").and_then(serde_json::Value::as_str),
+        ) else {
+            continue;
+        };
+        if path.is_empty() || name.is_empty() || !token_dir.join(name).is_file() {
+            continue;
+        }
+        out.push(DeletedAsset {
+            path: path.to_string(),
+            name: name.to_string(),
+            undo_token: token,
+            deleted_at: meta
+                .get("deletedAt")
+                .and_then(serde_json::Value::as_str)
+                .map(String::from),
+        });
+    }
+    out.sort_by(|a, b| b.deleted_at.cmp(&a.deleted_at));
+    out
+}
+
+/// `vault:purge-deleted-asset` — permanently drop one token dir.
+pub fn purge_deleted_asset(root: &Path, undo_token: &str) -> Result<(), String> {
+    if uuid::Uuid::parse_str(undo_token).is_err() {
+        return Err("Deleted asset token is invalid.".into());
+    }
+    let dir = root
+        .join(INTERNAL_VAULT_DIR)
+        .join(DELETED_ASSETS_DIR)
+        .join(undo_token);
+    let _ = fs::remove_dir_all(dir);
+    Ok(())
+}
+
+/// `vault:empty-deleted-assets` — drop the whole store.
+pub fn empty_deleted_assets(root: &Path) {
+    let _ = fs::remove_dir_all(root.join(INTERNAL_VAULT_DIR).join(DELETED_ASSETS_DIR));
+}
+
 pub fn restore_deleted_asset(root: &Path, deleted: &DeletedAsset) -> Result<AssetMeta, String> {
     let target_rel = normalize_vault_relative_path(&deleted.path);
     if target_rel.is_empty() || target_rel.split('/').any(|c| c == INTERNAL_VAULT_DIR) {
@@ -418,6 +480,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         layout::ensure_vault_layout(dir.path()).unwrap();
         dir
+    }
+
+    #[test]
+    fn deleted_assets_list_purge_empty_roundtrip() {
+        let v = vault();
+        fs::write(v.path().join("inbox/pic.png"), b"png").unwrap();
+        let deleted = delete_asset(v.path(), "inbox/pic.png").unwrap();
+        assert!(deleted.deleted_at.is_some());
+
+        let listed = list_deleted_assets(v.path());
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].path, "inbox/pic.png");
+        assert_eq!(listed[0].undo_token, deleted.undo_token);
+
+        purge_deleted_asset(v.path(), &deleted.undo_token).unwrap();
+        assert!(list_deleted_assets(v.path()).is_empty());
+        assert!(purge_deleted_asset(v.path(), "../../etc").is_err());
+
+        fs::write(v.path().join("inbox/pic2.png"), b"png").unwrap();
+        let _ = delete_asset(v.path(), "inbox/pic2.png").unwrap();
+        empty_deleted_assets(v.path());
+        assert!(list_deleted_assets(v.path()).is_empty());
     }
 
     #[test]
