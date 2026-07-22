@@ -31,29 +31,76 @@ static HREF_RE: LazyLock<Regex> =
 static CONTENT_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"(?i)content=["']([^"']*)["']"#).unwrap());
 
+/// Non-public IP ranges the fetcher must never touch. Broader than
+/// upstream's string blocklist (deliberate hardening): loopback, RFC1918,
+/// link-local, CG-NAT (100.64/10), multicast, broadcast, unspecified and
+/// 0.0.0.0/8; IPv6 loopback, unique-local (fc00::/7), link-local
+/// (fe80::/10), multicast, unspecified, and IPv4-mapped (checked as v4).
+fn is_disallowed_ip(ip: &std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                || v4.is_unspecified()
+                || o[0] == 0 // 0.0.0.0/8
+                || (o[0] == 100 && (64..=127).contains(&o[1])) // CG-NAT 100.64/10
+        }
+        IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_disallowed_ip(&IpAddr::V4(mapped));
+            }
+            let s = v6.segments();
+            v6.is_loopback()
+                || v6.is_multicast()
+                || v6.is_unspecified()
+                || (s[0] & 0xfe00) == 0xfc00 // unique-local fc00::/7
+                || (s[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
+        }
+    }
+}
+
+/// Hostname-level refusals for names that need no DNS to condemn. IP-literal
+/// hosts arrive here already normalized by the `url` crate (so decimal/octal
+/// forms like `https://2130706433/` become "127.0.0.1"); DNS names that
+/// *resolve* to private addresses are caught by the connect-time resolver.
 fn is_blocked_host(hostname: &str) -> bool {
     let h = hostname.to_lowercase();
     let h = h.trim_start_matches('[').trim_end_matches(']');
     if h == "localhost" || h.ends_with(".localhost") {
         return true;
     }
-    if h == "::1" || h == "0.0.0.0" {
-        return true;
-    }
-    // IPv4 private / loopback / link-local ranges.
-    if h.starts_with("127.") || h.starts_with("10.") || h.starts_with("192.168.") || h.starts_with("169.254.") {
-        return true;
-    }
-    if let Some(rest) = h.strip_prefix("172.") {
-        if let Some((octet, _)) = rest.split_once('.') {
-            if let Ok(n) = octet.parse::<u8>() {
-                if (16..=31).contains(&n) {
-                    return true;
-                }
-            }
-        }
+    if let Ok(ip) = h.parse::<std::net::IpAddr>() {
+        return is_disallowed_ip(&ip);
     }
     false
+}
+
+/// Connect-time DNS guard: every connection the agent makes — the initial
+/// request AND each redirect hop — resolves through this, and is refused if
+/// ANY resolved address is non-public. Validating the addresses actually
+/// used to connect closes the DNS-rebinding TOCTOU a pre-flight check
+/// would leave open.
+fn resolve_public_only(netloc: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
+    use std::net::ToSocketAddrs;
+    let addrs: Vec<std::net::SocketAddr> = netloc.to_socket_addrs()?.collect();
+    if addrs.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no addresses resolved",
+        ));
+    }
+    if addrs.iter().any(|a| is_disallowed_ip(&a.ip())) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "refusing to connect to a non-public address",
+        ));
+    }
+    Ok(addrs)
 }
 
 fn decode_entities(value: &str) -> String {
@@ -166,6 +213,7 @@ pub fn fetch_link_metadata(raw_url: &str) -> LinkMetadata {
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_millis(TIMEOUT_MS))
         .user_agent(USER_AGENT)
+        .resolver(resolve_public_only)
         .build();
     let Ok(response) = agent
         .get(parsed.as_str())
@@ -201,12 +249,39 @@ mod tests {
 
     #[test]
     fn blocked_hosts() {
-        for h in ["localhost", "api.localhost", "127.0.0.1", "10.1.2.3", "192.168.0.10", "169.254.1.1", "172.16.0.1", "172.31.9.9", "0.0.0.0", "::1"] {
+        for h in [
+            "localhost", "api.localhost", "127.0.0.1", "127.8.9.1", "10.1.2.3", "192.168.0.10",
+            "169.254.1.1", "172.16.0.1", "172.31.9.9", "0.0.0.0", "0.1.2.3", "100.64.0.1",
+            "100.127.255.254", "::1", "[::1]", "fc00::1", "fdab::7", "fe80::1",
+            "::ffff:127.0.0.1", "255.255.255.255", "224.0.0.1",
+        ] {
             assert!(is_blocked_host(h), "{h} should be blocked");
         }
-        for h in ["example.com", "172.15.0.1", "172.32.0.1", "8.8.8.8"] {
+        for h in ["example.com", "172.15.0.1", "172.32.0.1", "8.8.8.8", "100.128.0.1", "2606:4700::1111"] {
             assert!(!is_blocked_host(h), "{h} should be allowed");
         }
+    }
+
+    #[test]
+    fn url_crate_normalizes_ip_encodings() {
+        // Decimal/octal/hex IPv4 forms normalize to dotted-quad per the URL
+        // spec, so encoding tricks can't sneak past the host check.
+        for raw in ["https://2130706433/x", "https://0x7f000001/x", "https://017700000001/x"] {
+            let parsed = Url::parse(raw).unwrap();
+            assert!(
+                is_blocked_host(parsed.host_str().unwrap()),
+                "{raw} normalized to {:?} should be blocked",
+                parsed.host_str()
+            );
+        }
+    }
+
+    #[test]
+    fn resolver_refuses_private_addresses() {
+        assert!(resolve_public_only("127.0.0.1:443").is_err());
+        assert!(resolve_public_only("[::1]:443").is_err());
+        assert!(resolve_public_only("localhost:443").is_err());
+        assert!(resolve_public_only("8.8.8.8:443").is_ok());
     }
 
     #[test]
