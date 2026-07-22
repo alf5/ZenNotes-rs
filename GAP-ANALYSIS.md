@@ -186,7 +186,20 @@ Spec: `apps/desktop/src/main/app-config.ts` (746 lines); schema in
   `unlink` ignored, parse errors keep last-good config.
 - `getConfigPath`/`revealConfigFile`: trivial (`ensureConfigFile` then reveal).
 
-### E. Remaining misc
+### E. Remaining misc — ✅ DONE (2026-07-22)
+
+All three implemented: `fetchLinkMetadata` (Rust `link_metadata.rs`, ureq +
+upstream guard parity, live-verified), `convertObsidianExcalidraw`
+(shared-domain extraction in the webview + `vault_write_drawing`), and
+`openFolderTemporary` (ephemeral sessions with `.zennotes` write gates,
+adapted to the single-active-vault backend — per-window vaults remain the
+one architectural gap vs upstream). **The v2.15 bridge surface is now
+complete**; the only intentional stub is `listDatabases` (dead code
+upstream). Remaining nice-to-haves: theme-dir first-run seeding,
+`zen-theme://` asset protocol, per-window vault sessions. Original notes
+below.
+
+#### (original plan)
 
 | Method | Difficulty | Notes |
 |---|---|---|
