@@ -14,6 +14,7 @@ pkgbase = zennotes-rs
 	depends = webkit2gtk-4.1
 	depends = gtk3
 	depends = hicolor-icon-theme
+	options = !lto
 	source = zennotes-rs::git+https://github.com/alf5/ZenNotes-rs.git#tag=v2.15.0
 	source = zennotes-rs.desktop
 	sha256sums = SKIP
