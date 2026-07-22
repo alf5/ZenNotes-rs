@@ -154,7 +154,10 @@ fn walk_assets(root: &Path, dir: &Path, ancestors: &mut HashSet<PathBuf>, out: &
             ancestors.remove(&real);
             continue;
         }
-        if !ft.is_file() || name.to_lowercase().ends_with(".md") {
+        let lower = name.to_lowercase();
+        // `.excalidraw` drawings are note-like (listed by list_notes), not
+        // loose assets — mirror upstream vault.ts:3807.
+        if !ft.is_file() || lower.ends_with(".md") || lower.ends_with(".excalidraw") {
             continue;
         }
         let Ok(md) = fs::metadata(&full) else { continue };

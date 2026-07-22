@@ -1,7 +1,19 @@
-import { renderZenNotesApp } from '@zennotes/app-core/main'
 import { createTauriBridge } from './bridge/tauri-bridge'
 import { installDragRegionShim } from './bridge/drag-region'
-import { renderExportNoteWindow } from './export-window'
+import { initPortableConfig } from './bridge/portable-config'
+
+// Load config.toml before app-core evaluates: its store reads getConfigSync()
+// synchronously while building the initial state, so the snapshot must exist
+// by then. Electron pre-loads it in main before the window opens; here one
+// awaited invoke does the same job — which is exactly why app-core is
+// imported DYNAMICALLY below (a static import would evaluate the store
+// before this top-level await resolves). A failed load falls back to
+// pure-localStorage prefs rather than blocking boot.
+try {
+  await initPortableConfig()
+} catch (error) {
+  console.error('[zennotes-rs-renderer] config bootstrap failed', error)
+}
 
 // Install the Tauri-backed bridge. installZenBridge also assigns it to
 // window.zen, so components that still read window.zen directly (e.g. the
@@ -51,8 +63,10 @@ try {
   const params = new URLSearchParams(window.location.search)
   const exportNotePath = params.get('exportNote')
   if (exportNotePath) {
+    const { renderExportNoteWindow } = await import('./export-window')
     renderExportNoteWindow(root, exportNotePath)
   } else {
+    const { renderZenNotesApp } = await import('@zennotes/app-core/main')
     renderZenNotesApp(root)
   }
 } catch (error) {
