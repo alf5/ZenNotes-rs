@@ -26,22 +26,26 @@ import {
   tooltips
 } from '@codemirror/view'
 import { vim } from '@replit/codemirror-vim'
-import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
+import { history, historyKeymap, indentWithTab } from '@codemirror/commands'
+import { vimAwareDefaultKeymap, vimAwareMarkdownKeymap } from '../lib/cm-vim-default-keymap'
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
 import { resolveCodeLanguage } from '../lib/cm-code-languages'
 import { markdownListIndentPlugin } from '../lib/cm-markdown-list-indent'
 import { syntaxHighlighting, HighlightStyle, defaultHighlightStyle } from '@codemirror/language'
 import { tags as t } from '@lezer/highlight'
 import { searchKeymap } from '@codemirror/search'
-import { autocompletion, completionKeymap } from '@codemirror/autocomplete'
+import { autocompletion } from '@codemirror/autocomplete'
 import { useStore } from '../store'
 import type { LineNumberMode } from '../store'
 import { livePreviewPlugin } from '../lib/cm-live-preview'
 import { headingFolding } from '../lib/cm-heading-fold'
 import { slashCommandSource, slashCommandRender } from '../lib/cm-slash-commands'
+import { calloutTypeSource } from '../lib/cm-callouts'
 import { dateShortcutSource } from '../lib/cm-date-shortcuts'
-import { wikilinkSource } from '../lib/cm-wikilinks'
-import { classifyLocalAssetHref, type LocalAssetKind } from '../lib/local-assets'
+import { wikilinkSource, wikilinkHeadingSource } from '../lib/cm-wikilinks'
+import { hashtagSource } from '../lib/cm-hashtag-complete'
+import { completionKeymapForEditor, completionNavKeymap } from '../lib/cm-completion-nav'
+import { classifyLocalAssetHref, hrefFragment, type LocalAssetKind } from '../lib/local-assets'
 import { LazyPreview as Preview } from './LazyPreview'
 import { CloseIcon, PanelLeftIcon, PinIcon } from './icons'
 
@@ -59,6 +63,7 @@ const paperHighlight = HighlightStyle.define([
   { tag: t.heading6, class: 'tok-heading6' },
   { tag: t.emphasis, class: 'tok-emphasis' },
   { tag: t.strong, class: 'tok-strong' },
+  { tag: t.strikethrough, class: 'tok-strikethrough' },
   { tag: t.link, class: 'tok-link' },
   { tag: t.url, class: 'tok-url' },
   { tag: t.monospace, class: 'tok-monospace' },
@@ -115,9 +120,14 @@ export function PinnedReferencePane(): JSX.Element | null {
   const globalRefKind = useStore((s) => s.pinnedRefKind)
   const noteRefs = useStore((s) => s.noteRefs)
   const selectedPath = useStore((s) => s.selectedPath)
+  const globalRefFragment = useStore((s) => s.pinnedRefFragment)
   // Per-note pin (if any) overrides the global one.
   const noteRef = selectedPath ? noteRefs[selectedPath] : null
   const pinnedRefPath = noteRef?.path ?? globalRefPath
+  // Tie the fragment to the same pin as the path: a per-note pin without a
+  // fragment must not inherit the global pin's fragment (which belongs to a
+  // different asset), or its PDF would open at the wrong page.
+  const pinnedRefFragment = noteRef ? noteRef.fragment ?? null : globalRefFragment
   const pinnedRefKind = noteRef?.kind ?? globalRefKind
   const isPerNotePin = !!noteRef
   const pinnedRefVisible = useStore((s) => s.pinnedRefVisible)
@@ -184,7 +194,8 @@ export function PinnedReferencePane(): JSX.Element | null {
           drawSelection(),
           highlightActiveLine(),
           EditorView.lineWrapping,
-          markdown({ base: markdownLanguage, codeLanguages: resolveCodeLanguage, addKeymap: true }),
+          markdown({ base: markdownLanguage, codeLanguages: resolveCodeLanguage, addKeymap: false }),
+          vimAwareMarkdownKeymap,
           markdownListIndentPlugin,
           headingFolding(),
           syntaxHighlighting(paperHighlight),
@@ -193,14 +204,27 @@ export function PinnedReferencePane(): JSX.Element | null {
           lineNumbersCompartment.of(lineNumberExtension(s0.lineNumberMode)),
           tooltips({ parent: document.body }),
           autocompletion({
-            override: [slashCommandSource, dateShortcutSource, wikilinkSource],
+            // See EditorPane: skip the stock keymap so mac `Alt-`` / `Alt-i`
+            // don't swallow those characters on AltGr-style layouts (#429).
+            defaultKeymap: false,
+            override: [
+              slashCommandSource,
+              calloutTypeSource,
+              dateShortcutSource,
+              hashtagSource,
+              wikilinkSource,
+              wikilinkHeadingSource
+            ],
             addToOptions: [{ render: slashCommandRender.render, position: 0 }],
             icons: false,
-            optionClass: (completion) =>
-              (completion as { _kind?: string })._kind === 'wikilink'
-                ? 'wikilink-cmd-option'
-                : 'slash-cmd-option'
+            optionClass: (completion) => {
+              const kind = (completion as { _kind?: string })._kind
+              if (kind === 'wikilink') return 'wikilink-cmd-option'
+              if (kind === 'callout') return 'callout-cmd-option'
+              return 'slash-cmd-option'
+            }
           }),
+          completionNavKeymap,
           keymap.of([
             {
               key: 'Mod-f',
@@ -212,10 +236,10 @@ export function PinnedReferencePane(): JSX.Element | null {
               }
             },
             indentWithTab,
-            ...defaultKeymap,
+            ...vimAwareDefaultKeymap(s0.vimMode),
             ...historyKeymap,
             ...searchKeymap,
-            ...completionKeymap
+            ...completionKeymapForEditor
           ]),
           EditorView.updateListener.of((upd) => {
             if (!upd.docChanged) return
@@ -330,6 +354,7 @@ export function PinnedReferencePane(): JSX.Element | null {
     pinnedRefPath && isAsset && vaultRoot
       ? window.zen.resolveVaultAssetUrl(vaultRoot, pinnedRefPath)
       : null
+  const assetUrlWithFragment = assetUrl ? assetUrl + (pinnedRefFragment ?? '') : null
   const assetKind: LocalAssetKind | null =
     pinnedRefPath && isAsset ? classifyLocalAssetHref(pinnedRefPath) ?? 'file' : null
   const useAssetIframe = assetKind === 'pdf' || assetKind === 'file'
@@ -342,15 +367,15 @@ export function PinnedReferencePane(): JSX.Element | null {
   // user cycles through many PDFs.
   const [seenAssetUrls, setSeenAssetUrls] = useState<string[]>([])
   useEffect(() => {
-    if (!assetUrl || !useAssetIframe) return
+    if (!assetUrlWithFragment || !useAssetIframe) return
     setSeenAssetUrls((prev) => {
-      if (prev[prev.length - 1] === assetUrl) return prev
-      const without = prev.filter((u) => u !== assetUrl)
-      const next = [...without, assetUrl]
+      if (prev[prev.length - 1] === assetUrlWithFragment) return prev
+      const without = prev.filter((u) => u !== assetUrlWithFragment)
+      const next = [...without, assetUrlWithFragment]
       while (next.length > 16) next.shift()
       return next
     })
-  }, [assetUrl, useAssetIframe])
+  }, [assetUrlWithFragment, useAssetIframe])
 
   const showEditor = pinnedRefMode === 'edit'
   const hidden = !pinnedRefPath || !pinnedRefVisible
@@ -409,7 +434,7 @@ export function PinnedReferencePane(): JSX.Element | null {
             </button>
             <div className="flex shrink-0 items-center gap-1">
               {!isAsset && (
-                <div className="flex items-center gap-1 rounded-md bg-paper-200/70 p-0.5 text-[11px]">
+                <div className="flex items-center gap-1 rounded-md bg-paper-200/70 p-0.5 text-xs">
                   {(['edit', 'preview'] as const).map((m) => (
                     <button
                       key={m}
@@ -509,7 +534,7 @@ export function PinnedReferencePane(): JSX.Element | null {
           <div
             className="absolute inset-0"
             style={{
-              display: isAsset && assetUrl && useAssetIframe ? 'block' : 'none'
+              display: isAsset && assetUrlWithFragment && useAssetIframe ? 'block' : 'none'
             }}
           >
             {seenAssetUrls.map((url) => (
@@ -519,7 +544,7 @@ export function PinnedReferencePane(): JSX.Element | null {
                 title={url}
                 className="absolute inset-0 h-full w-full border-0 bg-paper-50"
                 style={{
-                  display: url === assetUrl ? 'block' : 'none'
+                  display: url === assetUrlWithFragment ? 'block' : 'none'
                 }}
               />
             ))}

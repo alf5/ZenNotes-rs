@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { getKeymapDefinition, shortcutBindingFromEvent, sequenceTokenFromEvent } from './keymaps'
+import {
+  findKeymapConflict,
+  getDefaultKeymapBinding,
+  getKeymapDefinition,
+  shortcutBindingFromEvent,
+  sequenceTokenFromEvent
+} from './keymaps'
 
 interface FakeEventInit {
   key: string
@@ -156,6 +162,31 @@ describe('leader keymap definitions', () => {
       defaultBinding: 'v'
     })
   })
+
+  it('binds hint mode to leader h so bare f stays a Vim motion (#107)', () => {
+    expect(getKeymapDefinition('vim.hintMode')).toMatchObject({
+      scope: 'leader',
+      title: 'Leader: hint mode',
+      defaultBinding: 'h'
+    })
+  })
+
+  it('keeps search notes on leader f', () => {
+    expect(getKeymapDefinition('vim.leaderSearchNotes')).toMatchObject({
+      title: 'Leader: search notes',
+      defaultBinding: 'f'
+    })
+  })
+
+  it('nests vault text search under the leader s search group (s then t)', () => {
+    expect(getKeymapDefinition('vim.leaderSearchGroup')).toMatchObject({
+      scope: 'leader',
+      defaultBinding: 's'
+    })
+    expect(getKeymapDefinition('vim.leaderSearchVaultText')).toMatchObject({
+      defaultBinding: 't'
+    })
+  })
 })
 
 describe('buffer keymap definitions', () => {
@@ -168,5 +199,57 @@ describe('buffer keymap definitions', () => {
       title: 'Next buffer',
       defaultBinding: '] b'
     })
+  })
+
+  it('defaults Vim tab navigation to gt and gT', () => {
+    expect(getKeymapDefinition('vim.tabNext')).toMatchObject({
+      title: 'Next tab',
+      defaultBinding: 'g t'
+    })
+    expect(getKeymapDefinition('vim.tabPrevious')).toMatchObject({
+      title: 'Previous tab',
+      defaultBinding: 'g T'
+    })
+  })
+})
+
+describe('findKeymapConflict (#298 — global shortcut conflicts)', () => {
+  it('returns null when a global shortcut binding is unique', () => {
+    expect(findKeymapConflict({}, 'global.commandPalette', 'Mod+Shift+K')).toBeNull()
+  })
+
+  it('detects a binding already owned by another global shortcut', () => {
+    // Mod+P is global.searchNotes by default; assigning it to the palette clashes.
+    expect(findKeymapConflict({}, 'global.commandPalette', 'Mod+P')?.id).toBe(
+      'global.searchNotes'
+    )
+  })
+
+  it('honors overrides on the other side of the conflict', () => {
+    // Move searchNotes off Mod+P and it is free for the palette again.
+    const overrides = { 'global.searchNotes': 'Mod+Alt+P' }
+    expect(findKeymapConflict(overrides, 'global.commandPalette', 'Mod+P')).toBeNull()
+  })
+
+  it('detects conflicts created by an override', () => {
+    const overrides = { 'global.toggleSidebar': 'Mod+2' }
+    // Mod+2 is global.toggleConnections by default.
+    expect(findKeymapConflict(overrides, 'global.toggleSidebar', 'Mod+2')?.id).toBe(
+      'global.toggleConnections'
+    )
+  })
+
+  it('never flags an action against itself', () => {
+    const own = getDefaultKeymapBinding('global.searchNotes')
+    expect(findKeymapConflict({}, 'global.searchNotes', own)).toBeNull()
+  })
+
+  it('does not flag sequence groups that reuse keys by design', () => {
+    // nav.moveRight and nav.openSideItem both default to "l" (lists scope),
+    // disambiguated at runtime — not a conflict.
+    expect(findKeymapConflict({}, 'nav.openSideItem', 'l')).toBeNull()
+    expect(findKeymapConflict({}, 'nav.moveRight', 'l')).toBeNull()
+    // Even a genuine cross-action duplicate in a sequence group is allowed.
+    expect(findKeymapConflict({}, 'nav.delete', 'x')).toBeNull()
   })
 })

@@ -10,6 +10,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useStore } from '../store'
 import { rankItems } from '../lib/fuzzy-score'
 import { isPaletteNextKey, isPalettePreviousKey } from '../lib/palette-nav'
+import { isImeComposing } from '../lib/ime'
 import { parseOutline, type OutlineItem } from '../lib/outline'
 import { isHelpTabPath } from '@shared/help'
 import { isArchiveTabPath } from '@shared/archive'
@@ -18,6 +19,7 @@ import { isTasksTabPath } from '@shared/tasks'
 import { isTrashTabPath } from '@shared/trash'
 import { isQuickNotesTabPath } from '@shared/quick-notes'
 import { focusEditorNormalMode } from '../lib/editor-focus'
+import { Modal } from './ui/Modal'
 
 function isVirtualPath(path: string | null): boolean {
   if (!path) return true
@@ -78,26 +80,23 @@ export function OutlinePalette(): JSX.Element {
   }
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/45 pt-[15vh] backdrop-blur-sm"
-      onClick={close}
-    >
-      <div
-        className="w-[min(560px,90vw)] overflow-hidden rounded-xl bg-paper-100 shadow-float ring-1 ring-paper-300/70"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="border-b border-paper-300/70 px-4 py-3">
+    <Modal size="md" layer="palette" onClose={close} closeOnEsc={false}>
+      <div className="border-b border-paper-300/70 px-4 py-3">
           <input
             ref={inputRef}
             value={query}
             placeholder="Jump to heading…"
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
+              // While composing (IME), let the input own Enter/Arrows. (#183)
+              if (isImeComposing(e)) return
               if (isPaletteNextKey(e)) {
                 e.preventDefault()
+                e.stopPropagation()
                 setActive((a) => Math.min(results.length - 1, a + 1))
               } else if (isPalettePreviousKey(e)) {
                 e.preventDefault()
+                e.stopPropagation()
                 setActive((a) => Math.max(0, a - 1))
               } else if (e.key === 'Enter') {
                 e.preventDefault()
@@ -134,16 +133,16 @@ export function OutlinePalette(): JSX.Element {
                 ].join(' ')}
                 style={{ paddingLeft: `${16 + (item.level - 1) * 14}px` }}
               >
-                <span className="shrink-0 text-[11px] uppercase tracking-wide text-ink-400">
+                <span className="shrink-0 text-xs uppercase tracking-wide text-ink-400">
                   H{item.level}
                 </span>
                 <span className="min-w-0 flex-1 truncate text-sm text-ink-900">{item.text}</span>
-                <span className="shrink-0 text-[11px] text-ink-400">L{item.line}</span>
+                <span className="shrink-0 text-xs text-ink-400">L{item.line}</span>
               </button>
             ))
           )}
         </div>
-        <div className="flex items-center justify-end gap-4 border-t border-paper-300/70 bg-paper-100 px-4 py-2 text-[11px] text-ink-500">
+        <div className="flex items-center justify-end gap-4 border-t border-paper-300/70 bg-paper-100 px-4 py-2 text-xs text-ink-500">
           <span>
             <kbd className="rounded bg-paper-200 px-1">↑↓</kbd>{' '}
             <kbd className="rounded bg-paper-200 px-1">Ctrl+N/P</kbd> move
@@ -155,7 +154,6 @@ export function OutlinePalette(): JSX.Element {
             <kbd className="rounded bg-paper-200 px-1">esc</kbd> close
           </span>
         </div>
-      </div>
-    </div>
+    </Modal>
   )
 }

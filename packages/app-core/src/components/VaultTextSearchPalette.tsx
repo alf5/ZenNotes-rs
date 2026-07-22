@@ -7,8 +7,10 @@ import type {
 import { useStore } from '../store'
 import { resolveSystemFolderLabels } from '../lib/system-folder-labels'
 import { isPaletteNextKey, isPalettePreviousKey } from '../lib/palette-nav'
+import { isImeComposing } from '../lib/ime'
 import { recordRendererPerf } from '../lib/perf'
 import { focusEditorNormalMode } from '../lib/editor-focus'
+import { Modal } from './ui/Modal'
 
 type ResolvedVaultTextSearchBackend = 'builtin' | 'ripgrep' | 'fzf'
 
@@ -372,29 +374,26 @@ export function VaultTextSearchPalette(): JSX.Element {
   }
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/45 pt-[12vh] backdrop-blur-sm"
-      onClick={close}
-    >
-      <div
-        className="w-[min(760px,92vw)] overflow-hidden rounded-xl bg-paper-100 shadow-float ring-1 ring-paper-300/70"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="border-b border-paper-300/70 px-4 py-3">
+    <Modal size="lg" layer="palette" onClose={close} closeOnEsc={false}>
+      <div className="border-b border-paper-300/70 px-4 py-3">
           <input
             ref={inputRef}
             value={query}
             placeholder="Search text across the vault…"
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
+              // While composing (IME), let the input own Enter/Arrows. (#183)
+              if (isImeComposing(e)) return
               if (isPaletteNextKey(e)) {
                 e.preventDefault()
+                e.stopPropagation()
                 if (results.length === 0) return
                 setActive((value) => Math.min(results.length - 1, value + 1))
                 return
               }
               if (isPalettePreviousKey(e)) {
                 e.preventDefault()
+                e.stopPropagation()
                 if (results.length === 0) return
                 setActive((value) => Math.max(0, value - 1))
                 return
@@ -413,9 +412,9 @@ export function VaultTextSearchPalette(): JSX.Element {
             }}
             className="w-full bg-transparent text-base text-ink-900 outline-none placeholder:text-ink-400"
           />
-          <div className="mt-2 flex items-center gap-2 text-[11px] uppercase tracking-[0.24em] text-ink-400">
+          <div className="mt-2 flex items-center gap-2 text-xs uppercase tracking-[0.24em] text-ink-400">
             <span>Vault text search</span>
-            <span className="rounded-full border border-paper-300/70 bg-paper-100/80 px-2 py-0.5 text-[10px] tracking-[0.16em] text-ink-500">
+            <span className="rounded-full border border-paper-300/70 bg-paper-100/80 px-2 py-0.5 text-2xs tracking-[0.16em] text-ink-500">
               {resolvedBackendLabel}
             </span>
           </div>
@@ -450,26 +449,26 @@ export function VaultTextSearchPalette(): JSX.Element {
                     <span className="truncate text-sm font-medium text-ink-900">
                       {renderHighlightedText(match.title, query)}
                     </span>
-                    <span className="shrink-0 text-[10px] uppercase tracking-[0.18em] text-ink-400">
+                    <span className="shrink-0 text-2xs uppercase tracking-[0.18em] text-ink-400">
                       {match.folder}
                     </span>
-                    <span className="shrink-0 text-[11px] text-ink-500">L{match.lineNumber}</span>
+                    <span className="shrink-0 text-xs text-ink-500">L{match.lineNumber}</span>
                   </div>
-                  <div className="truncate text-[11px] text-ink-500">
+                  <div className="truncate text-xs text-ink-500">
                     {renderHighlightedText(match.path, query)}
                   </div>
                   <div className="truncate text-sm text-ink-700">
                     {renderHighlightedText(match.lineText, query)}
                   </div>
                 </div>
-                <span className="shrink-0 rounded-full bg-paper-200 px-2 py-1 text-[11px] text-ink-600">
+                <span className="shrink-0 rounded-full bg-paper-200 px-2 py-1 text-xs text-ink-600">
                   Open
                 </span>
               </button>
             ))
           )}
         </div>
-        <div className="flex items-center justify-end gap-4 border-t border-paper-300/70 bg-paper-100 px-4 py-2 text-[11px] text-ink-500">
+        <div className="flex items-center justify-end gap-4 border-t border-paper-300/70 bg-paper-100 px-4 py-2 text-xs text-ink-500">
           <span>
             <kbd className="rounded bg-paper-200 px-1">↑↓</kbd>{' '}
             <kbd className="rounded bg-paper-200 px-1">Ctrl+N/P</kbd> move
@@ -481,7 +480,6 @@ export function VaultTextSearchPalette(): JSX.Element {
             <kbd className="rounded bg-paper-200 px-1">esc</kbd> close
           </span>
         </div>
-      </div>
-    </div>
+    </Modal>
   )
 }

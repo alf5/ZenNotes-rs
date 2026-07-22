@@ -21,8 +21,8 @@ import {
   EditorState,
   StateEffect,
   StateField,
-  type Extension,
-  type Transaction
+  Transaction,
+  type Extension
 } from '@codemirror/state'
 import {
   Decoration,
@@ -39,17 +39,34 @@ import {
 import { Vim, getCM, vim } from '@replit/codemirror-vim'
 import type { AssetMeta, ImportedAsset, NoteComment, NoteFolder } from '@shared/ipc'
 import {
-  defaultKeymap,
   history,
   historyKeymap,
   indentWithTab,
+  moveLineDown,
+  moveLineUp,
   redo,
   selectAll,
   undo
 } from '@codemirror/commands'
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
+import { isImeComposing } from '../lib/ime'
 import { resolveCodeLanguage } from '../lib/cm-code-languages'
 import { markdownListIndentPlugin } from '../lib/cm-markdown-list-indent'
+import { forwardOnCheckboxArrow } from '../lib/cm-forward-task'
+import { completionKeymapForEditor, completionNavKeymap } from '../lib/cm-completion-nav'
+import { vimAwareDefaultKeymap, vimAwareMarkdownKeymap } from '../lib/cm-vim-default-keymap'
+import { toCodeMirrorKey, vimHalfPageKeymap } from '../lib/vim-half-page-keymap'
+import { scrollOff } from '../lib/cm-scrolloff'
+import { offerCreateNoteFromLink } from '../lib/create-note-from-link'
+import { externalFileLink, openExternalFileLink } from '../lib/external-file-link'
+import { setHoveredLink } from '../lib/hovered-link'
+import {
+  setYankToClipboardEnabled,
+  setPasteFromClipboardEnabled,
+  vimClipboardPasteExtension,
+} from '../lib/cm-vim-clipboard'
+import { wireYankHighlight, yankHighlightExtension } from '../lib/cm-yank-highlight'
+import { frontmatterStyle } from '../lib/cm-frontmatter'
 import { codeBlockFontPlugin } from '../lib/cm-code-block-font'
 import {
   orderedListRenumber,
@@ -59,32 +76,69 @@ import { syntaxHighlighting, HighlightStyle, defaultHighlightStyle } from '@code
 import { headingFolding } from '../lib/cm-heading-fold'
 import { tags as t } from '@lezer/highlight'
 import { searchKeymap } from '@codemirror/search'
-import { autocompletion, completionKeymap } from '@codemirror/autocomplete'
+import { autocompletion } from '@codemirror/autocomplete'
 import { useStore } from '../store'
 import type { LineNumberMode } from '../store'
 import type { PaneEdge, PaneLeaf } from '../lib/pane-layout'
 import { findLeaf, inferPaneDropEdge } from '../lib/pane-layout'
 import { livePreviewPlugin } from '../lib/cm-live-preview'
+import { codeBlockFlairPlugin } from '../lib/cm-code-block-flair'
+import { tablePlugin, tableVimEntry } from '../lib/cm-table'
+import { wysiwygBlocksPlugin } from '../lib/cm-wysiwyg-blocks'
+import { hashtagExtension } from '../lib/cm-hashtags'
+import { hashtagSource } from '../lib/cm-hashtag-complete'
+import { applyHighlight, HIGHLIGHT_COLORS, highlightExtension } from '../lib/cm-highlight'
+import { wikilinkRenderExtension } from '../lib/cm-wikilink-render'
+import { mathRenderExtension } from '../lib/cm-math-render'
+import { embedRenderExtension } from '../lib/cm-embed-render'
+import { urlPasteMenuExtension } from '../lib/cm-url-paste-menu'
+import { mathBlockArrowKeymap } from '../lib/cm-math-nav'
 import { slashCommandSource, slashCommandRender } from '../lib/cm-slash-commands'
+import { calloutTypeSource } from '../lib/cm-callouts'
 import { dateShortcutSource } from '../lib/cm-date-shortcuts'
-import { wikilinkSource } from '../lib/cm-wikilinks'
+import { wikilinkSource, wikilinkHeadingSource, atNoteSource } from '../lib/cm-wikilinks'
+import { resolveWikilinkTarget, wikilinkHeadingAnchor } from '../lib/wikilinks'
+import { openDatabaseFromWikilink, openWikilinkHeading } from '../lib/wikilink-navigation'
+import {
+  externalLinkUrl,
+  extractLinkAtCursor,
+  markdownLinkAt,
+  resolveInternalNoteHref
+} from '../lib/internal-links'
+import { setBlockType, toggleWrap, wrapLink } from '../lib/cm-format'
+import { EditorSelectionToolbar } from './EditorSelectionToolbar'
+import { appMarkdownSnippetExtension } from '../lib/markdown-snippets-config'
 import { LazyDiagramTabView, LazyPreview as Preview } from './LazyPreview'
 import { ConnectionsPanel } from './ConnectionsPanel'
 import { OutlinePanel } from './OutlinePanel'
 import { CalendarPanel } from './CalendarPanel'
 import { CommentsPanel, type CommentDraft } from './CommentsPanel'
 import { ContextMenu, type ContextMenuItem } from './ContextMenu'
+import { promptApp } from '../lib/prompt-requests'
 import { TasksView } from './TasksView'
+import { DatabaseView } from './DatabaseView'
+import { LazyExcalidrawView } from './LazyExcalidrawView'
+import { ObsidianExcalidrawPrompt } from './ObsidianExcalidrawPrompt'
+import { HomeView } from './HomeView'
+import {
+  isExcalidrawPath,
+  isObsidianExcalidrawMarkdown,
+  isObsidianExcalidrawPath
+} from '@shared/excalidraw'
 import { TagView } from './TagView'
 import { HelpView } from './HelpView'
 import { ArchiveView } from './ArchiveView'
 import { TrashView } from './TrashView'
+import { AssetsView } from './AssetsView'
 import { QuickNotesView } from './QuickNotesView'
+import type { MathRenderer } from '@shared/app-config'
 import { isTasksTabPath } from '@shared/tasks'
+import { isDatabaseTabPath, databaseTitleFromTab, databaseTabPath, isDatabaseCsvPath } from '@shared/databases'
 import { isTagsTabPath } from '@shared/tags'
 import { isHelpTabPath } from '@shared/help'
 import { isArchiveTabPath } from '@shared/archive'
 import { isTrashTabPath } from '@shared/trash'
+import { isAssetsViewTabPath } from '@shared/assets-view'
 import { isQuickNotesTabPath } from '@shared/quick-notes'
 import {
   hasZenAssetItem,
@@ -106,25 +160,34 @@ import {
   type EditorHydrationState
 } from '../lib/editor-hydration'
 import { recordRendererPerf } from '../lib/perf'
-import { rememberTabScroll, recallTabScroll } from '../lib/tab-scroll-memory'
+import {
+  rememberTabScroll,
+  recallTabScroll,
+  type TabScrollPosition
+} from '../lib/tab-scroll-memory'
 import { parseOutline } from '../lib/outline'
 import {
   findRenderedHeadingForOutlineLine,
   nextOutlinePreviewSyncLockUntil,
   outlineHeadingTextOffset,
   previewScrollTopForHeading,
+  scrollTopForElementRelativeTop,
   scrollTopForScrollRatio,
   shouldSyncPreviewFromEditorViewport
 } from '../lib/preview-outline-jump'
 import {
   ArchiveIcon,
+  ArrowLeftIcon,
+  ArrowRightIcon,
   ArrowUpRightIcon,
   CalendarIcon,
   CheckSquareIcon,
   CloseIcon,
+  PaperclipIcon,
   DocumentIcon,
   FileDownIcon,
   FeedbackIcon,
+  HighlighterIcon,
   ListTreeIcon,
   PanelLeftIcon,
   PanelRightIcon,
@@ -157,7 +220,6 @@ import {
 } from '../lib/editor-paste-images'
 import {
   paneModeForPath,
-  paneModesWithPathMode,
   ZEN_SET_PANE_MODE_EVENT,
   type PaneMode,
   type PaneModesByPath
@@ -175,7 +237,13 @@ import {
   isDiagramTabPath
 } from '../lib/diagram-tabs'
 import { classifyLocalAssetHref } from '../lib/local-assets'
-import { getKeymapDisplay, type KeymapId } from '../lib/keymaps'
+import {
+  formatKeyToken,
+  getKeymapBinding,
+  getKeymapDisplay,
+  type KeymapId,
+  type KeymapOverrides
+} from '../lib/keymaps'
 import { isTabStripOverflowing } from '../lib/tab-strip-overflow'
 
 const MODE_OPTIONS: Array<{
@@ -198,11 +266,68 @@ const LARGE_DOC_LIVE_PREVIEW_DEFER_CHARS = 120_000
 const LARGE_DOC_LIVE_PREVIEW_DEFER_MS = 3_000
 const LARGE_DOC_EDITOR_HYDRATE_DELAY_MS = 180
 
+// The editor keymap depends on Vim mode: in Vim mode the macOS emacs-style
+// chords are stripped from `defaultKeymap` so Vim's `<C-d>` & co. work (see
+// cm-vim-default-keymap). Built behind a compartment and reconfigured on Vim
+// toggle or keymap-override changes.
+function buildEditorKeymap(vimMode: boolean, overrides: KeymapOverrides): Extension {
+  return keymap.of([
+    {
+      key: 'Mod-f',
+      run: () => {
+        const state = useStore.getState()
+        if (state.vimMode) return false
+        state.setSearchOpen(true)
+        return true
+      }
+    },
+    // Move the current line (or selection) up/down — reorders the markdown so
+    // it persists in the file. Listed before defaultKeymap so the configured
+    // binding wins; works in Vim normal/insert and non-Vim alike.
+    {
+      key: toCodeMirrorKey(getKeymapBinding(overrides, 'editor.moveLineUp')),
+      run: moveLineUp
+    },
+    {
+      key: toCodeMirrorKey(getKeymapBinding(overrides, 'editor.moveLineDown')),
+      run: moveLineDown
+    },
+    // Inline-format shortcuts (bold/italic/code/strike/highlight/math/link). In
+    // Vim mode VimNav owns these (its window handler also resolves the Ctrl+I
+    // jumplist collision on Linux); in non-Vim mode that handler is disabled, so
+    // bind them here — the mode-agnostic keymap — so they work in both modes as
+    // the docs promise. Matches the Quick Capture window's bindings. (#416)
+    ...(vimMode
+      ? []
+      : [
+          { key: 'Mod-b', run: (v: EditorView): boolean => toggleWrap(v, '**') },
+          { key: 'Mod-i', run: (v: EditorView): boolean => toggleWrap(v, '*') },
+          { key: 'Mod-e', run: (v: EditorView): boolean => toggleWrap(v, '`') },
+          { key: 'Shift-Mod-s', run: (v: EditorView): boolean => toggleWrap(v, '~~') },
+          { key: 'Shift-Mod-h', run: (v: EditorView): boolean => toggleWrap(v, '==') },
+          { key: 'Shift-Mod-m', run: (v: EditorView): boolean => toggleWrap(v, '$') },
+          { key: 'Mod-k', run: (v: EditorView): boolean => wrapLink(v) }
+        ]),
+    ...vimHalfPageKeymap(vimMode, overrides),
+    // Step arrows into rendered $$…$$ blocks (insert mode + non-Vim); Vim's
+    // j/k get the same treatment inside the display-line motion.
+    ...mathBlockArrowKeymap,
+    indentWithTab,
+    ...vimAwareDefaultKeymap(vimMode),
+    ...historyKeymap,
+    ...searchKeymap,
+    ...completionKeymapForEditor
+  ])
+}
+
 function markdownEditingExtensions(): Extension[] {
   return [
-    markdown({ base: markdownLanguage, codeLanguages: resolveCodeLanguage, addKeymap: true }),
+    markdown({ base: markdownLanguage, codeLanguages: resolveCodeLanguage, addKeymap: false }),
+    vimAwareMarkdownKeymap,
     markdownListIndentPlugin,
+    frontmatterStyle,
     orderedListRenumber,
+    forwardOnCheckboxArrow,
     headingFolding(),
     codeBlockFontPlugin
   ]
@@ -215,6 +340,40 @@ function markdownSyntaxHighlightExtensions(): Extension[] {
   ]
 }
 
+/**
+ * Live-preview ("WYSIWYG") rendering bundle: the base marker-hiding/inline
+ * plugin plus block-level renderers — tables, blockquote bars, list
+ * bullets, horizontal rules, fenced-code cards, hashtag chips, and
+ * wikilink rendering. Loaded by the livePreview compartment (gated by the
+ * `livePreview` setting); cleared to `[]` when off.
+ *
+ * Ported from the WYSIWYG work in PR #185 (author: songgnqing). That PR's
+ * frontmatter-properties panel is intentionally excluded — it depends on
+ * the PR's breaking database restructure.
+ */
+function wysiwygExtensions(renderTables: boolean, mathRenderer: MathRenderer): Extension[] {
+  return [
+    livePreviewPlugin,
+    codeBlockFlairPlugin,
+    // Table widgets are gated on a setting — off keeps tables as plain editable
+    // markdown for full keyboard/Vim editing (#232).
+    ...(renderTables ? [tablePlugin, tableVimEntry] : []),
+    wysiwygBlocksPlugin,
+    ...hashtagExtension,
+    ...highlightExtension,
+    ...wikilinkRenderExtension,
+    mathRenderExtension(mathRenderer),
+    embedRenderExtension,
+    urlPasteMenuExtension
+  ]
+}
+
+/** Current live-preview extension set, pulling both gating prefs from the store. */
+function currentWysiwygExtensions(): Extension[] {
+  const s = useStore.getState()
+  return wysiwygExtensions(s.renderTablesInLivePreview, s.mathRenderer)
+}
+
 const paperHighlight = HighlightStyle.define([
   // Markdown-level tokens
   { tag: t.heading1, class: 'tok-heading1' },
@@ -225,6 +384,7 @@ const paperHighlight = HighlightStyle.define([
   { tag: t.heading6, class: 'tok-heading6' },
   { tag: t.emphasis, class: 'tok-emphasis' },
   { tag: t.strong, class: 'tok-strong' },
+  { tag: t.strikethrough, class: 'tok-strikethrough' },
   { tag: t.link, class: 'tok-link' },
   { tag: t.url, class: 'tok-url' },
   { tag: t.monospace, class: 'tok-monospace' },
@@ -450,8 +610,10 @@ function lineNumberExtension(mode: LineNumberMode): Extension {
 
 type TabDropIndicator = { path: string; position: 'before' | 'after' } | null
 type SelectionCommentAction = { x: number; y: number } | null
-const COMMENT_ACTION_WIDTH = 34
-const COMMENT_ACTION_HEIGHT = 34
+// The selection bubble toolbar is centered over the selection (translateX -50%),
+// so we only need a rough half-width to keep it on screen.
+const SELECTION_TOOLBAR_HALF_WIDTH = 140
+const SELECTION_TOOLBAR_HEIGHT = 112
 
 function clampViewport(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value))
@@ -473,43 +635,32 @@ function selectionEdgeCoords(view: EditorView): {
   )
 }
 
-function selectionEndCoords(view: EditorView): {
-  right: number
-  top: number
-  bottom: number
-} | null {
-  const sel = view.state.selection.main
-  return (
-    view.coordsAtPos(sel.to, -1) ??
-    view.coordsAtPos(sel.to, 1) ??
-    selectionEdgeCoords(view)
-  )
-}
-
 function getSelectionCommentAction(view: EditorView): SelectionCommentAction {
   const sel = view.state.selection.main
   const active = document.activeElement
-  const hasFocus = view.hasFocus || (active instanceof Node && view.dom.contains(active))
+  // Keep the toolbar up while the editor holds the selection OR while the user
+  // has tabbed into the toolbar itself (keyboard navigation).
+  const inToolbar = active instanceof Element && active.closest('[data-selection-toolbar]') != null
+  const hasFocus =
+    view.hasFocus || (active instanceof Node && view.dom.contains(active)) || inToolbar
   if (sel.empty || !hasFocus) return null
-  const coords = selectionEndCoords(view)
-  if (!coords) return null
-  const editorRect = view.scrollDOM.getBoundingClientRect()
-  const desiredX = coords.right + 10
-  const maxX = Math.min(
-    editorRect.right - COMMENT_ACTION_WIDTH - 12,
-    window.innerWidth - COMMENT_ACTION_WIDTH - 8
-  )
+  const start = view.coordsAtPos(sel.from, 1)
+  const end = view.coordsAtPos(sel.to, -1)
+  if (!start || !end) return null
+  // Center the bubble horizontally over the selection; sit it just above the
+  // top of the selection, flipping below when there isn't room.
+  const centerX = (Math.min(start.left, end.left) + Math.max(start.right, end.right)) / 2
+  const gap = 8
+  const above = Math.min(start.top, end.top) - SELECTION_TOOLBAR_HEIGHT - gap
+  const below = Math.max(start.bottom, end.bottom) + gap
+  const y = above < 8 ? below : above
   return {
     x: clampViewport(
-      desiredX,
-      editorRect.left + 8,
-      Math.max(editorRect.left + 8, maxX)
+      centerX,
+      SELECTION_TOOLBAR_HALF_WIDTH + 8,
+      window.innerWidth - SELECTION_TOOLBAR_HALF_WIDTH - 8
     ),
-    y: clampViewport(
-      coords.top + (coords.bottom - coords.top) / 2 - COMMENT_ACTION_HEIGHT / 2,
-      8,
-      window.innerHeight - COMMENT_ACTION_HEIGHT - 8
-    )
+    y: clampViewport(y, 8, window.innerHeight - SELECTION_TOOLBAR_HEIGHT - 8)
   }
 }
 
@@ -524,6 +675,54 @@ function getEditorContextMenuPosition(view: EditorView): { x: number; y: number 
     y: clampViewport((coords?.bottom ?? editorRect.top + 32) + 6, 8, window.innerHeight - 12)
   }
 }
+
+/**
+ * Follow a link target extracted from the editor (Cmd/Ctrl-click): an external
+ * URL opens in the browser; a Markdown link to another note or a `[[wikilink]]`
+ * navigates, scrolling to its `#heading` when present. Returns false when the
+ * target resolves to nothing (so the click falls through to normal behavior). (#201)
+ */
+function followEditorLink(target: string): boolean {
+  const external = externalLinkUrl(target)
+  if (external) {
+    window.open(external, '_blank')
+    return true
+  }
+  const state = useStore.getState()
+  const focusSoon = (): void => {
+    state.setFocusedPanel('editor')
+    requestAnimationFrame(() => useStore.getState().editorViewRef?.focus())
+  }
+  const internal = resolveInternalNoteHref(state.selectedPath, target, state.notes)
+  if (internal) {
+    if (internal.heading) void openWikilinkHeading(internal.path, internal.heading).then(focusSoon)
+    else void state.selectNote(internal.path).then(focusSoon)
+    return true
+  }
+  const wikilink = resolveWikilinkTarget(state.notes, target)
+  if (wikilink) {
+    const heading = wikilinkHeadingAnchor(target)
+    if (heading) void openWikilinkHeading(wikilink.path, heading).then(focusSoon)
+    else void state.selectNote(wikilink.path).then(focusSoon)
+    return true
+  }
+  if (openDatabaseFromWikilink(target)) {
+    focusSoon()
+    return true
+  }
+  // A link to a file outside the vault (`~/…`, `file://…`, an absolute path):
+  // open it with the OS default app instead of treating it as a note. (#424)
+  if (externalFileLink(target)) {
+    void openExternalFileLink(target)
+    return true
+  }
+  // Dead link — don't leave it a silent dead end. Offer to create the note (with
+  // a confirmation), matching the `gd` follow-link path. (Discord: dead links)
+  void offerCreateNoteFromLink(target)
+  return true
+}
+
+const EMPTY_PANE_MODES: PaneModesByPath = {}
 
 export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
   const paneId = pane.id
@@ -579,22 +778,41 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
   const pendingJumpLocation = useStore((s) => s.pendingJumpLocation)
   const clearPendingJumpLocation = useStore((s) => s.clearPendingJumpLocation)
   const vimMode = useStore((s) => s.vimMode)
+  const vimYankToClipboard = useStore((s) => s.vimYankToClipboard)
   const livePreview = useStore((s) => s.livePreview)
+  const renderTablesInLivePreview = useStore((s) => s.renderTablesInLivePreview)
+  const mathRenderer = useStore((s) => s.mathRenderer)
   const editorFontSize = useStore((s) => s.editorFontSize)
   const editorLineHeight = useStore((s) => s.editorLineHeight)
+  const editorScrollOff = useStore((s) => s.editorScrollOff)
   const lineNumberMode = useStore((s) => s.lineNumberMode)
   const textFont = useStore((s) => s.textFont)
   const tabsEnabled = useStore((s) => s.tabsEnabled)
   const wrapTabs = useStore((s) => s.wrapTabs)
+  const jumpToPreviousNote = useStore((s) => s.jumpToPreviousNote)
+  const jumpToNextNote = useStore((s) => s.jumpToNextNote)
+  const canGoBack = useStore((s) => s.noteBackstack.length > 0)
+  const canGoForward = useStore((s) => s.noteForwardstack.length > 0)
+  const tabNavOverrides = useStore((s) => s.keymapOverrides)
   const workspaceMode = useStore((s) => s.workspaceMode)
   const wordWrap = useStore((s) => s.wordWrap)
+  const cursorBlink = useStore((s) => s.cursorBlink)
   const systemFolderLabels = useStore((s) => s.systemFolderLabels)
   const folderLabels = resolveSystemFolderLabels(systemFolderLabels)
   const vaultSettings = useStore((s) => s.vaultSettings)
   const autoCalendarPanel = useStore((s) => s.autoCalendarPanel)
 
-  const [modesByPath, setModesByPath] = useState<PaneModesByPath>({})
-  const mode = paneModeForPath(modesByPath, activeTab)
+  const modesByPath = useStore((s) => s.paneModes[paneId]) ?? EMPTY_PANE_MODES
+  const setPaneModeForPath = useStore((s) => s.setPaneModeForPath)
+  const keepViewModeAcrossNotes = useStore((s) => s.keepViewModeAcrossNotes)
+  const paneStickyMode = useStore((s) => s.paneStickyModes[paneId])
+  // With "keep view mode across notes" on, every note in this pane follows the
+  // pane's current mode instead of its own remembered one (falls back to the
+  // per-note mode until a mode has been picked in this pane).
+  const mode =
+    keepViewModeAcrossNotes && paneStickyMode
+      ? paneStickyMode
+      : paneModeForPath(modesByPath, activeTab)
   const [connectionsOpen, setConnectionsOpen] = useState(false)
   const [outlineOpen, setOutlineOpen] = useState(false)
   const [activeOutlineLine, setActiveOutlineLine] = useState<number | null>(null)
@@ -609,8 +827,13 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
   )
   const calendarAvailable = useMemo(() => {
     const s = normalizeVaultSettings(vaultSettings)
-    return s.dailyNotes.enabled || s.weeklyNotes.enabled
-  }, [vaultSettings])
+    if (!(s.dailyNotes.enabled || s.weeklyNotes.enabled)) return false
+    // The calendar navigates daily/weekly notes — it's meaningless in the Quick
+    // Notes scratchpad, and showing it there makes a quick note look like a
+    // calendar-linked daily note (a real source of confusion). Hide it there.
+    if (content?.folder === 'quick') return false
+    return true
+  }, [vaultSettings, content?.folder])
   const [commentDraft, setCommentDraft] = useState<CommentDraft | null>(null)
   const [selectionCommentAction, setSelectionCommentAction] =
     useState<SelectionCommentAction>(null)
@@ -624,6 +847,10 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     x: number
     y: number
     hasSelection: boolean
+    // Snapshot the selection at open time; the menu steals focus, so the live
+    // selection can't be trusted when an item (e.g. Highlight) runs. (#416)
+    selFrom: number
+    selTo: number
   } | null>(null)
   const [editorHydration, setEditorHydration] = useState<EditorHydrationState | null>(null)
   const [assetDropActive, setAssetDropActive] = useState(false)
@@ -648,11 +875,17 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
   const lastProgrammaticPreviewTopRef = useRef<number | null>(null)
   const lastRestoredPathRef = useRef<string | null>(null)
   const vimCompartmentRef = useRef<Compartment | null>(null)
+  const editorKeymapCompartmentRef = useRef<Compartment | null>(null)
   const markdownCompartmentRef = useRef<Compartment | null>(null)
   const markdownSyntaxCompartmentRef = useRef<Compartment | null>(null)
   const livePreviewCompartmentRef = useRef<Compartment | null>(null)
   const lineNumbersCompartmentRef = useRef<Compartment | null>(null)
   const wordWrapCompartmentRef = useRef<Compartment | null>(null)
+  const scrolloffCompartmentRef = useRef<Compartment | null>(null)
+  const drawSelectionCompartmentRef = useRef<Compartment | null>(null)
+  // history() lives in a compartment so we can reset undo history on a note
+  // switch — otherwise Cmd+Z crosses notes and overwrites the current one (#247).
+  const historyCompartmentRef = useRef<Compartment | null>(null)
   const ignoreEditorScrollRef = useRef(false)
   const ignorePreviewScrollRef = useRef(false)
   const pendingOutlineJumpLineRef = useRef<number | null>(null)
@@ -702,11 +935,30 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     setEditorMenu({
       x: pos.x,
       y: pos.y,
-      hasSelection: !sel.empty
+      hasSelection: !sel.empty,
+      selFrom: sel.from,
+      selTo: sel.to
     })
     view.focus()
     return true
   }, [paneId, setActivePane, setFocusedPanel])
+
+  const rememberCurrentTabScroll = useCallback((path = viewPathRef.current): void => {
+    if (!path) return
+    const prev = recallTabScroll(path)
+    const view = viewRef.current
+    const previewEl = previewScrollRef.current
+    const next: TabScrollPosition = {
+      editor: view?.scrollDOM.scrollTop ?? prev?.editor ?? 0,
+      preview: previewEl?.scrollTop ?? prev?.preview ?? 0
+    }
+    const selection = view && viewPathRef.current === path ? view.state.selection.main : null
+    if (selection) {
+      next.editorSelectionAnchor = selection.anchor
+      next.editorSelectionHead = selection.head
+    }
+    rememberTabScroll(path, next)
+  }, [])
 
   const toggleConnectionsPanel = useCallback(() => {
     setConnectionsOpen((open) => {
@@ -732,6 +984,16 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     return () => window.removeEventListener('zen:toggle-connections', handler)
   }, [isActive, toggleConnectionsPanel])
 
+  // Mirror `set clipboard=unnamed`: when enabled, Vim yank/delete/change also
+  // copy to the system clipboard, and `p` / `P` paste from it. The patch is
+  // global, so any pane can drive it. Also install the highlight-on-yank
+  // handler (idempotent). (#144, #357)
+  useEffect(() => {
+    setYankToClipboardEnabled(vimYankToClipboard)
+    setPasteFromClipboardEnabled(vimYankToClipboard)
+    wireYankHighlight()
+  }, [vimYankToClipboard])
+
   const toggleOutlinePanel = useCallback(() => {
     setOutlineOpen((open) => !open)
   }, [])
@@ -746,7 +1008,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
 
 
   const applyPaneMode = useCallback((nextMode: PaneMode) => {
-    setModesByPath((current) => paneModesWithPathMode(current, activeTab, nextMode))
+    setPaneModeForPath(paneId, activeTab, nextMode)
     setActivePane(paneId)
     setFocusedPanel('editor')
     requestAnimationFrame(() => {
@@ -756,7 +1018,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
       }
       focusEditorNormalMode()
     })
-  }, [activeTab, paneId, setActivePane, setFocusedPanel])
+  }, [activeTab, paneId, setPaneModeForPath, setActivePane, setFocusedPanel])
 
   // `zen:toggle-outline` — routed only to the active pane, same pattern
   // as the connections toggle.
@@ -787,6 +1049,26 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     window.addEventListener('zen:toggle-calendar', handler)
     return () => window.removeEventListener('zen:toggle-calendar', handler)
   }, [isActive, toggleCalendarPanel])
+
+  // `zen:close-right-panel` — Esc (when a right panel is focused) or the
+  // "Close right panel" command dismiss whichever right-hand panel is open in
+  // the active pane and return focus to the editor.
+  useEffect(() => {
+    if (!isActive) return
+    const handler = (): void => {
+      setConnectionsOpen(false)
+      setOutlineOpen(false)
+      setCommentsOpen(false)
+      setCalendarOpen(false)
+      setConnectionPreview(null)
+      const panel = useStore.getState().focusedPanel
+      if (panel === 'connections' || panel === 'comments' || panel === 'hoverpreview') {
+        setFocusedPanel('editor')
+      }
+    }
+    window.addEventListener('zen:close-right-panel', handler)
+    return () => window.removeEventListener('zen:close-right-panel', handler)
+  }, [isActive, setConnectionPreview, setFocusedPanel])
 
   // Auto-show the calendar when this pane lands on a daily/weekly note. On other
   // notes we leave it as-is (Obsidian-style persistence) so it stays open while
@@ -856,13 +1138,46 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     const previewEl = previewScrollRef.current
     if (!view || !editorEl || !previewEl) return false
 
-    const nextTop = scrollTopForScrollRatio(
-      editorEl.scrollTop,
-      editorEl.scrollHeight,
-      editorEl.clientHeight,
-      previewEl.scrollHeight,
-      previewEl.clientHeight
-    )
+    // Line-based sync: map the source line at the top of the editor viewport to
+    // the rendered preview block stamped with that line (data-source-line), so
+    // the same content sits at the top of both panes even when their heights
+    // differ. Falls back to a scroll ratio when no line data is available.
+    const ratioTop = (): number =>
+      scrollTopForScrollRatio(
+        editorEl.scrollTop,
+        editorEl.scrollHeight,
+        editorEl.clientHeight,
+        previewEl.scrollHeight,
+        previewEl.clientHeight
+      )
+
+    const blocks = previewEl.querySelectorAll<HTMLElement>('[data-source-line]')
+    let nextTop: number
+    if (blocks.length === 0) {
+      nextTop = ratioTop()
+    } else {
+      const topLine = view.state.doc.lineAt(view.lineBlockAtHeight(editorEl.scrollTop).from).number
+      let anchor: HTMLElement | null = null
+      let anchorLine = 0
+      for (const el of blocks) {
+        const ln = Number(el.dataset.sourceLine)
+        if (Number.isFinite(ln) && ln <= topLine) {
+          anchor = el
+          anchorLine = ln
+        } else if (ln > topLine) {
+          break
+        }
+      }
+      if (!anchor) {
+        nextTop = 0
+      } else {
+        // Shift the anchor by how far the editor has scrolled past its start
+        // line, so a mid-block scroll position carries over too.
+        const anchorEditorTop = view.lineBlockAt(view.state.doc.line(anchorLine).from).top
+        nextTop = scrollTopForElementRelativeTop(previewEl, anchor, anchorEditorTop - editorEl.scrollTop)
+      }
+    }
+
     if (Math.abs(previewEl.scrollTop - nextTop) < 1) return true
     ignorePreviewScrollRef.current = true
     previewEl.scrollTop = nextTop
@@ -1026,6 +1341,17 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     setFocusedPanel('editor')
     return draft
   }, [content, paneId, setActiveCommentId, setActivePane, setFocusedPanel])
+
+  // `zen:add-comment` — keyboard shortcut (⌥⌘M) / palette command to start a
+  // comment on the current selection (or line) in the active pane, no mouse.
+  useEffect(() => {
+    if (!isActive) return
+    const handler = (): void => {
+      captureCommentDraft()
+    }
+    window.addEventListener('zen:add-comment', handler)
+    return () => window.removeEventListener('zen:add-comment', handler)
+  }, [isActive, captureCommentDraft])
 
   const jumpToComment = useCallback((comment: NoteComment) => {
     const view = viewRef.current
@@ -1229,6 +1555,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
         richMarkdownDeferredRef.current = false
         setSelectionCommentAction(null)
         const existingView = viewRef.current
+        rememberCurrentTabScroll()
         if (
           existingView &&
           useStore.getState().editorViewRef === existingView
@@ -1241,17 +1568,25 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
       }
       if (viewRef.current) return
       const vimCompartment = new Compartment()
+      const editorKeymapCompartment = new Compartment()
       const markdownCompartment = new Compartment()
       const markdownSyntaxCompartment = new Compartment()
       const livePreviewCompartment = new Compartment()
       const lineNumbersCompartment = new Compartment()
       const wordWrapCompartment = new Compartment()
+      const scrolloffCompartment = new Compartment()
+      const drawSelectionCompartment = new Compartment()
+      const historyCompartment = new Compartment()
       vimCompartmentRef.current = vimCompartment
+      editorKeymapCompartmentRef.current = editorKeymapCompartment
       markdownCompartmentRef.current = markdownCompartment
       markdownSyntaxCompartmentRef.current = markdownSyntaxCompartment
       livePreviewCompartmentRef.current = livePreviewCompartment
       lineNumbersCompartmentRef.current = lineNumbersCompartment
       wordWrapCompartmentRef.current = wordWrapCompartment
+      scrolloffCompartmentRef.current = scrolloffCompartment
+      drawSelectionCompartmentRef.current = drawSelectionCompartment
+      historyCompartmentRef.current = historyCompartment
       const s0 = useStore.getState()
       const initialPath = findLeaf(s0.paneLayout, paneId)?.activeTab ?? null
       const initialContent = initialPath ? s0.noteContents[initialPath] ?? null : null
@@ -1263,50 +1598,88 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
       const state = EditorState.create({
         doc: initialBody,
         extensions: [
+          appMarkdownSnippetExtension(),
           vimCompartment.of(s0.vimMode ? vim() : []),
-          history(),
-          drawSelection(),
+          historyCompartment.of(history()),
+          drawSelectionCompartment.of(
+            drawSelection({ cursorBlinkRate: s0.cursorBlink ? 1200 : 0 })
+          ),
           highlightActiveLine(),
           taskJumpHighlightField,
+          yankHighlightExtension,
+          vimClipboardPasteExtension,
           commentDecorationField,
           wordWrapCompartment.of(s0.wordWrap ? EditorView.lineWrapping : []),
+          scrolloffCompartment.of(scrollOff(s0.editorScrollOff)),
           markdownCompartment.of(deferInitialRichMarkdown ? [] : markdownEditingExtensions()),
           markdownSyntaxCompartment.of(
             deferInitialRichMarkdown ? [] : markdownSyntaxHighlightExtensions()
           ),
           livePreviewCompartment.of(
-            s0.livePreview && !deferInitialRichMarkdown ? livePreviewPlugin : []
+            s0.livePreview && !deferInitialRichMarkdown
+              ? wysiwygExtensions(s0.renderTablesInLivePreview, s0.mathRenderer)
+              : []
           ),
           lineNumbersCompartment.of(lineNumberExtension(s0.lineNumberMode)),
           tooltips({ parent: document.body }),
           autocompletion({
-            override: [slashCommandSource, dateShortcutSource, wikilinkSource],
+            // Don't install @codemirror/autocomplete's stock keymap — it binds
+            // mac-only `Alt-`` / `Alt-i` to completion and swallows the char
+            // those combos type on AltGr-style layouts (#429). Our filtered
+            // `completionKeymapForEditor` (in buildEditorKeymap) covers the rest.
+            defaultKeymap: false,
+            override: [
+              slashCommandSource,
+              calloutTypeSource,
+              dateShortcutSource,
+              atNoteSource,
+              hashtagSource,
+              wikilinkSource,
+              wikilinkHeadingSource
+            ],
             addToOptions: [{ render: slashCommandRender.render, position: 0 }],
             icons: false,
-            optionClass: (completion) =>
-              (completion as { _kind?: string })._kind === 'wikilink'
-                ? 'wikilink-cmd-option'
-                : 'slash-cmd-option'
+            optionClass: (completion) => {
+              const kind = (completion as { _kind?: string })._kind
+              if (kind === 'wikilink') return 'wikilink-cmd-option'
+              if (kind === 'callout') return 'callout-cmd-option'
+              return 'slash-cmd-option'
+            }
           }),
-          keymap.of([
-            {
-              key: 'Mod-f',
-              run: () => {
-                const state = useStore.getState()
-                if (state.vimMode) return false
-                state.setSearchOpen(true)
-                return true
-              }
-            },
-            indentWithTab,
-            ...defaultKeymap,
-            ...historyKeymap,
-            ...searchKeymap,
-            ...completionKeymap
-          ]),
+          completionNavKeymap,
+          editorKeymapCompartment.of(buildEditorKeymap(s0.vimMode, s0.keymapOverrides)),
           EditorView.domEventHandlers({
-            mousedown: (event) => {
+            mousedown: (event, view) => {
               const target = event.target as HTMLElement | null
+              // Follow a Markdown link in live preview. A plain click follows a
+              // *rendered* link (the cursor is outside it, so its `(url)` syntax
+              // is hidden) — mirroring how `[[wikilinks]]` behave; clicking a
+              // link the cursor is already inside edits it instead. Cmd/Ctrl-click
+              // always follows (and reaches wikilinks too), gated to the primary
+              // button so a macOS Ctrl+click right-click doesn't trigger it. (#201)
+              if (event.button === 0 && !event.altKey && !event.shiftKey) {
+                const pos = view.posAtCoords({ x: event.clientX, y: event.clientY })
+                if (pos != null) {
+                  const doc = view.state.doc.toString()
+                  if (event.metaKey || event.ctrlKey) {
+                    const linkTarget = extractLinkAtCursor(doc, pos)
+                    if (linkTarget && followEditorLink(linkTarget)) {
+                      event.preventDefault()
+                      return true
+                    }
+                  } else {
+                    const link = markdownLinkAt(doc, pos)
+                    if (link) {
+                      const sel = view.state.selection.main
+                      const rendered = sel.to < link.from || sel.from > link.to
+                      if (rendered && followEditorLink(link.href)) {
+                        event.preventDefault()
+                        return true
+                      }
+                    }
+                  }
+                }
+              }
               const marker = target?.closest<HTMLElement>('.cm-comment-marker[data-comment-id]')
               const commentId = marker?.dataset.commentId
               if (!commentId) return false
@@ -1319,6 +1692,23 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
               setCommentDraft(null)
               setSelectionCommentAction(null)
               return true
+            },
+            // Show the link under the pointer in the status bar (browser-style).
+            // Scoped to the pointer's line so this stays cheap on every move,
+            // even in a large note (no full-document toString).
+            mousemove: (event, view) => {
+              const pos = view.posAtCoords({ x: event.clientX, y: event.clientY })
+              if (pos == null) {
+                setHoveredLink(null)
+                return false
+              }
+              const line = view.state.doc.lineAt(pos)
+              setHoveredLink(extractLinkAtCursor(line.text, pos - line.from))
+              return false
+            },
+            mouseleave: () => {
+              setHoveredLink(null)
+              return false
             },
             click: (event) => {
               const target = event.target as HTMLElement | null
@@ -1414,7 +1804,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
             markdownSyntaxCompartment.reconfigure(markdownSyntaxHighlightExtensions())
           ]
           if (useStore.getState().livePreview) {
-            restoreEffects.push(livePreviewCompartment.reconfigure(livePreviewPlugin))
+            restoreEffects.push(livePreviewCompartment.reconfigure(currentWysiwygExtensions()))
           }
           view.dispatch({ effects: restoreEffects })
         }, LARGE_DOC_LIVE_PREVIEW_DEFER_MS)
@@ -1423,6 +1813,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     [
       openEditorContextMenu,
       paneId,
+      rememberCurrentTabScroll,
       schedulePreviewSyncFromEditorViewport,
       scheduleSelectionCommentAction,
       setActiveCommentId,
@@ -1506,16 +1897,33 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
         markdownSyntaxCompartment.reconfigure(markdownSyntaxHighlightExtensions())
       )
       if (livePreviewEnabled && livePreviewCompartment) {
-        effects.push(livePreviewCompartment.reconfigure(livePreviewPlugin))
+        effects.push(livePreviewCompartment.reconfigure(currentWysiwygExtensions()))
       }
     }
     const dispatchStartedAt = performance.now()
     view.dispatch({
       changes: { from: 0, to: view.state.doc.length, insert: nextBody },
-      annotations: [programmatic.of(true), skipOrderedListRenumber.of(true)],
+      annotations: [
+        programmatic.of(true),
+        skipOrderedListRenumber.of(true),
+        // A programmatic swap (tab switch / external file sync) must never be
+        // undoable — otherwise Cmd+Z reverts the editor to the other document
+        // and the resulting change saves it over the current note (#247).
+        Transaction.addToHistory.of(false)
+      ],
       effects: effects.length > 0 ? effects : undefined,
       selection: pathChanged ? { anchor: 0 } : { anchor: clampedAnchor, head: clampedHead }
     })
+    if (pathChanged) {
+      // Switching notes: also drop the previous note's undo history so undo
+      // can't cross the boundary at all. There's no "clear history" command, so
+      // remove the history field then re-add it empty. (#247)
+      const historyCompartment = historyCompartmentRef.current
+      if (historyCompartment) {
+        view.dispatch({ effects: historyCompartment.reconfigure([]) })
+        view.dispatch({ effects: historyCompartment.reconfigure(history()) })
+      }
+    }
     if (pathChanged && pendingJumpLocation?.path !== nextPath) {
       // Clear scroll on a genuine tab switch; the activation effect below
       // restores a remembered position afterward when there is one.
@@ -1553,7 +1961,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
           markdownSyntaxCompartment.reconfigure(markdownSyntaxHighlightExtensions())
         ]
         if (useStore.getState().livePreview && livePreviewCompartment) {
-          restoreEffects.push(livePreviewCompartment.reconfigure(livePreviewPlugin))
+          restoreEffects.push(livePreviewCompartment.reconfigure(currentWysiwygExtensions()))
         }
         view.dispatch({
           effects: restoreEffects
@@ -1583,8 +1991,11 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     const view = viewRef.current
     const comp = vimCompartmentRef.current
     if (!view || !comp) return
-    view.dispatch({ effects: comp.reconfigure(vimMode ? vim() : []) })
-  }, [vimMode])
+    const effects = [comp.reconfigure(vimMode ? vim() : [])]
+    const keymapComp = editorKeymapCompartmentRef.current
+    if (keymapComp) effects.push(keymapComp.reconfigure(buildEditorKeymap(vimMode, tabNavOverrides)))
+    view.dispatch({ effects })
+  }, [vimMode, tabNavOverrides])
   useEffect(() => {
     const view = viewRef.current
     const comp = livePreviewCompartmentRef.current
@@ -1605,13 +2016,13 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
             markdownSyntaxCompartment.reconfigure(markdownSyntaxHighlightExtensions())
           )
         }
-        effects.push(comp.reconfigure(livePreviewPlugin))
+        effects.push(comp.reconfigure(currentWysiwygExtensions()))
         view.dispatch({ effects })
       }
       return
     }
-    view.dispatch({ effects: comp.reconfigure(livePreview ? livePreviewPlugin : []) })
-  }, [livePreview])
+    view.dispatch({ effects: comp.reconfigure(livePreview ? currentWysiwygExtensions() : []) })
+  }, [livePreview, renderTablesInLivePreview, mathRenderer])
   useEffect(() => {
     const view = viewRef.current
     const comp = lineNumbersCompartmentRef.current
@@ -1626,6 +2037,24 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
       effects: comp.reconfigure(wordWrap ? EditorView.lineWrapping : [])
     })
   }, [wordWrap])
+  useEffect(() => {
+    const view = viewRef.current
+    const comp = scrolloffCompartmentRef.current
+    if (!view || !comp) return
+    view.dispatch({ effects: comp.reconfigure(scrollOff(editorScrollOff)) })
+  }, [editorScrollOff])
+  useEffect(() => {
+    const view = viewRef.current
+    const comp = drawSelectionCompartmentRef.current
+    if (!view || !comp) return
+    // 0 disables blinking for both the drawn caret and the Vim block cursor
+    // (both read cursorBlinkRate from the drawSelection config). (#160)
+    view.dispatch({
+      effects: comp.reconfigure(
+        drawSelection({ cursorBlinkRate: cursorBlink ? 1200 : 0 })
+      )
+    })
+  }, [cursorBlink])
 
   // Re-measure CM on prefs that change line geometry.
   useEffect(() => {
@@ -1768,6 +2197,12 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
   useEffect(() => {
     if (!isActive) return
     if (focusedPanel !== 'editor') return
+    // A freshly created note focuses its title-rename field first (#214). That
+    // input's onFocus flips focusedPanel to 'editor', which re-runs this effect
+    // — don't bounce focus out of the title field and into the body H1. The
+    // editor takes focus explicitly once the rename is committed (Enter/Escape).
+    const active = document.activeElement
+    if (active instanceof HTMLElement && active.dataset.noteTitleInput != null) return
     viewRef.current?.focus()
   }, [isActive, focusedPanel])
 
@@ -2091,13 +2526,15 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
           isHelp: false,
           isArchive: false,
           isTrash: false,
+          isAssetsView: false,
           isAsset: false,
-          isDiagram: false
+          isDiagram: false,
+          isDatabase: false
         }
         if (isTasksTabPath(path)) {
           return {
             ...base,
-            title: 'Tasks',
+            title: folderLabels.tasks,
             isTasks: true
           }
         }
@@ -2136,6 +2573,13 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
             isTrash: true
           }
         }
+        if (isAssetsViewTabPath(path)) {
+          return {
+            ...base,
+            title: 'Assets',
+            isAssetsView: true
+          }
+        }
         if (isAssetTabPath(path)) {
           const assetPath = assetPathFromTab(path)
           return {
@@ -2151,6 +2595,13 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
             isDiagram: true
           }
         }
+        if (isDatabaseTabPath(path)) {
+          return {
+            ...base,
+            title: databaseTitleFromTab(path),
+            isDatabase: true
+          }
+        }
         const meta = path === content?.path ? content : notes.find((n) => n.path === path)
         const title = meta?.title ?? path.split('/').pop()?.replace(/\.md$/i, '') ?? path
         return {
@@ -2159,7 +2610,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
         }
       })
     },
-    [tabs, pinnedTabs, previewTab, content, notes, folderLabels.quick, folderLabels.archive, folderLabels.trash]
+    [tabs, pinnedTabs, previewTab, content, notes, folderLabels.quick, folderLabels.archive, folderLabels.trash, folderLabels.tasks]
   )
 
   const tabMenuItems = useMemo<ContextMenuItem[]>(() => {
@@ -2226,7 +2677,8 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
       isArchiveTabPath(path) ||
       isTrashTabPath(path) ||
       isAssetTabPath(path) ||
-      isDiagramTabPath(path)
+      isDiagramTabPath(path) ||
+      isDatabaseTabPath(path)
     ) {
       return [
         { label: 'Close', onSelect: async () => closeTabInPane(paneId, path) },
@@ -2330,6 +2782,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
       isHelp: boolean
       isArchive: boolean
       isTrash: boolean
+      isAssetsView: boolean
       isAsset: boolean
       isDiagram: boolean
     }) => {
@@ -2341,6 +2794,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
         tab.isHelp ||
         tab.isArchive ||
         tab.isTrash ||
+        tab.isAssetsView ||
         tab.isAsset ||
         tab.isDiagram
       return (
@@ -2407,6 +2861,17 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
             e.preventDefault()
             setTabMenu({ x: e.clientX, y: e.clientY, path: tab.path })
           }}
+          onMouseDown={(e) => {
+            if (e.button === 1) {
+              e.preventDefault()
+            }
+          }}
+          onAuxClick={(e) => {
+            if (e.button === 1) {
+              e.preventDefault()
+              void closeTabInPane(paneId, tab.path)
+            }
+          }}
         >
           {tabDropIndicator?.path === tab.path && (
             <div
@@ -2418,15 +2883,24 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
           )}
           <div
             className={[
-              'group flex h-8 min-w-0 items-center gap-1 rounded-t-lg border border-b-0 px-1.5 text-sm transition-colors',
+              // Flat, full-height segmented tabs (VS Code-style): right-border
+              // separators, no rounded tops; the active tab is filled. (#185)
+              'group relative flex h-full min-w-0 items-center gap-1.5 border-r border-paper-300/60 px-[var(--z-tab-pad-x)] text-sm transition-colors',
+              // `min-h-8` gives wrapped rows a consistent floor. In no-wrap mode
+              // the strip is a fixed-height single row with a horizontal
+              // scrollbar; forcing the tab to that same min-height made it
+              // overflow the area the scrollbar leaves and clipped the title in
+              // Compact density (#421). Let `h-full` size it to the scroll area
+              // there instead.
+              wrapTabs ? 'min-h-8' : '',
               tab.pinned ? 'max-w-[140px]' : 'max-w-[220px]',
               active && isActive
                 ? focusedPanel === 'tabs'
-                  ? 'border-accent/70 bg-paper-100 text-ink-900 ring-1 ring-inset ring-accent/60'
-                  : 'border-paper-300/80 bg-paper-100 text-ink-900'
+                  ? 'bg-paper-200 font-medium text-ink-900 ring-1 ring-inset ring-accent/60'
+                  : 'bg-paper-200 font-medium text-ink-900'
                 : active
-                  ? 'border-paper-300/60 bg-paper-100/70 text-ink-800'
-                  : 'border-transparent bg-paper-200/45 text-ink-500 hover:bg-paper-200/70 hover:text-ink-900'
+                  ? 'bg-paper-200/70 text-ink-700'
+                  : 'text-ink-500 hover:bg-paper-200/40 hover:text-ink-900'
             ].join(' ')}
           >
             {tab.pinned && (
@@ -2466,6 +2940,9 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
               {tab.isTrash && (
                 <TrashIcon width={13} height={13} className="shrink-0 text-accent" />
               )}
+              {tab.isAssetsView && (
+                <PaperclipIcon width={13} height={13} className="shrink-0 text-accent" />
+              )}
               {tab.isAsset && (
                 <DocumentIcon width={13} height={13} className="shrink-0 text-accent" />
               )}
@@ -2481,10 +2958,12 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
               aria-label={`Close ${tab.title}`}
               onClick={() => void closeTabInPane(paneId, tab.path)}
               className={[
-                'flex h-4 w-4 shrink-0 items-center justify-center rounded-sm transition-colors',
+                // The active tab keeps its close affordance; inactive tabs
+                // reveal it on hover/focus (VS Code convention). (#185)
+                'flex h-4 w-4 shrink-0 items-center justify-center rounded-sm transition',
                 active
                   ? 'text-ink-500 hover:bg-paper-200 hover:text-ink-900'
-                  : 'hover:bg-paper-300/70'
+                  : 'opacity-0 hover:bg-paper-300/70 group-hover:opacity-100 focus-visible:opacity-100'
               ].join(' ')}
             >
               <CloseIcon width={12} height={12} />
@@ -2507,7 +2986,8 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
       reorderTabInPane,
       tabDropIndicator,
       tabs,
-      unpinTabInPane
+      unpinTabInPane,
+      wrapTabs
     ]
   )
 
@@ -2519,47 +2999,55 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
   const toolbar = useMemo(() => {
     if (!content) return null
     const folder = content.folder
+    // Excalidraw drawings only get the file-level actions (archive/trash) — the
+    // Markdown-specific controls (edit/split/preview, connections, comments,
+    // outline, calendar, PDF export) don't apply to a canvas.
+    const isDrawing = isExcalidrawPath(content.path)
     return (
       <div className="flex items-center gap-1 text-ink-500">
-        <ToggleGroup mode={mode} onChange={applyPaneMode} />
-        <div className="mx-2 h-4 w-px bg-paper-300" />
-        <IconBtn
-          title={connectionsOpen ? 'Hide connections' : 'Show connections'}
-          active={connectionsOpen}
-          onClick={toggleConnectionsPanel}
-        >
-          <PanelRightIcon />
-        </IconBtn>
-        <IconBtn
-          title={
-            commentsOpen
-              ? 'Hide comments'
-              : `Show comments${openCommentCount > 0 ? ` (${openCommentCount})` : ''}`
-          }
-          active={commentsOpen}
-          onClick={toggleCommentsPanel}
-        >
-          <FeedbackIcon />
-        </IconBtn>
-        <IconBtn
-          title={outlineOpen ? 'Hide outline' : 'Show outline'}
-          active={outlineOpen}
-          onClick={toggleOutlinePanel}
-        >
-          <ListTreeIcon />
-        </IconBtn>
-        {calendarAvailable && (
-          <IconBtn
-            title={calendarOpen ? 'Hide calendar' : 'Show calendar'}
-            active={calendarOpen}
-            onClick={toggleCalendarPanel}
-          >
-            <CalendarIcon />
-          </IconBtn>
+        {!isDrawing && (
+          <>
+            <ToggleGroup mode={mode} onChange={applyPaneMode} />
+            <div className="mx-2 h-4 w-px bg-paper-300" />
+            <IconBtn
+              title={connectionsOpen ? 'Hide connections' : 'Show connections'}
+              active={connectionsOpen}
+              onClick={toggleConnectionsPanel}
+            >
+              <PanelRightIcon />
+            </IconBtn>
+            <IconBtn
+              title={
+                commentsOpen
+                  ? 'Hide comments'
+                  : `Show comments${openCommentCount > 0 ? ` (${openCommentCount})` : ''}`
+              }
+              active={commentsOpen}
+              onClick={toggleCommentsPanel}
+            >
+              <FeedbackIcon />
+            </IconBtn>
+            <IconBtn
+              title={outlineOpen ? 'Hide outline' : 'Show outline'}
+              active={outlineOpen}
+              onClick={toggleOutlinePanel}
+            >
+              <ListTreeIcon />
+            </IconBtn>
+            {calendarAvailable && (
+              <IconBtn
+                title={calendarOpen ? 'Hide calendar' : 'Show calendar'}
+                active={calendarOpen}
+                onClick={toggleCalendarPanel}
+              >
+                <CalendarIcon />
+              </IconBtn>
+            )}
+            <IconBtn title="Export as PDF (⇧⌘E)" onClick={() => void exportActiveNotePdf()}>
+              <FileDownIcon />
+            </IconBtn>
+          </>
         )}
-        <IconBtn title="Export as PDF (⇧⌘E)" onClick={() => void exportActiveNotePdf()}>
-          <FileDownIcon />
-        </IconBtn>
         {folder === 'trash' ? (
           <IconBtn title="Restore" onClick={() => void restoreActive()}>
             <ArrowUpRightIcon />
@@ -2643,11 +3131,24 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     }
   }, [hasTabs, wrapTabs, tabStripMeasureKey])
 
+  // Keep the active tab scrolled into view in the horizontally-scrolling strip,
+  // so switching tabs (e.g. via the keyboard) never leaves it off-screen. (#185)
+  useEffect(() => {
+    if (!hasTabs || wrapTabs || !activeTab) return
+    const el = tabStripRef.current?.querySelector<HTMLElement>('[data-tab-active="true"]')
+    el?.scrollIntoView({ inline: 'nearest', block: 'nearest' })
+  }, [activeTab, hasTabs, wrapTabs, tabStripMeasureKey])
+
+  // Outer header holds the back/forward nav buttons + the (flex-1) tab strip.
+  const tabStripHeaderClass = [
+    'glass-header flex shrink-0 items-stretch border-b border-paper-300/70 pl-1',
+    wrapTabs ? 'min-h-[var(--z-tab-height)]' : 'h-[var(--z-tab-height)]'
+  ].join(' ')
   const tabStripClass = [
-    'workspace-tab-strip glass-header flex shrink-0 items-start gap-1 border-b border-paper-300/70 px-3 pt-2',
+    'workspace-tab-strip flex min-w-0 flex-1 items-stretch gap-0',
     wrapTabs
-      ? 'min-h-10 flex-wrap content-start overflow-x-hidden overflow-y-visible'
-      : `${tabStripOverflowing ? 'h-14 overflow-x-auto' : 'h-10 overflow-x-hidden'} overflow-y-hidden`
+      ? 'min-h-[var(--z-tab-height)] flex-wrap content-start overflow-x-hidden overflow-y-visible'
+      : `h-[var(--z-tab-height)] ${tabStripOverflowing ? 'overflow-x-auto' : 'overflow-x-hidden'} overflow-y-hidden`
   ].join(' ')
   const deferEditorHydration = shouldDeferEditorHydration(
     showEditor,
@@ -2743,11 +3244,12 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
   ])
 
   // Remember this tab's scroll position as the user scrolls, so switching
-  // away and back (e.g. opening a diagram in a tab) restores it instead of
-  // snapping to the top. `content` is only set for real notes — virtual
-  // tabs (tasks, diagrams, …) never reach here. Capture only; the restore
-  // happens in the activation layout effect below.
-  useEffect(() => {
+  // away and back (e.g. opening another note or a diagram in a tab) restores
+  // it instead of snapping to the top. This intentionally uses a layout
+  // effect: its cleanup runs before the next tab's doc-sync layout effect
+  // resets the shared CodeMirror scroller to 0, so the outgoing tab cannot be
+  // overwritten by that programmatic reset.
+  useLayoutEffect(() => {
     const path = content?.path
     if (!path) return
     const editorEl = editorReady ? viewRef.current?.scrollDOM ?? null : null
@@ -2755,36 +3257,46 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     if (!editorEl && !previewEl) return
 
     let frame = 0
-    const capture = (): void => {
-      if (frame) return
-      frame = requestAnimationFrame(() => {
-        frame = 0
-        const prev = recallTabScroll(path)
-        rememberTabScroll(path, {
-          // Keep the other surface's value when one isn't mounted (e.g.
-          // preview-only mode has no editor scroller), so we don't clobber it.
-          editor: editorEl?.scrollTop ?? prev?.editor ?? 0,
-          preview: previewEl?.scrollTop ?? prev?.preview ?? 0
-        })
-      })
+    const captureNow = (): void => {
+      frame = 0
+      const prev = recallTabScroll(path)
+      const view = viewRef.current
+      const selection =
+        view && viewPathRef.current === path ? view.state.selection.main : null
+      const next: TabScrollPosition = {
+        // Keep the other surface's value when one isn't mounted (e.g.
+        // preview-only mode has no editor scroller), so we don't clobber it.
+        editor: editorEl?.scrollTop ?? prev?.editor ?? 0,
+        preview: previewEl?.scrollTop ?? prev?.preview ?? 0
+      }
+      if (selection) {
+        next.editorSelectionAnchor = selection.anchor
+        next.editorSelectionHead = selection.head
+      }
+      rememberTabScroll(path, next)
     }
-    editorEl?.addEventListener('scroll', capture, { passive: true })
-    previewEl?.addEventListener('scroll', capture, { passive: true })
+    const scheduleCapture = (): void => {
+      if (frame) return
+      frame = requestAnimationFrame(captureNow)
+    }
+    editorEl?.addEventListener('scroll', scheduleCapture, { passive: true })
+    previewEl?.addEventListener('scroll', scheduleCapture, { passive: true })
     return () => {
       if (frame) cancelAnimationFrame(frame)
-      editorEl?.removeEventListener('scroll', capture)
-      previewEl?.removeEventListener('scroll', capture)
+      captureNow()
+      editorEl?.removeEventListener('scroll', scheduleCapture)
+      previewEl?.removeEventListener('scroll', scheduleCapture)
     }
   }, [content?.path, mode, editorReady])
 
-  // Restore a note tab's remembered scroll on (re)activation. Keyed on the
+  // Restore a note tab's remembered editor state on (re)activation. Keyed on the
   // active path, which flips note → (diagram tab) → note even though the
   // editor view's own `pathChanged` does not — that's why opening a diagram
-  // in a tab and returning otherwise snapped the note to the top. Runs as a
-  // layout effect (after the doc-sync effect dispatches the body) so the
-  // editor is restored before paint; the preview is restored best-effort now
-  // and again from `onRendered` once async diagrams settle. Explicit jumps
-  // own the scroll, so defer to a matching `pendingJumpLocation`.
+  // in a tab and returning otherwise snapped the note to the top. Runs after
+  // the doc-sync effect dispatches the body so the editor selection and scroll
+  // are restored before paint; the preview is restored best-effort now and
+  // again from `onRendered` once async diagrams settle. Explicit jumps own the
+  // scroll, so defer to a matching `pendingJumpLocation`.
   useLayoutEffect(() => {
     const path = content?.path ?? null
     // Only act on a genuine activation (path change). The `pendingJumpLocation`
@@ -2800,10 +3312,39 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
 
     const applyEditor = (): void => {
       const view = viewRef.current
-      if (view) view.scrollDOM.scrollTop = remembered.editor
+      if (!view) return
+      let restoredHead: number | null = null
+      if (
+        remembered.editorSelectionAnchor != null &&
+        remembered.editorSelectionHead != null
+      ) {
+        const docLength = view.state.doc.length
+        const anchor = Math.max(
+          0,
+          Math.min(docLength, remembered.editorSelectionAnchor)
+        )
+        const head = Math.max(
+          0,
+          Math.min(docLength, remembered.editorSelectionHead)
+        )
+        restoredHead = head
+        const current = view.state.selection.main
+        if (current.anchor !== anchor || current.head !== head) {
+          view.dispatch({ selection: { anchor, head } })
+        }
+      }
+      view.scrollDOM.scrollTop = remembered.editor
+      if (remembered.editor <= 0 && restoredHead != null) {
+        const cursor = view.coordsAtPos(restoredHead)
+        const scroller = view.scrollDOM.getBoundingClientRect()
+        if (!cursor || cursor.bottom < scroller.top || cursor.top > scroller.bottom) {
+          view.dispatch({ effects: EditorView.scrollIntoView(restoredHead, { y: 'center' }) })
+        }
+      }
     }
     applyEditor()
     const raf = requestAnimationFrame(applyEditor)
+    const postFocusTimeout = window.setTimeout(applyEditor, 0)
 
     if (remembered.preview > 0) {
       previewRestoreTargetRef.current = { path, top: remembered.preview }
@@ -2813,7 +3354,10 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
         lastProgrammaticPreviewTopRef.current = previewEl.scrollTop
       }
     }
-    return () => cancelAnimationFrame(raf)
+    return () => {
+      cancelAnimationFrame(raf)
+      window.clearTimeout(postFocusTimeout)
+    }
   }, [content?.path, pendingJumpLocation?.path])
 
   const paneFrameClass = [
@@ -2836,13 +3380,47 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
       }}
     >
       {hasTabs && (
-        <div
-          ref={tabStripRef}
-          className={tabStripClass}
-          onDragOver={handleTabStripDragOver}
-          onDrop={handleTabStripDrop}
-        >
-          {tabItems.map((tab, i) => {
+        <div className={tabStripHeaderClass}>
+          <div className="flex shrink-0 items-center gap-0.5 self-center">
+            {!sidebarOpen && (
+              <IconBtn
+                title="Show sidebar (⌘1)"
+                onClick={toggleSidebar}
+                tooltipAlign="left"
+              >
+                <PanelLeftIcon width={16} height={16} />
+              </IconBtn>
+            )}
+            <IconBtn
+              title={`Go back (${getKeymapDisplay(
+                tabNavOverrides,
+                vimMode ? 'vim.historyBack' : 'global.historyBack'
+              )})`}
+              onClick={() => void jumpToPreviousNote()}
+              disabled={!canGoBack}
+              tooltipAlign="left"
+            >
+              <ArrowLeftIcon width={16} height={16} />
+            </IconBtn>
+            <IconBtn
+              title={`Go forward (${getKeymapDisplay(
+                tabNavOverrides,
+                vimMode ? 'vim.historyForward' : 'global.historyForward'
+              )})`}
+              onClick={() => void jumpToNextNote()}
+              disabled={!canGoForward}
+              tooltipAlign="left"
+            >
+              <ArrowRightIcon width={16} height={16} />
+            </IconBtn>
+          </div>
+          <div
+            ref={tabStripRef}
+            className={tabStripClass}
+            onDragOver={handleTabStripDragOver}
+            onDrop={handleTabStripDrop}
+          >
+            {tabItems.map((tab, i) => {
             // Draw a subtle vertical separator between the last pinned
             // tab and the first unpinned one (VSCode convention). The
             // separator is a flex sibling, not a wrapper, so drag hit-
@@ -2861,16 +3439,12 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
               </Fragment>
             )
           })}
+          </div>
         </div>
       )}
       {content && !zenMode && (
         <header className="glass-header flex h-12 shrink-0 items-center justify-between gap-3 px-4">
           <div className="flex min-w-0 flex-1 items-center gap-1">
-            {!sidebarOpen && isActive && (
-              <IconBtn title="Show sidebar (⌘1)" onClick={toggleSidebar}>
-                <PanelLeftIcon />
-              </IconBtn>
-            )}
             <Breadcrumb
               note={content}
               autoFocus={isActive && pendingTitleFocusPath === content.path}
@@ -2917,10 +3491,28 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
             <ArchiveView />
           ) : isTrashTabPath(activeTab) ? (
             <TrashView />
+          ) : isAssetsViewTabPath(activeTab) ? (
+            <AssetsView />
           ) : activeTab && isAssetTabPath(activeTab) ? (
-            <AssetTabView tabPath={activeTab} vaultRoot={vault?.root ?? null} />
+            isDatabaseCsvPath(assetPathFromTab(activeTab) ?? '') ? (
+              <DatabaseView
+                tabPath={databaseTabPath(assetPathFromTab(activeTab) as string)}
+                isActive={isActive}
+              />
+            ) : (
+              <AssetTabView tabPath={activeTab} vaultRoot={vault?.root ?? null} />
+            )
           ) : activeTab && isDiagramTabPath(activeTab) ? (
             <LazyDiagramTabView diagram={diagramFromTabPath(activeTab)} />
+          ) : activeTab && isDatabaseTabPath(activeTab) ? (
+            <DatabaseView tabPath={activeTab} isActive={isActive} />
+          ) : activeTab && isExcalidrawPath(activeTab) ? (
+            <LazyExcalidrawView path={activeTab} />
+          ) : activeTab &&
+            content &&
+            (isObsidianExcalidrawPath(activeTab) ||
+              isObsidianExcalidrawMarkdown(content.body)) ? (
+            <ObsidianExcalidrawPrompt path={activeTab} />
           ) : content ? (
             <div
               className={[
@@ -2950,7 +3542,9 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
                   setEditorMenu({
                     x: e.clientX,
                     y: e.clientY,
-                    hasSelection: !sel.empty
+                    hasSelection: !sel.empty,
+                    selFrom: sel.from,
+                    selTo: sel.to
                   })
                 }}
                 >
@@ -2965,7 +3559,16 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
                     </div>
                   )}
                   {editorReady ? (
-                    <div ref={setContainerRef} className="min-h-0 min-w-0 flex-1" />
+                    <div
+                      ref={setContainerRef}
+                      className={[
+                        'min-h-0 min-w-0 flex-1',
+                        // WYSIWYG styling (code-block cards, etc.) is gated on
+                        // the same `livePreview` condition that loads the
+                        // wysiwyg plugins, so CSS and plugins stay in lockstep.
+                        livePreview ? 'cm-wysiwyg' : ''
+                      ].join(' ')}
+                    />
                   ) : (
                     <div className="flex min-h-0 min-w-0 flex-1 items-center justify-center text-sm text-ink-400">
                       Preparing editor…
@@ -2998,10 +3601,18 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
             <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-ink-400">
               Loading…
             </div>
-          ) : (
+          ) : zenMode ? (
             <EmptyPaneState
               sidebarOpen={sidebarOpen}
               zenMode={zenMode}
+              onShowSidebar={() => {
+                toggleSidebar()
+                setFocusedPanel('sidebar')
+              }}
+            />
+          ) : (
+            <HomeView
+              sidebarOpen={sidebarOpen}
               onShowSidebar={() => {
                 toggleSidebar()
                 setFocusedPanel('sidebar')
@@ -3035,23 +3646,24 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
         selectionCommentAction &&
         !commentDraft &&
         !zenMode && (
-          <button
-            type="button"
-            data-selection-comment-action
-            title="Add comment"
-            aria-label="Add comment to selected text"
-            onMouseDown={(event) => {
-              event.preventDefault()
-              event.stopPropagation()
+          <EditorSelectionToolbar
+            x={selectionCommentAction.x}
+            y={selectionCommentAction.y}
+            onWrap={(marker) => {
+              const view = viewRef.current
+              if (view) toggleWrap(view, marker)
             }}
-            onClick={() => {
-              captureCommentDraft()
+            onLink={() => {
+              const view = viewRef.current
+              if (view) wrapLink(view)
             }}
-            className="fixed z-50 flex h-[34px] w-[34px] items-center justify-center rounded-lg border border-paper-300/75 bg-paper-100/92 text-ink-700 shadow-[0_10px_24px_-18px_rgb(var(--z-shadow)/0.7),0_0_0_1px_rgb(var(--z-bg)/0.55)] backdrop-blur transition-colors hover:border-accent/45 hover:bg-paper-50 hover:text-accent"
-            style={{ left: selectionCommentAction.x, top: selectionCommentAction.y }}
-          >
-            <FeedbackIcon width={16} height={16} />
-          </button>
+            onComment={() => captureCommentDraft()}
+            onBlockType={(type) => {
+              const view = viewRef.current
+              if (view) setBlockType(view, type)
+            }}
+            onDismiss={() => viewRef.current?.focus()}
+          />
         )}
       {tabMenu && (
         <ContextMenu
@@ -3068,7 +3680,8 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
           items={buildEditorContextItems(
             viewRef.current,
             editorMenu.hasSelection,
-            captureCommentDraft
+            captureCommentDraft,
+            { from: editorMenu.selFrom, to: editorMenu.selTo }
           )}
           onClose={() => setEditorMenu(null)}
         />
@@ -3151,12 +3764,49 @@ function AssetTabView({
  * Build the right-click menu shown over the editor text. Uses the live
  * CodeMirror view for clipboard / undo / redo / select-all commands.
  */
+function HighlightSwatch({ color }: { color: string }): JSX.Element {
+  return (
+    <span
+      className="inline-block h-3.5 w-3.5 rounded-[3px] border border-paper-300"
+      style={{ backgroundColor: `rgb(var(--hl-${color}) / 0.7)` }}
+    />
+  )
+}
+
 function buildEditorContextItems(
   view: EditorView | null,
   hasSelection: boolean,
-  onAddComment: () => void
+  onAddComment: () => void,
+  // Selection snapshotted when the menu opened, applied by the highlight actions
+  // so they don't depend on the live selection surviving the menu. (#416)
+  selRange: { from: number; to: number }
 ): ContextMenuItem[] {
   if (!view) return []
+
+  // "Highlight" group (selection only): default (yellow) via `==`, named colors
+  // via `<mark class>`, and a remove action. Shares applyHighlight with ⇧⌘H.
+  const highlightItems: ContextMenuItem[] = hasSelection
+    ? [
+        {
+          label: 'Highlight',
+          hint: formatKeyToken('Mod+Shift+H'),
+          icon: <HighlighterIcon width={14} height={14} />,
+          onSelect: async () => applyHighlight(view, 'yellow', selRange)
+        },
+        ...HIGHLIGHT_COLORS.filter((c) => c.id !== 'yellow').map(
+          (c): ContextMenuItem => ({
+            label: `Highlight: ${c.label}`,
+            icon: <HighlightSwatch color={c.id} />,
+            onSelect: async () => applyHighlight(view, c.id, selRange)
+          })
+        ),
+        {
+          label: 'Remove highlight',
+          onSelect: async () => applyHighlight(view, 'remove', selRange)
+        },
+        { kind: 'separator' }
+      ]
+    : []
 
   const copy = async (): Promise<void> => {
     const sel = view.state.selection.main
@@ -3207,13 +3857,14 @@ function buildEditorContextItems(
       }
     },
     { kind: 'separator' },
-    { label: 'Cut', hint: '⌘X', disabled: !hasSelection, onSelect: cut },
-    { label: 'Copy', hint: '⌘C', disabled: !hasSelection, onSelect: copy },
-    { label: 'Paste', hint: '⌘V', onSelect: paste },
+    ...highlightItems,
+    { label: 'Cut', hint: formatKeyToken('Mod+X'), disabled: !hasSelection, onSelect: cut },
+    { label: 'Copy', hint: formatKeyToken('Mod+C'), disabled: !hasSelection, onSelect: copy },
+    { label: 'Paste', hint: formatKeyToken('Mod+V'), onSelect: paste },
     { kind: 'separator' },
     {
       label: 'Select All',
-      hint: '⌘A',
+      hint: formatKeyToken('Mod+A'),
       onSelect: async () => {
         selectAll(view)
         view.focus()
@@ -3222,7 +3873,7 @@ function buildEditorContextItems(
     { kind: 'separator' },
     {
       label: 'Undo',
-      hint: '⌘Z',
+      hint: formatKeyToken('Mod+Z'),
       onSelect: async () => {
         undo(view)
         view.focus()
@@ -3230,7 +3881,7 @@ function buildEditorContextItems(
     },
     {
       label: 'Redo',
-      hint: '⇧⌘Z',
+      hint: formatKeyToken('Mod+Shift+Z'),
       onSelect: async () => {
         redo(view)
         view.focus()
@@ -3289,7 +3940,7 @@ function EmptyPaneState({
             >
               <PanelLeftIcon width={16} height={16} />
               <span>Show sidebar</span>
-              <span className="rounded-md border border-paper-300/80 bg-paper-50/80 px-1.5 py-0.5 font-mono text-[11px] text-ink-500">
+              <span className="rounded-md border border-paper-300/80 bg-paper-50/80 px-1.5 py-0.5 font-mono text-xs text-ink-500">
                 ⌘1
               </span>
             </button>
@@ -3304,28 +3955,42 @@ function IconBtn({
   children,
   onClick,
   title,
-  active = false
+  active = false,
+  disabled = false,
+  tooltipAlign = 'center'
 }: {
   children: JSX.Element
   onClick: () => void
   title: string
   active?: boolean
+  disabled?: boolean
+  /** 'left' anchors the tooltip to the button's left edge so it never spills
+   *  off the left of the window (used by the leftmost toolbar buttons). */
+  tooltipAlign?: 'center' | 'left'
 }): JSX.Element {
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
       aria-label={title}
       aria-pressed={active}
       className={[
         'group relative flex h-7 w-7 items-center justify-center rounded-md transition-colors',
-        active
-          ? 'bg-paper-200 text-ink-900'
-          : 'text-ink-500 hover:bg-paper-200 hover:text-ink-900'
+        disabled
+          ? 'cursor-default text-ink-500/40'
+          : active
+            ? 'bg-paper-200 text-ink-900'
+            : 'text-ink-500 hover:bg-paper-200 hover:text-ink-900'
       ].join(' ')}
     >
       <span className="pointer-events-none">{children}</span>
-      <span className="pointer-events-none absolute left-1/2 top-full z-30 mt-1.5 hidden -translate-x-1/2 whitespace-nowrap rounded-md border border-paper-300 bg-paper-50 px-2 py-1 text-[11px] font-medium text-ink-800 shadow-panel group-hover:block group-focus-visible:block">
+      <span
+        className={[
+          'pointer-events-none absolute top-full z-30 mt-1.5 hidden whitespace-nowrap rounded-md border border-paper-300 bg-paper-50 px-2 py-1 text-xs font-medium text-ink-800 shadow-panel group-hover:block group-focus-visible:block',
+          tooltipAlign === 'left' ? 'left-0' : 'left-1/2 -translate-x-1/2'
+        ].join(' ')}
+      >
         {title}
       </span>
     </button>
@@ -3381,6 +4046,12 @@ function Breadcrumb({
   const setView = useStore((s) => s.setView)
   const systemFolderLabels = useStore((s) => s.systemFolderLabels)
   const vaultSettings = useStore((s) => s.vaultSettings)
+  const createAndOpen = useStore((s) => s.createAndOpen)
+  const createDrawingAndOpen = useStore((s) => s.createDrawingAndOpen)
+  const createFolder = useStore((s) => s.createFolder)
+  const [crumbMenu, setCrumbMenu] = useState<{ x: number; y: number; subpath: string } | null>(
+    null
+  )
   const [editing, setEditing] = useState(false)
   const [value, setValue] = useState(note.title)
   const [warning, setWarning] = useState('')
@@ -3389,9 +4060,20 @@ function Breadcrumb({
 
   useEffect(() => setValue(note.title), [note.title])
   useEffect(() => setWarning(''), [note.path])
+  // Switching to a different note never inherits a previous note's open rename
+  // field. Listed before the autoFocus latch so a freshly created note (path +
+  // autoFocus change together) ends up editing.
   useEffect(() => {
-    setEditing(autoFocus)
-  }, [autoFocus, note.path])
+    setEditing(false)
+  }, [note.path])
+  // Enter title-edit mode when a freshly created note requests it (#214).
+  // Entering is a one-way latch: when `onAutoFocusHandled` clears the pending
+  // flag (autoFocus → false) we must NOT drop out of editing, or the focused
+  // input would unmount mid-create and focus would fall back to the body. Only
+  // Enter/Escape/blur or a note switch leaves edit mode.
+  useEffect(() => {
+    if (autoFocus) setEditing(true)
+  }, [autoFocus])
   useEffect(() => {
     if (!editingNow) return
     const raf = requestAnimationFrame(() => {
@@ -3400,16 +4082,17 @@ function Breadcrumb({
       if (autoFocus) onAutoFocusHandled()
     })
     return () => cancelAnimationFrame(raf)
-  }, [autoFocus, editingNow, onAutoFocusHandled])
+  }, [autoFocus, editingNow, onAutoFocusHandled, note.path])
 
   const topFolder = note.folder
   const segments = noteFolderSubpath(note, vaultSettings)
     .split('/')
     .filter(Boolean)
-  const ancestors: { label: string; onClick: () => void }[] = []
+  const ancestors: { label: string; subpath: string; onClick: () => void }[] = []
   if (!(topFolder === 'inbox' && isPrimaryNotesAtRoot(vaultSettings))) {
     ancestors.push({
       label: getSystemFolderLabel(topFolder, systemFolderLabels),
+      subpath: '',
       onClick: () => setView({ kind: 'folder', folder: topFolder, subpath: '' })
     })
   }
@@ -3419,6 +4102,7 @@ function Breadcrumb({
     const subpath = acc
     ancestors.push({
       label: seg,
+      subpath,
       onClick: () => setView({ kind: 'folder', folder: topFolder, subpath })
     })
   }
@@ -3447,18 +4131,63 @@ function Breadcrumb({
       {ancestors.map((c, i) => (
         <span key={i} className="flex shrink-0 items-center gap-1">
           <button
+            data-crumb-menu=""
             onClick={c.onClick}
+            onContextMenu={(e) => {
+              e.preventDefault()
+              e.stopPropagation()
+              setCrumbMenu({ x: e.clientX, y: e.clientY, subpath: c.subpath })
+            }}
             className="truncate rounded px-1 hover:bg-paper-200/70 hover:text-ink-800"
-            title={`Go to ${c.label}`}
+            title={`Go to ${c.label} — right-click (or m) to create here`}
           >
             {c.label}
           </button>
           <span className="text-ink-400">›</span>
         </span>
       ))}
+      {crumbMenu && (
+        <ContextMenu
+          x={crumbMenu.x}
+          y={crumbMenu.y}
+          onClose={() => setCrumbMenu(null)}
+          items={[
+            {
+              label: 'New note',
+              onSelect: () =>
+                void createAndOpen(topFolder, crumbMenu.subpath, { focusTitle: true })
+            },
+            {
+              label: 'New drawing',
+              onSelect: () => void createDrawingAndOpen(topFolder, crumbMenu.subpath)
+            },
+            {
+              label: 'New folder',
+              onSelect: async () => {
+                const name = await promptApp({
+                  title: 'New folder',
+                  placeholder: 'Folder name',
+                  okLabel: 'Create',
+                  validate: (v) => (v.includes('/') ? 'Folder name cannot contain "/"' : null)
+                })
+                if (!name) return
+                const clean = name.trim().replace(/^\/+|\/+$/g, '')
+                if (!clean) return
+                const next = crumbMenu.subpath ? `${crumbMenu.subpath}/${clean}` : clean
+                try {
+                  await createFolder(topFolder, next)
+                } catch (err) {
+                  window.alert((err as Error).message)
+                }
+              }
+            }
+          ]}
+        />
+      )}
       {editingNow ? (
         <input
           ref={inputRef}
+          data-note-title-input=""
           spellCheck={false}
           value={value}
           placeholder="Untitled"
@@ -3471,6 +4200,9 @@ function Breadcrumb({
             if (commitRename()) setEditing(false)
           }}
           onKeyDown={(e) => {
+            // While an IME composition is active, Enter confirms the conversion
+            // (and Escape cancels it) — don't commit/cancel the rename. (#183)
+            if (isImeComposing(e)) return
             if (e.key === 'Enter') {
               e.preventDefault()
               e.stopPropagation()

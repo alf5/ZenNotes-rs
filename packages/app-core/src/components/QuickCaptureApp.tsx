@@ -31,7 +31,7 @@
  *   :find        — open the note picker (alias for ⌘P).
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Compartment, EditorState } from '@codemirror/state'
+import { Compartment, EditorState, Prec } from '@codemirror/state'
 import {
   EditorView,
   drawSelection,
@@ -40,13 +40,25 @@ import {
   placeholder
 } from '@codemirror/view'
 import { Vim, vim } from '@replit/codemirror-vim'
-import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
+import { history, historyKeymap, indentWithTab } from '@codemirror/commands'
+import { vimAwareDefaultKeymap, vimAwareMarkdownKeymap } from '../lib/cm-vim-default-keymap'
+import { registerDisplayLineMotion } from '../lib/cm-vim-display-line'
+import { toggleWrap, wrapLink } from '../lib/cm-format'
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
 import { resolveCodeLanguage } from '../lib/cm-code-languages'
 import { markdownListIndentPlugin } from '../lib/cm-markdown-list-indent'
+import { appMarkdownSnippetExtension } from '../lib/markdown-snippets-config'
 import { syntaxHighlighting, HighlightStyle, defaultHighlightStyle } from '@codemirror/language'
 import { tags as t } from '@lezer/highlight'
 import { searchKeymap } from '@codemirror/search'
+import {
+  autocompletion,
+  closeCompletion,
+  completionStatus
+} from '@codemirror/autocomplete'
+import { completionKeymapForEditor, completionNavKeymap } from '../lib/cm-completion-nav'
+import { slashCommandRender, templateSlashCommandSource } from '../lib/cm-slash-commands'
+import { calloutTypeSource } from '../lib/cm-callouts'
 import type { NoteMeta } from '@shared/ipc'
 import {
   DEFAULT_THEME_ID,
@@ -61,6 +73,8 @@ import {
 } from '../lib/note-search'
 import { deriveTitleFromBody, planQuickCaptureSave } from '../lib/quick-capture-save'
 import { applyVimInsertEscape } from '../lib/vim-insert-escape'
+import { isPaletteNextKey, isPalettePreviousKey } from '../lib/palette-nav'
+import { isImeComposing } from '../lib/ime'
 import { PinIcon } from './icons'
 
 const PREFS_KEY = 'zen:prefs:v2'
@@ -112,6 +126,7 @@ const captureHighlight = HighlightStyle.define([
   { tag: t.heading3, class: 'tok-heading3' },
   { tag: t.emphasis, class: 'tok-emphasis' },
   { tag: t.strong, class: 'tok-strong' },
+  { tag: t.strikethrough, class: 'tok-strikethrough' },
   { tag: t.link, class: 'tok-link' },
   { tag: t.url, class: 'tok-url' },
   { tag: t.monospace, class: 'tok-monospace' },
@@ -182,6 +197,10 @@ function registerCaptureVimCommands(): void {
   if (vimRegistered) return
   vimRegistered = true
 
+  // #312: this window is a separate Electron renderer with its own Vim, so it
+  // needs its own registration to get the main editor's j/k display-line motion.
+  registerDisplayLineMotion()
+
   Vim.defineEx('write', 'w', () => {
     setTimeout(() => {
       void vimHandlers.save?.()
@@ -226,6 +245,11 @@ export function QuickCaptureApp(): JSX.Element {
   const [notes, setNotes] = useState<NoteMeta[]>([])
   const [overlay, setOverlay] = useState<'none' | 'search' | 'command'>('none')
   const editorRef = useRef<EditorView | null>(null)
+
+  // Set a different title for the quick capture window.
+  useEffect(() => {
+    document.title = 'ZenNotes Quick Capture'
+  }, [])
 
   // Apply theme + font CSS vars before paint.
   useEffect(() => {
@@ -404,17 +428,71 @@ export function QuickCaptureApp(): JSX.Element {
       const state = EditorState.create({
         doc: '',
         extensions: [
+          appMarkdownSnippetExtension(),
           new Compartment().of(prefs.vimMode ? vim() : []),
+          // #312: inline-format shortcuts (bold/italic/code/strike/highlight/
+          // math/link) — the same markers the main editor's VimNav binds — so
+          // the Quick Note window formats identically instead of falling through
+          // to a default (⌘I selecting the line). Highest precedence so they beat
+          // vim's Ctrl chords (Mod = Ctrl on Linux/Windows) and editor defaults.
+          Prec.highest(
+            keymap.of([
+              { key: 'Mod-b', run: (v) => toggleWrap(v, '**') },
+              { key: 'Mod-i', run: (v) => toggleWrap(v, '*') },
+              { key: 'Mod-e', run: (v) => toggleWrap(v, '`') },
+              { key: 'Shift-Mod-s', run: (v) => toggleWrap(v, '~~') },
+              { key: 'Shift-Mod-h', run: (v) => toggleWrap(v, '==') },
+              { key: 'Shift-Mod-m', run: (v) => toggleWrap(v, '$') },
+              { key: 'Mod-k', run: (v) => wrapLink(v) }
+            ])
+          ),
           history(),
           drawSelection(),
           highlightActiveLine(),
           EditorView.lineWrapping,
-          markdown({ base: markdownLanguage, codeLanguages: resolveCodeLanguage, addKeymap: true }),
+          markdown({ base: markdownLanguage, codeLanguages: resolveCodeLanguage, addKeymap: false }),
+          vimAwareMarkdownKeymap,
           markdownListIndentPlugin,
           syntaxHighlighting(captureHighlight),
           syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
           placeholder('Start writing…'),
-          keymap.of([indentWithTab, ...defaultKeymap, ...historyKeymap, ...searchKeymap]),
+          // Notion-style `/` slash commands — same block inserters as the main
+          // editor, minus the store-dependent "Page" (no active note here). (#182)
+          autocompletion({
+            // See EditorPane: skip the stock keymap so mac `Alt-`` / `Alt-i`
+            // don't swallow those characters on AltGr-style layouts (#429).
+            defaultKeymap: false,
+            override: [templateSlashCommandSource, calloutTypeSource],
+            addToOptions: [{ render: slashCommandRender.render, position: 0 }],
+            icons: false,
+            optionClass: (completion) =>
+              (completion as { _kind?: string })._kind === 'callout'
+                ? 'callout-cmd-option'
+                : 'slash-cmd-option'
+          }),
+          completionNavKeymap,
+          // Esc closes an open slash menu instead of bubbling to the window-level
+          // Esc that saves + hides the capture window. Runs before everything,
+          // and only when a completion is actually open.
+          Prec.highest(
+            EditorView.domEventHandlers({
+              keydown: (event, view) => {
+                if (event.key !== 'Escape') return false
+                if (completionStatus(view.state) !== 'active') return false
+                closeCompletion(view)
+                event.preventDefault()
+                event.stopPropagation()
+                return true
+              }
+            })
+          ),
+          keymap.of([
+            indentWithTab,
+            ...completionKeymapForEditor,
+            ...vimAwareDefaultKeymap(prefs.vimMode),
+            ...historyKeymap,
+            ...searchKeymap
+          ]),
           EditorView.updateListener.of((upd) => {
             if (!upd.docChanged) return
             const doc = upd.state.doc.toString()
@@ -569,7 +647,7 @@ export function QuickCaptureApp(): JSX.Element {
         </span>
         {mode.kind === 'existing' && (
           <span
-            className="shrink-0 rounded-md bg-paper-200/80 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-ink-500"
+            className="shrink-0 rounded-md bg-paper-200/80 px-1.5 py-0.5 text-2xs uppercase tracking-wide text-ink-500"
             title={mode.note.path}
           >
             {mode.note.folder}
@@ -626,7 +704,7 @@ export function QuickCaptureApp(): JSX.Element {
         )}
       </div>
 
-      <footer className="flex shrink-0 items-center justify-between gap-3 border-t border-paper-300/70 px-4 py-1.5 text-[11px] text-ink-500">
+      <footer className="flex shrink-0 items-center justify-between gap-3 border-t border-paper-300/70 px-4 py-1.5 text-xs text-ink-500">
         <span className="truncate">
           {error ? (
             <span className="text-red-500">{error}</span>
@@ -694,10 +772,12 @@ function NotePickerOverlay({ notes, onPick, onCancel }: NotePickerOverlayProps):
   useEffect(() => setActive(0), [query])
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>): void => {
-    if (e.key === 'ArrowDown' || (e.ctrlKey && e.key.toLowerCase() === 'n')) {
+    // While composing (IME), let the input own Enter/Arrows. (#183)
+    if (isImeComposing(e)) return
+    if (isPaletteNextKey(e)) {
       e.preventDefault()
       setActive((i) => Math.min(results.length - 1, i + 1))
-    } else if (e.key === 'ArrowUp' || (e.ctrlKey && e.key.toLowerCase() === 'p')) {
+    } else if (isPalettePreviousKey(e)) {
       e.preventDefault()
       setActive((i) => Math.max(0, i - 1))
     } else if (e.key === 'Enter') {
@@ -746,11 +826,11 @@ function NotePickerOverlay({ notes, onPick, onCancel }: NotePickerOverlayProps):
                   isActive ? 'bg-paper-200 text-ink-900' : 'text-ink-700 hover:bg-paper-200/60'
                 ].join(' ')}
               >
-                <span className="shrink-0 text-[10px] uppercase tracking-wide text-ink-400">
+                <span className="shrink-0 text-2xs uppercase tracking-wide text-ink-400">
                   {note.folder}
                 </span>
                 <span className="truncate">{note.title}</span>
-                <span className="ml-auto truncate text-[10px] text-ink-400">{note.path}</span>
+                <span className="ml-auto truncate text-2xs text-ink-400">{note.path}</span>
               </button>
             )
           })
@@ -819,10 +899,12 @@ function CommandOverlay({ modKey, mode, onAction, onCancel }: CommandOverlayProp
   useEffect(() => setActive(0), [query])
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>): void => {
-    if (e.key === 'ArrowDown' || (e.ctrlKey && e.key.toLowerCase() === 'n')) {
+    // While composing (IME), let the input own Enter/Arrows. (#183)
+    if (isImeComposing(e)) return
+    if (isPaletteNextKey(e)) {
       e.preventDefault()
       setActive((i) => Math.min(results.length - 1, i + 1))
-    } else if (e.key === 'ArrowUp' || (e.ctrlKey && e.key.toLowerCase() === 'p')) {
+    } else if (isPalettePreviousKey(e)) {
       e.preventDefault()
       setActive((i) => Math.max(0, i - 1))
     } else if (e.key === 'Enter') {
@@ -868,7 +950,7 @@ function CommandOverlay({ modKey, mode, onAction, onCancel }: CommandOverlayProp
                 ].join(' ')}
               >
                 <span className="truncate">{cmd.label}</span>
-                <kbd className="ml-auto rounded bg-paper-200 px-1.5 py-0.5 text-[10px] text-ink-500">
+                <kbd className="ml-auto rounded bg-paper-200 px-1.5 py-0.5 text-2xs text-ink-500">
                   {cmd.hint}
                 </kbd>
               </button>

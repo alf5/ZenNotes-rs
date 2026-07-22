@@ -37,6 +37,7 @@ import {
   type ExternalFileContent,
   type FolderEntry,
   type ImportedAsset,
+  type LinkMetadata,
   type LocalVaultEntry,
   type MoveExternalFileResult,
   type NoteComment,
@@ -62,6 +63,10 @@ import {
   type VaultTextSearchToolPaths
 } from '@zennotes/bridge-contract/ipc'
 import type { CustomTemplateFile, WriteTemplateInput } from '@zennotes/bridge-contract/templates'
+import type { AppConfigPortable } from '@zennotes/shared-domain/app-config'
+import type { CustomTheme } from '@zennotes/shared-domain/custom-themes'
+import type { DatabaseDoc, DatabaseSummary } from '@zennotes/shared-domain/databases'
+import type { Override } from '@zennotes/shared-domain/overrides'
 import type { VaultTask } from '@zennotes/shared-domain/tasks'
 import type {
   McpClientId,
@@ -355,7 +360,8 @@ const bridge: ZenBridge = {
     void getCurrentWindow().close().catch(() => {})
   },
   openNoteWindow: (relPath: string): Promise<void> => invoke('window_open_note', { relPath }),
-  openVaultWindow: (): Promise<VaultInfo | null> => invoke('window_open_vault'),
+  openVaultWindow: (root?: string): Promise<VaultInfo | null> =>
+    invoke('window_open_vault', { root: root ?? null }),
   readExternalFile: (): Promise<ExternalFileContent> => invoke('app_read_external_file'),
   writeExternalFile: (body: string): Promise<void> => invoke('app_write_external_file', { body }),
   moveExternalFileToVault: (): Promise<MoveExternalFileResult> =>
@@ -431,7 +437,77 @@ const bridge: ZenBridge = {
       /* ignore */
     }
   },
-  clipboardReadText: (): string => '' // M12 (sync read is not available in the webview)
+  clipboardReadText: (): string => '', // M12 (sync read is not available in the webview)
+
+  // ---- v2.15 contract surface (M17, stubs) -------------------------------
+  // Added by the v2.1.0 -> v2.15.0 re-vendor. Every stub below honors the
+  // degradation contract app-core expects from a platform without the
+  // feature (the web bridge's stub values), so the UI renders and fails
+  // soft until the Rust command lands. See GAP-ANALYSIS.md for the
+  // per-method implementation plan. `convertObsidianExcalidraw` (optional
+  // in the contract) is deliberately omitted: app-core feature-detects it.
+
+  // Workspace state: null/no-op keeps the v2.1.0 localStorage-only behavior;
+  // app-core's newest-wins reconciliation adopts the file transparently once
+  // the Rust side ships.
+  readWorkspaceState: async (): Promise<string | null> => null,
+  writeWorkspaceState: async (): Promise<void> => {},
+  rootContentHiddenByInboxMode: async (): Promise<boolean> => false,
+
+  // Portable config (config.toml): null = "no config file on this platform",
+  // which app-core answers with pure-localStorage prefs — exactly the
+  // v2.1.0 behavior. Once Rust reads the TOML before the webview boots,
+  // getConfigSync must return the preloaded snapshot ({} when absent, which
+  // triggers app-core to seed the file from localStorage).
+  getConfigSync: (): AppConfigPortable | null => null,
+  setConfig: async (): Promise<void> => {},
+  getConfigPath: async (): Promise<string | null> => null,
+  revealConfigFile: async (): Promise<void> => {},
+  onConfigChange: (): (() => void) => () => {},
+
+  // CSV databases: openDatabase -> null makes app-core forget the tab
+  // gracefully; the mutators reject and every caller try/catches.
+  openDatabase: async (): Promise<DatabaseDoc | null> => null,
+  writeDatabaseRows: (): Promise<DatabaseDoc> => notImplemented('writeDatabaseRows'),
+  writeDatabaseSchema: (): Promise<DatabaseDoc> => notImplemented('writeDatabaseSchema'),
+  createDatabase: (): Promise<DatabaseDoc> => notImplemented('createDatabase'),
+  renameDatabase: (): Promise<string> => notImplemented('renameDatabase'),
+  createRecordPage: (): Promise<string> => notImplemented('createRecordPage'),
+  listDatabases: async (): Promise<DatabaseSummary[]> => [],
+
+  // Excalidraw drawings ("New Drawing" command surfaces the rejection as a
+  // logged error until the Rust command lands).
+  createExcalidraw: (): Promise<NoteMeta> => notImplemented('createExcalidraw'),
+
+  // Deleted-assets store (.zennotes/deleted-assets/): reads as empty.
+  listDeletedAssets: async (): Promise<DeletedAsset[]> => [],
+  purgeDeletedAsset: async (): Promise<void> => {},
+  emptyDeletedAssets: async (): Promise<void> => {},
+
+  // Custom themes + CSS overrides (~/.config/zennotes/{themes,overrides}):
+  // empty lists render the Settings empty-state placeholders.
+  listCustomThemes: async (): Promise<CustomTheme[]> => [],
+  getCustomThemesDir: async (): Promise<string | null> => null,
+  revealCustomThemesDir: async (): Promise<void> => {},
+  deleteCustomTheme: async (): Promise<void> => {},
+  createCustomTheme: async (): Promise<string | null> => null,
+  onCustomThemesChange: (): (() => void) => () => {},
+  listOverrides: async (): Promise<Override[]> => [],
+  revealOverridesDir: async (): Promise<void> => {},
+  deleteOverride: async (): Promise<void> => {},
+  onOverridesChange: (): (() => void) => () => {},
+
+  // Misc desktop surface. openExternalFile's 'desktop-only' sentinel and
+  // fetchLinkMetadata's {ok:false} are the exact web-bridge degradations
+  // (toast / bare bookmark card).
+  revealFilePath: async (): Promise<void> => {},
+  openExternalFile: async (): Promise<{ ok: boolean; error?: string }> => ({
+    ok: false,
+    error: 'desktop-only'
+  }),
+  fetchLinkMetadata: async (url: string): Promise<LinkMetadata> => ({ url, ok: false }),
+  openFolderTemporary: async (): Promise<void> => {},
+  toggleDevTools: async (): Promise<void> => {}
 }
 
 export function createTauriBridge(): ZenBridge {

@@ -13,8 +13,11 @@ import rehypeStringify from 'rehype-stringify'
 import { visit, SKIP } from 'unist-util-visit'
 import type { Root as MdRoot } from 'mdast'
 import type { Root as HastRoot, Element as HastElement } from 'hast'
+import type { VFile } from 'vfile'
 import { recordRendererPerf } from './perf'
 import { classifyLocalAssetHref } from './local-assets'
+import { parseEmbedSizeHint } from './excalidraw-preview'
+import { parseColWidthsComment } from './markdown-table'
 
 /**
  * Remark plugin: `[[target]]` and `[[target|label]]` → link nodes
@@ -28,7 +31,13 @@ const ALLOWED_RENDERED_URI_SCHEME_RE = /^(?:https?|mailto|zen|zen-asset|blob|dat
 const ALLOWED_RENDERED_URI_RE =
   /^(?:(?:https?|mailto|zen|zen-asset|blob|data):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i
 const ALLOWED_RENDERED_DATA_ATTRS = [
+  'data-bookmark-url',
   'data-callout',
+  'data-embed-src',
+  'data-embed-url',
+  'data-embed-height',
+  'data-embed-width',
+  'data-excalidraw-embed',
   'data-function-plot-source',
   'data-jsxgraph-source',
   'data-local-asset-href',
@@ -38,6 +47,8 @@ const ALLOWED_RENDERED_DATA_ATTRS = [
   'data-resolved-path',
   'data-tag',
   'data-tikz-source',
+  'data-typst-display',
+  'data-typst-source',
   'data-wikilink',
   'data-zen-diagram-expanded',
   'data-zen-diagram-kind',
@@ -78,6 +89,16 @@ function remarkWikilinks() {
         url: target,
         title: null,
         alt: label
+      }
+    }
+    if (bang === '!' && assetKind === 'excalidraw') {
+      const size = parseEmbedSizeHint(label)
+      const w = size?.width ? ` data-embed-width="${size.width}"` : ''
+      const h = size?.height ? ` data-embed-height="${size.height}"` : ''
+      const safeTarget = target.replace(/"/g, '&quot;')
+      return {
+        type: 'html',
+        value: `<div class="excalidraw-embed-host" data-excalidraw-embed="${safeTarget}"${w}${h}></div>`
       }
     }
     if (bang === '!' && assetKind) {
@@ -202,7 +223,7 @@ function remarkHashtags() {
       if (p.type === 'link' || p.type === 'linkReference' || p.type === 'heading') return
       const value = (node as { value: string }).value
       if (!value.includes('#')) return
-      const regex = /(^|\s)#([a-zA-Z][\w\-/]*)/g
+      const regex = /(^|\s)#(\p{L}[\p{L}\d_/-]*)/gu
       const next: AnyNode[] = []
       let last = 0
       let m: RegExpExecArray | null
@@ -231,6 +252,46 @@ function remarkHashtags() {
       if (last < value.length) {
         next.push({ type: 'text', value: value.slice(last) })
       }
+      p.children.splice(index, 1, ...next)
+      return [SKIP, index + next.length]
+    })
+  }
+}
+
+/**
+ * Remark plugin: `==text==` → `<mark>` (Obsidian-style highlight). Colored
+ * highlights are authored as raw `<mark class="hl-green">…</mark>` HTML and ride
+ * through `rehypeRaw`; this plugin only handles the bare `==…==` shorthand,
+ * which maps to the default highlight color. Inline code is a separate mdast
+ * node (not a `text` child), so code spans are skipped automatically.
+ */
+function remarkHighlight() {
+  return (tree: MdRoot): void => {
+    visit(tree, 'text', (node, index, parent) => {
+      if (!parent || index === undefined) return
+      const p = parent as unknown as AnyParent
+      if (p.type === 'link' || p.type === 'linkReference') return
+      const value = (node as { value: string }).value
+      if (!value.includes('==')) return
+      // `==text==`: non-space just inside each `==`, shortest content, so
+      // `==a== ==b==` is two marks and `x == y` (spaced) never matches.
+      const regex = /==(?=\S)([\s\S]*?\S)==/g
+      const next: AnyNode[] = []
+      let last = 0
+      let m: RegExpExecArray | null
+      let changed = false
+      while ((m = regex.exec(value)) !== null) {
+        if (m.index > last) next.push({ type: 'text', value: value.slice(last, m.index) })
+        next.push({
+          type: 'emphasis',
+          data: { hName: 'mark' },
+          children: [{ type: 'text', value: m[1] }]
+        })
+        last = regex.lastIndex
+        changed = true
+      }
+      if (!changed) return
+      if (last < value.length) next.push({ type: 'text', value: value.slice(last) })
       p.children.splice(index, 1, ...next)
       return [SKIP, index + next.length]
     })
@@ -348,7 +409,13 @@ function rehypeMathDiagrams() {
     'language-functionplot': {
       className: 'zen-function-plot',
       sourceAttr: 'data-function-plot-source'
-    }
+    },
+    // A ```embed fence holds a URL (YouTube, etc.) rendered as an iframe by
+    // `renderEmbeds`. The runtime replaces the placeholder with the player.
+    'language-embed': { className: 'zen-embed', sourceAttr: 'data-embed-url' },
+    // A ```bookmark fence holds a URL rendered as a rich link card (favicon /
+    // title / description / preview) by `renderBookmarks`.
+    'language-bookmark': { className: 'zen-bookmark', sourceAttr: 'data-bookmark-url' }
   }
   return (tree: HastRoot): void => {
     visit(tree, 'element', (node, index, parent) => {
@@ -379,22 +446,201 @@ function rehypeMathDiagrams() {
   }
 }
 
-const processor = unified()
-  .use(remarkParse)
-  .use(remarkFrontmatter, ['yaml', 'toml'])
-  .use(remarkGfm)
-  .use(remarkBreaks)
-  .use(remarkMath)
-  .use(remarkWikilinks)
-  .use(remarkHashtags)
-  .use(remarkCallouts)
-  .use(remarkRehype, { allowDangerousHtml: true })
-  .use(rehypeRaw)
-  .use(rehypeMermaid)
-  .use(rehypeMathDiagrams)
-  .use(rehypeHighlight, { detect: true, ignoreMissing: true })
-  .use(rehypeKatex)
-  .use(rehypeStringify)
+/**
+ * Honor a `<!-- zen:cols=120,auto,90 -->` width hint that follows a table (#294):
+ * turn it into a <colgroup> so the preview and PDF export render the columns at
+ * the widths set by the live-table resize handles. The comment node itself is
+ * dropped by the sanitizer. Runs after rehypeRaw so the comment is a hast node.
+ */
+function rehypeTableColWidths() {
+  return (tree: HastRoot): void => {
+    visit(tree, 'element', (node, index, parent) => {
+      if (node.tagName !== 'table' || !parent || index === undefined) return
+      const siblings = (parent as unknown as AnyParent).children
+      let j = index + 1
+      while (
+        j < siblings.length &&
+        siblings[j]?.type === 'text' &&
+        String((siblings[j] as { value?: string }).value ?? '').trim() === ''
+      ) {
+        j++
+      }
+      const sib = siblings[j] as (AnyNode & { value?: string }) | undefined
+      if (!sib || sib.type !== 'comment' || typeof sib.value !== 'string') return
+      const widths = parseColWidthsComment(`<!--${sib.value}-->`)
+      if (!widths || !widths.some((w) => w != null)) return
+      const colgroup = {
+        type: 'element',
+        tagName: 'colgroup',
+        properties: {},
+        children: widths.map((w) => ({
+          type: 'element',
+          tagName: 'col',
+          properties: w != null ? { style: `width:${w}px` } : {},
+          children: []
+        }))
+      } as unknown as HastElement
+      node.children = [colgroup, ...(node.children ?? [])] as HastElement['children']
+      const cls = (node.properties?.className as string[] | undefined) ?? []
+      node.properties = { ...(node.properties ?? {}), className: [...cls, 'zen-has-col-widths'] }
+    })
+  }
+}
+
+/**
+ * Stamp each top-level block with `data-source-line` (its 1-based start line in
+ * the markdown source), so the split-view preview can be scroll-synced to the
+ * editor by mapping the editor's top line to the matching rendered element
+ * instead of by a raw scroll ratio (which drifts when the two heights differ).
+ * Applied via `data.hProperties` so `remarkRehype` carries it onto the element.
+ */
+function remarkSourceLines() {
+  return (tree: MdRoot): void => {
+    for (const node of tree.children) {
+      const line = node.position?.start?.line
+      if (line == null) continue
+      const data = (node.data ??= {})
+      const hProperties = ((data.hProperties ??= {}) as Record<string, unknown>)
+      hProperties['data-source-line'] = line
+    }
+  }
+}
+
+/**
+ * Genuine inline math (mirrors the live editor's `INLINE_MATH_RE`): a single `$`
+ * on each side with no whitespace immediately inside either delimiter. The
+ * anchored form is tested against the raw `$…$` source token.
+ */
+const STRICT_INLINE_MATH_RE = /^\$(?!\s)(?:\\.|[^$\\])*(?<!\s)\$$/
+
+/**
+ * remark-math is more permissive than the editor: it renders `$5 and got $10` as
+ * a formula (the content only has to avoid *both-sided* padding), so a currency
+ * line shows up as math in the reading view while the editor keeps it literal.
+ * Re-check every inline-math node against the editor's stricter rule using the
+ * original source, and turn currency-like matches back into plain text so the two
+ * views agree. Runs right after remark-math, before the node becomes a KaTeX span.
+ */
+function remarkCurrencyGuard() {
+  return (tree: MdRoot, file: VFile): void => {
+    const raw = file?.value
+    const source = typeof raw === 'string' ? raw : raw != null ? String(raw) : ''
+    if (!source.includes('$')) return
+    visit(tree, 'inlineMath', (node, index, parent) => {
+      if (!parent || index === undefined) return
+      const start = node.position?.start?.offset
+      const end = node.position?.end?.offset
+      if (start == null || end == null) return
+      const token = source.slice(start, end)
+      if (STRICT_INLINE_MATH_RE.test(token)) return
+      ;(parent as unknown as AnyParent).children.splice(index, 1, { type: 'text', value: token })
+      return [SKIP, index + 1]
+    })
+  }
+}
+
+/**
+ * Remark plugin (Typst renderer only): rewrite `$…$` / `$$…$$` math nodes into
+ * `.zen-typst-math` placeholders carrying the raw Typst source, instead of
+ * letting rehype-katex bake KaTeX HTML. The runtime (`renderTypstMath` in
+ * `typst-math-render.ts`, invoked from Preview.tsx) fills each placeholder with
+ * a compiled SVG (the same placeholder-then-render pattern the diagram blocks
+ * use). Runs after remark-math so the math nodes already exist.
+ */
+function remarkTypstMathPlaceholders() {
+  return (tree: MdRoot): void => {
+    visit(tree, ['math', 'inlineMath'], (node) => {
+      const mathNode = node as AnyNode & { value?: string; data?: Record<string, unknown> }
+      const display = mathNode.type === 'math'
+      const value = String(mathNode.value ?? '')
+      const data = (mathNode.data ??= {})
+      data.hName = display ? 'div' : 'span'
+      data.hProperties = {
+        className: display
+          ? ['zen-typst-math', 'zen-typst-display']
+          : ['zen-typst-math'],
+        'data-typst-source': value,
+        'data-typst-display': display ? 'true' : 'false'
+      }
+      data.hChildren = [{ type: 'text', value }]
+    })
+  }
+}
+
+/**
+ * Build the markdown → HTML processor for a given math renderer. Everything is
+ * shared except the math step: KaTeX bakes formulas into HTML via rehype-katex;
+ * Typst emits placeholders (rehype-katex is omitted) for the runtime to render.
+ */
+function createProcessor(mathRenderer: 'katex' | 'typst') {
+  const base = unified()
+    .use(remarkParse)
+    .use(remarkFrontmatter, ['yaml', 'toml'])
+    .use(remarkGfm)
+    .use(remarkBreaks)
+    .use(remarkMath)
+    .use(remarkCurrencyGuard)
+
+  const withTypst =
+    mathRenderer === 'typst' ? base.use(remarkTypstMathPlaceholders) : base
+
+  const rehyped = withTypst
+    .use(remarkWikilinks)
+    .use(remarkHashtags)
+    .use(remarkHighlight)
+    .use(remarkCallouts)
+    .use(remarkSourceLines)
+    .use(remarkRehype, { allowDangerousHtml: true })
+    .use(rehypeRaw)
+    .use(rehypeTableColWidths)
+    .use(rehypeMermaid)
+    .use(rehypeMathDiagrams)
+    .use(rehypeHighlight, { detect: true, ignoreMissing: true })
+
+  const withKatex =
+    mathRenderer === 'katex' ? rehyped.use(rehypeKatex) : rehyped
+
+  return withKatex.use(rehypeStringify)
+}
+
+const katexProcessor = createProcessor('katex')
+let typstProcessor: ReturnType<typeof createProcessor> | null = null
+
+// Which typesetter `renderMarkdown` uses. Driven by the `mathRenderer` setting
+// (App.tsx pushes changes here). Default KaTeX keeps existing notes unchanged.
+let activeMathRenderer: 'katex' | 'typst' = 'katex'
+
+/**
+ * Point the preview pipeline at KaTeX or Typst. Clears the render cache so the
+ * current note re-renders under the new engine on the next `renderMarkdown`.
+ */
+export function setMarkdownMathRenderer(mathRenderer: 'katex' | 'typst'): void {
+  if (mathRenderer === activeMathRenderer) return
+  activeMathRenderer = mathRenderer
+  markdownRenderCache.clear()
+}
+
+// When on, a `$$…$$` display block also renders when prose sits before the
+// opening fence (`Note: $$…$$`) or after the closing fence (`$$…$$ done`); the
+// prose is split onto its own paragraph so the fence owns its line. Off by
+// default (the `looseMathDelimiters` setting drives it); the editor keeps
+// showing source for those shapes, so this only relaxes the reading view.
+let looseMathDelimiters = false
+
+/** Toggle relaxed `$$` display-math delimiters (prose before/after the fence).
+ *  Clears the render cache so the current note re-renders under the new rule. */
+export function setMarkdownLooseMathDelimiters(loose: boolean): void {
+  if (loose === looseMathDelimiters) return
+  looseMathDelimiters = loose
+  markdownRenderCache.clear()
+}
+
+function activeProcessor() {
+  if (activeMathRenderer === 'typst') {
+    return (typstProcessor ??= createProcessor('typst'))
+  }
+  return katexProcessor
+}
 
 const MARKDOWN_RENDER_CACHE_LIMIT = 24
 const markdownRenderCache = new Map<string, string>()
@@ -416,6 +662,185 @@ function cacheRenderedMarkdown(src: string, html: string): void {
   }
 }
 
+/**
+ * GFM splits table cells on every `|`, including pipes inside inline math, so
+ * `| $P(A|B)$ |` is torn apart before remark-math ever sees it (#319). Escape a
+ * raw `|` when it falls inside an inline `$...$` span on a table row: GFM then
+ * treats it as a literal pipe and unescapes it back to `|` for the cell, so the
+ * math renders. Currency like `| $5 | $10 |` is left alone, because the span
+ * rule (no whitespace just inside the `$` delimiters) never matches it.
+ */
+function escapeTableMathPipes(src: string): string {
+  if (!src.includes('|') || !src.includes('$')) return src
+  const lines = src.split('\n')
+  // A GFM delimiter row: only spaces, pipes, colons, dashes, with a pipe and a
+  // dash. The line above it (the header) must also look like a table row.
+  const delimiter = /^[\s|:-]*-[\s|:-]*$/
+  const isTableRow = new Array<boolean>(lines.length).fill(false)
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i].includes('|') && delimiter.test(lines[i]) && lines[i - 1].includes('|')) {
+      isTableRow[i - 1] = true
+      isTableRow[i] = true
+      for (
+        let j = i + 1;
+        j < lines.length && lines[j].trim() !== '' && lines[j].includes('|');
+        j++
+      ) {
+        isTableRow[j] = true
+      }
+    }
+  }
+  // Inline math: opening `$` not escaped and not followed by space; closing `$`
+  // not preceded by space. Mirrors remark-math so currency is not matched.
+  const mathSpan = /(?<!\\)\$(?!\s)((?:\\.|[^$\\])+?)(?<!\s)\$/g
+  let changed = false
+  const out = lines.map((line, i) => {
+    if (!isTableRow[i] || !line.includes('$') || !line.includes('|')) return line
+    return line.replace(mathSpan, (whole, inner: string) => {
+      if (!inner.includes('|')) return whole
+      changed = true
+      return `$${inner.replace(/(?<!\\)\|/g, '\\|')}$`
+    })
+  })
+  return changed ? out.join('\n') : src
+}
+
+/**
+ * remark-math only closes a `$$` block on a line containing nothing but the
+ * closing fence, while the editor's live preview (cm-math-render) also accepts
+ * content hugging a fence: a closing `$$` at the end of the last content line,
+ * or a whole `$$x^2$$` block on one line (#399). Rewrite those editor-legal
+ * shapes into the canonical fence-on-its-own-line form so the reading view
+ * parses exactly what the editor renders. Fenced code is left untouched, and
+ * anything the editor itself rejects (mid-line `$$`, empty or unclosed blocks)
+ * passes through unchanged — canonical notes come back byte-identical.
+ */
+function normalizeBlockMathFences(src: string, loose = false): string {
+  if (!src.includes('$$')) return src
+  const lines = src.split('\n')
+  const out: string[] = []
+  let changed = false
+  let codeFence: string | null = null
+  let i = 0
+  while (i < lines.length) {
+    const raw = lines[i]
+    const trimmed = raw.trim()
+    if (codeFence) {
+      out.push(raw)
+      if (trimmed.startsWith(codeFence)) codeFence = null
+      i++
+      continue
+    }
+    const fence = trimmed.match(/^(`{3,}|~{3,})/)
+    if (fence) {
+      out.push(raw)
+      codeFence = fence[1]
+      i++
+      continue
+    }
+    // Opening fence: strict is `$$` at line start; loose also accepts prose
+    // before a `$$` that ends the line (`Note: $$`), splitting the prose off.
+    let indent: string | null = null
+    let rest = ''
+    let proseBefore = ''
+    const strictOpen = raw.match(/^( {0,3})\$\$(?!\$)(.*)$/)
+    if (strictOpen) {
+      indent = strictOpen[1]
+      rest = strictOpen[2]
+    } else if (loose) {
+      const looseOpen = raw.match(/^( {0,3})(.+?)\s*\$\$(?!\$)\s*$/)
+      if (looseOpen && !looseOpen[2].includes('$$')) {
+        indent = looseOpen[1]
+        proseBefore = looseOpen[2]
+      }
+    }
+    if (indent === null) {
+      out.push(raw)
+      i++
+      continue
+    }
+    const restTrimmed = rest.trim()
+    if (restTrimmed.includes('$$')) {
+      // `$$x^2$$` on one line: expand it. Anything else with a `$$` mid-line
+      // (`$$a$$b`, `$$ $$`) is rejected by the editor too — pass through.
+      if (restTrimmed.endsWith('$$') && restTrimmed.indexOf('$$') === restTrimmed.length - 2) {
+        const inner = restTrimmed.slice(0, -2)
+        if (inner.trim() !== '') {
+          out.push(`${indent}$$`, inner, `${indent}$$`)
+          changed = true
+          i++
+          continue
+        }
+      }
+      out.push(raw)
+      i++
+      continue
+    }
+    // Multi-line block: find the closing fence, giving up at the first `$$`
+    // the editor's whole-line rule would reject. In loose mode, prose after
+    // the close fence (`$$ done`) is also accepted and split off.
+    let close = -1
+    let closeHasContent = false
+    let closeTrailing = ''
+    for (let k = i + 1; k < lines.length; k++) {
+      const t = lines[k].trim()
+      if (!t.includes('$$')) continue
+      if (t === '$$') {
+        close = k
+      } else if (t.endsWith('$$') && t.indexOf('$$') === t.length - 2) {
+        close = k
+        closeHasContent = true
+      } else if (loose) {
+        // `$$ done` (prose after the close) or `x^2$$ done` (content + prose).
+        const trailing = t.match(/^(.*?)\$\$(?!\$)\s+(\S.*)$/)
+        if (trailing && !trailing[1].includes('$$')) {
+          close = k
+          if (trailing[1].trim() !== '') closeHasContent = true
+          closeTrailing = trailing[2]
+        }
+      }
+      break
+    }
+    const alreadyCanonical =
+      restTrimmed === '' && !closeHasContent && proseBefore === '' && closeTrailing === ''
+    if (close === -1 || alreadyCanonical) {
+      // Unclosed, editor-rejected, or already canonical: leave untouched.
+      out.push(raw)
+      i++
+      continue
+    }
+    if (proseBefore !== '') {
+      // Prose leading the open fence becomes its own paragraph.
+      out.push(`${indent}${proseBefore}`, '')
+      changed = true
+    }
+    out.push(`${indent}$$`)
+    if (restTrimmed !== '') {
+      out.push(rest)
+      changed = true
+    }
+    for (let k = i + 1; k < close; k++) out.push(lines[k])
+    if (closeTrailing !== '') {
+      // Loose close: `[content]$$ trailing` -> content, `$$`, blank, trailing.
+      const rawClose = lines[close]
+      const idx = rawClose.lastIndexOf('$$')
+      const beforeDollar = rawClose.slice(0, idx)
+      if (beforeDollar.trim() !== '') out.push(beforeDollar)
+      out.push(`${indent}$$`, '', `${indent}${closeTrailing}`)
+      changed = true
+    } else if (closeHasContent) {
+      const rawClose = lines[close]
+      const idx = rawClose.lastIndexOf('$$')
+      out.push(rawClose.slice(0, idx), `${indent}$$`)
+      changed = true
+    } else {
+      out.push(lines[close])
+    }
+    i = close + 1
+  }
+  return changed ? out.join('\n') : src
+}
+
 export function renderMarkdown(src: string): string {
   const cached = getCachedMarkdown(src)
   if (cached != null) {
@@ -425,7 +850,13 @@ export function renderMarkdown(src: string): string {
 
   const startedAt = performance.now()
   try {
-    const html = sanitizeRenderedHtml(String(processor.processSync(src)))
+    const html = sanitizeRenderedHtml(
+      String(
+        activeProcessor().processSync(
+          escapeTableMathPipes(normalizeBlockMathFences(src, looseMathDelimiters))
+        )
+      )
+    )
     cacheRenderedMarkdown(src, html)
     recordRendererPerf('markdown.render', performance.now() - startedAt, {
       chars: src.length

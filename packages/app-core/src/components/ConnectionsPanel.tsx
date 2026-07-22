@@ -3,11 +3,13 @@ import type { NoteContent, NoteMeta } from '@shared/ipc'
 import { useStore } from '../store'
 import {
   extractWikilinkTargets,
+  extractMarkdownLinkHrefs,
   extractMentionSnippet,
   parseCreateNotePath,
   resolveWikilinkTarget,
   suggestCreateNotePath
 } from '../lib/wikilinks'
+import { resolveInternalNoteHref } from '../lib/internal-links'
 import { LazyNoteHoverPreview as NoteHoverPreview } from './LazyNoteHoverPreview'
 import { promptApp } from '../lib/prompt-requests'
 import { usePanelResize } from '../lib/use-panel-resize'
@@ -103,6 +105,15 @@ export function ConnectionsPanel({ note }: { note: NoteContent }): JSX.Element {
         suggestedPath: suggestCreateNotePath(target)
       })
     }
+    // #70dark: standard Markdown links [text](Note.md) also count as outgoing
+    // connections — resolve each href the way `gd` does and add resolved notes.
+    for (const href of extractMarkdownLinkHrefs(note.body)) {
+      const resolvedPath = resolveInternalNoteHref(note.path, href, notes)?.path
+      if (!resolvedPath || resolvedPath === note.path) continue
+      if (resolvedItems.some((n) => n.path === resolvedPath)) continue
+      const target = notes.find((n) => n.path === resolvedPath)
+      if (target && target.folder !== 'trash') resolvedItems.push(target)
+    }
     return { resolvedItems, missingItems }
   }, [note.body, note.path, notes])
 
@@ -170,9 +181,14 @@ export function ConnectionsPanel({ note }: { note: NoteContent }): JSX.Element {
         try {
           const content = await window.zen.readNote(candidate.path)
           const targets = extractWikilinkTargets(content.body)
-          const linksHere = targets.some(
-            (target) => resolveWikilinkTarget(notes, target)?.path === note.path
-          )
+          const linksHere =
+            targets.some(
+              (target) => resolveWikilinkTarget(notes, target)?.path === note.path
+            ) ||
+            // #70dark: a markdown link [text](Note.md) here also counts as a backlink.
+            extractMarkdownLinkHrefs(content.body).some(
+              (href) => resolveInternalNoteHref(candidate.path, href, notes)?.path === note.path
+            )
           const snippet = extractMentionSnippet(content.body, note.title)
           return {
             note: candidate,
@@ -234,7 +250,7 @@ export function ConnectionsPanel({ note }: { note: NoteContent }): JSX.Element {
       >
         <PanelResizeHandle onStart={startResize} />
         <div className="border-b border-paper-300/60 px-4 py-4">
-          <div className="text-[11px] font-medium uppercase tracking-[0.16em] text-ink-400">
+          <div className="text-xs font-medium uppercase tracking-[0.16em] text-ink-400">
             Connections
           </div>
           <div className="mt-2 flex items-center gap-2 text-xs text-ink-500">
@@ -339,7 +355,7 @@ export function ConnectionsPanel({ note }: { note: NoteContent }): JSX.Element {
           </ConnectionSection>
         </div>
         {showKeyboardHints && (
-          <div className="border-t border-paper-300/60 px-3 py-2 text-[11px] text-ink-500">
+          <div className="border-t border-paper-300/60 px-3 py-2 text-xs text-ink-500">
             {isHoverPreviewFocused
               ? 'Esc returns to Connections. Esc again returns to the note.'
               : 'Use p to focus the hover preview without leaving the keyboard.'}
@@ -428,20 +444,20 @@ function ConnectionRow({
           <div className={['truncate text-sm font-medium', active ? 'text-white' : 'text-ink-900'].join(' ')}>
             {note.title}
           </div>
-          <div className={['mt-0.5 truncate text-[11px]', active ? 'text-white/75' : 'text-ink-500'].join(' ')}>
+          <div className={['mt-0.5 truncate text-xs', active ? 'text-white/75' : 'text-ink-500'].join(' ')}>
             {note.path}
           </div>
         </div>
         <span
           className={[
-            'rounded-full px-2 py-1 text-[10px] uppercase tracking-[0.14em]',
+            'rounded-full px-2 py-1 text-2xs uppercase tracking-[0.14em]',
             active ? 'bg-white/12 text-white/80' : 'bg-paper-200/80 text-ink-500'
           ].join(' ')}
         >
           hover
         </span>
       </div>
-      <div className={['mt-2 line-clamp-3 text-[12px] leading-5', active ? 'text-white/85' : 'text-ink-600'].join(' ')}>
+      <div className={['mt-2 line-clamp-3 text-xs leading-5', active ? 'text-white/85' : 'text-ink-600'].join(' ')}>
         {summary}
       </div>
       {active && (
@@ -486,20 +502,20 @@ function MissingConnectionRow({
           <div className={['truncate text-sm font-medium', active ? 'text-white' : 'text-ink-900'].join(' ')}>
             {target}
           </div>
-          <div className={['mt-0.5 truncate text-[11px]', active ? 'text-white/75' : 'text-ink-500'].join(' ')}>
+          <div className={['mt-0.5 truncate text-xs', active ? 'text-white/75' : 'text-ink-500'].join(' ')}>
             {suggestedPath}
           </div>
         </div>
         <span
           className={[
-            'rounded-full px-2 py-1 text-[10px] uppercase tracking-[0.14em]',
+            'rounded-full px-2 py-1 text-2xs uppercase tracking-[0.14em]',
             active ? 'bg-white/12 text-white/80' : 'bg-amber-500/12 text-amber-200'
           ].join(' ')}
         >
           create
         </span>
       </div>
-      <div className={['mt-2 line-clamp-2 text-[12px] leading-5', active ? 'text-white/85' : 'text-ink-600'].join(' ')}>
+      <div className={['mt-2 line-clamp-2 text-xs leading-5', active ? 'text-white/85' : 'text-ink-600'].join(' ')}>
         No note resolves this wikilink yet. Click to create it.
       </div>
       {active && (
@@ -539,13 +555,13 @@ function ConnectionKeyHint({
   return (
     <span
       className={[
-        'pointer-events-none shrink-0 rounded-md border px-1.5 py-0.5 text-[10px] leading-none',
+        'pointer-events-none shrink-0 rounded-md border px-1.5 py-0.5 text-2xs leading-none',
         active
           ? 'border-white/25 bg-white/12 text-white/80'
           : 'border-paper-300/70 bg-paper-100/75 text-ink-500'
       ].join(' ')}
     >
-      <span className="font-mono text-[10px]">{keyLabel}</span>
+      <span className="font-mono text-2xs">{keyLabel}</span>
       <span className="ml-1">{label}</span>
     </span>
   )

@@ -1,18 +1,31 @@
 import { lazy, Suspense, useEffect, useMemo, useRef } from 'react'
-import { useStore } from './store'
-import { resolveAuto } from './lib/themes'
+import { useStore, initConfigSync, initCustomThemes, initOverrides } from './store'
+import { resolveAuto, findTheme } from './lib/themes'
+import {
+  injectActiveTheme,
+  injectOverrides,
+  injectTweaks,
+  isCustomThemeId,
+  customThemeSlugFromId,
+  resolveCustomThemeMode
+} from './lib/custom-themes'
 import { Sidebar } from './components/Sidebar'
 import { NoteList } from './components/NoteList'
 import { TitleBar } from './components/TitleBar'
 import { PromptHost } from './components/PromptHost'
 import { ConfirmHost } from './components/ConfirmHost'
 import { ServerDirectoryPickerHost } from './components/ServerDirectoryPickerHost'
+import { ToastHost } from './components/ui'
+import { ExcalidrawEmbedMenuHost } from './components/ExcalidrawEmbedMenuHost'
 import { resolveQuickNoteTitle } from './lib/quick-note-title'
-import { matchesShortcut, matchesSequenceToken } from './lib/keymaps'
+import { isMacPlatform, matchesShortcut, matchesSequenceToken } from './lib/keymaps'
+import { focusPaneOrEdgePanel } from './lib/pane-nav'
 import { requestPaneMode } from './lib/pane-mode'
 import { recordRendererPerf } from './lib/perf'
 import { focusEditorNormalMode } from './lib/editor-focus'
+import { isAppOverlayOpen } from './lib/overlay-open'
 import { installMarkdownFileDropHandler } from './lib/markdown-file-drop'
+import { setMarkdownLooseMathDelimiters, setMarkdownMathRenderer } from './lib/markdown'
 import {
   appUpdateNoticeLabel,
   appUpdatePrimaryActionLabel,
@@ -160,6 +173,11 @@ const TemplatePalette = lazy(async () => {
   return { default: module.TemplatePalette }
 })
 
+const EmbedDrawingPalette = lazy(async () => {
+  const module = await import('./components/EmbedDrawingPalette')
+  return { default: module.EmbedDrawingPalette }
+})
+
 const SettingsModal = lazy(async () => {
   const module = await import('./components/SettingsModal')
   return { default: module.SettingsModal }
@@ -209,7 +227,7 @@ function AppUpdateNotice({
       <span className="h-2 w-2 shrink-0 rounded-full bg-accent shadow-[0_0_0_4px_rgb(var(--z-accent)/0.12)]" />
       <span className="min-w-0 truncate font-medium">{label}</span>
       {updateState?.phase === 'downloading' && (
-        <span className="shrink-0 rounded-md bg-paper-200/80 px-1.5 py-0.5 text-[11px] font-medium text-ink-600">
+        <span className="shrink-0 rounded-md bg-paper-200/80 px-1.5 py-0.5 text-xs font-medium text-ink-600">
           {Math.round(updateState.progressPercent ?? 0)}%
         </span>
       )}
@@ -246,6 +264,8 @@ function App(): JSX.Element {
   const setOutlinePaletteOpen = useStore((s) => s.setOutlinePaletteOpen)
   const templatePaletteOpen = useStore((s) => s.templatePaletteOpen)
   const setTemplatePaletteOpen = useStore((s) => s.setTemplatePaletteOpen)
+  const embedDrawingPaletteOpen = useStore((s) => s.embedDrawingPaletteOpen)
+  const setEmbedDrawingPaletteOpen = useStore((s) => s.setEmbedDrawingPaletteOpen)
   const sidebarOpen = useStore((s) => s.sidebarOpen)
   const noteListOpen = useStore((s) => s.noteListOpen)
   const zenMode = useStore((s) => s.zenMode)
@@ -263,11 +283,19 @@ function App(): JSX.Element {
   const themeId = useStore((s) => s.themeId)
   const themeFamily = useStore((s) => s.themeFamily)
   const themeMode = useStore((s) => s.themeMode)
+  const customThemes = useStore((s) => s.customThemes)
+  const overrides = useStore((s) => s.overrides)
+  const enabledOverrides = useStore((s) => s.enabledOverrides)
+  const themeTweaks = useStore((s) => s.themeTweaks)
   const editorFontSize = useStore((s) => s.editorFontSize)
   const editorLineHeight = useStore((s) => s.editorLineHeight)
   const previewMaxWidth = useStore((s) => s.previewMaxWidth)
   const editorMaxWidth = useStore((s) => s.editorMaxWidth)
   const contentAlign = useStore((s) => s.contentAlign)
+  const completedTaskStyle = useStore((s) => s.completedTaskStyle)
+  const mathRenderer = useStore((s) => s.mathRenderer)
+  const looseMathDelimiters = useStore((s) => s.looseMathDelimiters)
+  const lineNumberPosition = useStore((s) => s.lineNumberPosition)
   const interfaceFont = useStore((s) => s.interfaceFont)
   const textFont = useStore((s) => s.textFont)
   const monoFont = useStore((s) => s.monoFont)
@@ -289,6 +317,29 @@ function App(): JSX.Element {
     if (!vault) return undefined
     return scheduleEditorModuleWarmup()
   }, [vault])
+
+  // When a full-surface panel (Tasks/Tags) closes, the store asks the editor to
+  // reclaim keyboard focus so the reopened note takes typing without a manual
+  // pane jump or mouse click. Routed through a DOM event to keep the store free
+  // of an editor-focus import cycle. (#353)
+  useEffect(() => {
+    const handler = (): void => focusEditorNormalMode({ attempts: 10, delayMs: 24 })
+    window.addEventListener('zen:focus-editor', handler)
+    return () => window.removeEventListener('zen:focus-editor', handler)
+  }, [])
+
+  // Closing the sidebar while it holds keyboard focus (⌘1, Leader E, etc.) used
+  // to strand focus on the now-hidden pane; hand it back to the editor. Only
+  // fires on the open→closed transition when the sidebar was the focused panel,
+  // so hiding it mid-edit never steals focus from the editor. (#353)
+  const prevSidebarOpenRef = useRef(sidebarOpen)
+  useEffect(() => {
+    const wasOpen = prevSidebarOpenRef.current
+    prevSidebarOpenRef.current = sidebarOpen
+    if (wasOpen && !sidebarOpen && useStore.getState().focusedPanel === 'sidebar') {
+      focusEditorNormalMode({ attempts: 10, delayMs: 24 })
+    }
+  }, [sidebarOpen])
 
   useEffect(() => {
     const raf = window.requestAnimationFrame(() => {
@@ -318,6 +369,14 @@ function App(): JSX.Element {
     window.zen.notifyRendererReady()
   }, [])
 
+  // Mirror portable prefs to the plain-text config file and pick up external
+  // edits (synced dotfile / hand-edit). Desktop-only; a no-op on web.
+  useEffect(() => {
+    initConfigSync()
+    initCustomThemes()
+    initOverrides()
+  }, [])
+
   // Drag a markdown file from the OS onto the window to open it. Desktop
   // resolves the file to a path and opens it in place (vault note when it
   // lives inside a known vault, otherwise a standalone external-file window) —
@@ -335,7 +394,19 @@ function App(): JSX.Element {
           const path = window.zen.getPathForFile(file)
           if (path) void window.zen.openMarkdownFile(path)
         }
-      }
+      },
+      // Dragging a folder onto the window opens it as a temporary session.
+      // Desktop-only (the web build has no OS paths).
+      ...(runtime === 'web'
+        ? {}
+        : {
+            onFolders: (folders: File[]) => {
+              for (const folder of folders) {
+                const path = window.zen.getPathForFile(folder)
+                if (path) void window.zen.openFolderTemporary(path)
+              }
+            }
+          })
     })
   }, [])
 
@@ -390,18 +461,36 @@ function App(): JSX.Element {
     return () => window.removeEventListener('beforeunload', flush)
   }, [flushDirtyNotes])
 
-  // Apply theme: set html[data-theme=...] based on mode/family/id.
-  // When mode === 'auto', we mirror `prefers-color-scheme` and also
-  // react to changes while the app is running.
+  // Apply theme: set html[data-theme=...] + html[data-theme-mode=...] based on
+  // mode/family/id. Custom themes keep one id (`custom-<slug>`) and express
+  // light/dark via `data-theme-mode`; built-ins encode mode in their id but we
+  // mirror it onto `data-theme-mode` too so overrides/custom CSS can rely on it
+  // universally. When mode === 'auto' we mirror `prefers-color-scheme` live.
   useEffect(() => {
     const html = document.documentElement
     const mql = window.matchMedia('(prefers-color-scheme: dark)')
     const apply = (): void => {
-      let id = themeId
-      if (themeMode === 'auto') {
-        id = resolveAuto(themeFamily, mql.matches, themeId)
+      const prevMode = html.dataset.themeMode
+      const prefersDark = mql.matches
+      if (isCustomThemeId(themeId)) {
+        const slug = customThemeSlugFromId(themeId)
+        const theme = customThemes.find((t) => t.slug === slug)
+        const wantDark = themeMode === 'auto' ? prefersDark : themeMode === 'dark'
+        html.dataset.theme = themeId
+        html.dataset.themeMode = resolveCustomThemeMode(theme, wantDark)
+      } else {
+        const id = themeMode === 'auto' ? resolveAuto(themeFamily, prefersDark, themeId) : themeId
+        html.dataset.theme = id
+        html.dataset.themeMode = findTheme(id).mode
       }
-      html.dataset.theme = id
+      // Excalidraw embed previews are exported light/dark to match the theme;
+      // re-render them when the resolved mode flips so a dark note never shows a
+      // white drawing. (#363)
+      if (prevMode && prevMode !== html.dataset.themeMode) {
+        useStore.setState((s) => ({
+          excalidrawPreviewVersion: s.excalidrawPreviewVersion + 1
+        }))
+      }
     }
     apply()
     if (themeMode === 'auto') {
@@ -409,7 +498,23 @@ function App(): JSX.Element {
       return () => mql.removeEventListener('change', apply)
     }
     return undefined
-  }, [themeId, themeFamily, themeMode])
+  }, [themeId, themeFamily, themeMode, customThemes])
+
+  // Inject the active custom theme's raw CSS (built-ins clear it). Reacts to
+  // theme switches and to live edits arriving via the file watcher.
+  useEffect(() => {
+    injectActiveTheme(themeId, customThemes)
+  }, [themeId, customThemes])
+
+  // Inject enabled CSS overrides on top of the active theme.
+  useEffect(() => {
+    injectOverrides(overrides, enabledOverrides)
+  }, [overrides, enabledOverrides])
+
+  // Inject the visual color tweaks (the picker UI) as the topmost layer.
+  useEffect(() => {
+    injectTweaks(themeTweaks)
+  }, [themeTweaks])
 
   // Apply editor font size + line height + all three font families as
   // CSS variables. Each family has its own fallback stack so leaving it
@@ -421,6 +526,9 @@ function App(): JSX.Element {
     html.style.setProperty('--z-preview-max-width', `${previewMaxWidth}px`)
     html.style.setProperty('--z-editor-max-width', `${editorMaxWidth}px`)
     html.dataset.contentAlign = contentAlign
+    html.dataset.completedTaskStyle = completedTaskStyle
+    html.dataset.mathRenderer = mathRenderer
+    html.dataset.lineNumberPosition = lineNumberPosition
 
     const setFont = (name: string, value: string | null, fallback: string): void => {
       if (value) html.style.setProperty(name, `"${value}", ${fallback}`)
@@ -441,7 +549,19 @@ function App(): JSX.Element {
       monoFont,
       '"SF Mono", "SFMono-Regular", ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace'
     )
-  }, [editorFontSize, editorLineHeight, previewMaxWidth, editorMaxWidth, contentAlign, interfaceFont, textFont, monoFont])
+  }, [editorFontSize, editorLineHeight, previewMaxWidth, editorMaxWidth, contentAlign, completedTaskStyle, mathRenderer, lineNumberPosition, interfaceFont, textFont, monoFont])
+
+  // Keep the markdown/preview pipeline pointed at the active math engine, even
+  // on surfaces that render markdown without the Preview component mounted
+  // (note hover cards, comments). Preview also sets this inline before its own
+  // render to avoid any effect-ordering race on toggle.
+  useEffect(() => {
+    setMarkdownMathRenderer(mathRenderer)
+  }, [mathRenderer])
+
+  useEffect(() => {
+    setMarkdownLooseMathDelimiters(looseMathDelimiters)
+  }, [looseMathDelimiters])
 
   // The app now always runs fully opaque.
   useEffect(() => {
@@ -528,6 +648,28 @@ function App(): JSX.Element {
         void window.zen.resetAppZoom()
         return
       }
+      // On macOS ⌥←/→ moves by word inside text fields; don't let note-history
+      // nav hijack it while editing — that broke word-motion in insert mode
+      // (#302). History nav still works outside text fields, on other platforms,
+      // and via Vim's Ctrl+O / Ctrl+I.
+      const isMacWordMotion =
+        isMacPlatform() &&
+        e.altKey &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        (e.key === 'ArrowLeft' || e.key === 'ArrowRight') &&
+        isEditableShortcutTarget(e.target)
+      if (!isMacWordMotion && matchesShortcut(e, overrides, 'global.historyBack')) {
+        // Back in note navigation history (works in any mode).
+        e.preventDefault()
+        void state.jumpToPreviousNote()
+        return
+      }
+      if (!isMacWordMotion && matchesShortcut(e, overrides, 'global.historyForward')) {
+        e.preventDefault()
+        void state.jumpToNextNote()
+        return
+      }
       if (matchesShortcut(e, overrides, 'global.searchNotes')) {
         // ⌘P — note search
         e.preventDefault()
@@ -537,16 +679,33 @@ function App(): JSX.Element {
         return
       }
       if (matchesShortcut(e, overrides, 'global.closeActiveTab')) {
-        // On Linux/Windows `Mod+W` (close tab) resolves to Ctrl+W, which also
-        // is the vim pane-focus prefix (`<C-w>hjkl`) and insert-mode word
-        // delete. When vim mode is on, reserve that key for vim — VimNav's
-        // capture-phase handler arms the prefix; close tabs via :q / :bd / the
-        // command palette. On macOS close-tab is Cmd+W, so this never triggers.
-        if (state.vimMode && matchesSequenceToken(e, overrides, 'vim.panePrefix')) {
+        // On Linux/Windows `Mod+W` (close tab) resolves to Ctrl+W, which is also
+        // the vim pane-focus prefix (`<C-w>hjkl`) and insert-mode word delete.
+        // When vim mode is on AND a tab is open, reserve Ctrl+W for vim (close
+        // tabs via :q / :bd / the palette). With no tab open the prefix has
+        // nothing to act on, so fall through and close the window. On macOS
+        // close-tab is Cmd+W, so the vim guard never matches there.
+        const hasActiveTab = !!state.selectedPath
+        if (
+          state.vimMode &&
+          hasActiveTab &&
+          matchesSequenceToken(e, overrides, 'vim.panePrefix')
+        ) {
           return
         }
         e.preventDefault()
-        void state.closeActiveNote()
+        if (hasActiveTab) {
+          void state.closeActiveNote()
+        } else {
+          // No tab left to close — close the window, matching native Cmd+W
+          // (macOS) / Ctrl+W behavior even with vim mode on (#192).
+          window.zen.windowClose()
+        }
+        return
+      }
+      if (matchesShortcut(e, overrides, 'global.reopenClosedTab')) {
+        e.preventDefault()
+        void state.reopenLastClosedTab()
         return
       }
       if (e.key === 'Escape' && state.searchOpen) {
@@ -574,6 +733,11 @@ function App(): JSX.Element {
         focusEditorNormalMode()
         return
       }
+      if (e.key === 'Escape' && state.embedDrawingPaletteOpen) {
+        setEmbedDrawingPaletteOpen(false)
+        focusEditorNormalMode()
+        return
+      }
       if (e.key === 'Escape' && state.outlinePaletteOpen) {
         setOutlinePaletteOpen(false)
         focusEditorNormalMode()
@@ -597,6 +761,21 @@ function App(): JSX.Element {
         window.dispatchEvent(new Event('zen:toggle-outline'))
         return
       }
+      // ⇧⌘C — toggle the comments panel in the active pane
+      if (matchesShortcut(e, overrides, 'global.toggleCommentsPanel')) {
+        e.preventDefault()
+        window.dispatchEvent(new Event('zen:toggle-comments'))
+        return
+      }
+      // ⌥⌘M — comment the current selection (or line) without the mouse
+      if (matchesShortcut(e, overrides, 'global.addComment')) {
+        e.preventDefault()
+        window.dispatchEvent(new Event('zen:add-comment'))
+        return
+      }
+      // Pane-focus shortcuts (⌥h/j/k/l by default) are handled by a separate
+      // capture-phase listener so a remap onto an editor key still wins over
+      // CodeMirror — see focusPaneHandler below. (#124)
       if (matchesShortcut(e, overrides, 'global.modeEdit')) {
         e.preventDefault()
         requestPaneMode('edit')
@@ -625,26 +804,124 @@ function App(): JSX.Element {
         return
       }
     }
+    // Pane-focus shortcuts must win over the editor. CodeMirror binds keys such
+    // as Ctrl-h (delete character) and Ctrl-k (delete to line end), so when a
+    // user remaps a focusPane shortcut onto one of them the bubble-phase handler
+    // above would run *after* CodeMirror already executed its command — the key
+    // would both delete text and move focus (#124). Handle these in the capture
+    // phase and consume the event so the editor never sees the key.
+    const focusPaneHandler = (e: KeyboardEvent): void => {
+      const state = useStore.getState()
+      // Don't move focus (or swallow the key) while a modal, palette, or the
+      // Settings keybinding recorder is open — the recorder also captures keys
+      // in this phase, so a focusPane shortcut bound to e.g. Ctrl+H must not
+      // intercept it. (#124)
+      if (
+        state.settingsOpen ||
+        state.searchOpen ||
+        state.vaultTextSearchOpen ||
+        state.commandPaletteOpen ||
+        state.bufferPaletteOpen ||
+        state.templatePaletteOpen ||
+        state.embedDrawingPaletteOpen ||
+        state.outlinePaletteOpen ||
+        document.querySelector('[data-ctx-menu]') ||
+        document.querySelector('[data-prompt-modal]') ||
+        document.querySelector('[data-confirm-modal]') ||
+        // An open autocomplete popup (slash menu, [[ links, the callout [! type
+        // picker) owns the keyboard: its Ctrl+J/Ctrl+K/Ctrl+N/Ctrl+P navigation
+        // must win over a focusPane shortcut a user remapped onto those chords,
+        // rather than switching panes mid-completion. Mirrors the completion
+        // deferral for inline-format shortcuts (#337). Reported by Tornado300.
+        document.querySelector('.cm-tooltip-autocomplete')
+      ) {
+        return
+      }
+      const overrides = state.keymapOverrides
+      const paneDir = matchesShortcut(e, overrides, 'global.focusPaneLeft')
+        ? 'h'
+        : matchesShortcut(e, overrides, 'global.focusPaneDown')
+          ? 'j'
+          : matchesShortcut(e, overrides, 'global.focusPaneUp')
+            ? 'k'
+            : matchesShortcut(e, overrides, 'global.focusPaneRight')
+              ? 'l'
+              : null
+      if (!paneDir) return
+      e.preventDefault()
+      e.stopImmediatePropagation()
+      focusPaneOrEdgePanel(paneDir)
+    }
     window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
+    window.addEventListener('keydown', focusPaneHandler, true)
+    return () => {
+      window.removeEventListener('keydown', handler)
+      window.removeEventListener('keydown', focusPaneHandler, true)
+    }
   }, [
     setBufferPaletteOpen,
     setCommandPaletteOpen,
     setOutlinePaletteOpen,
     setTemplatePaletteOpen,
+    setEmbedDrawingPaletteOpen,
     setSearchOpen,
     setVaultTextSearchOpen
   ])
 
+  // Self-heal keyboard focus when the window wakes from an idle/background
+  // state. If Chromium/the OS lets the editor silently lose DOM focus while
+  // idle, window shortcuts and the Vim keymap stop receiving keys until focus
+  // is re-established. When the window regains focus (or becomes visible again)
+  // and the editor was the active surface with no overlay open, re-grab it so
+  // the user doesn't have to open Settings + Escape to recover. Pairs with the
+  // main-process `backgroundThrottling: false`. (#350)
+  useEffect(() => {
+    const heal = (): void => {
+      const state = useStore.getState()
+      if (state.focusedPanel !== 'editor') return
+      if (
+        state.settingsOpen ||
+        state.searchOpen ||
+        state.vaultTextSearchOpen ||
+        state.commandPaletteOpen ||
+        state.bufferPaletteOpen ||
+        state.templatePaletteOpen ||
+        state.outlinePaletteOpen ||
+        isAppOverlayOpen()
+      ) {
+        return
+      }
+      const view = state.editorViewRef
+      if (!view) return
+      const active = document.activeElement
+      const editorHasFocus = !!active && (active === view.dom || view.dom.contains(active))
+      if (editorHasFocus) return
+      // Leave a deliberately-focused note-title input alone.
+      if (active instanceof HTMLElement && active.dataset.noteTitleInput != null) return
+      focusEditorNormalMode()
+    }
+    const onVisibility = (): void => {
+      if (document.visibilityState === 'visible') heal()
+    }
+    window.addEventListener('focus', heal)
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      window.removeEventListener('focus', heal)
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
+  }, [])
+
   if (!hasCompletedOnboarding) {
     return (
-      <div className="h-screen w-screen bg-paper-100 text-ink-900">
+      <div className="zn-app-shell w-screen bg-paper-100 text-ink-900">
         {!zenMode && <TitleBar />}
         <Suspense fallback={<div className="flex-1" />}>
           <OnboardingWizard />
         </Suspense>
         <PromptHost />
         <ConfirmHost />
+        <ToastHost />
+        <ExcalidrawEmbedMenuHost />
         <ServerDirectoryPickerHost />
         <AppUpdateNotice hidden={zenMode} />
       </div>
@@ -653,13 +930,15 @@ function App(): JSX.Element {
 
   if (!vault) {
     return (
-      <div className="h-screen w-screen bg-paper-100 text-ink-900">
+      <div className="zn-app-shell w-screen bg-paper-100 text-ink-900">
         {!zenMode && <TitleBar />}
         <Suspense fallback={<div className="flex-1" />}>
           <EmptyVault />
         </Suspense>
         <PromptHost />
         <ConfirmHost />
+        <ToastHost />
+        <ExcalidrawEmbedMenuHost />
         <ServerDirectoryPickerHost />
         <AppUpdateNotice hidden={zenMode} />
       </div>
@@ -667,7 +946,7 @@ function App(): JSX.Element {
   }
 
   return (
-    <div className="flex h-screen w-screen flex-col bg-paper-100 text-ink-900">
+    <div className="zn-app-shell flex w-screen flex-col bg-paper-100 text-ink-900">
       {!zenMode && <TitleBar />}
       <div className="flex min-h-0 flex-1">
         {!zenMode && sidebarOpen && <Sidebar />}
@@ -711,6 +990,11 @@ function App(): JSX.Element {
           <TemplatePalette />
         </Suspense>
       )}
+      {embedDrawingPaletteOpen && (
+        <Suspense fallback={null}>
+          <EmbedDrawingPalette />
+        </Suspense>
+      )}
       {settingsOpen && (
         <Suspense fallback={null}>
           <SettingsModal />
@@ -718,6 +1002,8 @@ function App(): JSX.Element {
       )}
       <PromptHost />
       <ConfirmHost />
+      <ToastHost />
+      <ExcalidrawEmbedMenuHost />
       <ServerDirectoryPickerHost />
       <AppUpdateNotice hidden={zenMode || settingsOpen} />
       <Suspense fallback={null}>
