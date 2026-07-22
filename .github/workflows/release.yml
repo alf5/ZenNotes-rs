@@ -41,8 +41,10 @@ jobs:
           - macOS (Apple Silicon): \`*_aarch64.dmg\`
           - macOS (Intel): \`*_x64.dmg\`
           - Linux: \`*.AppImage\` and \`*.deb\`
+          - Windows: \`*-setup.exe\` (NSIS installer) or \`*.msi\`
 
-          macOS builds are unsigned/un-notarized — on first launch, right-click → Open (or run \`xattr -dr com.apple.quarantine /Applications/ZenNotes-rs.app\`)."
+          macOS builds are unsigned/un-notarized — on first launch, right-click → Open (or run \`xattr -dr com.apple.quarantine /Applications/ZenNotes-rs.app\`).
+          Windows builds are unsigned — SmartScreen may warn on first run; choose More info → Run anyway."
           fi
 
   build:
@@ -58,6 +60,12 @@ jobs:
             target: x86_64-apple-darwin
             args: --target x86_64-apple-darwin
           - platform: ubuntu-22.04
+            target: ''
+            args: ''
+          - platform: windows-latest
+            # Empty target → host default (x86_64-pc-windows-msvc); keeps the
+            # bundle path flat like Linux. WebView2 + MSVC are preinstalled and
+            # the Tauri bundler fetches NSIS/WiX itself, so no system-deps step.
             target: ''
             args: ''
     runs-on: ${{ matrix.platform }}
@@ -117,4 +125,17 @@ jobs:
           gh release upload "$RELEASE_TAG" \
             src-tauri/target/release/bundle/appimage/*.AppImage \
             src-tauri/target/release/bundle/deb/*.deb \
+            -R "$GITHUB_REPOSITORY" --clobber
+
+      - name: Upload Windows bundles
+        if: runner.os == 'Windows'
+        # bash (Git Bash, preinstalled) so the globs expand — the default
+        # Windows shell is PowerShell, which would pass '*.exe' to gh literally.
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "$RELEASE_TAG" \
+            src-tauri/target/release/bundle/nsis/*-setup.exe \
+            src-tauri/target/release/bundle/msi/*.msi \
             -R "$GITHUB_REPOSITORY" --clobber
