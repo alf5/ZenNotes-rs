@@ -44,7 +44,9 @@ fn resolve_dir_descent(
 }
 
 fn is_markdown_note_entry(full: &Path, file_type: &FileType, name: &str) -> bool {
-    if !name.to_lowercase().ends_with(".md") {
+    let lower = name.to_lowercase();
+    // `.excalidraw` drawings are note-like vault files (v2.15).
+    if !lower.ends_with(".md") && !lower.ends_with(".excalidraw") {
         return false;
     }
     if file_type.is_file() {

@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use tauri::{AppHandle, Manager, State};
 
+use crate::ipc::types::OpenExternalFileResult;
 use crate::os;
 use crate::state::AppState;
 use crate::vault::config;
@@ -74,4 +75,38 @@ pub fn vault_reveal_folder_target(app: AppHandle, state: State<AppState>, folder
 #[tauri::command]
 pub fn vault_reveal_assets_dir(app: AppHandle, state: State<AppState>) -> Result<(), String> {
     os::reveal_assets_dir(&app, &state)
+}
+
+// ---- v2.15 phase A --------------------------------------------------------
+
+#[tauri::command]
+pub fn vault_reveal_file_path(app: AppHandle, abs_path: String) -> Result<(), String> {
+    os::reveal_file_path(&app, &abs_path)
+}
+
+/// `vault:open-external-file` — never throws; the `{ok, error}` shape drives
+/// the renderer's toast handling.
+#[tauri::command]
+pub fn vault_open_external_file(app: AppHandle, href: String) -> OpenExternalFileResult {
+    match os::open_external_file(&app, &href) {
+        Ok(()) => OpenExternalFileResult { ok: true, error: None },
+        Err(error) => OpenExternalFileResult { ok: false, error: Some(error) },
+    }
+}
+
+/// `devtools:toggle` — Settings → Developer tools. Tauri only compiles
+/// devtools into debug builds (or with the `devtools` feature); release
+/// builds no-op, matching the button's best-effort contract.
+#[tauri::command]
+pub fn devtools_toggle(window: tauri::WebviewWindow) {
+    #[cfg(debug_assertions)]
+    {
+        if window.is_devtools_open() {
+            window.close_devtools();
+        } else {
+            window.open_devtools();
+        }
+    }
+    #[cfg(not(debug_assertions))]
+    let _ = window;
 }

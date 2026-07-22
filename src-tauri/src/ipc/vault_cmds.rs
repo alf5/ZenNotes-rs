@@ -81,6 +81,82 @@ fn open_vault(
     Ok(vault)
 }
 
+// ---- v2.15 phase A: workspace state, drawings, deleted assets -------------
+
+/// `workspace-state:read` — raw `<vault>/.zennotes/workspace.json` contents.
+/// Never parsed here; the renderer owns the schema. No vault → null, matching
+/// upstream's remote/ephemeral null path.
+#[tauri::command]
+pub fn workspace_state_read(state: State<AppState>) -> Result<Option<String>, String> {
+    let Ok(root) = require_root(&state) else {
+        return Ok(None);
+    };
+    match std::fs::read_to_string(root.join(layout::INTERNAL_VAULT_DIR).join("workspace.json")) {
+        Ok(raw) => Ok(Some(raw)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("workspace state read failed: {e}")),
+    }
+}
+
+/// `workspace-state:write` — persist the renderer's snapshot verbatim.
+#[tauri::command]
+pub fn workspace_state_write(state: State<AppState>, json: String) -> Result<(), String> {
+    let Ok(root) = require_root(&state) else {
+        return Ok(());
+    };
+    let dir = root.join(layout::INTERNAL_VAULT_DIR);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir failed: {e}"))?;
+    std::fs::write(dir.join("workspace.json"), json)
+        .map_err(|e| format!("workspace state write failed: {e}"))
+}
+
+/// `vault:root-content-hidden` — true when the saved location says "inbox"
+/// but a fresh scan would infer a root-mode vault (drives the "Switch to
+/// Vault root" banner; upstream vault.ts:1241).
+#[tauri::command]
+pub fn vault_root_content_hidden(state: State<AppState>) -> Result<bool, String> {
+    let Ok(root) = require_root(&state) else {
+        return Ok(false);
+    };
+    if settings::get_vault_settings(&root).primary_notes_location != "inbox" {
+        return Ok(false);
+    }
+    Ok(settings::infer_primary_notes_location(&root) == "root")
+}
+
+/// `vault:create-excalidraw` — new empty drawing (v2.15).
+#[tauri::command]
+pub fn vault_create_excalidraw(
+    state: State<AppState>,
+    folder: String,
+    subpath: Option<String>,
+    title: Option<String>,
+) -> Result<NoteMeta, String> {
+    let root = require_root(&state)?;
+    crud::create_excalidraw(&root, &folder, title.as_deref(), subpath.as_deref().unwrap_or(""))
+}
+
+#[tauri::command]
+pub fn vault_list_deleted_assets(state: State<AppState>) -> Result<Vec<DeletedAsset>, String> {
+    let Ok(root) = require_root(&state) else {
+        return Ok(Vec::new());
+    };
+    Ok(assets::list_deleted_assets(&root))
+}
+
+#[tauri::command]
+pub fn vault_purge_deleted_asset(state: State<AppState>, undo_token: String) -> Result<(), String> {
+    let root = require_root(&state)?;
+    assets::purge_deleted_asset(&root, &undo_token)
+}
+
+#[tauri::command]
+pub fn vault_empty_deleted_assets(state: State<AppState>) -> Result<(), String> {
+    let root = require_root(&state)?;
+    assets::empty_deleted_assets(&root);
+    Ok(())
+}
+
 /// v2.15 `openVaultWindow(root?)` support: open `root` as the active vault
 /// (used by window_cmds before spawning the new workspace window).
 pub(crate) fn open_local_vault_root(
