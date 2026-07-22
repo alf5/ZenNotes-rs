@@ -169,6 +169,7 @@ pub fn read_meta(
         size: md.len(),
         tags: metadata::extract_tags(&body),
         wikilinks: metadata::extract_wikilinks(&body),
+        asset_embeds: metadata::extract_asset_embeds(&body),
         has_attachments: metadata::body_has_local_asset(&body),
         excerpt: metadata::build_excerpt(&body),
         is_symlink: linked,

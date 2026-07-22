@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 pub struct VaultInfo {
     pub root: String,
     pub name: String,
+    /// v2.15: marks an ephemeral "open folder temporarily" session (banner in
+    /// the UI). Always absent until that feature is ported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temporary: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +38,9 @@ pub struct NoteMeta {
     pub size: u64,
     pub tags: Vec<String>,
     pub wikilinks: Vec<String>,
+    /// Local files embedded via `![[file.png]]` / `![](file.png)` (v2.15).
+    #[serde(default)]
+    pub asset_embeds: Vec<String>,
     pub has_attachments: bool,
     pub excerpt: String,
     pub is_symlink: bool,
@@ -176,6 +183,9 @@ pub struct DeletedAsset {
     pub path: String,
     pub name: String,
     pub undo_token: String,
+    /// ISO timestamp of the deletion (v2.15; absent for pre-2.11 deletes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,6 +222,12 @@ pub struct PeriodicNotesSettings {
     pub directory: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub template_id: Option<String>,
+    /// Passthrough for keys this backend doesn't interpret (titlePattern,
+    /// locale, legacyPatterns, tasksDueOnNoteDate, …). The renderer's
+    /// normalizer validates them; carrying them verbatim means a
+    /// settings round-trip never drops newer-contract fields.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -222,6 +238,12 @@ pub struct VaultSettings {
     pub weekly_notes: PeriodicNotesSettings,
     /// Map of `folder:subpath` → folder-icon id.
     pub folder_icons: std::collections::BTreeMap<String, String>,
+    /// Passthrough for v2.15+ keys the backend doesn't interpret
+    /// (monthlyNotes, folderColors, favorites, view, drawingsLocation,
+    /// databasesLocation, tasksLocation, …). Kept verbatim so a
+    /// get → set round-trip never drops them; the renderer validates.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

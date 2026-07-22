@@ -33,6 +33,8 @@ static FRONTMATTER_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^---\n[\s\S]*?\n---\n").unwrap());
 static MD_IMAGE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"!\[[^\]]*\]\([^)]*\)").unwrap());
+static ASSET_MD_EMBED_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"!\[[^\]]*\]\(\s*<?([^)>\s]+)>?[^)]*\)").unwrap());
 static MD_LINK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[([^\]]+)\]\([^)]*\)").unwrap());
 static EMBED_LABEL_RE: LazyLock<Regex> =
@@ -166,6 +168,42 @@ pub fn extract_wikilinks(body: &str) -> Vec<String> {
     seen
 }
 
+/// Local files embedded in the note, mirroring upstream `extractAssetEmbeds`
+/// (vault.ts:1693): `![[file.png]]` wiki embeds whose target is asset-like,
+/// plus `![](path)` markdown image embeds with a relative (non-URL, non-anchor)
+/// target, URL-decoded. Unique, insertion-ordered.
+pub fn extract_asset_embeds(body: &str) -> Vec<String> {
+    let stripped = strip_code_content(body);
+    let mut seen: Vec<String> = Vec::new();
+    let mut set: BTreeSet<String> = BTreeSet::new();
+    if stripped.contains("![[") {
+        for caps in EMBED_RE.captures_iter(&stripped).flatten() {
+            let target = caps.get(1).map(|m| m.as_str().trim()).unwrap_or("");
+            if !target.is_empty()
+                && local_asset_target_kind(target).is_some()
+                && set.insert(target.to_string())
+            {
+                seen.push(target.to_string());
+            }
+        }
+    }
+    if stripped.contains("](") {
+        for caps in ASSET_MD_EMBED_RE.captures_iter(&stripped).flatten() {
+            let raw = caps.get(1).map(|m| m.as_str().trim()).unwrap_or("");
+            if raw.is_empty() || raw.starts_with('#') || is_uri_scheme(raw) {
+                continue;
+            }
+            let decoded = urlencoding::decode(raw)
+                .map(|c| c.into_owned())
+                .unwrap_or_else(|_| raw.to_string());
+            if set.insert(decoded.clone()) {
+                seen.push(decoded);
+            }
+        }
+    }
+    seen
+}
+
 /// Whether the body references at least one local asset (sidebar paperclip).
 pub fn body_has_local_asset(body: &str) -> bool {
     if !body.contains("](") && !body.contains("![[") {
@@ -262,6 +300,16 @@ pub fn build_excerpt(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn asset_embeds_wiki_and_md_image_targets() {
+        let body = "![[pic.png|300]] and ![[Other note]] plus ![alt](docs/a%20b.pdf) \
+                    ![x](https://example.com/c.png) ![y](#anchor)\n```\n![[code.png]]\n```\n![[pic.png]]";
+        assert_eq!(
+            extract_asset_embeds(body),
+            vec!["pic.png".to_string(), "docs/a b.pdf".to_string()]
+        );
+    }
 
     #[test]
     fn tags_unique_and_ordered_skip_code() {

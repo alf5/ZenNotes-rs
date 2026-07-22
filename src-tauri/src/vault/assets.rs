@@ -16,6 +16,8 @@ use crate::vault::metadata::{classify_imported_asset, pasted_image_extension};
 use crate::vault::notes::{normalize_vault_relative_path, resolve_safe, to_posix};
 
 const DELETED_ASSETS_DIR: &str = "deleted-assets";
+/// Per-token metadata sidecar inside each deleted-asset dir (upstream parity).
+const DELETED_ASSET_META: &str = ".zn-deleted.json";
 
 fn rel_of(root: &Path, abs: &Path) -> String {
     let root_abs = resolve_path(&root.to_string_lossy());
@@ -240,7 +242,15 @@ pub fn delete_asset(root: &Path, rel: &str) -> Result<DeletedAsset, String> {
     fs::create_dir_all(&trash_dir).map_err(|e| format!("mkdir failed: {e}"))?;
     let name = abs.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     fs::rename(&abs, trash_dir.join(&name)).map_err(|e| format!("delete failed: {e}"))?;
-    Ok(DeletedAsset { path: rel_norm, name, undo_token })
+    let deleted_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    // `.zn-deleted.json` sidecar (upstream v2.11+): persists the original
+    // location so the Trash view can list and restore assets across restarts.
+    let sidecar = serde_json::json!({ "path": rel_norm, "name": name, "deletedAt": deleted_at });
+    let _ = fs::write(
+        trash_dir.join(DELETED_ASSET_META),
+        serde_json::to_string_pretty(&sidecar).unwrap_or_else(|_| "{}".into()),
+    );
+    Ok(DeletedAsset { path: rel_norm, name, undo_token, deleted_at: Some(deleted_at) })
 }
 
 pub fn restore_deleted_asset(root: &Path, deleted: &DeletedAsset) -> Result<AssetMeta, String> {

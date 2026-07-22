@@ -27,9 +27,13 @@ fn unique_label(prefix: &str) -> String {
 pub fn open_note_window(app: &AppHandle, rel_path: &str) -> Result<(), String> {
     let enc = urlencoding::encode(rel_path);
     let url = format!("index.html?floating=1&note={enc}");
-    WebviewWindowBuilder::new(app, unique_label("floating"), WebviewUrl::App(url.into()))
+    let builder = WebviewWindowBuilder::new(app, unique_label("floating"), WebviewUrl::App(url.into()))
         .title(rel_path.rsplit('/').next().unwrap_or("Note"))
-        .inner_size(620.0, 720.0)
+        .inner_size(620.0, 720.0);
+    // Linux ships frameless (like upstream Electron); the app draws its own titlebar.
+    #[cfg(target_os = "linux")]
+    let builder = builder.decorations(false);
+    builder
         .build()
         .map_err(|e| format!("Failed to open note window: {e}"))?;
     Ok(())
@@ -37,9 +41,12 @@ pub fn open_note_window(app: &AppHandle, rel_path: &str) -> Result<(), String> {
 
 /// `window:open-vault` — open another workspace window on the active vault.
 pub fn open_vault_window(app: &AppHandle, state: &AppState) -> Result<Option<VaultInfo>, String> {
-    WebviewWindowBuilder::new(app, unique_label("workspace"), WebviewUrl::App("index.html".into()))
+    let builder = WebviewWindowBuilder::new(app, unique_label("workspace"), WebviewUrl::App("index.html".into()))
         .title("ZenNotes-rs")
-        .inner_size(1200.0, 800.0)
+        .inner_size(1200.0, 800.0);
+    #[cfg(target_os = "linux")]
+    let builder = builder.decorations(false);
+    builder
         .build()
         .map_err(|e| format!("Failed to open vault window: {e}"))?;
     Ok(state.current())
@@ -61,7 +68,7 @@ pub fn toggle_quick_capture(app: &AppHandle, pinned: bool) -> Result<(), String>
         }
         return Ok(());
     }
-    WebviewWindowBuilder::new(
+    let builder = WebviewWindowBuilder::new(
         app,
         QUICK_CAPTURE_LABEL,
         WebviewUrl::App("index.html?quickCapture=1".into()),
@@ -69,9 +76,12 @@ pub fn toggle_quick_capture(app: &AppHandle, pinned: bool) -> Result<(), String>
     .title("Quick Capture")
     .inner_size(640.0, 420.0)
     .always_on_top(pinned)
-    .skip_taskbar(true)
-    .build()
-    .map_err(|e| format!("Failed to open quick capture: {e}"))?;
+    .skip_taskbar(true);
+    #[cfg(target_os = "linux")]
+    let builder = builder.decorations(false);
+    builder
+        .build()
+        .map_err(|e| format!("Failed to open quick capture: {e}"))?;
     Ok(())
 }
 

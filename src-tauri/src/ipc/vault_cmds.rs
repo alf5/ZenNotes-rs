@@ -81,6 +81,16 @@ fn open_vault(
     Ok(vault)
 }
 
+/// v2.15 `openVaultWindow(root?)` support: open `root` as the active vault
+/// (used by window_cmds before spawning the new workspace window).
+pub(crate) fn open_local_vault_root(
+    app: &AppHandle,
+    state: &AppState,
+    root: &str,
+) -> Result<VaultInfo, String> {
+    open_vault(app, state, Path::new(root), now_ms())
+}
+
 #[tauri::command]
 pub fn vault_get_current(
     app: AppHandle,
