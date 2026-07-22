@@ -5,6 +5,7 @@
 //! it used with Electron; each Electron IPC channel maps to a `#[command]`
 //! here (see src/bridge/tauri-bridge.ts on the frontend side).
 
+mod app_config;
 mod asset_protocol;
 mod deep_links;
 mod ipc;
@@ -70,6 +71,16 @@ pub fn run() {
         })
         .manage(AppState::default())
         .setup(|app| {
+            // Watch the portable config.toml for external edits (synced
+            // dotfiles / hand-edits) and push changes to every window.
+            match app_config::spawn_watcher(app.handle().clone()) {
+                Ok(debouncer) => {
+                    app.manage(app_config::PortableConfigWatcher(std::sync::Mutex::new(
+                        Some(debouncer),
+                    )));
+                }
+                Err(err) => eprintln!("config watcher failed to start: {err}"),
+            }
             // Register the persisted quick-capture global shortcut.
             if let Ok(dir) = app.path().app_config_dir() {
                 let hotkey = vault::config::load_config(&dir).quick_capture_hotkey;
@@ -168,6 +179,9 @@ pub fn run() {
             os_cmds::vault_reveal_file_path,
             os_cmds::vault_open_external_file,
             os_cmds::devtools_toggle,
+            app_config::config_file_path,
+            app_config::config_file_read,
+            app_config::config_file_write,
             vault_cmds::workspace_state_read,
             vault_cmds::workspace_state_write,
             vault_cmds::vault_root_content_hidden,

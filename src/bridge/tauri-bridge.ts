@@ -76,6 +76,13 @@ import type {
 } from '@zennotes/shared-domain/mcp-clients'
 import { TAURI_CAPABILITIES } from './capabilities'
 import { resolveLocalAssetUrl, resolveVaultAssetUrl } from './asset-url'
+import {
+  ensureConfigFile,
+  getConfigFilePathCached,
+  getPortableConfigSnapshot,
+  setPortableConfig,
+  subscribeConfigChange
+} from './portable-config'
 
 const APP_INFO: ZenAppInfo = {
   name: 'zennotes-rs',
@@ -453,16 +460,21 @@ const bridge: ZenBridge = {
   writeWorkspaceState: (json: string): Promise<void> => invoke('workspace_state_write', { json }),
   rootContentHiddenByInboxMode: (): Promise<boolean> => invoke('vault_root_content_hidden'),
 
-  // Portable config (config.toml): null = "no config file on this platform",
-  // which app-core answers with pure-localStorage prefs — exactly the
-  // v2.1.0 behavior. Once Rust reads the TOML before the webview boots,
-  // getConfigSync must return the preloaded snapshot ({} when absent, which
-  // triggers app-core to seed the file from localStorage).
-  getConfigSync: (): AppConfigPortable | null => null,
-  setConfig: async (): Promise<void> => {},
-  getConfigPath: async (): Promise<string | null> => null,
-  revealConfigFile: async (): Promise<void> => {},
-  onConfigChange: (): (() => void) => () => {},
+  // Portable config (~/.config/zennotes/config.toml). The TOML format lives
+  // in portable-config.ts (upstream's serializer, verbatim); Rust is the
+  // file layer + watcher. initPortableConfig() runs in main.tsx before React
+  // mounts, so the synchronous snapshot has real data at first paint — {}
+  // when the file is absent, which triggers app-core to seed it from
+  // localStorage (the v2.1.0 → config-file migration, for free).
+  getConfigSync: (): AppConfigPortable | null => getPortableConfigSnapshot(),
+  setConfig: (next: AppConfigPortable): Promise<void> => setPortableConfig(next),
+  getConfigPath: async (): Promise<string | null> => getConfigFilePathCached(),
+  revealConfigFile: async (): Promise<void> => {
+    const path = await ensureConfigFile()
+    if (path) await invoke('vault_reveal_file_path', { absPath: path })
+  },
+  onConfigChange: (cb: (next: AppConfigPortable) => void): (() => void) =>
+    subscribeConfigChange(cb),
 
   // CSV databases: openDatabase -> null makes app-core forget the tab
   // gracefully; the mutators reject and every caller try/catches.
