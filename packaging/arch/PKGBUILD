@@ -18,12 +18,28 @@ source=("$pkgname::git+https://github.com/alf5/ZenNotes-rs.git#tag=v$pkgver"
 sha256sums=('SKIP'
   '29d0643953714a755f9da9aea4236b4630d22a66956ba8bddbc428ebddb2a82d')
 
+# Disable makepkg's global LTO for this package. ring (ureq's rustls TLS
+# backend, used by the link-preview fetcher) compiles its crypto primitives
+# from C/assembly; Arch's makepkg.conf enables LTO by default and injects
+# -flto into those C objects, after which the asm-derived ring_core_* symbols
+# don't survive to the final link (undefined reference). CI and the test suite
+# link ring cleanly because neither goes through makepkg. See build() for the
+# matching Rust-side LTO opt-out.
+options=('!lto')
+
 build() {
   cd "$srcdir/$pkgname"
 
   # Keep bun + cargo caches inside the build dir.
   export BUN_INSTALL_CACHE_DIR="$srcdir/bun-cache"
   export CARGO_HOME="${CARGO_HOME:-$srcdir/cargo-home}"
+
+  # Also disable Rust's own release LTO (the profile sets lto = true). Paired
+  # with options=('!lto') above, this makes the whole build LTO-free — matching
+  # the config under which the test suite links ring — so no ring_core_*
+  # symbols are lost. Env-scoped, so the tag's source is untouched; the only
+  # cost is a slightly larger binary, which is secondary for a from-source pkg.
+  export CARGO_PROFILE_RELEASE_LTO=false
 
   # Install the JS deps (vendored frontend workspace + Tauri CLI) from the
   # committed bun.lock. bun (not npm) because bun.lock is the repo's real
@@ -33,7 +49,9 @@ build() {
 
   # Build the frontend (Vite, embedded into the binary) and the Rust app,
   # without producing a bundle/installer — we install files ourselves below.
-  bun run tauri build -- --no-bundle
+  # No `--` before --no-bundle: it's a `tauri build` flag, and a `--` separator
+  # would route it to the cargo runner instead (cargo: unexpected argument).
+  bun run tauri build --no-bundle
 }
 
 package() {
