@@ -3,6 +3,7 @@ import type { EditorView } from '@codemirror/view'
 import { DEFAULT_VAULT_SETTINGS } from '@shared/ipc'
 import type {
   AssetMeta,
+  DateNotePatternSettings,
   DeletedAsset,
   FolderEntry,
   LocalVaultEntry,
@@ -16,32 +17,64 @@ import type {
   RemoteWorkspaceProfileInput,
   ServerCapabilities,
   VaultSettings,
+  VaultViewSettings,
   VaultTextSearchBackendPreference,
   VaultChangeEvent,
   VaultInfo,
   WorkspaceMode
 } from '@shared/ipc'
 import type { VaultTask } from '@shared/tasks'
-import { TASKS_TAB_PATH, isTasksTabPath } from '@shared/tasks'
+import { isExcalidrawPath, isObsidianExcalidrawPath } from '@shared/excalidraw'
+import { TASKS_TAB_PATH, isTasksTabPath, parseTasksFromBody, toIsoDateLocal } from '@shared/tasks'
+import {
+  composeTaskFile,
+  setTaskFileStatus,
+  taskFilePriorityValue,
+  updateFrontmatterFields
+} from '@shared/frontmatter'
+import type { DatabaseDoc, DatabaseSidecar } from '@shared/databases'
+import {
+  databaseTabPath,
+  formTitleFromCsvPath,
+  isDatabaseInternalPath,
+  isDatabaseTabPath,
+  isDatabaseCsvPath
+} from '@shared/databases'
+import { parseFrontmatter } from '@shared/template-files'
+import { recordTitle, composePageBody } from './lib/database-cells'
+import { applyManualMove, manualOrderCompare, parentDirOf } from './lib/manual-order'
 import { TAGS_TAB_PATH, isTagsTabPath } from '@shared/tags'
 import { HELP_TAB_PATH, isHelpTabPath } from '@shared/help'
 import { ARCHIVE_TAB_PATH, isArchiveTabPath } from '@shared/archive'
 import { TRASH_TAB_PATH, isTrashTabPath } from '@shared/trash'
+import { ASSETS_VIEW_TAB_PATH, isAssetsViewTabPath } from '@shared/assets-view'
 import { QUICK_NOTES_TAB_PATH, isQuickNotesTabPath } from '@shared/quick-notes'
-import { isAssetTabPath } from './lib/asset-tabs'
+import { isAssetTabPath, assetPathFromTab, assetTabPath } from './lib/asset-tabs'
+import { invalidateExcalidrawPreview } from './lib/excalidraw-preview'
 import {
   FENCE_RE,
   TASK_LINE_RE,
+  extractUncheckedTaskBlocks,
+  moveTaskLine,
+  removeTaskAtIndex,
+  takeTaskLineAtIndex,
   setTaskCheckedAtIndex,
   setTaskDueAtIndex,
+  setTaskForwardedAtIndex,
   setTaskPriorityAtIndex,
+  setTaskFieldAtIndex,
+  setTaskTextAtIndex,
   setTaskWaitingAtIndex,
   toggleTaskAtIndex,
   type TaskPriority as TaskLinePriority
 } from '@shared/tasklists'
 import { DEFAULT_THEME_ID, THEMES, type ThemeFamily, type ThemeMode } from './lib/themes'
+import { isCustomThemeId } from './lib/custom-themes'
+import { customThemeSlugFromId, type CustomTheme } from '@shared/custom-themes'
+import type { Override } from '@shared/overrides'
 import { formatMarkdown } from './lib/format-markdown'
 import { confirmMoveToTrash } from './lib/confirm-trash'
+import { confirmApp } from './lib/confirm-requests'
 import { pickServerDirectoryApp } from './lib/server-directory-picker-requests'
 import { promptApp } from './lib/prompt-requests'
 import {
@@ -52,6 +85,16 @@ import {
 import type { KeymapId, KeymapOverrides } from './lib/keymaps'
 import { normalizeKeymapOverrides } from './lib/keymaps'
 import {
+  PORTABLE_PREF_KEYS,
+  pickPortablePrefs,
+  defaultTimeFormat,
+  type AppConfigPortable,
+  type CompletedTaskStyle,
+  type MathRenderer,
+  type TimeFormat
+} from '@shared/app-config'
+import {
+  type LabelKey,
   type SystemFolderLabels,
   normalizeSystemFolderLabels
 } from './lib/system-folder-labels'
@@ -62,16 +105,28 @@ import {
   workspaceRestorePrefetchContentPaths
 } from './lib/workspace-tabs'
 import {
+  classifyDateNote,
+  duplicateFolderColors,
   duplicateFolderIcons,
+  dailyNoteLocationForDate,
   folderForVaultRelativePath,
+  findDailyNoteForDate,
+  findWeeklyNoteForDate,
+  findMonthlyNoteForDate,
+  noteTitleForDate,
   isPrimaryNotesAtRoot,
-  normalizeDailyNotesDirectory,
-  normalizeWeeklyNotesDirectory,
+  removeFavoritesForFolder,
+  removeFolderColors,
   removeFolderIcons,
   normalizeVaultSettings,
   noteFolderSubpath,
-  noteTitleForDate,
-  weeklyNoteTitle,
+  resolveCreateLocation,
+  rewriteFavoriteNotePath,
+  rewriteFavoritesForFolderRename,
+  toggleFavorite as toggleFavoriteKey,
+  weeklyNoteLocationForDate,
+  monthlyNoteLocationForDate,
+  rewriteFolderColorsForRename,
   rewriteFolderIconsForRename
 } from './lib/vault-layout'
 import { renderTemplate, renderTitle } from './lib/template-render'
@@ -103,6 +158,7 @@ import {
   mapLeaves,
   replaceLeaf,
   rewritePathsInTree,
+  preserveLayoutIfPruneEmptiesNoteTabs,
   splitLeaf,
   updateLeaf,
   updateSplitSizes,
@@ -111,9 +167,11 @@ import {
   type PaneLayout,
   type PaneLeaf
 } from './lib/pane-layout'
+import { paneModesWithPathMode, type PaneMode, type PaneModesByPath } from './lib/pane-mode'
 
 export type NoteSortOrder =
   | 'none'
+  | 'manual'
   | 'updated-desc'
   | 'updated-asc'
   | 'created-desc'
@@ -122,11 +180,28 @@ export type NoteSortOrder =
   | 'name-desc'
 
 export type LineNumberMode = 'off' | 'absolute' | 'relative'
+
+/** Where the line-number gutter sits when content is centered: glued to the
+ *  left of the text column ('text', default) or pinned to the editor's far-left
+ *  edge ('edge'). No visible effect when content is left-aligned. (#228) */
+export type LineNumberPosition = 'edge' | 'text'
 export type WhichKeyHintMode = 'timed' | 'sticky'
 export type CommandPaletteInitialMode = 'main' | 'vault'
 
 const PREFS_KEY = 'zen:prefs:v2'
 const WORKSPACE_KEY = 'zen:workspace:v1'
+
+/** Ask the active editor pane to reclaim keyboard focus. Dispatched as a DOM
+ *  event (handled in App.tsx via `focusEditorNormalMode`) so the store doesn't
+ *  have to import editor-focus, which imports the store. Used when a focused
+ *  panel (Tasks/Tags) closes so typing lands in the editor again. (#353) */
+function requestEditorFocus(): void {
+  if (typeof window === 'undefined') return
+  window.dispatchEvent(new Event('zen:focus-editor'))
+}
+/** Debounce for mirroring the workspace snapshot to the synced vault file —
+ *  localStorage updates immediately; the file lags to bound sync churn. (#292) */
+const WORKSPACE_FILE_DEBOUNCE_MS = 1500
 const VALID_FAMILIES: ThemeFamily[] = [
   'apple',
   'gruvbox',
@@ -135,11 +210,15 @@ const VALID_FAMILIES: ThemeFamily[] = [
   'solarized',
   'one',
   'nord',
-  'tokyo-night'
+  'tokyo-night',
+  'kanagawa',
+  'black-metal',
+  'custom'
 ]
 const VALID_MODES: ThemeMode[] = ['light', 'dark', 'auto']
 const VALID_SORTS: NoteSortOrder[] = [
   'none',
+  'manual',
   'updated-desc',
   'updated-asc',
   'created-desc',
@@ -148,6 +227,7 @@ const VALID_SORTS: NoteSortOrder[] = [
   'name-desc'
 ]
 const VALID_LINE_NUMBER_MODES: LineNumberMode[] = ['off', 'absolute', 'relative']
+const VALID_LINE_NUMBER_POSITIONS: LineNumberPosition[] = ['edge', 'text']
 const VALID_WHICH_KEY_HINT_MODES: WhichKeyHintMode[] = ['timed', 'sticky']
 const VALID_VAULT_TEXT_SEARCH_BACKENDS: VaultTextSearchBackendPreference[] = [
   'auto',
@@ -158,7 +238,11 @@ const VALID_VAULT_TEXT_SEARCH_BACKENDS: VaultTextSearchBackendPreference[] = [
 const MAX_NOTE_JUMP_HISTORY = 100
 const DEFAULT_SIDEBAR_WIDTH = 336
 const LEGACY_DEFAULT_SIDEBAR_WIDTHS = new Set([232, 260, 288])
-const LIST_NOTES_BRIDGE_PAGE_SIZE = 250
+// Matches the desktop main process's own default/preferred stream chunk size
+// (capped at 1000 there). 500 halves the number of boot-time IPC round-trips
+// and inter-page yields for large vaults versus the old 250, while keeping each
+// page small enough to stay responsive. Identical note set, fewer trips.
+const LIST_NOTES_BRIDGE_PAGE_SIZE = 500
 
 function nextRendererTask(): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, 0))
@@ -187,9 +271,42 @@ async function listNotesFromBridge(): Promise<NoteMeta[]> {
   }
 }
 
+// Coalesce full note-list refreshes triggered by vault-change (watcher) events.
+// A bulk external change — git pull, cloud sync, bulk move/import — fires one
+// watcher event per file; routing each straight to refreshNotes() would re-walk
+// the entire vault N times. This collapses a burst into a single in-flight
+// refresh plus at most one trailing refresh, so the *final* state is identical
+// (refreshNotes is idempotent) but the vault is listed once or twice, not N
+// times. Isolated changes still refresh immediately with no added latency.
+let coalescedNotesRefreshInFlight: Promise<void> | null = null
+let coalescedNotesRefreshPending = false
+
+function refreshNotesCoalesced(): Promise<void> {
+  if (coalescedNotesRefreshInFlight) {
+    coalescedNotesRefreshPending = true
+    return coalescedNotesRefreshInFlight
+  }
+  coalescedNotesRefreshInFlight = (async () => {
+    try {
+      do {
+        coalescedNotesRefreshPending = false
+        await useStore.getState().refreshNotes()
+      } while (coalescedNotesRefreshPending)
+    } finally {
+      coalescedNotesRefreshInFlight = null
+    }
+  })()
+  return coalescedNotesRefreshInFlight
+}
+
 async function refreshVaultIndexes(): Promise<void> {
   const state = useStore.getState()
-  await Promise.all([state.refreshNotes(), state.refreshAssets(), state.loadCustomTemplates()])
+  await Promise.all([
+    state.refreshNotes(),
+    state.refreshAssets(),
+    state.loadCustomTemplates(),
+    state.refreshRootContentHidden()
+  ])
 }
 
 /** Find a template (built-in or custom) by id, or undefined if it's gone. */
@@ -254,7 +371,14 @@ interface Prefs {
   /** Key sequence that exits insert mode (maps to <Esc>), e.g. "jk".
    *  Empty disables it. */
   vimInsertEscape: string
+  /** When true, Vim yank/delete/change also copy to the system clipboard and
+   *  `p` / `P` paste from it (like `set clipboard=unnamed`). */
+  vimYankToClipboard: boolean
   keymapOverrides: KeymapOverrides
+  /** Enabled CSS overrides, keyed by filename (e.g. `"focus.css": "on"`). Persisted. */
+  enabledOverrides: Record<string, string>
+  /** Visual color tweaks from the picker UI, keyed by token slug (e.g. `"accent": "#ff3b30"`). Persisted. */
+  themeTweaks: Record<string, string>
   /** When true, pressing the leader key shows the next available Vim-style actions. */
   whichKeyHints: boolean
   /** Whether leader hints auto-hide after a timeout or stay open until dismissed. */
@@ -268,6 +392,26 @@ interface Prefs {
   /** Optional explicit binary path for fzf. Blank uses PATH lookup. */
   fzfBinaryPath: string | null
   livePreview: boolean      // hide markdown syntax on inactive lines
+  /** Render Markdown tables as interactive WYSIWYG widgets in live preview.
+   *  Off keeps tables as plain editable markdown — full keyboard/Vim editing. */
+  renderTablesInLivePreview: boolean
+  /** How a completed task's text is styled (strike / gray / both / none) in the
+   *  editor and preview. Applied via `html[data-completed-task-style]`. */
+  completedTaskStyle: CompletedTaskStyle
+  /** Typesetter for `$…$` / `$$…$$` math (KaTeX or Typst), in both the editor
+   *  live preview and the reading view. */
+  mathRenderer: MathRenderer
+  /** Relax `$$…$$` display math so prose before the open fence (`Note: $$…$$`)
+   *  or after the close fence (`$$…$$ done`) still renders in the reading view.
+   *  Off by default; the editor keeps showing source for those shapes. */
+  looseMathDelimiters: boolean
+  /** Keep the current view mode (Edit / Split / Preview) when switching notes
+   *  instead of resolving each note's own last mode. Off = per-note (default). */
+  keepViewModeAcrossNotes: boolean
+  /** Auto-close markdown delimiters while typing: `**`+Space → `**|**`,
+   *  ```` ``` ````+Enter expands a fenced block. Off restores plain typing. */
+  markdownSnippets: boolean
+  hideBuiltinTemplates: boolean // hide shipped built-in templates from the pickers
   tabsEnabled: boolean
   wrapTabs: boolean
   themeId: string
@@ -275,8 +419,17 @@ interface Prefs {
   themeMode: ThemeMode
   editorFontSize: number    // px — affects editor + preview
   editorLineHeight: number  // unitless multiplier
+  editorScrollOff: number   // vim scrolloff — lines kept above/below the cursor (0 = off)
+  timeFormat: TimeFormat    // clock format for the @time macro
   previewMaxWidth: number   // px — max reading width for preview surfaces
   lineNumberMode: LineNumberMode
+  lineNumberPosition: LineNumberPosition
+  /** Whether note-list/view prefs (sort, grouping, tasks view, …) apply the
+   *  same everywhere ('global') or independently per vault ('vault'). (#292) */
+  viewSettingsScope: 'global' | 'vault'
+  /** Export PDFs using the current theme (colors + dark/light, incl. custom
+   *  themes) instead of the default clean light-for-print theme. */
+  pdfExportUseTheme: boolean
   /** Font used by the whole app chrome (sidebar, menus, title bar). */
   interfaceFont: string | null
   /** Font used inside the editor + preview content. */
@@ -317,6 +470,9 @@ interface Prefs {
   /** When true, long lines wrap inside the editor. When false they
    *  scroll horizontally — same as a coding editor's "Word Wrap". */
   wordWrap: boolean
+  /** When false the editor caret (and the Vim block cursor) stay solid
+   *  instead of blinking. */
+  cursorBlink: boolean
   /** Ctrl+D / Ctrl+U half-page scroll in preview mode. When true the
    *  jumps animate; when false they snap instantly. Vim users often
    *  prefer the instant flavor because it keeps the position
@@ -344,6 +500,11 @@ interface Prefs {
   /** Sidebar Tags section collapsed — keeps the tag pills hidden
    *  without removing the section entirely. */
   tagsCollapsed: boolean
+  /** Show `/`-separated tags as a collapsible tree (sidebar + Tags view)
+   *  instead of a flat list. Degrades to a flat list when no tag nests. (#439) */
+  nestedTags: boolean
+  /** Full paths of collapsed nodes in the nested-tag tree. */
+  collapsedTagNodes: string[]
   /** Auto-show the calendar panel when the active note is a daily or
    *  weekly note. Persisted. */
   autoCalendarPanel: boolean
@@ -357,30 +518,79 @@ interface Prefs {
   kanbanGroupBy: KanbanGroupBy
   /** Display-only Kanban column title overrides. Keyed by `${groupBy}:${columnId}`. */
   kanbanColumnTitles: Record<string, string>
+  /** Manual Kanban column arrangement per board. Keyed by groupBy → ordered
+   *  column ids; unlisted columns fall to the end in their built order. */
+  kanbanColumnOrder: Record<string, string[]>
+  /** Ordered status ids for the custom-status Kanban board (group-by "custom").
+   *  Each id matches an inline `@status:<id>` task token. Config-driven. (#354) */
+  kanbanStatuses: string[]
   /** True once the user has dismissed the first-run onboarding wizard. */
   hasCompletedOnboarding: boolean
 }
 
 export type TasksViewMode = 'list' | 'calendar' | 'kanban'
-export type KanbanGroupBy = 'status' | 'priority' | 'folder'
+export type KanbanGroupBy = 'status' | 'priority' | 'folder' | `field:${string}`
+/** How the Tags view combines multiple selected tags: `all` = intersection
+ *  (AND, narrows), `any` = union (OR, widens). */
+export type TagMatchMode = 'all' | 'any'
 
 export type TaskMutation =
   | { kind: 'set-checked'; checked: boolean }
   | { kind: 'set-waiting'; waiting: boolean }
   | { kind: 'set-priority'; priority: TaskLinePriority | null }
   | { kind: 'set-due'; due: string | null }
+  | { kind: 'set-field'; key: string; value: string | null }
+  | { kind: 'set-text'; text: string }
 
 type AssetUndoEntry = { kind: 'delete-asset'; deleted: DeletedAsset; createdAt: number }
+type ClosedTabEntry = {
+  paneId: string
+  path: string
+  index: number
+  pinned: boolean
+}
 
 const VALID_TASKS_VIEW_MODES: TasksViewMode[] = ['list', 'calendar', 'kanban']
-const VALID_KANBAN_GROUP_BYS: KanbanGroupBy[] = ['status', 'priority', 'folder']
+// The static, always-present group-bys. Field group-bys (`field:<key>`) are
+// dynamic and validated by shape. Column-title overrides only apply to these
+// static boards.
+const STATIC_KANBAN_GROUP_BYS = ['status', 'priority', 'folder'] as const
+const FIELD_GROUP_BY_RE = /^field:[a-z][a-z0-9_-]*$/
+
+export function isKanbanGroupBy(value: unknown): value is KanbanGroupBy {
+  return (
+    value === 'status' ||
+    value === 'priority' ||
+    value === 'folder' ||
+    (typeof value === 'string' && FIELD_GROUP_BY_RE.test(value))
+  )
+}
+
+/** Coerce a persisted group-by, migrating the pre-release `custom` id to
+ *  `field:status`. Falls back to `status`. */
+export function normalizeKanbanGroupBy(raw: unknown): KanbanGroupBy {
+  if (raw === 'custom') return 'field:status'
+  return isKanbanGroupBy(raw) ? raw : 'status'
+}
+const MAX_KANBAN_STATUSES = 24
+const MAX_KANBAN_STATUS_ID_LENGTH = 32
 const MAX_KANBAN_COLUMN_TITLE_LENGTH = 48
 const MAX_ASSET_UNDO_STACK = 20
+const MAX_CLOSED_TAB_STACK = 50
 
 function normalizeKanbanColumnTitle(title: string): string | null {
   const normalized = title.trim().replace(/\s+/g, ' ').slice(0, MAX_KANBAN_COLUMN_TITLE_LENGTH)
   return normalized.length > 0 ? normalized : null
 }
+
+// A static-board column-title key is `<status|priority|folder>:<columnId>`; a
+// field-board one is `field:<key>:<value>` (two colons). Accept both so inline
+// column renames survive a config round-trip on every board. The field-value
+// part also accepts the `__none__` sentinel (NO_VALUE_COLUMN_ID in
+// TasksKanban) so renaming the "No <field>" bucket persists too — its underscore
+// prefix would otherwise fail the value grammar and get silently dropped. (#389)
+const STATIC_COLUMN_TITLE_KEY_RE = /^[a-z-]+:[A-Za-z0-9_-]+$/
+const FIELD_COLUMN_TITLE_KEY_RE = /^field:[a-z][a-z0-9_-]*:(?:__none__|[\p{L}\d][\p{L}\d/_-]*)$/u
 
 function normalizeKanbanColumnTitles(raw: unknown): Record<string, string> {
   if (!raw || typeof raw !== 'object') return {}
@@ -388,17 +598,131 @@ function normalizeKanbanColumnTitles(raw: unknown): Record<string, string> {
   const out: Record<string, string> = {}
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
     if (typeof value !== 'string') continue
-    if (!/^[a-z-]+:[A-Za-z0-9_-]+$/.test(key)) continue
-    if (!VALID_KANBAN_GROUP_BYS.some((group) => key.startsWith(`${group}:`))) continue
+    const isStatic =
+      STATIC_COLUMN_TITLE_KEY_RE.test(key) &&
+      STATIC_KANBAN_GROUP_BYS.some((group) => key.startsWith(`${group}:`))
+    const isField = FIELD_COLUMN_TITLE_KEY_RE.test(key)
+    if (!isStatic && !isField) continue
     const normalized = normalizeKanbanColumnTitle(value)
     if (normalized) out[key] = normalized
   }
   return out
 }
 
-const DEFAULT_PREFS: Prefs = {
+const MAX_KANBAN_ORDERED_COLUMNS = 64
+
+// Manual column arrangement per board: `{ "<groupBy>": ["<columnId>", ...] }`.
+// Column ids are validated loosely (the same tag-like slugs the boards use);
+// unknown ids are dropped so a stale order can't resurrect vanished columns.
+function normalizeKanbanColumnOrder(raw: unknown): Record<string, string[]> {
+  if (!raw || typeof raw !== 'object') return {}
+  const out: Record<string, string[]> = {}
+  for (const [group, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!isKanbanGroupBy(group) || !Array.isArray(value)) continue
+    const ids: string[] = []
+    const seen = new Set<string>()
+    for (const entry of value) {
+      if (typeof entry !== 'string') continue
+      const id = entry.trim().slice(0, MAX_KANBAN_STATUS_ID_LENGTH)
+      if (!id || seen.has(id)) continue
+      seen.add(id)
+      ids.push(id)
+      if (ids.length >= MAX_KANBAN_ORDERED_COLUMNS) break
+    }
+    if (ids.length) out[group] = ids
+  }
+  return out
+}
+
+// A status id is a tag-like slug, matching the `@status:<id>` grammar the task
+// parser accepts (see INLINE_STATUS_RE). Lower-cased, de-duplicated, capped. (#354)
+const KANBAN_STATUS_ID_RE = /^[\p{L}\d][\p{L}\d/_-]*$/u
+
+export function normalizeKanbanStatuses(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return []
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const entry of raw) {
+    if (typeof entry !== 'string') continue
+    const id = entry.trim().toLowerCase().slice(0, MAX_KANBAN_STATUS_ID_LENGTH)
+    if (!KANBAN_STATUS_ID_RE.test(id) || seen.has(id)) continue
+    seen.add(id)
+    out.push(id)
+    if (out.length >= MAX_KANBAN_STATUSES) break
+  }
+  return out
+}
+
+/**
+ * Build the store patch that overlays a vault's per-vault view overrides (#292)
+ * onto the 8 view prefs. Unset/invalid keys are omitted, so the live (global)
+ * value is kept for them. Applied on every vault open.
+ */
+export function viewPrefsFromVault(settings: VaultSettings | null | undefined): Partial<Store> {
+  const v = settings?.view
+  if (!v || typeof v !== 'object') return {}
+  const patch: Partial<Store> = {}
+  if (typeof v.noteSortOrder === 'string' && VALID_SORTS.includes(v.noteSortOrder as NoteSortOrder)) {
+    patch.noteSortOrder = v.noteSortOrder as NoteSortOrder
+  }
+  if (typeof v.groupByKind === 'boolean') patch.groupByKind = v.groupByKind
+  if (
+    typeof v.tasksViewMode === 'string' &&
+    VALID_TASKS_VIEW_MODES.includes(v.tasksViewMode as TasksViewMode)
+  ) {
+    patch.tasksViewMode = v.tasksViewMode as TasksViewMode
+  }
+  if (
+    typeof v.kanbanGroupBy === 'string' &&
+    (isKanbanGroupBy(v.kanbanGroupBy) || v.kanbanGroupBy === 'custom')
+  ) {
+    patch.kanbanGroupBy = normalizeKanbanGroupBy(v.kanbanGroupBy)
+  }
+  if (v.kanbanColumnTitles && typeof v.kanbanColumnTitles === 'object') {
+    patch.kanbanColumnTitles = normalizeKanbanColumnTitles(v.kanbanColumnTitles)
+  }
+  if (v.kanbanColumnOrder && typeof v.kanbanColumnOrder === 'object') {
+    patch.kanbanColumnOrder = normalizeKanbanColumnOrder(v.kanbanColumnOrder)
+  }
+  if (Array.isArray(v.kanbanStatuses)) {
+    patch.kanbanStatuses = normalizeKanbanStatuses(v.kanbanStatuses)
+  }
+  if (typeof v.autoReveal === 'boolean') patch.autoReveal = v.autoReveal
+  if (v.systemFolderLabels && typeof v.systemFolderLabels === 'object') {
+    patch.systemFolderLabels = normalizeSystemFolderLabels(v.systemFolderLabels)
+  }
+  if (typeof v.unifiedSidebar === 'boolean') patch.unifiedSidebar = v.unifiedSidebar
+  return patch
+}
+
+let viewPersistTimer: ReturnType<typeof setTimeout> | null = null
+let pendingViewPatch: VaultViewSettings = {}
+
+/** Persist a view-pref change to the CURRENT vault's `vault.json` `view` block
+ *  (debounced + coalesced) so the choice is per-vault. The global pref keeps
+ *  being written too (it's the floating default for vaults with no override). (#292) */
+function persistVaultViewOverride(patch: VaultViewSettings): void {
+  // Only persist per-vault when the user opted into per-vault scope; in 'global'
+  // scope the 8 setters keep writing the global config only. (#292)
+  if (useStore.getState().viewSettingsScope !== 'vault') return
+  pendingViewPatch = { ...pendingViewPatch, ...patch }
+  if (viewPersistTimer) clearTimeout(viewPersistTimer)
+  viewPersistTimer = setTimeout(() => {
+    viewPersistTimer = null
+    const toApply = pendingViewPatch
+    pendingViewPatch = {}
+    const current = useStore.getState().vaultSettings
+    void useStore.getState().setVaultSettings({
+      ...current,
+      view: { ...(current.view ?? {}), ...toApply }
+    })
+  }, 400)
+}
+
+export const DEFAULT_PREFS: Prefs = {
   vimMode: true,
   vimInsertEscape: '',
+  vimYankToClipboard: false,
   keymapOverrides: {},
   whichKeyHints: true,
   whichKeyHintMode: 'timed',
@@ -407,15 +731,29 @@ const DEFAULT_PREFS: Prefs = {
   ripgrepBinaryPath: null,
   fzfBinaryPath: null,
   livePreview: true,
+  renderTablesInLivePreview: true,
+  completedTaskStyle: 'none',
+  mathRenderer: 'katex',
+  looseMathDelimiters: false,
+  keepViewModeAcrossNotes: false,
+  markdownSnippets: true,
+  hideBuiltinTemplates: false,
   tabsEnabled: true,
   wrapTabs: false,
   themeId: DEFAULT_THEME_ID,
   themeFamily: 'gruvbox',
   themeMode: 'dark',
+  enabledOverrides: {},
+  themeTweaks: {},
   editorFontSize: 16,
   editorLineHeight: 1.7,
+  editorScrollOff: 0,
+  timeFormat: defaultTimeFormat(),
   previewMaxWidth: 920,
   lineNumberMode: 'off',
+  lineNumberPosition: 'text',
+  viewSettingsScope: 'global',
+  pdfExportUseTheme: false,
   // Leave all font slots on the built-in "Default" path. That lets the
   // shipped CSS fallbacks choose sensible system fonts on each machine
   // instead of forcing a specific family that may not exist.
@@ -440,6 +778,7 @@ const DEFAULT_PREFS: Prefs = {
   quickNoteDateTitle: false,
   quickNoteTitlePrefix: 'Quick Note',
   wordWrap: true,
+  cursorBlink: true,
   previewSmoothScroll: true,
   editorMaxWidth: 920,
   pdfEmbedInEditMode: 'compact',
@@ -447,12 +786,16 @@ const DEFAULT_PREFS: Prefs = {
   noteRefs: {},
   contentAlign: 'center',
   tagsCollapsed: false,
+  nestedTags: true,
+  collapsedTagNodes: [],
   autoCalendarPanel: true,
   calendarWeekStart: 'monday',
   calendarShowWeekNumbers: true,
   tasksViewMode: 'list',
   kanbanGroupBy: 'status',
   kanbanColumnTitles: {},
+  kanbanColumnOrder: {},
+  kanbanStatuses: [],
   hasCompletedOnboarding: false
 }
 /** Coerce any loaded prefs blob into a valid Prefs object, dropping
@@ -467,7 +810,7 @@ function normalizePrefs(p: Partial<Prefs>): Prefs {
       ? p.themeMode
       : DEFAULT_PREFS.themeMode
   const themeId =
-    p.themeId && THEMES.some((t) => t.id === p.themeId)
+    p.themeId && (THEMES.some((t) => t.id === p.themeId) || isCustomThemeId(p.themeId))
       ? p.themeId
       : DEFAULT_PREFS.themeId
   return {
@@ -476,7 +819,13 @@ function normalizePrefs(p: Partial<Prefs>): Prefs {
       typeof p.vimInsertEscape === 'string'
         ? p.vimInsertEscape.trim().slice(0, 5)
         : DEFAULT_PREFS.vimInsertEscape,
+    vimYankToClipboard:
+      typeof p.vimYankToClipboard === 'boolean'
+        ? p.vimYankToClipboard
+        : DEFAULT_PREFS.vimYankToClipboard,
     keymapOverrides: normalizeKeymapOverrides(p.keymapOverrides),
+    enabledOverrides: normalizeEnabledOverrides(p.enabledOverrides),
+    themeTweaks: normalizeThemeTweaks(p.themeTweaks),
     whichKeyHints:
       typeof p.whichKeyHints === 'boolean'
         ? p.whichKeyHints
@@ -504,6 +853,37 @@ function normalizePrefs(p: Partial<Prefs>): Prefs {
         : DEFAULT_PREFS.fzfBinaryPath,
     livePreview:
       typeof p.livePreview === 'boolean' ? p.livePreview : DEFAULT_PREFS.livePreview,
+    renderTablesInLivePreview:
+      typeof p.renderTablesInLivePreview === 'boolean'
+        ? p.renderTablesInLivePreview
+        : DEFAULT_PREFS.renderTablesInLivePreview,
+    completedTaskStyle:
+      p.completedTaskStyle === 'strikethrough' ||
+      p.completedTaskStyle === 'gray' ||
+      p.completedTaskStyle === 'gray-strikethrough' ||
+      p.completedTaskStyle === 'none'
+        ? p.completedTaskStyle
+        : DEFAULT_PREFS.completedTaskStyle,
+    mathRenderer:
+      p.mathRenderer === 'typst' || p.mathRenderer === 'katex'
+        ? p.mathRenderer
+        : DEFAULT_PREFS.mathRenderer,
+    looseMathDelimiters:
+      typeof p.looseMathDelimiters === 'boolean'
+        ? p.looseMathDelimiters
+        : DEFAULT_PREFS.looseMathDelimiters,
+    keepViewModeAcrossNotes:
+      typeof p.keepViewModeAcrossNotes === 'boolean'
+        ? p.keepViewModeAcrossNotes
+        : DEFAULT_PREFS.keepViewModeAcrossNotes,
+    markdownSnippets:
+      typeof p.markdownSnippets === 'boolean'
+        ? p.markdownSnippets
+        : DEFAULT_PREFS.markdownSnippets,
+    hideBuiltinTemplates:
+      typeof p.hideBuiltinTemplates === 'boolean'
+        ? p.hideBuiltinTemplates
+        : DEFAULT_PREFS.hideBuiltinTemplates,
     tabsEnabled:
       typeof p.tabsEnabled === 'boolean' ? p.tabsEnabled : DEFAULT_PREFS.tabsEnabled,
     wrapTabs:
@@ -519,6 +899,14 @@ function normalizePrefs(p: Partial<Prefs>): Prefs {
       typeof p.editorLineHeight === 'number'
         ? p.editorLineHeight
         : DEFAULT_PREFS.editorLineHeight,
+    editorScrollOff:
+      typeof p.editorScrollOff === 'number' && p.editorScrollOff >= 0
+        ? Math.floor(p.editorScrollOff)
+        : DEFAULT_PREFS.editorScrollOff,
+    timeFormat:
+      p.timeFormat === '12h' || p.timeFormat === '24h'
+        ? p.timeFormat
+        : DEFAULT_PREFS.timeFormat,
     previewMaxWidth:
       typeof p.previewMaxWidth === 'number'
         ? Math.min(1600, Math.max(640, p.previewMaxWidth))
@@ -527,6 +915,15 @@ function normalizePrefs(p: Partial<Prefs>): Prefs {
       p.lineNumberMode && VALID_LINE_NUMBER_MODES.includes(p.lineNumberMode)
         ? p.lineNumberMode
         : DEFAULT_PREFS.lineNumberMode,
+    viewSettingsScope: p.viewSettingsScope === 'vault' ? 'vault' : 'global',
+    pdfExportUseTheme:
+      typeof p.pdfExportUseTheme === 'boolean'
+        ? p.pdfExportUseTheme
+        : DEFAULT_PREFS.pdfExportUseTheme,
+    lineNumberPosition:
+      p.lineNumberPosition && VALID_LINE_NUMBER_POSITIONS.includes(p.lineNumberPosition)
+        ? p.lineNumberPosition
+        : DEFAULT_PREFS.lineNumberPosition,
     interfaceFont:
       typeof p.interfaceFont === 'string' || p.interfaceFont === null
         ? (p.interfaceFont as string | null)
@@ -600,6 +997,10 @@ function normalizePrefs(p: Partial<Prefs>): Prefs {
         : DEFAULT_PREFS.quickNoteTitlePrefix,
     wordWrap:
       typeof p.wordWrap === 'boolean' ? p.wordWrap : DEFAULT_PREFS.wordWrap,
+    cursorBlink:
+      typeof p.cursorBlink === 'boolean'
+        ? p.cursorBlink
+        : DEFAULT_PREFS.cursorBlink,
     previewSmoothScroll:
       typeof p.previewSmoothScroll === 'boolean'
         ? p.previewSmoothScroll
@@ -636,6 +1037,10 @@ function normalizePrefs(p: Partial<Prefs>): Prefs {
         : DEFAULT_PREFS.contentAlign,
     tagsCollapsed:
       typeof p.tagsCollapsed === 'boolean' ? p.tagsCollapsed : DEFAULT_PREFS.tagsCollapsed,
+    nestedTags: typeof p.nestedTags === 'boolean' ? p.nestedTags : DEFAULT_PREFS.nestedTags,
+    collapsedTagNodes: Array.isArray(p.collapsedTagNodes)
+      ? p.collapsedTagNodes.filter((k): k is string => typeof k === 'string')
+      : DEFAULT_PREFS.collapsedTagNodes,
     autoCalendarPanel:
       typeof p.autoCalendarPanel === 'boolean'
         ? p.autoCalendarPanel
@@ -652,42 +1057,116 @@ function normalizePrefs(p: Partial<Prefs>): Prefs {
       p.tasksViewMode && VALID_TASKS_VIEW_MODES.includes(p.tasksViewMode)
         ? p.tasksViewMode
         : DEFAULT_PREFS.tasksViewMode,
-    kanbanGroupBy:
-      p.kanbanGroupBy && VALID_KANBAN_GROUP_BYS.includes(p.kanbanGroupBy)
-        ? p.kanbanGroupBy
-        : DEFAULT_PREFS.kanbanGroupBy,
+    kanbanGroupBy: normalizeKanbanGroupBy(p.kanbanGroupBy),
     kanbanColumnTitles: normalizeKanbanColumnTitles(p.kanbanColumnTitles),
+    kanbanColumnOrder: normalizeKanbanColumnOrder(p.kanbanColumnOrder),
+    kanbanStatuses: normalizeKanbanStatuses(p.kanbanStatuses),
     hasCompletedOnboarding:
       typeof p.hasCompletedOnboarding === 'boolean'
         ? p.hasCompletedOnboarding
         : DEFAULT_PREFS.hasCompletedOnboarding
   }
 }
+// --- Portable config file integration (desktop) -----------------------------
+// On desktop, the portable subset of prefs is mirrored to a plain-text
+// config.toml (issue #203) so it can be synced across machines. The file is
+// the source of truth for portable keys; localStorage stays as a fast cache
+// and the web fallback. `getConfigSync()` returns null on web (and when the
+// bridge is absent, e.g. tests) — we then behave exactly as before.
+let cachedInitialPrefs: Prefs | null = null
+// True when a config file is available on this platform (desktop). Gates
+// whether savePrefs mirrors changes out to the file.
+let configFileEnabled = false
+// True when the config file already had content at load — i.e. this isn't a
+// first run, so we must NOT clobber it by seeding from localStorage.
+let configFileHadContent = false
+
+function readConfigFromBridge(): AppConfigPortable | null {
+  try {
+    const bridge = typeof window !== 'undefined' ? window.zen : undefined
+    if (!bridge || typeof bridge.getConfigSync !== 'function') return null
+    return bridge.getConfigSync()
+  } catch {
+    return null
+  }
+}
+
 function loadPrefs(): Prefs {
+  if (cachedInitialPrefs) return cachedInitialPrefs
+
+  let base: Partial<Prefs> = {}
+  let hadLocalStorage = false
   try {
     const raw = localStorage.getItem(PREFS_KEY)
     if (raw) {
-      const parsed = JSON.parse(raw) as Partial<Prefs>
-      const normalized = normalizePrefs(parsed)
-      // Users upgrading from a version that didn't have the onboarding flag
-      // shouldn't be greeted with the wizard on next launch — treat the
-      // presence of an existing prefs blob as evidence they've been here.
-      if (typeof parsed.hasCompletedOnboarding !== 'boolean') {
-        normalized.hasCompletedOnboarding = true
-      }
-      return normalized
+      base = JSON.parse(raw) as Partial<Prefs>
+      hadLocalStorage = true
     }
   } catch {
     /* ignore */
   }
-  return DEFAULT_PREFS
+
+  const fileConfig = readConfigFromBridge()
+  configFileEnabled = fileConfig !== null
+  configFileHadContent = !!fileConfig && Object.keys(fileConfig).length > 0
+
+  // The file wins for portable keys; localStorage supplies machine-local keys.
+  const merged: Partial<Prefs> = configFileHadContent
+    ? { ...base, ...(fileConfig as Partial<Prefs>) }
+    : base
+
+  const normalized = normalizePrefs(merged)
+
+  // Don't greet returning users with the onboarding wizard: an existing prefs
+  // blob or a populated config file both mean they've been here before.
+  if (
+    (hadLocalStorage && typeof base.hasCompletedOnboarding !== 'boolean') ||
+    configFileHadContent
+  ) {
+    normalized.hasCompletedOnboarding = true
+  }
+
+  // When the config file is authoritative, refresh the localStorage cache so
+  // other same-origin renderers (e.g. the quick-capture window) and the next
+  // launch see the synced values immediately.
+  if (configFileHadContent) {
+    try {
+      localStorage.setItem(PREFS_KEY, JSON.stringify(normalized))
+    } catch {
+      /* ignore */
+    }
+  }
+
+  cachedInitialPrefs = hadLocalStorage || configFileHadContent ? normalized : DEFAULT_PREFS
+  return cachedInitialPrefs
 }
+
+let configPushTimer: ReturnType<typeof setTimeout> | null = null
+const CONFIG_PUSH_DEBOUNCE_MS = 400
+
+function pushPortableConfig(p: Prefs): void {
+  if (!configFileEnabled) return
+  const bridge = typeof window !== 'undefined' ? window.zen : undefined
+  if (!bridge || typeof bridge.setConfig !== 'function') return
+  if (configPushTimer) clearTimeout(configPushTimer)
+  configPushTimer = setTimeout(() => {
+    configPushTimer = null
+    try {
+      void bridge.setConfig(pickPortablePrefs(p as unknown as Record<string, unknown>))
+    } catch {
+      /* ignore */
+    }
+  }, CONFIG_PUSH_DEBOUNCE_MS)
+}
+
 function savePrefs(p: Prefs): void {
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify(p))
   } catch {
     /* ignore */
   }
+  cachedInitialPrefs = p
+  pushPortableConfig(p)
 }
 
 function replaceNoteMeta(notes: NoteMeta[], oldPath: string, next: NoteMeta): NoteMeta[] {
@@ -817,11 +1296,33 @@ function getVisiblePreviewScrollElement(): HTMLElement | null {
   ) ?? null
 }
 
+/**
+ * A database surface that can be the active tab: either a `zen://database/…`
+ * tab (opened via "New Database") or a `.csv` opened directly as an asset tab
+ * (`zen://asset/Foo.csv`), which EditorPane renders as a database grid. Both
+ * must round-trip through the note jump history so Ctrl+O returns to the grid.
+ */
+function isDatabaseSurfaceTabPath(path: string | null | undefined): path is string {
+  if (!path) return false
+  if (isDatabaseTabPath(path)) return true
+  return isAssetTabPath(path) && isDatabaseCsvPath(assetPathFromTab(path) ?? '')
+}
+
+/**
+ * Tabs worth recording in the note jump history (Ctrl+O / Ctrl+I): real notes,
+ * plus database surfaces — so opening a row's record page and pressing Ctrl+O
+ * jumps back to the grid. Other virtual tabs (tasks, tags, plain assets…) stay
+ * excluded.
+ */
+function isJumpHistoryTabPath(path: string | null | undefined): path is string {
+  return !!path && (!isWorkspaceVirtualTabPath(path) || isDatabaseSurfaceTabPath(path))
+}
+
 function captureNoteJumpLocation(state: {
   selectedPath: string | null
   editorViewRef: EditorView | null
 }): NoteJumpLocation | null {
-  if (!state.selectedPath || isWorkspaceVirtualTabPath(state.selectedPath)) return null
+  if (!isJumpHistoryTabPath(state.selectedPath)) return null
   const selection = state.editorViewRef?.state.selection.main
   return {
     path: state.selectedPath,
@@ -863,12 +1364,114 @@ function resolveTaskLineNumber(body: string, task: VaultTask): number {
   return task.lineNumber
 }
 
+/** Parse a `YYYY-MM-DD` string to a local-midnight Date, or null if malformed. */
+function parseIsoDateLocal(iso: string): Date | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso)
+  if (!m) return null
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+  return Number.isNaN(d.getTime()) ? null : d
+}
+
+// Per-vault "we already rolled over today" marker, persisted in localStorage so
+// opening today's daily note across sessions doesn't re-scan past notes once
+// it's done for the day. Keyed by vault root so multiple vaults don't collide.
+function rolloverMarkerKey(root: string): string {
+  return `zen.tasks.rollover.${root || 'default'}`
+}
+function readRolloverMarker(root: string): string | null {
+  try {
+    return typeof localStorage !== 'undefined'
+      ? localStorage.getItem(rolloverMarkerKey(root))
+      : null
+  } catch {
+    return null
+  }
+}
+function writeRolloverMarker(root: string, iso: string): void {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(rolloverMarkerKey(root), iso)
+    }
+  } catch {
+    // localStorage may be unavailable (private mode); the in-session flow still works.
+  }
+}
+
+// Per-vault "the user dismissed the inbox-mode/vault-root notice" marker (#216).
+// Some vaults intentionally keep extra material at the root (e.g. AI tooling),
+// so once dismissed the banner stays hidden for that vault. Keyed by root.
+function rootBannerDismissKey(root: string): string {
+  return `zen.sidebar.rootBannerDismissed.${root || 'default'}`
+}
+function readRootBannerDismissed(root: string): boolean {
+  try {
+    return (
+      typeof localStorage !== 'undefined' &&
+      localStorage.getItem(rootBannerDismissKey(root)) === '1'
+    )
+  } catch {
+    return false
+  }
+}
+function writeRootBannerDismissed(root: string): void {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(rootBannerDismissKey(root), '1')
+    }
+  } catch {
+    // localStorage may be unavailable; the banner just reappears next session.
+  }
+}
+
+// Per-vault manual note order (#224): `parentDir -> ordered note paths`. Stored
+// in localStorage keyed by vault root, like the rollover marker. Not a vault
+// sidecar yet, so it's per-machine — a portable `.zennotes` file is a follow-up.
+type ManualNoteOrder = Record<string, string[]>
+function manualOrderKey(root: string): string {
+  return `zen.notes.manualOrder.${root || 'default'}`
+}
+function readManualOrder(root: string): ManualNoteOrder {
+  try {
+    const raw =
+      typeof localStorage !== 'undefined' ? localStorage.getItem(manualOrderKey(root)) : null
+    if (!raw) return {}
+    const parsed = JSON.parse(raw) as unknown
+    if (!parsed || typeof parsed !== 'object') return {}
+    const out: ManualNoteOrder = {}
+    for (const [dir, list] of Object.entries(parsed as Record<string, unknown>)) {
+      if (Array.isArray(list)) out[dir] = list.filter((p): p is string => typeof p === 'string')
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+function writeManualOrder(root: string, order: ManualNoteOrder): void {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(manualOrderKey(root), JSON.stringify(order))
+    }
+  } catch {
+    // localStorage may be unavailable; the manual order is best-effort.
+  }
+}
+// Which vault root the in-memory manual order was loaded for; reloaded on switch.
+let manualOrderLoadedForRoot: string | null = null
+
 function applyTaskMutationsToTask(task: VaultTask, mutations: TaskMutation[]): VaultTask {
   let next = task
   for (const m of mutations) {
     switch (m.kind) {
       case 'set-checked':
-        if (next.checked !== m.checked) next = { ...next, checked: m.checked }
+        if (next.checked !== m.checked) {
+          next = { ...next, checked: m.checked }
+          // A file-task's completion lives in its `status`, so keep that (and the
+          // Kanban-grouping field) in sync optimistically too.
+          if (next.kind === 'file') {
+            const status = m.checked ? 'done' : 'open'
+            next = { ...next, status, fields: { ...next.fields, status } }
+          }
+        }
         break
       case 'set-waiting':
         if (next.waiting !== m.waiting) next = { ...next, waiting: m.waiting }
@@ -883,9 +1486,57 @@ function applyTaskMutationsToTask(task: VaultTask, mutations: TaskMutation[]): V
         if (next.due !== due) next = { ...next, due }
         break
       }
+      case 'set-field': {
+        const value = m.value ?? undefined
+        const fields = { ...next.fields }
+        if (value == null) delete fields[m.key]
+        else fields[m.key] = value
+        next = { ...next, fields }
+        if (m.key === 'status') next = { ...next, status: value }
+        break
+      }
+      case 'set-text': {
+        const content = m.text.trim()
+        if (next.content !== content) next = { ...next, content }
+        break
+      }
     }
   }
   return next
+}
+
+/** Map task mutations onto frontmatter scalar updates for a whole-note file
+ *  task (which has no inline checkbox to edit). Mirrors the inline mutators in
+ *  `applyTaskMutation`. `todayIso` stamps the completion date. */
+function fileTaskMutationUpdates(
+  mutations: TaskMutation[],
+  todayIso: string
+): Record<string, string | null> {
+  const updates: Record<string, string | null> = {}
+  for (const m of mutations) {
+    switch (m.kind) {
+      case 'set-checked':
+        updates.status = m.checked ? 'done' : 'open'
+        updates.completedDate = m.checked ? todayIso : null
+        break
+      case 'set-waiting':
+        updates.status = m.waiting ? 'waiting' : 'open'
+        break
+      case 'set-priority':
+        updates.priority = taskFilePriorityValue(m.priority)
+        break
+      case 'set-due':
+        updates.due = m.due
+        break
+      case 'set-field':
+        updates[m.key] = m.value
+        break
+      case 'set-text':
+        updates.title = m.text.trim()
+        break
+    }
+  }
+  return updates
 }
 
 function yieldForOptimisticPaint(): Promise<void> {
@@ -961,8 +1612,9 @@ async function rewriteTagAcrossVault(
   const { notes, activeNote } = get()
   const escaped = oldTag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   // Match `#tag` preceded by start/whitespace and followed by a non
-  // tag-character or end-of-string, keeping the leading separator.
-  const pattern = new RegExp(`(^|\\s)#${escaped}(?=[^\\w\\-/]|$)`, 'gm')
+  // tag-character or end-of-string, keeping the leading separator. The
+  // boundary excludes any Unicode letter so Cyrillic/CJK tags rename too (#205).
+  const pattern = new RegExp(`(^|\\s)#${escaped}(?=[^\\p{L}\\d_/-]|$)`, 'gmu')
 
   const rewriteBody = (src: string): string => {
     // Preserve code fences and inline code exactly. Split the body
@@ -1020,7 +1672,10 @@ async function rewriteTagAcrossVault(
 function collectPrefs(s: {
   vimMode: boolean
   vimInsertEscape: string
+  vimYankToClipboard: boolean
   keymapOverrides: KeymapOverrides
+  enabledOverrides: Record<string, string>
+  themeTweaks: Record<string, string>
   whichKeyHints: boolean
   whichKeyHintMode: WhichKeyHintMode
   whichKeyHintTimeoutMs: number
@@ -1028,6 +1683,13 @@ function collectPrefs(s: {
   ripgrepBinaryPath: string | null
   fzfBinaryPath: string | null
   livePreview: boolean
+  renderTablesInLivePreview: boolean
+  completedTaskStyle: CompletedTaskStyle
+  mathRenderer: MathRenderer
+  looseMathDelimiters: boolean
+  keepViewModeAcrossNotes: boolean
+  markdownSnippets: boolean
+  hideBuiltinTemplates: boolean
   tabsEnabled: boolean
   wrapTabs: boolean
   themeId: string
@@ -1035,8 +1697,13 @@ function collectPrefs(s: {
   themeMode: ThemeMode
   editorFontSize: number
   editorLineHeight: number
+  editorScrollOff: number
+  timeFormat: TimeFormat
   previewMaxWidth: number
   lineNumberMode: LineNumberMode
+  lineNumberPosition: LineNumberPosition
+  viewSettingsScope: 'global' | 'vault'
+  pdfExportUseTheme: boolean
   interfaceFont: string | null
   textFont: string | null
   monoFont: string | null
@@ -1058,6 +1725,7 @@ function collectPrefs(s: {
   quickNoteDateTitle: boolean
   quickNoteTitlePrefix: string | null
   wordWrap: boolean
+  cursorBlink: boolean
   previewSmoothScroll: boolean
   editorMaxWidth: number
   pdfEmbedInEditMode: 'compact' | 'full'
@@ -1065,18 +1733,25 @@ function collectPrefs(s: {
   noteRefs: Record<string, { path: string; kind: 'note' | 'asset' }>
   contentAlign: 'center' | 'left'
   tagsCollapsed: boolean
+  nestedTags: boolean
+  collapsedTagNodes: string[]
   autoCalendarPanel: boolean
   calendarWeekStart: CalendarWeekStart
   calendarShowWeekNumbers: boolean
   tasksViewMode: TasksViewMode
   kanbanGroupBy: KanbanGroupBy
   kanbanColumnTitles: Record<string, string>
+  kanbanColumnOrder: Record<string, string[]>
+  kanbanStatuses: string[]
   hasCompletedOnboarding: boolean
 }): Prefs {
   return {
     vimMode: s.vimMode,
     vimInsertEscape: s.vimInsertEscape,
+    vimYankToClipboard: s.vimYankToClipboard,
     keymapOverrides: s.keymapOverrides,
+    enabledOverrides: s.enabledOverrides,
+    themeTweaks: s.themeTweaks,
     whichKeyHints: s.whichKeyHints,
     whichKeyHintMode: s.whichKeyHintMode,
     whichKeyHintTimeoutMs: s.whichKeyHintTimeoutMs,
@@ -1084,6 +1759,13 @@ function collectPrefs(s: {
     ripgrepBinaryPath: s.ripgrepBinaryPath,
     fzfBinaryPath: s.fzfBinaryPath,
     livePreview: s.livePreview,
+    renderTablesInLivePreview: s.renderTablesInLivePreview,
+    completedTaskStyle: s.completedTaskStyle,
+    mathRenderer: s.mathRenderer,
+    looseMathDelimiters: s.looseMathDelimiters,
+    keepViewModeAcrossNotes: s.keepViewModeAcrossNotes,
+    markdownSnippets: s.markdownSnippets,
+    hideBuiltinTemplates: s.hideBuiltinTemplates,
     tabsEnabled: s.tabsEnabled,
     wrapTabs: s.wrapTabs,
     themeId: s.themeId,
@@ -1091,8 +1773,13 @@ function collectPrefs(s: {
     themeMode: s.themeMode,
     editorFontSize: s.editorFontSize,
     editorLineHeight: s.editorLineHeight,
+    editorScrollOff: s.editorScrollOff,
+    timeFormat: s.timeFormat,
     previewMaxWidth: s.previewMaxWidth,
     lineNumberMode: s.lineNumberMode,
+    viewSettingsScope: s.viewSettingsScope,
+    pdfExportUseTheme: s.pdfExportUseTheme,
+    lineNumberPosition: s.lineNumberPosition,
     interfaceFont: s.interfaceFont,
     textFont: s.textFont,
     monoFont: s.monoFont,
@@ -1114,6 +1801,7 @@ function collectPrefs(s: {
     quickNoteDateTitle: s.quickNoteDateTitle,
     quickNoteTitlePrefix: s.quickNoteTitlePrefix,
     wordWrap: s.wordWrap,
+    cursorBlink: s.cursorBlink,
     previewSmoothScroll: s.previewSmoothScroll,
     editorMaxWidth: s.editorMaxWidth,
     pdfEmbedInEditMode: s.pdfEmbedInEditMode,
@@ -1121,12 +1809,16 @@ function collectPrefs(s: {
     noteRefs: s.noteRefs,
     contentAlign: s.contentAlign,
     tagsCollapsed: s.tagsCollapsed,
+    nestedTags: s.nestedTags,
+    collapsedTagNodes: s.collapsedTagNodes,
     autoCalendarPanel: s.autoCalendarPanel,
     calendarWeekStart: s.calendarWeekStart,
     calendarShowWeekNumbers: s.calendarShowWeekNumbers,
     tasksViewMode: s.tasksViewMode,
     kanbanGroupBy: s.kanbanGroupBy,
     kanbanColumnTitles: s.kanbanColumnTitles,
+    kanbanColumnOrder: s.kanbanColumnOrder,
+    kanbanStatuses: s.kanbanStatuses,
     hasCompletedOnboarding: s.hasCompletedOnboarding
   }
 }
@@ -1151,6 +1843,10 @@ interface WorkspaceSnapshot {
   sidebarOpen: boolean
   noteListOpen: boolean
   selectedTags: string[]
+  /** Epoch ms of the last write — drives newest-wins when the synced file and
+   *  the local cache disagree (e.g. after working in this vault on another
+   *  machine). (#292) */
+  savedAt?: number
 }
 
 interface ZenRestoreState {
@@ -1170,7 +1866,7 @@ function loadWorkspaceSnapshots(): Record<string, unknown> {
   }
 }
 
-function saveWorkspaceSnapshot(root: string, snapshot: WorkspaceSnapshot): void {
+function writeWorkspaceSnapshotToCache(root: string, snapshot: unknown): void {
   try {
     const allSnapshots = loadWorkspaceSnapshots()
     allSnapshots[root] = snapshot
@@ -1180,8 +1876,55 @@ function saveWorkspaceSnapshot(root: string, snapshot: WorkspaceSnapshot): void 
   }
 }
 
+let workspaceFileWriteTimer: ReturnType<typeof setTimeout> | null = null
+
+function saveWorkspaceSnapshot(root: string, snapshot: WorkspaceSnapshot): void {
+  const stamped: WorkspaceSnapshot = { ...snapshot, savedAt: Date.now() }
+  // localStorage stays the fast, synchronous local cache.
+  writeWorkspaceSnapshotToCache(root, stamped)
+  // Mirror to <vault>/.zennotes/workspace.json (debounced) so the workspace
+  // syncs with the vault across machines. The IPC targets the CURRENT window's
+  // vault, so drop the write if the vault changed during the debounce. (#292)
+  if (workspaceFileWriteTimer) clearTimeout(workspaceFileWriteTimer)
+  workspaceFileWriteTimer = setTimeout(() => {
+    workspaceFileWriteTimer = null
+    if (useStore.getState().vault?.root !== root) return
+    try {
+      void window.zen?.writeWorkspaceState?.(JSON.stringify(stamped))
+    } catch {
+      /* ignore */
+    }
+  }, WORKSPACE_FILE_DEBOUNCE_MS)
+}
+
 function loadWorkspaceSnapshot(root: string): unknown {
   return loadWorkspaceSnapshots()[root] ?? null
+}
+
+/** Pick the freshest workspace snapshot between the local cache and the synced
+ *  file (newest-wins by `savedAt`), refreshing the cache when the file wins. The
+ *  file IPC targets the current window's vault, which matches `root` at restore
+ *  time. (#292) */
+async function loadBestWorkspaceSnapshot(root: string): Promise<unknown> {
+  const local = loadWorkspaceSnapshot(root) as { savedAt?: unknown } | null
+  let fileSnap: { savedAt?: unknown } | null = null
+  try {
+    const raw = await window.zen?.readWorkspaceState?.()
+    if (raw) {
+      const parsed = JSON.parse(raw) as unknown
+      if (parsed && typeof parsed === 'object') fileSnap = parsed as { savedAt?: unknown }
+    }
+  } catch {
+    /* ignore — fall back to the local cache */
+  }
+  if (!fileSnap) return local
+  const fileAt = typeof fileSnap.savedAt === 'number' ? fileSnap.savedAt : 0
+  const localAt = local && typeof local.savedAt === 'number' ? local.savedAt : -1
+  if (fileAt >= localAt) {
+    writeWorkspaceSnapshotToCache(root, fileSnap)
+    return fileSnap
+  }
+  return local
 }
 
 function normalizeWorkspaceView(raw: unknown): View {
@@ -1333,6 +2076,19 @@ function hasTasksViewOpen(state: { paneLayout: PaneLayout }): boolean {
   return allLeaves(state.paneLayout).some((leaf) => leaf.tabs.includes(TASKS_TAB_PATH))
 }
 
+/** True when a surface backed by `vaultTasks` is on screen and therefore needs
+ *  the shared task cache kept fresh on note edits. Covers the Tasks view and the
+ *  calendar panel — the latter is per-pane local state exposed via a DOM marker
+ *  (the same one VimNav reads for pane navigation), so editing a daily note with
+ *  only the calendar open still refreshes its tasks. */
+function tasksSurfaceVisible(state: { paneLayout: PaneLayout }): boolean {
+  if (hasTasksViewOpen(state)) return true
+  return (
+    typeof document !== 'undefined' &&
+    document.querySelector('[data-calendar-panel]') !== null
+  )
+}
+
 /** True when the active pane's active tab is the vault-wide Tags view. */
 export function isTagsViewActive(state: {
   paneLayout: PaneLayout
@@ -1369,6 +2125,15 @@ export function isArchiveViewActive(state: {
   return leaf?.activeTab === ARCHIVE_TAB_PATH
 }
 
+/** True when the active pane's active tab is the built-in Assets view. */
+export function isAssetsViewActive(state: {
+  paneLayout: PaneLayout
+  activePaneId: string
+}): boolean {
+  const leaf = findLeaf(state.paneLayout, state.activePaneId)
+  return leaf?.activeTab === ASSETS_VIEW_TAB_PATH
+}
+
 /** True when the active pane's active tab is the built-in Quick Notes view. */
 export function isQuickNotesViewActive(state: {
   paneLayout: PaneLayout
@@ -1386,6 +2151,10 @@ interface Store {
   localVaults: LocalVaultEntry[]
   workspaceSetupError: string | null
   vaultSettings: VaultSettings
+  /** Vault is in `inbox` mode but its root holds notes only `root` mode shows. */
+  rootContentHiddenByInboxMode: boolean
+  /** The user dismissed the vault-root notice for the current vault (#216). */
+  rootContentBannerDismissed: boolean
   notes: NoteMeta[]
   folders: FolderEntry[]
   assetFiles: AssetMeta[]
@@ -1407,6 +2176,11 @@ interface Store {
   bufferPaletteOpen: boolean
   outlinePaletteOpen: boolean
   templatePaletteOpen: boolean
+  /** "Embed existing drawing" picker visibility. */
+  embedDrawingPaletteOpen: boolean
+  /** Bumped whenever an Excalidraw drawing changes on disk so embed widgets
+   *  and preview components invalidate their cached PNG and re-render. */
+  excalidrawPreviewVersion: number
   /** 'create' makes a new note from the picked template; 'insert' renders it
    *  into the active note instead. */
   templatePaletteMode: 'create' | 'insert'
@@ -1425,7 +2199,13 @@ interface Store {
   vimMode: boolean
   /** Key sequence that exits insert mode (maps to <Esc>), e.g. "jk". Persisted. */
   vimInsertEscape: string
+  /** When true, Vim yank/delete/change also copy to the system clipboard. Persisted. */
+  vimYankToClipboard: boolean
   keymapOverrides: KeymapOverrides
+  /** Enabled CSS overrides, keyed by filename. Persisted to config [overrides]. */
+  enabledOverrides: Record<string, string>
+  /** Visual color tweaks (token slug → color). Persisted to config [tweaks]. */
+  themeTweaks: Record<string, string>
   whichKeyHints: boolean
   whichKeyHintMode: WhichKeyHintMode
   whichKeyHintTimeoutMs: number
@@ -1433,6 +2213,14 @@ interface Store {
   ripgrepBinaryPath: string | null
   fzfBinaryPath: string | null
   livePreview: boolean
+  renderTablesInLivePreview: boolean
+  completedTaskStyle: CompletedTaskStyle
+  mathRenderer: MathRenderer
+  looseMathDelimiters: boolean
+  keepViewModeAcrossNotes: boolean
+  /** Auto-close markdown delimiters while typing. Persisted. */
+  markdownSnippets: boolean
+  hideBuiltinTemplates: boolean
   tabsEnabled: boolean
   wrapTabs: boolean
   settingsOpen: boolean
@@ -1441,8 +2229,13 @@ interface Store {
   themeMode: ThemeMode
   editorFontSize: number
   editorLineHeight: number
+  editorScrollOff: number
+  timeFormat: TimeFormat
   previewMaxWidth: number
   lineNumberMode: LineNumberMode
+  lineNumberPosition: LineNumberPosition
+  viewSettingsScope: 'global' | 'vault'
+  pdfExportUseTheme: boolean
   interfaceFont: string | null
   textFont: string | null
   monoFont: string | null
@@ -1455,6 +2248,9 @@ interface Store {
   unifiedSidebar: boolean
   darkSidebar: boolean
   showSidebarChevrons: boolean
+  /** Manual (drag-to-reorder) note order for `noteSortOrder: 'manual'`, keyed
+   *  by parent directory → ordered note paths. Persisted per vault (#224). */
+  manualNoteOrder: ManualNoteOrder
   /** Sidebar tree collapsed-folder keys. Kept in the store so the
    *  state survives Sidebar unmount/mount (e.g. toggling the sidebar). */
   collapsedFolders: string[]
@@ -1462,6 +2258,9 @@ interface Store {
   /** Pinned reference pane — an always-visible side panel that shows a
    *  single companion note while the user works in the main editor. */
   pinnedRefPath: string | null
+  /** URL hash fragment for the pinned asset (e.g. "#page=12") — passed
+   *  through to the iframe so the PDF viewer opens at the right page. */
+  pinnedRefFragment: string | null
   pinnedRefVisible: boolean
   pinnedRefWidth: number
   panelWidths: PanelWidths
@@ -1475,6 +2274,10 @@ interface Store {
 
   /** Whether long lines wrap or scroll horizontally in the editor. */
   wordWrap: boolean
+
+  /** When false the editor caret and the Vim block cursor stay solid
+   *  instead of blinking. */
+  cursorBlink: boolean
 
   /** Animate Ctrl+D / Ctrl+U half-page jumps in preview mode. Off
    *  gives an instant snap, which Vim muscle memory prefers. */
@@ -1496,7 +2299,7 @@ interface Store {
 
   /** Per-note reference pins. Active note's entry overrides the
    *  global pinnedRefPath while that note is open. */
-  noteRefs: Record<string, { path: string; kind: 'note' | 'asset' }>
+  noteRefs: Record<string, { path: string; kind: 'note' | 'asset'; fragment?: string | null }>
 
   /** Center the editor + preview content (with the width cap) or
    *  left-align it to the pane edge. */
@@ -1505,6 +2308,11 @@ interface Store {
   /** Sidebar Tags section collapsed — hides the pill rail but keeps
    *  the section header visible as a toggle. Persisted. */
   tagsCollapsed: boolean
+  /** Render `/`-separated tags as a collapsible tree (sidebar + Tags view).
+   *  Persisted. (#439) */
+  nestedTags: boolean
+  /** Full paths of collapsed nodes in the nested-tag tree. Persisted. */
+  collapsedTagNodes: string[]
   /** Auto-show the calendar panel when the active note is a daily or
    *  weekly note. Persisted. */
   autoCalendarPanel: boolean
@@ -1517,6 +2325,19 @@ interface Store {
    *  and kept incrementally fresh via the chokidar watcher while the view
    *  is visible. */
   vaultTasks: VaultTask[]
+
+  /** User themes parsed from ~/.config/zennotes/themes. Loaded + watched by
+   *  `initCustomThemes`; the CSS is injected as it changes. */
+  customThemes: CustomTheme[]
+  /** User CSS overrides parsed from ~/.config/zennotes/overrides. Loaded + watched
+   *  by `initOverrides`; enabled ones are injected on top of the active theme. */
+  overrides: Override[]
+  /** Toggle a override on/off (persists to the config [overrides] table). */
+  setOverrideEnabled(name: string, on: boolean): void
+  /** Set or clear a visual color tweak (slug → color; null clears it). Persisted. */
+  setThemeTweak(slug: string, value: string | null): void
+  /** Clear all visual color tweaks. */
+  resetThemeTweaks(): void
   tasksLoading: boolean
   tasksFilter: string
   taskCursorIndex: number
@@ -1526,6 +2347,10 @@ interface Store {
   kanbanGroupBy: KanbanGroupBy
   /** Display-only column title overrides for the Tasks Kanban view. */
   kanbanColumnTitles: Record<string, string>
+  /** Manual column arrangement per board (groupBy → ordered column ids). */
+  kanbanColumnOrder: Record<string, string[]>
+  /** Ordered status ids for the custom-status Kanban board (config-driven). */
+  kanbanStatuses: string[]
   /** True once the user has finished or skipped the first-run onboarding. */
   hasCompletedOnboarding: boolean
   /** ISO YYYY-MM-DD currently selected in the Calendar view. null = today. */
@@ -1533,14 +2358,34 @@ interface Store {
   /** First-of-month anchor (ISO YYYY-MM-01) for the Calendar view's grid. */
   tasksCalendarMonthAnchor: string | null
 
+  /** Hydrated CSV databases keyed by their vault-relative `.csv` path. */
+  databases: Record<string, DatabaseDoc>
+  /** In-flight load flags keyed by `.csv` path. */
+  databasesLoading: Record<string, boolean>
+
   /** Tags currently selected in the Tags view. The view shows every non-
-   *  trash note carrying *any* of these (union), so toggling more tags
-   *  widens the result set. Cleared when the Tags tab closes. */
+   *  trash note carrying *all* (or, in `any` mode, any) of these, depending on
+   *  `tagMatchMode`. Cleared when the Tags tab closes. */
   selectedTags: string[]
+  /** Whether multiple selected tags combine with AND (`all`, the default —
+   *  narrows) or OR (`any` — widens). */
+  tagMatchMode: TagMatchMode
 
   /** Vim navigation: which panel is keyboard-focused. */
   focusedPanel: Panel | null
   sidebarCursorIndex: number
+  /** Expanded group keys in the Daily/Weekly date-nav tree (ephemeral UI, not
+   *  persisted). Kept in the store — not Sidebar-local — so the keyboard nav in
+   *  VimNav can expand/collapse date groups like real folders. (#301) */
+  dateNavExpanded: string[]
+  /** Editor view mode (edit/split/preview) per pane, per note path. Ephemeral
+   *  (not persisted): kept in the store so it survives EditorPane remounts and a
+   *  split can inherit the source pane's mode instead of resetting to edit. (#321) */
+  paneModes: Record<string, PaneModesByPath>
+  /** Last view mode explicitly set in each pane, by pane id. Used only when
+   *  `keepViewModeAcrossNotes` is on, so every note in the pane follows the
+   *  pane's current mode instead of its own. Ephemeral, like `paneModes`. */
+  paneStickyModes: Record<string, PaneMode>
   noteListCursorIndex: number
   connectionsCursorIndex: number
   connectionPreview: ConnectionPreviewState | null
@@ -1563,9 +2408,19 @@ interface Store {
   /** Comment sidecars keyed by note path. Loaded lazily per open note. */
   noteComments: Record<string, NoteComment[]>
   activeCommentId: string | null
+  closedTabStack: ClosedTabEntry[]
 
   setVault: (v: VaultInfo | null) => void
   setVaultSettings: (next: VaultSettings) => Promise<void>
+  /**
+   * Toggle a favorite (a note path or a `folder:subpath` key) and persist it.
+   * Favorites pin to the top of the sidebar.
+   */
+  toggleFavorite: (key: string) => Promise<void>
+  /** Toggle favorite for the active editor note (Vim leader command). */
+  toggleFavoriteActiveNote: () => Promise<void>
+  /** @internal Replace the favorites list and persist (no note refresh). */
+  applyFavorites: (nextFavorites: string[]) => Promise<void>
   setNotes: (notes: NoteMeta[]) => void
   setView: (view: View) => void
   /** Open the Tasks panel as a tab in the active pane. If the tab is
@@ -1585,13 +2440,43 @@ interface Store {
   openQuickNotesView: () => Promise<void>
   /** Open the built-in Archive tab in the active pane. */
   openArchiveView: () => Promise<void>
+  openAssetsView: () => Promise<void>
   /** Open the built-in Trash tab in the active pane. */
   openTrashView: () => Promise<void>
+  /** Read a CSV database (CSV + sidecar) into `databases` if not already loaded. */
+  loadDatabase: (csvPath: string) => Promise<void>
+  /** Load a database and open it as a tab in the active pane. */
+  openDatabase: (csvPath: string) => Promise<void>
+  /** Create a new empty database under `folder`/`subpath` and open it. */
+  createDatabase: (folder: NoteFolder, subpath?: string, title?: string) => Promise<void>
+  /** Create a database in the configured default databases location and open it. (#362) */
+  newDatabase: () => Promise<void>
+  /** Rename a database (its `.base` folder); rehomes the open grid tab. */
+  renameDatabase: (csvPath: string, newTitle: string) => Promise<void>
+  /** Optimistically replace a database's rows and debounce-persist the CSV. */
+  updateDatabaseRows: (csvPath: string, next: DatabaseDoc) => void
+  /** Delete rows AND purge their record-page mappings from the sidecar (a plain
+   *  row write only touches the CSV, so a stale UUID would otherwise linger in
+   *  schema.json). When a deleted row has a linked page note, prompt whether to
+   *  trash the note too or keep it as a standalone note. (#391) */
+  deleteDatabaseRows: (csvPath: string, rowIds: string[]) => Promise<void>
+  /** Optimistically replace a database's schema/views and debounce-persist sidecar + CSV. */
+  updateDatabaseSchema: (csvPath: string, next: DatabaseDoc) => void
+  /** Re-read a database from disk after an external change (skips our own write echoes). */
+  syncDatabaseFromDisk: (csvPath: string) => Promise<void>
+  /** Drop a deleted database's cached doc and close its tab (no disk read). */
+  forgetDatabase: (csvPath: string) => Promise<void>
+  /** Open a record as a markdown "page" note (creating + linking it on first open). */
+  openRecordPage: (csvPath: string, rowId: string) => Promise<void>
+  /** Rename a record's linked page note to match its title (no-op if unlinked). */
+  renameRecordPage: (csvPath: string, rowId: string) => Promise<void>
   /** Add or remove a tag from the Tags view selection without touching
    *  pane layout. No-op if the selection is already in that state. */
   toggleTagSelection: (tag: string) => void
   /** Replace the Tags view selection wholesale (used by `:tag a b c`). */
   setSelectedTags: (tags: string[]) => void
+  /** Switch how multiple selected tags combine (AND vs OR). */
+  setTagMatchMode: (mode: TagMatchMode) => void
   /** Force a full vault rescan for tasks. */
   refreshTasks: () => Promise<void>
   /** Rescan a single note's tasks and splice the result into `vaultTasks`. */
@@ -1611,6 +2496,16 @@ interface Store {
     task: VaultTask,
     mutation: TaskMutation | TaskMutation[]
   ) => Promise<void>
+  /** Delete a task's line from its note (the right-click "Delete" action). */
+  deleteTaskFromList: (task: VaultTask) => Promise<void>
+  /** Physically move a task's line into the daily note for `dateIso`,
+   *  removing it from its current note. Falls back to setting the due date
+   *  when daily notes are disabled or it already lives in that day's note. */
+  moveTaskToDate: (task: VaultTask, dateIso: string) => Promise<void>
+  /** Forward a task to another note (#316): leaves `[>]` + a link to the target
+   *  on the original, and appends a fresh `- [ ]` copy (backlinked) to the
+   *  target note. */
+  forwardTask: (task: VaultTask, targetPath: string) => Promise<void>
   setTasksFilter: (q: string) => void
   setTasksViewMode: (mode: TasksViewMode) => void
   setKanbanGroupBy: (group: KanbanGroupBy) => void
@@ -1619,6 +2514,12 @@ interface Store {
     columnId: string,
     title: string | null
   ) => void
+  /** Persist the manual column arrangement for a board. Pass the full ordered
+   *  list of column ids; empties clear the override for that board. */
+  setKanbanColumnOrder: (group: KanbanGroupBy, orderedIds: string[]) => void
+  /** Replace the ordered custom-status list (from Settings). Normalized and
+   *  written back to config.toml + the per-vault view override. (#354) */
+  setKanbanStatuses: (statuses: string[]) => void
   setTasksCalendarSelectedDate: (iso: string | null) => void
   setTasksCalendarMonthAnchor: (iso: string | null) => void
   setTaskCursorIndex: (idx: number) => void
@@ -1636,6 +2537,9 @@ interface Store {
   jumpToNextNote: () => Promise<void>
   applyChange: (ev: VaultChangeEvent) => Promise<void>
   refreshNotes: () => Promise<void>
+  refreshRootContentHidden: () => Promise<void>
+  /** Dismiss the vault-root notice for the current vault, persisted (#216). */
+  dismissRootContentBanner: () => void
   refreshAssets: () => Promise<void>
   deleteAsset: (relPath: string) => Promise<void>
   undoLastAssetAction: () => Promise<boolean>
@@ -1649,6 +2553,16 @@ interface Store {
     subpath?: string,
     options?: { focusTitle?: boolean; title?: string }
   ) => Promise<void>
+  createDrawingAndOpen: (folder: NoteFolder, subpath?: string) => Promise<void>
+  /** Quick-add a whole-note task file (`#task`-tagged, TaskNotes-style). Prompts
+   *  for a title and creates it at `opts` (an explicit folder/subpath) or, when
+   *  omitted, the configured tasks location. Resolves to the created path, or
+   *  null if cancelled. */
+  newTaskFile: (opts?: { folder: NoteFolder; subpath?: string }) => Promise<string | null>
+  /** Quick-add a task file after first asking which folder to put it in (a
+   *  destination prompt with folder autocomplete), then the title — for keeping
+   *  per-project tasks organized. Resolves to the created path, or null. */
+  newTaskFileInChosenFolder: () => Promise<string | null>
   /**
    * Create a note after asking where to put it: a destination prompt that
    * defaults to `initialPath` (empty = vault root), so the user can press Enter
@@ -1665,11 +2579,13 @@ interface Store {
    */
   importDroppedMarkdownFiles: (files: File[]) => Promise<void>
   closeActiveNote: () => Promise<void>
+  reopenLastClosedTab: () => Promise<void>
   trashActive: () => Promise<void>
   restoreActive: () => Promise<void>
   archiveActive: () => Promise<void>
   unarchiveActive: () => Promise<void>
   exportActiveNotePdf: () => Promise<void>
+  copyActiveNoteAsMarkdown: () => Promise<void>
   setSearchOpen: (open: boolean) => void
   setVaultTextSearchOpen: (open: boolean) => void
   setCommandPaletteOpen: (open: boolean, mode?: CommandPaletteInitialMode) => void
@@ -1681,6 +2597,7 @@ interface Store {
   setFocusMode: (focus: boolean) => void
   setVimMode: (on: boolean) => void
   setVimInsertEscape: (sequence: string) => void
+  setVimYankToClipboard: (on: boolean) => void
   setKeymapBinding: (id: KeymapId, binding: string | null) => void
   resetAllKeymaps: () => void
   setWhichKeyHints: (on: boolean) => void
@@ -1690,21 +2607,47 @@ interface Store {
   setRipgrepBinaryPath: (path: string | null) => void
   setFzfBinaryPath: (path: string | null) => void
   setLivePreview: (on: boolean) => void
+  setRenderTablesInLivePreview: (on: boolean) => void
+  setCompletedTaskStyle: (style: CompletedTaskStyle) => void
+  setMathRenderer: (renderer: MathRenderer) => void
+  setLooseMathDelimiters: (on: boolean) => void
+  setKeepViewModeAcrossNotes: (on: boolean) => void
+  setMarkdownSnippets: (on: boolean) => void
+  setHideBuiltinTemplates: (hidden: boolean) => void
   setTabsEnabled: (on: boolean) => void
   setWrapTabs: (on: boolean) => void
   setSettingsOpen: (open: boolean) => void
   setTheme: (next: { id: string; family: ThemeFamily; mode: ThemeMode }) => void
   setEditorFontSize: (px: number) => void
   setEditorLineHeight: (mult: number) => void
+  setEditorScrollOff: (lines: number) => void
+  setTimeFormat: (format: TimeFormat) => void
   setPreviewMaxWidth: (px: number) => void
   setLineNumberMode: (mode: LineNumberMode) => void
+  setViewSettingsScope: (scope: 'global' | 'vault') => void
+  setPdfExportUseTheme: (on: boolean) => void
+  setLineNumberPosition: (position: LineNumberPosition) => void
   setInterfaceFont: (family: string | null) => void
   setTextFont: (family: string | null) => void
   setMonoFont: (family: string | null) => void
-  setSystemFolderLabel: (folder: NoteFolder, label: string | null) => void
+  setSystemFolderLabel: (key: LabelKey, label: string | null) => void
   setSidebarWidth: (px: number) => void
   setNoteListWidth: (px: number) => void
   setNoteSortOrder: (order: NoteSortOrder) => void
+  /** Move a note before/after a sibling in its folder's manual order (#224). */
+  reorderNoteManually: (
+    draggedPath: string,
+    targetPath: string,
+    position: 'before' | 'after'
+  ) => void
+  /** Reorder a task by moving its markdown line before/after another task's
+   *  line in the same note (the note's line order is the source of truth).
+   *  No-op across notes. */
+  reorderTaskInNote: (
+    task: VaultTask,
+    targetTask: VaultTask,
+    position: 'before' | 'after'
+  ) => Promise<void>
   setGroupByKind: (on: boolean) => void
   setAutoReveal: (on: boolean) => void
   setUnifiedSidebar: (on: boolean) => void
@@ -1712,16 +2655,20 @@ interface Store {
   setShowSidebarChevrons: (on: boolean) => void
   toggleCollapseFolder: (key: string) => void
   setCollapsedFolders: (keys: string[]) => void
+  /* Daily/Weekly date-nav tree expand state — reachable from VimNav (#301) */
+  expandDateNav: (key: string) => void
+  collapseDateNav: (key: string) => void
+  toggleDateNav: (key: string) => void
 
   /* Pinned reference pane */
   pinReference: (path: string) => Promise<void>
   /** Pin a non-text asset (PDF, etc.) — rendered in the side pane via
    *  iframe, with no text-content cache. */
-  pinAssetReference: (path: string) => void
+  pinAssetReference: (path: string, fragment?: string | null) => void
   unpinReference: () => void
   /** Per-note variant: the pin only shows while `notePath` is the
    *  active note. Switching notes hides it; coming back shows it. */
-  pinAssetReferenceForNote: (notePath: string, assetPath: string) => void
+  pinAssetReferenceForNote: (notePath: string, assetPath: string, fragment?: string | null) => void
   unpinReferenceForNote: (notePath: string) => void
   togglePinnedRefVisible: () => void
   setPinnedRefWidth: (px: number) => void
@@ -1732,7 +2679,16 @@ interface Store {
   setQuickNoteTitlePrefix: (prefix: string | null) => void
   openTodayDailyNote: () => Promise<void>
   openThisWeekWeeklyNote: () => Promise<void>
+  openThisMonthMonthlyNote: () => Promise<void>
   setTemplatePaletteOpen: (open: boolean) => void
+  setEmbedDrawingPaletteOpen: (open: boolean) => void
+  /** Create a new Excalidraw drawing and open it in a dedicated tab. */
+  newDrawing: () => Promise<void>
+  /** Create a new Excalidraw drawing, embed it at the cursor in the active
+   *  note, then switch focus to the new drawing's editor tab. */
+  embedNewDrawing: () => Promise<void>
+  /** Insert a `![[path]]` embed at the cursor in the active note. */
+  insertEmbedAtCursor: (embed: string) => void
   /** Open the template picker scoped to a folder; the chosen template is
    *  created there directly (no destination prompt). */
   openTemplatePaletteForFolder: (folder: NoteFolder, subpath: string) => void
@@ -1755,20 +2711,40 @@ interface Store {
    *  has no titleTemplate and no explicit title is supplied. */
   createFromTemplate: (
     template: NoteTemplate,
-    opts?: { folder?: NoteFolder; subpath?: string; title?: string }
+    opts?: { folder?: NoteFolder; subpath?: string; title?: string; date?: Date }
   ) => Promise<void>
   saveActiveNoteAsTemplate: () => Promise<void>
+  saveActiveNoteAs: (newName: string) => Promise<void>
   setWordWrap: (on: boolean) => void
+  setCursorBlink: (on: boolean) => void
   setPreviewSmoothScroll: (on: boolean) => void
   setEditorMaxWidth: (px: number) => void
   setPdfEmbedInEditMode: (mode: 'compact' | 'full') => void
   setContentAlign: (align: 'center' | 'left') => void
   setTagsCollapsed: (collapsed: boolean) => void
+  setNestedTags: (enabled: boolean) => void
+  /** Toggle a nested-tag tree node between expanded and collapsed by its full path. */
+  toggleCollapseTagNode: (path: string) => void
   setAutoCalendarPanel: (enabled: boolean) => void
   setCalendarWeekStart: (start: CalendarWeekStart) => void
   setCalendarShowWeekNumbers: (show: boolean) => void
   openDailyNoteForDate: (date: Date) => Promise<void>
   openWeeklyNoteForDate: (date: Date) => Promise<void>
+  openMonthlyNoteForDate: (date: Date) => Promise<void>
+  /** Find the daily note for `date`, creating it on disk (template-aware)
+   *  WITHOUT navigating to it. Returns its meta, or null if daily notes are
+   *  disabled or creation failed. */
+  ensureDailyNoteForDate: (date: Date) => Promise<NoteMeta | null>
+  /** Append a `- [ ] …` task to the daily note for `dateIso` (YYYY-MM-DD),
+   *  prompting to create that daily note first if it doesn't exist. */
+  addTaskForDate: (dateIso: string, text: string) => Promise<void>
+  /** Move unfinished tasks from past daily notes into today's note. Returns the
+   *  number of task lines moved. Without `force`, it is gated by the
+   *  `rolloverUnfinishedTasks` setting and a once-per-day marker. */
+  rolloverUnfinishedTasksIntoToday: (opts?: {
+    force?: boolean
+    open?: boolean
+  }) => Promise<number>
   /** Mark the first-run onboarding as complete (or skipped). Persists. */
   completeOnboarding: () => void
   /** Re-open the first-run onboarding wizard. Persists. */
@@ -1814,6 +2790,7 @@ interface Store {
   }) => Promise<void>
   /** Update sizes on a split node (for divider drag). */
   resizeSplit: (splitId: string, sizes: number[]) => void
+  setPaneModeForPath: (paneId: string, path: string | null, mode: PaneMode) => void
   /** Pin a tab within a specific pane — sticks it to the left of the
    *  strip and protects it from "Close Others" / "Close Tabs to Right". */
   pinTabInPane: (paneId: string, path: string) => void
@@ -1890,6 +2867,84 @@ const PATH_SAVE_DEBOUNCE_MS = 350
  * completion and echo arrival get rolled back to the older disk body.
  */
 const lastWrittenByPath = new Map<string, string>()
+
+// --- CSV database debounced persistence + echo suppression ---
+const DATABASE_SAVE_DEBOUNCE_MS = 400
+const databaseSaveTimers = new Map<string, ReturnType<typeof setTimeout>>()
+/** A pending write that touched the schema must persist the sidecar too. */
+const databaseWriteKind = new Map<string, 'rows' | 'schema'>()
+/** When we last wrote a database; used to ignore the watcher echo of our own write. */
+const lastDatabaseWriteAt = new Map<string, number>()
+
+function databaseToSidecar(doc: DatabaseDoc): DatabaseSidecar {
+  return {
+    version: 1,
+    idFieldId: doc.idFieldId,
+    fields: doc.fields,
+    views: doc.views,
+    activeViewId: doc.activeViewId,
+    ...(doc.pages ? { pages: doc.pages } : {})
+  }
+}
+
+function scheduleDatabaseWrite(
+  csvPath: string,
+  kind: 'rows' | 'schema',
+  getDoc: () => DatabaseDoc | undefined
+): void {
+  const prev = databaseWriteKind.get(csvPath)
+  databaseWriteKind.set(csvPath, kind === 'schema' || prev === 'schema' ? 'schema' : 'rows')
+  const existing = databaseSaveTimers.get(csvPath)
+  if (existing) clearTimeout(existing)
+  databaseSaveTimers.set(
+    csvPath,
+    setTimeout(() => {
+      databaseSaveTimers.delete(csvPath)
+      const writeKind = databaseWriteKind.get(csvPath) ?? 'rows'
+      databaseWriteKind.delete(csvPath)
+      const doc = getDoc()
+      if (!doc) return
+      const done = (): void => {
+        lastDatabaseWriteAt.set(csvPath, Date.now())
+      }
+      const write =
+        writeKind === 'schema'
+          ? window.zen.writeDatabaseSchema(csvPath, databaseToSidecar(doc), doc.rows)
+          : window.zen.writeDatabaseRows(csvPath, doc.rows)
+      void write.catch((err) => console.error('database write failed', err)).finally(done)
+    }, DATABASE_SAVE_DEBOUNCE_MS)
+  )
+}
+
+/**
+ * The database table is the source of truth for a record's properties; the
+ * record-page note's frontmatter is a derived "metadata" mirror. Whenever the
+ * table changes (a cell value, an added/renamed/removed field), re-mirror the
+ * frontmatter of any record page that's currently open so it updates live —
+ * preserving the page's body. Pages that aren't open are re-mirrored lazily the
+ * next time they're opened (see `openRecordPage`).
+ */
+function remirrorOpenRecordPages(
+  csvPath: string,
+  get: () => {
+    databases: Record<string, DatabaseDoc>
+    noteContents: Record<string, NoteContent>
+    updateNoteBody: (path: string, body: string) => void
+  }
+): void {
+  const doc = get().databases[csvPath]
+  if (!doc?.pages) return
+  const { noteContents } = get()
+  for (const [rowId, pagePath] of Object.entries(doc.pages)) {
+    const current = noteContents[pagePath]
+    if (!current) continue // not open — re-mirrored on next open
+    const row = doc.rows.find((r) => r.id === rowId)
+    if (!row) continue
+    const { body } = parseFrontmatter(current.body)
+    const next = composePageBody(doc, row, body)
+    if (next !== current.body) get().updateNoteBody(pagePath, next)
+  }
+}
 
 function normalizeServerBaseUrl(value: string): string {
   const trimmed = value.trim()
@@ -2033,6 +3088,110 @@ function renameNoteState(
     noteComments: rewriteNoteCommentsPath(s.noteComments, oldPath, meta.path),
     activeCommentId: s.activeCommentId,
     ...activeFieldsFrom(ensured.layout, ensured.activePaneId, contents, dirty)
+  }
+}
+
+const MAX_DATE_NOTE_PATTERN_HISTORY = 20
+
+function dateNotePatternKey(pattern: DateNotePatternSettings): string {
+  return `${pattern.directory}\0${pattern.titlePattern ?? ''}\0${pattern.locale ?? ''}`
+}
+
+function currentDailyPatternFromSettings(settings: VaultSettings): DateNotePatternSettings {
+  return {
+    directory: settings.dailyNotes.directory,
+    titlePattern: settings.dailyNotes.titlePattern,
+    locale: settings.dailyNotes.locale
+  }
+}
+
+function currentWeeklyPatternFromSettings(settings: VaultSettings): DateNotePatternSettings {
+  return {
+    directory: settings.weeklyNotes.directory,
+    titlePattern: settings.weeklyNotes.titlePattern,
+    locale: settings.weeklyNotes.locale
+  }
+}
+
+function currentMonthlyPatternFromSettings(settings: VaultSettings): DateNotePatternSettings {
+  return {
+    directory: settings.monthlyNotes.directory,
+    titlePattern: settings.monthlyNotes.titlePattern,
+    locale: settings.monthlyNotes.locale
+  }
+}
+
+function appendDateNotePatternHistory(
+  history: readonly DateNotePatternSettings[] | undefined,
+  previous: DateNotePatternSettings,
+  current: DateNotePatternSettings
+): DateNotePatternSettings[] {
+  const out: DateNotePatternSettings[] = []
+  const seen = new Set([dateNotePatternKey(current)])
+  for (const pattern of [previous, ...(history ?? [])]) {
+    const key = dateNotePatternKey(pattern)
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(pattern)
+    if (out.length >= MAX_DATE_NOTE_PATTERN_HISTORY) break
+  }
+  return out
+}
+
+function withDateNotePatternHistory(
+  previousSettings: VaultSettings,
+  requestedSettings: VaultSettings
+): VaultSettings {
+  const previous = normalizeVaultSettings(previousSettings)
+  const next = normalizeVaultSettings(requestedSettings)
+  const previousDaily = currentDailyPatternFromSettings(previous)
+  const nextDaily = currentDailyPatternFromSettings(next)
+  const previousWeekly = currentWeeklyPatternFromSettings(previous)
+  const nextWeekly = currentWeeklyPatternFromSettings(next)
+  const previousMonthly = currentMonthlyPatternFromSettings(previous)
+  const nextMonthly = currentMonthlyPatternFromSettings(next)
+
+  return {
+    ...next,
+    dailyNotes: {
+      ...next.dailyNotes,
+      legacyPatterns:
+        previous.dailyNotes.enabled &&
+        next.dailyNotes.enabled &&
+        dateNotePatternKey(previousDaily) !== dateNotePatternKey(nextDaily)
+          ? appendDateNotePatternHistory(
+              next.dailyNotes.legacyPatterns,
+              previousDaily,
+              nextDaily
+            )
+          : next.dailyNotes.legacyPatterns
+    },
+    weeklyNotes: {
+      ...next.weeklyNotes,
+      legacyPatterns:
+        previous.weeklyNotes.enabled &&
+        next.weeklyNotes.enabled &&
+        dateNotePatternKey(previousWeekly) !== dateNotePatternKey(nextWeekly)
+          ? appendDateNotePatternHistory(
+              next.weeklyNotes.legacyPatterns,
+              previousWeekly,
+              nextWeekly
+            )
+          : next.weeklyNotes.legacyPatterns
+    },
+    monthlyNotes: {
+      ...next.monthlyNotes,
+      legacyPatterns:
+        previous.monthlyNotes.enabled &&
+        next.monthlyNotes.enabled &&
+        dateNotePatternKey(previousMonthly) !== dateNotePatternKey(nextMonthly)
+          ? appendDateNotePatternHistory(
+              next.monthlyNotes.legacyPatterns,
+              previousMonthly,
+              nextMonthly
+            )
+          : next.monthlyNotes.legacyPatterns
+    }
   }
 }
 
@@ -2278,15 +3437,13 @@ export const useStore = create<Store>((set, get) => {
         paneLayout: nextLayout,
         noteBackstack:
           historyMode === 'push' &&
-          state.selectedPath !== null &&
-          !isWorkspaceVirtualTabPath(state.selectedPath) &&
+          isJumpHistoryTabPath(state.selectedPath) &&
           state.selectedPath !== relPath
             ? appendNoteJumpHistory(state.noteBackstack, captureNoteJumpLocation(state))
             : state.noteBackstack,
         noteForwardstack:
           historyMode === 'push' &&
-          state.selectedPath !== null &&
-          !isWorkspaceVirtualTabPath(state.selectedPath) &&
+          isJumpHistoryTabPath(state.selectedPath) &&
           state.selectedPath !== relPath
             ? []
             : state.noteForwardstack,
@@ -2313,8 +3470,7 @@ export const useStore = create<Store>((set, get) => {
     const latest = get()
     const shouldPushHistory =
       historyMode === 'push' &&
-      latest.selectedPath !== null &&
-      !isWorkspaceVirtualTabPath(latest.selectedPath) &&
+      isJumpHistoryTabPath(latest.selectedPath) &&
       latest.selectedPath !== relPath
     const nextBackstack = shouldPushHistory
       ? appendNoteJumpHistory(latest.noteBackstack, captureNoteJumpLocation(latest))
@@ -2377,8 +3533,29 @@ export const useStore = create<Store>((set, get) => {
     set({ loadingNote: true })
     while (source.length > 0) {
       const target = source.pop() ?? null
-      if (!target || target.path === get().selectedPath || isWorkspaceVirtualTabPath(target.path)) {
+      if (
+        !target ||
+        target.path === get().selectedPath ||
+        (isWorkspaceVirtualTabPath(target.path) && !isDatabaseSurfaceTabPath(target.path))
+      ) {
         continue
+      }
+      // A database surface in the history — e.g. the grid a record page was
+      // opened from. Reopen the tab instead of loading note content, and record
+      // the current location on the opposite stack so the jump stays reversible.
+      if (isDatabaseSurfaceTabPath(target.path)) {
+        const latest = get()
+        const opposite =
+          direction === 'back' ? latest.noteForwardstack : latest.noteBackstack
+        const nextOpposite = appendNoteJumpHistory(opposite, captureNoteJumpLocation(latest))
+        set({
+          loadingNote: false,
+          pendingJumpLocation: null,
+          noteBackstack: direction === 'back' ? source : nextOpposite,
+          noteForwardstack: direction === 'back' ? nextOpposite : source
+        })
+        await selectNoteImpl(target.path, 'preserve')
+        return
       }
       try {
         const content = await readNoteContent(target.path, get())
@@ -2427,7 +3604,15 @@ export const useStore = create<Store>((set, get) => {
 
   const restoreWorkspaceForVault = async (vault: VaultInfo): Promise<void> => {
     const startedAt = performance.now()
-    const rawSnapshot = loadWorkspaceSnapshot(vault.root)
+    // Overlay this vault's per-vault view overrides onto the live prefs — only
+    // in per-vault scope; in 'global' scope the global prefs win. (#292)
+    if (get().viewSettingsScope === 'vault') {
+      const viewOverlay = viewPrefsFromVault(get().vaultSettings)
+      if (Object.keys(viewOverlay).length > 0) set(viewOverlay)
+    }
+    // Prefer the synced .zennotes/workspace.json when it's newer than the local
+    // cache, so opening a vault on another machine restores its workspace. (#292)
+    const rawSnapshot = await loadBestWorkspaceSnapshot(vault.root)
     if (!rawSnapshot || typeof rawSnapshot !== 'object') {
       set({
         collapsedFolders: computeStartupCollapsedFolders(
@@ -2526,6 +3711,9 @@ export const useStore = create<Store>((set, get) => {
   localVaults: [],
   workspaceSetupError: null,
   vaultSettings: DEFAULT_VAULT_SETTINGS,
+  rootContentHiddenByInboxMode: false,
+  rootContentBannerDismissed: false,
+  manualNoteOrder: {},
   notes: [],
   folders: [],
   assetFiles: [],
@@ -2546,6 +3734,8 @@ export const useStore = create<Store>((set, get) => {
   bufferPaletteOpen: false,
   outlinePaletteOpen: false,
   templatePaletteOpen: false,
+  embedDrawingPaletteOpen: false,
+  excalidrawPreviewVersion: 0,
   templatePaletteMode: 'create',
   templatePaletteTarget: null,
   customTemplates: [],
@@ -2558,7 +3748,10 @@ export const useStore = create<Store>((set, get) => {
   zenRestoreState: null,
   vimMode: loadPrefs().vimMode,
   vimInsertEscape: loadPrefs().vimInsertEscape,
+  vimYankToClipboard: loadPrefs().vimYankToClipboard,
   keymapOverrides: loadPrefs().keymapOverrides,
+  enabledOverrides: loadPrefs().enabledOverrides,
+  themeTweaks: loadPrefs().themeTweaks,
   whichKeyHints: loadPrefs().whichKeyHints,
   whichKeyHintMode: loadPrefs().whichKeyHintMode,
   whichKeyHintTimeoutMs: loadPrefs().whichKeyHintTimeoutMs,
@@ -2566,6 +3759,13 @@ export const useStore = create<Store>((set, get) => {
   ripgrepBinaryPath: loadPrefs().ripgrepBinaryPath,
   fzfBinaryPath: loadPrefs().fzfBinaryPath,
   livePreview: loadPrefs().livePreview,
+  renderTablesInLivePreview: loadPrefs().renderTablesInLivePreview,
+  completedTaskStyle: loadPrefs().completedTaskStyle,
+  mathRenderer: loadPrefs().mathRenderer,
+  looseMathDelimiters: loadPrefs().looseMathDelimiters,
+  keepViewModeAcrossNotes: loadPrefs().keepViewModeAcrossNotes,
+  markdownSnippets: loadPrefs().markdownSnippets,
+  hideBuiltinTemplates: loadPrefs().hideBuiltinTemplates,
   tabsEnabled: loadPrefs().tabsEnabled,
   wrapTabs: loadPrefs().wrapTabs,
   settingsOpen: false,
@@ -2574,8 +3774,13 @@ export const useStore = create<Store>((set, get) => {
   themeMode: loadPrefs().themeMode,
   editorFontSize: loadPrefs().editorFontSize,
   editorLineHeight: loadPrefs().editorLineHeight,
+  editorScrollOff: loadPrefs().editorScrollOff,
+  timeFormat: loadPrefs().timeFormat,
   previewMaxWidth: loadPrefs().previewMaxWidth,
   lineNumberMode: loadPrefs().lineNumberMode,
+  viewSettingsScope: loadPrefs().viewSettingsScope,
+  pdfExportUseTheme: loadPrefs().pdfExportUseTheme,
+  lineNumberPosition: loadPrefs().lineNumberPosition,
   interfaceFont: loadPrefs().interfaceFont,
   textFont: loadPrefs().textFont,
   monoFont: loadPrefs().monoFont,
@@ -2590,6 +3795,7 @@ export const useStore = create<Store>((set, get) => {
   showSidebarChevrons: loadPrefs().showSidebarChevrons,
   collapsedFolders: DEFAULT_PREFS.collapsedFolders,
   pinnedRefPath: loadPrefs().pinnedRefPath,
+  pinnedRefFragment: null,
   pinnedRefVisible: loadPrefs().pinnedRefVisible,
   pinnedRefWidth: loadPrefs().pinnedRefWidth,
   panelWidths: loadPrefs().panelWidths,
@@ -2597,6 +3803,7 @@ export const useStore = create<Store>((set, get) => {
   quickNoteDateTitle: loadPrefs().quickNoteDateTitle,
   quickNoteTitlePrefix: loadPrefs().quickNoteTitlePrefix,
   wordWrap: loadPrefs().wordWrap,
+  cursorBlink: loadPrefs().cursorBlink,
   previewSmoothScroll: loadPrefs().previewSmoothScroll,
   editorMaxWidth: loadPrefs().editorMaxWidth,
   pdfEmbedInEditMode: loadPrefs().pdfEmbedInEditMode,
@@ -2604,22 +3811,34 @@ export const useStore = create<Store>((set, get) => {
   noteRefs: loadPrefs().noteRefs,
   contentAlign: loadPrefs().contentAlign,
   tagsCollapsed: loadPrefs().tagsCollapsed,
+  nestedTags: loadPrefs().nestedTags,
+  collapsedTagNodes: loadPrefs().collapsedTagNodes,
   autoCalendarPanel: loadPrefs().autoCalendarPanel,
   calendarWeekStart: loadPrefs().calendarWeekStart,
   calendarShowWeekNumbers: loadPrefs().calendarShowWeekNumbers,
   tasksViewMode: loadPrefs().tasksViewMode,
   kanbanGroupBy: loadPrefs().kanbanGroupBy,
   kanbanColumnTitles: loadPrefs().kanbanColumnTitles,
+  kanbanColumnOrder: loadPrefs().kanbanColumnOrder,
+  kanbanStatuses: loadPrefs().kanbanStatuses,
   hasCompletedOnboarding: loadPrefs().hasCompletedOnboarding,
   vaultTasks: [],
+  customThemes: [],
+  overrides: [],
   tasksLoading: false,
   tasksFilter: '',
   taskCursorIndex: 0,
   tasksCalendarSelectedDate: null,
   tasksCalendarMonthAnchor: null,
+  databases: {},
+  databasesLoading: {},
   selectedTags: [],
+  tagMatchMode: 'all',
   focusedPanel: null,
   sidebarCursorIndex: 0,
+  dateNavExpanded: [],
+  paneModes: {},
+  paneStickyModes: {},
   noteListCursorIndex: 0,
   connectionsCursorIndex: 0,
   connectionPreview: null,
@@ -2631,6 +3850,7 @@ export const useStore = create<Store>((set, get) => {
   noteDirty: {},
   noteComments: {},
   activeCommentId: null,
+  closedTabStack: [],
 
   setVault: (v) =>
     set((s) => {
@@ -2638,18 +3858,69 @@ export const useStore = create<Store>((set, get) => {
       if (vaultChanged) {
         clearNoteContentReadCaches()
       }
-      return vaultChanged ? { vault: v, assetUndoStack: [] } : { vault: v }
+      return vaultChanged ? { vault: v, assetUndoStack: [], closedTabStack: [] } : { vault: v }
     }),
   setVaultSettings: async (next) => {
     try {
-      const settings = normalizeVaultSettings(await window.zen.setVaultSettings(next))
+      const settingsToSave = withDateNotePatternHistory(get().vaultSettings, next)
+      const settings = normalizeVaultSettings(await window.zen.setVaultSettings(settingsToSave))
       set({
         vaultSettings: settings
       })
       await get().refreshNotes()
+      await get().refreshRootContentHidden()
     } catch (err) {
       console.error('setVaultSettings failed', err)
     }
+  },
+  applyFavorites: async (nextFavorites) => {
+    const current = get().vaultSettings
+    if (
+      current.favorites.length === nextFavorites.length &&
+      current.favorites.every((f, i) => f === nextFavorites[i])
+    ) {
+      return // unchanged — skip the disk write
+    }
+    // Favorites don't affect note listing, so update optimistically and persist
+    // without a full refreshNotes.
+    set({ vaultSettings: { ...current, favorites: nextFavorites } })
+    try {
+      const saved = normalizeVaultSettings(
+        await window.zen.setVaultSettings({ ...get().vaultSettings, favorites: nextFavorites })
+      )
+      set({ vaultSettings: saved })
+    } catch (err) {
+      console.error('applyFavorites failed', err)
+      set({ vaultSettings: current }) // revert on failure
+    }
+  },
+  toggleFavorite: async (key) => {
+    if (!key) return
+    await get().applyFavorites(toggleFavoriteKey(get().vaultSettings.favorites, key))
+  },
+  toggleFavoriteActiveNote: async () => {
+    const path = get().activeNote?.path ?? get().selectedPath
+    if (!path) return
+    await get().toggleFavorite(path)
+  },
+  refreshRootContentHidden: async () => {
+    try {
+      const hidden = await window.zen.rootContentHiddenByInboxMode()
+      const dismissed = readRootBannerDismissed(get().vault?.root ?? '')
+      const cur = get()
+      if (
+        cur.rootContentHiddenByInboxMode !== hidden ||
+        cur.rootContentBannerDismissed !== dismissed
+      ) {
+        set({ rootContentHiddenByInboxMode: hidden, rootContentBannerDismissed: dismissed })
+      }
+    } catch {
+      // Non-fatal: the banner is advisory; keep the previous value on error.
+    }
+  },
+  dismissRootContentBanner: () => {
+    writeRootBannerDismissed(get().vault?.root ?? '')
+    set({ rootContentBannerDismissed: true })
   },
   setNotes: (notes) => set({ notes }),
   setView: (view) => {
@@ -2692,6 +3963,9 @@ export const useStore = create<Store>((set, get) => {
       }
     }
     set({ tasksFilter: '', taskCursorIndex: 0 })
+    // The Tasks panel held keyboard focus; hand it back to the editor so the
+    // reopened note takes typing immediately, without a pane jump or click. (#353)
+    requestEditorFocus()
   },
 
   openTagView: async (tag) => {
@@ -2725,6 +3999,8 @@ export const useStore = create<Store>((set, get) => {
       }
     }
     set({ selectedTags: [] })
+    // Same as closeTasksView: return keyboard focus to the editor pane. (#353)
+    requestEditorFocus()
   },
 
   openHelpView: async () => {
@@ -2755,6 +4031,314 @@ export const useStore = create<Store>((set, get) => {
     set({ focusedPanel: 'editor' })
   },
 
+  openAssetsView: async () => {
+    const state = get()
+    // Refresh both: assets for the list, notes for fresh assetEmbeds (usage).
+    await Promise.all([get().refreshAssets(), get().refreshNotes()])
+    await get().openNoteInPane(state.activePaneId, ASSETS_VIEW_TAB_PATH)
+    ;(document.activeElement as HTMLElement | null)?.blur?.()
+    set({ focusedPanel: 'editor' })
+  },
+  loadDatabase: async (csvPath) => {
+    if (get().databasesLoading[csvPath]) return
+    set((s) => ({ databasesLoading: { ...s.databasesLoading, [csvPath]: true } }))
+    try {
+      const doc = await window.zen.openDatabase(csvPath)
+      if (!doc) {
+        // The .csv is gone — drop it and close any stale tab rather than leave
+        // a grid pointed at a deleted file (and re-requesting it on every render).
+        await get().forgetDatabase(csvPath)
+        return
+      }
+      set((s) => ({ databases: { ...s.databases, [csvPath]: doc } }))
+    } catch (err) {
+      console.error('loadDatabase failed', err)
+    } finally {
+      set((s) =>
+        csvPath in s.databasesLoading
+          ? { databasesLoading: { ...s.databasesLoading, [csvPath]: false } }
+          : {}
+      )
+    }
+  },
+  openDatabase: async (csvPath) => {
+    await get().loadDatabase(csvPath)
+    // The load may have failed/forgotten a now-missing database — don't open an
+    // empty tab for it.
+    if (!get().databases[csvPath]) return
+    await get().openNoteInPane(get().activePaneId, databaseTabPath(csvPath))
+    ;(document.activeElement as HTMLElement | null)?.blur?.()
+    set({ focusedPanel: 'editor' })
+  },
+  createDatabase: async (folder, subpath = '', title) => {
+    try {
+      const doc = await window.zen.createDatabase(folder, subpath, title)
+      set((s) => ({ databases: { ...s.databases, [doc.path]: doc } }))
+      await get().openNoteInPane(get().activePaneId, databaseTabPath(doc.path))
+      ;(document.activeElement as HTMLElement | null)?.blur?.()
+      set({ focusedPanel: 'editor' })
+    } catch (err) {
+      console.error('createDatabase failed', err)
+    }
+  },
+  newDatabase: async () => {
+    const s = get()
+    const settings = normalizeVaultSettings(s.vaultSettings)
+    const { folder, subpath } = resolveCreateLocation(
+      settings.databasesLocation,
+      s.activeNote,
+      settings
+    )
+    await get().createDatabase(folder, subpath)
+  },
+  newTaskFile: async (opts) => {
+    const title = (
+      await promptApp({
+        title: 'New task',
+        placeholder: 'Task title, e.g. Buy groceries',
+        okLabel: 'Create task'
+      })
+    )?.trim()
+    if (!title) return null
+    const s = get()
+    const settings = normalizeVaultSettings(s.vaultSettings)
+    // An explicit destination wins; otherwise fall back to the configured tasks
+    // location (the inbox by default).
+    const { folder, subpath } = opts
+      ? { folder: opts.folder, subpath: opts.subpath ?? '' }
+      : resolveCreateLocation(settings.tasksLocation, s.activeNote, settings)
+    try {
+      const meta = await window.zen.createNote(folder, title, subpath)
+      // Overwrite the default `# title` body with the TaskNotes-style frontmatter
+      // so the note is recognized as a task and shows up in the Tasks view.
+      await window.zen.writeNote(
+        meta.path,
+        composeTaskFile({ title, dateCreated: new Date().toISOString() })
+      )
+      await get().refreshTasks()
+      return meta.path
+    } catch (err) {
+      console.error('newTaskFile failed', err)
+      return null
+    }
+  },
+  newTaskFileInChosenFolder: async () => {
+    const state = get()
+    const entered = await promptApp(buildNoteDestinationPrompt('', state.folders))
+    if (entered == null) return null // cancelled
+    const dest = parseTemplateDestination(entered)
+    return get().newTaskFile({ folder: dest.folder, subpath: dest.subpath })
+  },
+  renameDatabase: async (csvPath, newTitle) => {
+    if (typeof window.zen.renameDatabase !== 'function') return
+    try {
+      const newCsvPath = await window.zen.renameDatabase(csvPath, newTitle)
+      if (!newCsvPath || newCsvPath === csvPath) {
+        await get().refreshNotes()
+        return
+      }
+      // The `.base` folder moved, so the open grid tab's path changed. Rehome it
+      // in place (and the cached doc) instead of leaving a stale tab.
+      const oldTab = databaseTabPath(csvPath)
+      const newTab = databaseTabPath(newCsvPath)
+      set((s) => {
+        const rewrite = (p: string): string => (p === oldTab ? newTab : p)
+        const ensured = ensureActivePane(rewritePathsInTree(s.paneLayout, rewrite), s.activePaneId)
+        const databases = { ...s.databases }
+        const loading = { ...s.databasesLoading }
+        const prev = databases[csvPath]
+        if (prev) {
+          databases[newCsvPath] = {
+            ...prev,
+            path: newCsvPath,
+            title: formTitleFromCsvPath(newCsvPath)
+          }
+          delete databases[csvPath]
+        }
+        delete loading[csvPath]
+        return {
+          paneLayout: ensured.layout,
+          activePaneId: ensured.activePaneId,
+          databases,
+          databasesLoading: loading,
+          ...activeFieldsFrom(ensured.layout, ensured.activePaneId, s.noteContents, s.noteDirty)
+        }
+      })
+      await get().refreshNotes()
+    } catch (err) {
+      console.error('renameDatabase failed', err)
+      window.alert(err instanceof Error ? err.message : String(err))
+    }
+  },
+  updateDatabaseRows: (csvPath, next) => {
+    set((s) => ({ databases: { ...s.databases, [csvPath]: next } }))
+    scheduleDatabaseWrite(csvPath, 'rows', () => get().databases[csvPath])
+    remirrorOpenRecordPages(csvPath, get)
+  },
+  deleteDatabaseRows: async (csvPath, rowIds) => {
+    const doc = get().databases[csvPath]
+    if (!doc) return
+    const ids = [...new Set(rowIds)].filter((id) => doc.rows.some((r) => r.id === id))
+    if (ids.length === 0) return
+
+    // Deleted rows that carry a linked record page — the ones worth asking about.
+    const attached = ids
+      .map((id) => doc.pages?.[id])
+      .filter((p): p is string => typeof p === 'string' && p.length > 0)
+
+    let trashNotes = false
+    if (attached.length > 0) {
+      const many = attached.length > 1
+      trashNotes = await confirmApp({
+        title: many ? `Delete ${ids.length} rows and their notes?` : 'Delete row and its linked note?',
+        description: many
+          ? `${attached.length} of these rows have a linked page note. Move those notes to Trash too, or keep them as standalone notes? The rows are deleted either way.`
+          : 'This row has a linked page note. Move it to Trash too, or keep it as a standalone note? The row is deleted either way.',
+        confirmLabel: many ? 'Delete rows + notes' : 'Delete row + note',
+        cancelLabel: many ? 'Keep notes' : 'Keep note',
+        danger: true
+      })
+    }
+
+    // Re-read after the (async) prompt so a concurrent edit isn't clobbered.
+    const latest = get().databases[csvPath]
+    if (!latest) return
+    const removeSet = new Set(ids)
+    const nextPages = { ...(latest.pages ?? {}) }
+    const nextFlags = { ...(latest.pageHasContent ?? {}) }
+    const prunedPaths: string[] = []
+    for (const id of ids) {
+      const pagePath = nextPages[id]
+      if (pagePath) {
+        prunedPaths.push(pagePath)
+        delete nextPages[id]
+        delete nextFlags[id]
+      }
+    }
+    const pagesChanged = prunedPaths.length > 0
+    const next: DatabaseDoc = {
+      ...latest,
+      rows: latest.rows.filter((r) => !removeSet.has(r.id)),
+      ...(pagesChanged ? { pages: nextPages, pageHasContent: nextFlags } : {})
+    }
+    set((s) => ({ databases: { ...s.databases, [csvPath]: next } }))
+    // A pruned page mapping lives in the sidecar, so force a schema write; a
+    // plain 'rows' write only rewrites the CSV and would leave the stale entry.
+    scheduleDatabaseWrite(csvPath, pagesChanged ? 'schema' : 'rows', () => get().databases[csvPath])
+    remirrorOpenRecordPages(csvPath, get)
+
+    if (trashNotes) {
+      for (const pagePath of prunedPaths) {
+        try {
+          await window.zen.moveToTrash(pagePath)
+        } catch (err) {
+          console.error('trash record page failed', err)
+        }
+      }
+    }
+  },
+  updateDatabaseSchema: (csvPath, next) => {
+    set((s) => ({ databases: { ...s.databases, [csvPath]: next } }))
+    scheduleDatabaseWrite(csvPath, 'schema', () => get().databases[csvPath])
+    remirrorOpenRecordPages(csvPath, get)
+  },
+  syncDatabaseFromDisk: async (csvPath) => {
+    if (!get().databases[csvPath]) return
+    // Ignore the watcher echo of a write we just made.
+    if (Date.now() - (lastDatabaseWriteAt.get(csvPath) ?? 0) < 1500) return
+    // Don't clobber edits that are still mid-debounce.
+    if (databaseSaveTimers.has(csvPath)) return
+    try {
+      const doc = await window.zen.openDatabase(csvPath)
+      if (!doc) {
+        await get().forgetDatabase(csvPath)
+        return
+      }
+      set((s) => (s.databases[csvPath] ? { databases: { ...s.databases, [csvPath]: doc } } : {}))
+    } catch (err) {
+      console.error('syncDatabaseFromDisk failed', err)
+    }
+  },
+  forgetDatabase: async (csvPath) => {
+    // Close the database's tab in every pane that holds it. A .csv can be open
+    // either as a `zen://database/…` tab or as a `.csv` asset tab that renders
+    // the same grid, so close both forms.
+    const tabPaths = [databaseTabPath(csvPath), assetTabPath(csvPath)]
+    for (const leaf of allLeaves(get().paneLayout)) {
+      for (const tabPath of tabPaths) {
+        if (leaf.tabs.includes(tabPath)) {
+          await get().closeTabInPane(leaf.id, tabPath)
+        }
+      }
+    }
+    // Drop the cached doc + loading flag so nothing re-reads a file that's gone.
+    set((s) => {
+      if (!(csvPath in s.databases) && !(csvPath in s.databasesLoading)) return {}
+      const databases = { ...s.databases }
+      const databasesLoading = { ...s.databasesLoading }
+      delete databases[csvPath]
+      delete databasesLoading[csvPath]
+      return { databases, databasesLoading }
+    })
+  },
+  openRecordPage: async (csvPath, rowId) => {
+    const doc = get().databases[csvPath]
+    if (!doc) return
+    const row = doc.rows.find((r) => r.id === rowId)
+    if (!row) return
+    let pagePath = doc.pages?.[rowId]
+    if (pagePath) {
+      // Confirm the linked note still exists; otherwise recreate-and-relink.
+      try {
+        await window.zen.readNote(pagePath)
+      } catch {
+        pagePath = undefined
+      }
+    }
+    if (!pagePath) {
+      try {
+        const body = composePageBody(doc, row, `# ${recordTitle(doc, row)}\n\n`)
+        pagePath = await window.zen.createRecordPage(csvPath, recordTitle(doc, row), body)
+        get().updateDatabaseSchema(csvPath, {
+          ...doc,
+          pages: { ...(doc.pages ?? {}), [rowId]: pagePath },
+          pageHasContent: { ...(doc.pageHasContent ?? {}), [rowId]: false }
+        })
+      } catch (err) {
+        console.error('createRecordPage failed', err)
+        return
+      }
+    } else {
+      // Re-mirror current properties into the note's frontmatter, keep the body.
+      try {
+        const note = await window.zen.readNote(pagePath)
+        const { body } = parseFrontmatter(note.body)
+        await window.zen.writeNote(pagePath, composePageBody(doc, row, body))
+      } catch (err) {
+        console.error('refresh record page failed', err)
+      }
+    }
+    await get().selectNote(pagePath)
+  },
+  renameRecordPage: async (csvPath, rowId) => {
+    const doc = get().databases[csvPath]
+    const pagePath = doc?.pages?.[rowId]
+    if (!doc || !pagePath) return
+    const row = doc.rows.find((r) => r.id === rowId)
+    if (!row) return
+    try {
+      const meta = await window.zen.renameNote(pagePath, recordTitle(doc, row))
+      if (meta.path !== pagePath) {
+        get().updateDatabaseSchema(csvPath, {
+          ...get().databases[csvPath]!,
+          pages: { ...(get().databases[csvPath]!.pages ?? {}), [rowId]: meta.path }
+        })
+      }
+    } catch (err) {
+      console.error('renameRecordPage failed', err)
+    }
+  },
+
   toggleTagSelection: (tag) => {
     const trimmed = tag.trim()
     if (!trimmed) return
@@ -2779,6 +4363,8 @@ export const useStore = create<Store>((set, get) => {
     }
     set({ selectedTags: clean })
   },
+
+  setTagMatchMode: (mode) => set({ tagMatchMode: mode }),
 
   refreshTasks: async () => {
     set({ tasksLoading: true })
@@ -2849,6 +4435,11 @@ export const useStore = create<Store>((set, get) => {
       },
       focusedPanel: 'editor'
     })
+    // Setting focusedPanel above only updates store state; the Tasks view still
+    // holds real DOM focus (opening the source note swaps the pane's content
+    // async), so move keyboard focus to the editor for vim motions / typing.
+    // The event handler retries across the note remount. (#415)
+    requestEditorFocus()
   },
 
   toggleTaskFromList: async (task) => {
@@ -2857,7 +4448,13 @@ export const useStore = create<Store>((set, get) => {
     const openBuffer = state.noteContents[path]
     // Prefer the live buffer for open notes so we don't stomp unsaved edits.
     const body = openBuffer?.body ?? (await window.zen.readNote(path)).body
-    const nextBody = toggleTaskAtIndex(body, task.taskIndex, !task.checked)
+    // A file-task's completion lives in frontmatter (`status`/`completedDate`),
+    // not a checkbox char.
+    const nextChecked = !task.checked
+    const nextBody =
+      task.kind === 'file'
+        ? setTaskFileStatus(body, nextChecked, toIsoDateLocal(new Date()))
+        : toggleTaskAtIndex(body, task.taskIndex, nextChecked)
     if (nextBody === body) return
 
     if (openBuffer) {
@@ -2875,10 +4472,13 @@ export const useStore = create<Store>((set, get) => {
 
     // Optimistically reflect the change locally; the watcher echo will
     // confirm via rescanTasksForPath.
+    const nextStatus = nextChecked ? 'done' : 'open'
     set((s) => ({
       vaultTasks: s.vaultTasks.map((t) =>
         t.sourcePath === path && t.taskIndex === task.taskIndex
-          ? { ...t, checked: !task.checked }
+          ? task.kind === 'file'
+            ? { ...t, checked: nextChecked, status: nextStatus, fields: { ...t.fields, status: nextStatus } }
+            : { ...t, checked: nextChecked }
           : t
       )
     }))
@@ -2913,20 +4513,35 @@ export const useStore = create<Store>((set, get) => {
     }
 
     let nextBody = body
-    for (const m of mutations) {
-      switch (m.kind) {
-        case 'set-checked':
-          nextBody = setTaskCheckedAtIndex(nextBody, task.taskIndex, m.checked)
-          break
-        case 'set-waiting':
-          nextBody = setTaskWaitingAtIndex(nextBody, task.taskIndex, m.waiting)
-          break
-        case 'set-priority':
-          nextBody = setTaskPriorityAtIndex(nextBody, task.taskIndex, m.priority)
-          break
-        case 'set-due':
-          nextBody = setTaskDueAtIndex(nextBody, task.taskIndex, m.due)
-          break
+    if (task.kind === 'file') {
+      // Whole-note task: every field lives in frontmatter, so apply the whole
+      // batch as one frontmatter rewrite rather than per-line edits.
+      nextBody = updateFrontmatterFields(
+        body,
+        fileTaskMutationUpdates(mutations, toIsoDateLocal(new Date()))
+      )
+    } else {
+      for (const m of mutations) {
+        switch (m.kind) {
+          case 'set-checked':
+            nextBody = setTaskCheckedAtIndex(nextBody, task.taskIndex, m.checked)
+            break
+          case 'set-waiting':
+            nextBody = setTaskWaitingAtIndex(nextBody, task.taskIndex, m.waiting)
+            break
+          case 'set-priority':
+            nextBody = setTaskPriorityAtIndex(nextBody, task.taskIndex, m.priority)
+            break
+          case 'set-due':
+            nextBody = setTaskDueAtIndex(nextBody, task.taskIndex, m.due)
+            break
+          case 'set-field':
+            nextBody = setTaskFieldAtIndex(nextBody, task.taskIndex, m.key, m.value)
+            break
+          case 'set-text':
+            nextBody = setTaskTextAtIndex(nextBody, task.taskIndex, m.text)
+            break
+        }
       }
     }
     if (nextBody === body) {
@@ -2947,14 +4562,219 @@ export const useStore = create<Store>((set, get) => {
     }
   },
 
+  deleteTaskFromList: async (task) => {
+    const path = task.sourcePath
+    // A file-task *is* the note, so "delete" means trash the whole note (with a
+    // confirm, since it may hold body notes). Inline tasks just drop their line.
+    if (task.kind === 'file') {
+      if (!(await confirmMoveToTrash(task.noteTitle))) return
+      set((s) => ({ vaultTasks: s.vaultTasks.filter((t) => t.sourcePath !== path) }))
+      try {
+        await window.zen.moveToTrash(path)
+        await get().refreshNotes()
+      } catch (err) {
+        console.error('deleteTaskFromList moveToTrash failed', err)
+        void get().refreshTasks()
+      }
+      return
+    }
+    const openBuffer = get().noteContents[path]
+    let body: string
+    try {
+      body = openBuffer?.body ?? (await window.zen.readNote(path)).body
+    } catch (err) {
+      console.error('deleteTaskFromList readNote failed', err)
+      return
+    }
+    const nextBody = removeTaskAtIndex(body, task.taskIndex)
+    if (nextBody === body) return
+    // Optimistically drop it from the index so the row vanishes immediately.
+    set((s) => ({
+      vaultTasks: s.vaultTasks.filter(
+        (t) => !(t.sourcePath === path && t.taskIndex === task.taskIndex)
+      )
+    }))
+    if (openBuffer) {
+      get().updateNoteBody(path, nextBody)
+    } else {
+      try {
+        await window.zen.writeNote(path, nextBody)
+        await get().rescanTasksForPath(path)
+      } catch (err) {
+        console.error('deleteTaskFromList writeNote failed', err)
+        void get().rescanTasksForPath(path)
+      }
+    }
+  },
+
+  moveTaskToDate: async (task, dateIso) => {
+    const parsed = parseIsoDateLocal(dateIso)
+    if (!parsed) return
+    // A file-task isn't a line that can move into a daily note; rescheduling it
+    // just rewrites its frontmatter `due`.
+    if (task.kind === 'file') {
+      await get().applyTaskMutation(task, { kind: 'set-due', due: dateIso })
+      return
+    }
+    const settings = normalizeVaultSettings(get().vaultSettings)
+    // No daily notes to move into — just set the due date instead.
+    if (!settings.dailyNotes.enabled) {
+      await get().applyTaskMutation(task, { kind: 'set-due', due: dateIso })
+      return
+    }
+    const target = await get().ensureDailyNoteForDate(parsed)
+    if (!target) return
+    const inferDue = settings.dailyNotes.tasksDueOnNoteDate
+    // Already in that day's note — nothing to relocate; just align its due.
+    if (target.path === task.sourcePath) {
+      await get().applyTaskMutation(task, { kind: 'set-due', due: inferDue ? null : dateIso })
+      return
+    }
+
+    const srcBuffer = get().noteContents[task.sourcePath]
+    const tgtBuffer = get().noteContents[target.path]
+    let srcBody: string
+    let tgtBody: string
+    try {
+      srcBody = srcBuffer?.body ?? (await window.zen.readNote(task.sourcePath)).body
+      tgtBody = tgtBuffer?.body ?? (await window.zen.readNote(target.path)).body
+    } catch (err) {
+      console.error('moveTaskToDate read failed', err)
+      return
+    }
+    const { line, body: strippedSrc } = takeTaskLineAtIndex(srcBody, task.taskIndex)
+    if (!line) return
+    // Moving INTO the target day's note: with implicit due on, a bare line
+    // already reads as that day, so strip any `due:` token; otherwise write the
+    // explicit date.
+    const movedLine = setTaskDueAtIndex(line, 0, inferDue ? null : dateIso)
+    const trimmed = tgtBody.replace(/\s+$/u, '')
+    const nextTgt = trimmed.length ? `${trimmed}\n${movedLine}\n` : `${movedLine}\n`
+
+    // Persist both notes (open buffers go through the edit pipeline).
+    if (srcBuffer) get().updateNoteBody(task.sourcePath, strippedSrc)
+    else {
+      try {
+        await window.zen.writeNote(task.sourcePath, strippedSrc)
+      } catch (err) {
+        console.error('moveTaskToDate write source failed', err)
+        return
+      }
+    }
+    if (tgtBuffer) get().updateNoteBody(target.path, nextTgt)
+    else {
+      try {
+        await window.zen.writeNote(target.path, nextTgt)
+      } catch (err) {
+        console.error('moveTaskToDate write target failed', err)
+        return
+      }
+    }
+
+    // Rebuild the index for the two affected notes with a client-side parse —
+    // authoritative (same parser the scanner uses) and independent of the
+    // single-file IPC rescanner, so the move shows immediately.
+    const srcTasks = parseTasksFromBody(strippedSrc, {
+      path: task.sourcePath,
+      title: task.noteTitle,
+      folder: task.noteFolder
+    })
+    const tgtTasks = parseTasksFromBody(nextTgt, {
+      path: target.path,
+      title: target.title,
+      folder: target.folder
+    })
+    set((s) => ({
+      vaultTasks: [
+        ...s.vaultTasks.filter(
+          (t) => t.sourcePath !== task.sourcePath && t.sourcePath !== target.path
+        ),
+        ...srcTasks,
+        ...tgtTasks
+      ]
+    }))
+  },
+
+  forwardTask: async (task, targetPath) => {
+    if (!targetPath || targetPath === task.sourcePath) return
+    const targetMeta = get().notes.find((n) => n.path === targetPath)
+    if (!targetMeta) return
+
+    const srcBuffer = get().noteContents[task.sourcePath]
+    const tgtBuffer = get().noteContents[targetPath]
+    let srcBody: string
+    let tgtBody: string
+    try {
+      srcBody = srcBuffer?.body ?? (await window.zen.readNote(task.sourcePath)).body
+      tgtBody = tgtBuffer?.body ?? (await window.zen.readNote(targetPath)).body
+    } catch (err) {
+      console.error('forwardTask read failed', err)
+      return
+    }
+
+    // Cross-links are title-based wikilinks (navigable + resolver-friendly).
+    const backLink = `[[${task.noteTitle}]]`
+    const forwardLink = `[[${targetMeta.title}]]`
+
+    // Original: flip to `[>]` and record where it went.
+    const nextSrc = setTaskForwardedAtIndex(srcBody, task.taskIndex, forwardLink)
+    if (nextSrc === srcBody) return
+
+    // Copy: a fresh open task in the target, backlinked to the origin.
+    const copyLine = `- [ ] ${task.content} ${backLink}`.replace(/\s+$/u, '')
+    const trimmed = tgtBody.replace(/\s+$/u, '')
+    const nextTgt = trimmed.length ? `${trimmed}\n${copyLine}\n` : `${copyLine}\n`
+
+    if (srcBuffer) get().updateNoteBody(task.sourcePath, nextSrc)
+    else {
+      try {
+        await window.zen.writeNote(task.sourcePath, nextSrc)
+      } catch (err) {
+        console.error('forwardTask write source failed', err)
+        return
+      }
+    }
+    if (tgtBuffer) get().updateNoteBody(targetPath, nextTgt)
+    else {
+      try {
+        await window.zen.writeNote(targetPath, nextTgt)
+      } catch (err) {
+        console.error('forwardTask write target failed', err)
+        return
+      }
+    }
+
+    const srcTasks = parseTasksFromBody(nextSrc, {
+      path: task.sourcePath,
+      title: task.noteTitle,
+      folder: task.noteFolder
+    })
+    const tgtTasks = parseTasksFromBody(nextTgt, {
+      path: targetPath,
+      title: targetMeta.title,
+      folder: targetMeta.folder
+    })
+    set((s) => ({
+      vaultTasks: [
+        ...s.vaultTasks.filter(
+          (t) => t.sourcePath !== task.sourcePath && t.sourcePath !== targetPath
+        ),
+        ...srcTasks,
+        ...tgtTasks
+      ]
+    }))
+  },
+
   setTasksFilter: (q) => set({ tasksFilter: q, taskCursorIndex: 0 }),
   setTasksViewMode: (mode) => {
     set({ tasksViewMode: mode, taskCursorIndex: 0 })
     savePrefs(collectPrefs(get()))
+    persistVaultViewOverride({ tasksViewMode: mode })
   },
   setKanbanGroupBy: (group) => {
     set({ kanbanGroupBy: group })
     savePrefs(collectPrefs(get()))
+    persistVaultViewOverride({ kanbanGroupBy: group })
   },
   setKanbanColumnTitle: (group, columnId, title) => {
     const key = `${group}:${columnId}`
@@ -2964,6 +4784,29 @@ export const useStore = create<Store>((set, get) => {
     else delete nextTitles[key]
     set({ kanbanColumnTitles: nextTitles })
     savePrefs(collectPrefs(get()))
+    persistVaultViewOverride({ kanbanColumnTitles: nextTitles })
+  },
+  setKanbanColumnOrder: (group, orderedIds) => {
+    const ids: string[] = []
+    const seen = new Set<string>()
+    for (const raw of orderedIds) {
+      const id = typeof raw === 'string' ? raw.trim() : ''
+      if (!id || seen.has(id)) continue
+      seen.add(id)
+      ids.push(id)
+    }
+    const nextOrder = { ...get().kanbanColumnOrder }
+    if (ids.length) nextOrder[group] = ids
+    else delete nextOrder[group]
+    set({ kanbanColumnOrder: nextOrder })
+    savePrefs(collectPrefs(get()))
+    persistVaultViewOverride({ kanbanColumnOrder: nextOrder })
+  },
+  setKanbanStatuses: (statuses) => {
+    const next = normalizeKanbanStatuses(statuses)
+    set({ kanbanStatuses: next })
+    savePrefs(collectPrefs(get()))
+    persistVaultViewOverride({ kanbanStatuses: next })
   },
   setTasksCalendarSelectedDate: (iso) => set({ tasksCalendarSelectedDate: iso }),
   setTasksCalendarMonthAnchor: (iso) => set({ tasksCalendarMonthAnchor: iso }),
@@ -3071,6 +4914,12 @@ export const useStore = create<Store>((set, get) => {
 
   refreshNotes: async () => {
     try {
+      // Load this vault's manual note order once per vault (drives #224).
+      const orderRoot = get().vault?.root ?? ''
+      if (manualOrderLoadedForRoot !== orderRoot) {
+        manualOrderLoadedForRoot = orderRoot
+        set({ manualNoteOrder: readManualOrder(orderRoot) })
+      }
       const startedAt = performance.now()
       const [notes, folders, hasAssetsDirOnDisk] = await Promise.all([
         listNotesFromBridge(),
@@ -3092,8 +4941,18 @@ export const useStore = create<Store>((set, get) => {
           existingPaths.has(path) ||
           isWorkspaceVirtualTabPath(path) ||
           path === s.selectedPath
-        const nextLayout = rewritePathsInTree(s.paneLayout, (path) =>
+        const prunedLayout = rewritePathsInTree(s.paneLayout, (path) =>
           keep(path) ? path : null
+        )
+        // #384: never let a background note-list refresh close *every* open
+        // note tab at once (a transient/incomplete list — reported on Linux
+        // when moving a note to Trash — would otherwise wipe all tabs and drop
+        // the user on the home screen). Real deletions are handled precisely by
+        // the trash/delete actions and applyChange('unlink').
+        const nextLayout = preserveLayoutIfPruneEmptiesNoteTabs(
+          s.paneLayout,
+          prunedLayout,
+          isWorkspaceVirtualTabPath
         )
         const ensured = ensureActivePane(nextLayout, s.activePaneId)
         // Auto-unpin the reference pane if its note has been deleted on
@@ -3150,10 +5009,13 @@ export const useStore = create<Store>((set, get) => {
   refreshAssets: async () => {
     try {
       const startedAt = performance.now()
-      const [assetFiles, hasAssetsDirOnDisk] = await Promise.all([
+      const [rawAssets, hasAssetsDirOnDisk] = await Promise.all([
         window.zen.listAssets(),
         window.zen.hasAssetsDir()
       ])
+      // Hide database internals (sidecar + .bak backups) — they're not
+      // standalone files the user manages.
+      const assetFiles = rawAssets.filter((a) => !isDatabaseInternalPath(a.path))
       set({
         assetFiles,
         hasAssetsDir: hasAssetsDirOnDisk || assetFiles.length > 0
@@ -3215,18 +5077,52 @@ export const useStore = create<Store>((set, get) => {
       await get().loadNoteComments(ev.path)
       return
     }
-    const pathIsMarkdown = ev.path.toLowerCase().endsWith('.md')
-    if (ev.scope !== 'vault-settings' && !pathIsMarkdown) {
+    if (ev.scope === 'database') {
+      // On delete, forget the database instead of re-reading a file that's gone
+      // (which throws "Database not found"); otherwise sync from disk.
+      if (ev.kind === 'unlink') {
+        await get().forgetDatabase(ev.path)
+      } else {
+        await get().syncDatabaseFromDisk(ev.path)
+      }
+      // Surface a newly-created (or removed) .csv in the note list.
+      if (ev.kind !== 'change') await get().refreshAssets()
+      return
+    }
+    if (ev.scope === 'folder') {
+      // A folder was created/removed/renamed externally (e.g. in another
+      // client sharing this vault). An empty folder produces no note event,
+      // so refresh the tree explicitly — refreshNotes() re-lists folders.
+      await refreshNotesCoalesced()
+      return
+    }
+    // Excalidraw drawings are notes (they live in the notes tree), so treat
+    // their change events as note events, not asset events.
+    const pathIsNote =
+      ev.path.toLowerCase().endsWith('.md') || isExcalidrawPath(ev.path)
+    if (ev.scope !== 'vault-settings' && !pathIsNote) {
       await get().refreshAssets()
       return
     }
+    // An Excalidraw drawing changed on disk — drop its cached PNG preview
+    // and bump the version so editor widgets and preview embeds re-render.
+    if (isExcalidrawPath(ev.path) || isObsidianExcalidrawPath(ev.path)) {
+      invalidateExcalidrawPreview(ev.path)
+      set({ excalidrawPreviewVersion: get().excalidrawPreviewVersion + 1 })
+    }
     await Promise.all([
-      get().refreshNotes(),
+      refreshNotesCoalesced(),
       ev.scope === 'vault-settings'
         ? window.zen
             .getVaultSettings()
             .then((settings) => {
-              set({ vaultSettings: normalizeVaultSettings(settings) })
+              const normalized = normalizeVaultSettings(settings)
+              // Re-overlay view overrides if vault.json changed externally — only
+              // in per-vault scope. (#292)
+              set({
+                vaultSettings: normalized,
+                ...(get().viewSettingsScope === 'vault' ? viewPrefsFromVault(normalized) : {})
+              })
             })
             .catch((err) => {
               console.error('refresh vault settings failed', err)
@@ -3237,11 +5133,22 @@ export const useStore = create<Store>((set, get) => {
 
     if (ev.scope === 'vault-settings') return
 
-    // Keep an open Tasks tab in sync as files change externally or via our own
-    // writes — cheap per-path rescans instead of walking the whole vault. This
-    // also covers inactive Tasks tabs so returning to Kanban doesn't show stale
-    // cards from the last time the tab was focused.
-    if (hasTasksViewOpen(state)) {
+    // A record "page" note changed on disk — re-sync any open database that
+    // links to it so the Table's page icon (empty vs has-content) updates. The
+    // page note needn't be open in a pane; the database tab is what shows it.
+    for (const [csvPath, dbDoc] of Object.entries(state.databases)) {
+      if (dbDoc.pages && Object.values(dbDoc.pages).includes(ev.path)) {
+        void get().syncDatabaseFromDisk(csvPath)
+      }
+    }
+
+    // Keep the shared task cache in sync as files change externally or via our
+    // own writes — cheap per-path rescans instead of walking the whole vault.
+    // This covers the Tasks view (incl. inactive tabs, so returning to Kanban
+    // doesn't show stale cards) and the calendar panel, whose weekly task list
+    // otherwise kept showing a daily note's tasks as they were at the last full
+    // scan (stale checked-state, missing newly added tasks).
+    if (tasksSurfaceVisible(state)) {
       if (ev.kind === 'unlink') {
         set((s) => ({
           vaultTasks: s.vaultTasks.filter((t) => t.sourcePath !== ev.path)
@@ -3484,6 +5391,9 @@ export const useStore = create<Store>((set, get) => {
     try {
       const meta = await window.zen.renameNote(oldPath, nextTitle)
       set((s) => renameNoteState(s, oldPath, meta))
+      await get().applyFavorites(
+        rewriteFavoriteNotePath(get().vaultSettings.favorites, oldPath, meta.path)
+      )
       await get().refreshNotes()
     } catch (err) {
       console.error('renameNote failed', err)
@@ -3507,6 +5417,67 @@ export const useStore = create<Store>((set, get) => {
       await get().selectNote(meta.path)
     } catch (err) {
       console.error('createNote failed', err)
+    }
+  },
+
+  createDrawingAndOpen: async (folder, subpath = '') => {
+    try {
+      const meta = await window.zen.createExcalidraw(folder, subpath)
+      await get().refreshNotes()
+      set({ view: { kind: 'folder', folder, subpath } })
+      await get().selectNote(meta.path)
+    } catch (err) {
+      console.error('createExcalidraw failed', err)
+    }
+  },
+
+  insertEmbedAtCursor: (embed) => {
+    const state = get()
+    const view = state.editorViewRef
+    if (!view) return
+    const { from, to } = view.state.selection.main
+    view.dispatch({
+      changes: { from, to, insert: embed },
+      selection: { anchor: from + embed.length },
+      scrollIntoView: true
+    })
+    view.focus()
+  },
+
+  newDrawing: async () => {
+    try {
+      const s = get()
+      const settings = normalizeVaultSettings(s.vaultSettings)
+      const { folder, subpath } = resolveCreateLocation(
+        settings.drawingsLocation,
+        s.activeNote,
+        settings
+      )
+      const meta = await window.zen.createExcalidraw(folder, subpath)
+      await get().refreshNotes()
+      await get().openNoteInTab(meta.path)
+    } catch (err) {
+      console.error('newDrawing failed', err)
+    }
+  },
+
+  embedNewDrawing: async () => {
+    try {
+      const s = get()
+      const settings = normalizeVaultSettings(s.vaultSettings)
+      const { folder, subpath } = resolveCreateLocation(
+        settings.drawingsLocation,
+        s.activeNote,
+        settings
+      )
+      const meta = await window.zen.createExcalidraw(folder, subpath)
+      if (get().activeNote) {
+        get().insertEmbedAtCursor(`![[${meta.path}]]\n`)
+      }
+      await get().refreshNotes()
+      await get().openNoteInTab(meta.path)
+    } catch (err) {
+      console.error('embedNewDrawing failed', err)
     }
   },
 
@@ -3543,6 +5514,28 @@ export const useStore = create<Store>((set, get) => {
     const path = state.selectedPath
     if (!path) return
     await get().closeTabInPane(state.activePaneId, path)
+  },
+
+  reopenLastClosedTab: async () => {
+    while (get().closedTabStack.length > 0) {
+      const entry = get().closedTabStack.at(-1)
+      if (!entry) return
+      set((s) => ({ closedTabStack: s.closedTabStack.slice(0, -1) }))
+
+      const state = get()
+      const targetPaneId = findLeaf(state.paneLayout, entry.paneId)
+        ? entry.paneId
+        : state.activePaneId
+
+      if (!isWorkspaceVirtualTabPath(entry.path)) {
+        const noteExists = state.notes.some((note) => note.path === entry.path)
+        if (!noteExists) continue
+      }
+
+      await get().openNoteInPane(targetPaneId, entry.path, entry.index)
+      if (entry.pinned) get().pinTabInPane(targetPaneId, entry.path)
+      return
+    }
   },
 
   trashActive: async () => {
@@ -3692,14 +5685,43 @@ export const useStore = create<Store>((set, get) => {
       if (get().noteDirty[path]) {
         throw new Error('Could not save the note before exporting the PDF.')
       }
-      await window.zen.exportNotePdf(path)
+      const pdfPath = await window.zen.exportNotePdf(path)
+      // A returned path means a real file was written on disk — desktop only.
+      // Web returns null (it navigates the prepared window to a print view, which
+      // is the feedback there, so we must NOT close that window), and desktop
+      // returns null when the save dialog is cancelled. Only then confirm + offer
+      // to reveal the file. (#257)
+      if (pdfPath) {
+        const { useToastStore } = await import('./lib/toast')
+        useToastStore.getState().addToast('PDF exported', 'success', {
+          label: 'Show in folder',
+          onClick: () => void window.zen.revealFilePath(pdfPath)
+        })
+      }
     } catch (err) {
       preparedExportWindow?.close()
       console.error('exportNotePdf failed', err)
-      window.alert(
-        err instanceof Error ? err.message : 'Could not export the note as a PDF.'
+      const { useToastStore } = await import('./lib/toast')
+      useToastStore.getState().addToast(
+        err instanceof Error ? err.message : 'Could not export the note as a PDF.',
+        'error'
       )
     }
+  },
+
+  copyActiveNoteAsMarkdown: async () => {
+    const s = get()
+    const active = s.activeNote
+    if (!active) return
+    let body = s.noteContents[active.path]?.body
+    if (body == null) {
+      try {
+        body = (await window.zen.readNote(active.path)).body
+      } catch {
+        return
+      }
+    }
+    window.zen.clipboardWriteText(body)
   },
 
   setSearchOpen: (open) =>
@@ -3719,6 +5741,7 @@ export const useStore = create<Store>((set, get) => {
       commandPaletteInitialMode: open ? mode : 'main'
     }),
   setBufferPaletteOpen: (open) => set({ bufferPaletteOpen: open }),
+  setEmbedDrawingPaletteOpen: (open) => set({ embedDrawingPaletteOpen: open }),
   setOutlinePaletteOpen: (open) => set({ outlinePaletteOpen: open }),
   setQuery: (q) => set({ query: q }),
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
@@ -3759,6 +5782,10 @@ export const useStore = create<Store>((set, get) => {
     set({ vimInsertEscape: sequence.trim().slice(0, 5) })
     savePrefs(collectPrefs(get()))
   },
+  setVimYankToClipboard: (on) => {
+    set({ vimYankToClipboard: on })
+    savePrefs(collectPrefs(get()))
+  },
   setKeymapBinding: (id, binding) => {
     set((s) => {
       const nextOverrides = { ...s.keymapOverrides }
@@ -3770,6 +5797,29 @@ export const useStore = create<Store>((set, get) => {
   },
   resetAllKeymaps: () => {
     set({ keymapOverrides: {} })
+    savePrefs(collectPrefs(get()))
+  },
+  setOverrideEnabled: (name, on) => {
+    set((s) => {
+      const next = { ...s.enabledOverrides }
+      if (on) next[name] = 'on'
+      else delete next[name]
+      return { enabledOverrides: next }
+    })
+    savePrefs(collectPrefs(get()))
+  },
+  setThemeTweak: (slug, value) => {
+    set((s) => {
+      const next = { ...s.themeTweaks }
+      if (value) next[slug] = value
+      else delete next[slug]
+      return { themeTweaks: next }
+    })
+    // State updates immediately (live preview); the config write is debounced.
+    scheduleThemeTweaksSave()
+  },
+  resetThemeTweaks: () => {
+    set({ themeTweaks: {} })
     savePrefs(collectPrefs(get()))
   },
   setWhichKeyHints: (on) => {
@@ -3798,6 +5848,34 @@ export const useStore = create<Store>((set, get) => {
   },
   setLivePreview: (on) => {
     set({ livePreview: on })
+    savePrefs(collectPrefs(get()))
+  },
+  setRenderTablesInLivePreview: (on) => {
+    set({ renderTablesInLivePreview: on })
+    savePrefs(collectPrefs(get()))
+  },
+  setCompletedTaskStyle: (style) => {
+    set({ completedTaskStyle: style })
+    savePrefs(collectPrefs(get()))
+  },
+  setMathRenderer: (renderer) => {
+    set({ mathRenderer: renderer })
+    savePrefs(collectPrefs(get()))
+  },
+  setLooseMathDelimiters: (on) => {
+    set({ looseMathDelimiters: on })
+    savePrefs(collectPrefs(get()))
+  },
+  setKeepViewModeAcrossNotes: (on) => {
+    set({ keepViewModeAcrossNotes: on })
+    savePrefs(collectPrefs(get()))
+  },
+  setMarkdownSnippets: (on) => {
+    set({ markdownSnippets: on })
+    savePrefs(collectPrefs(get()))
+  },
+  setHideBuiltinTemplates: (hidden) => {
+    set({ hideBuiltinTemplates: hidden })
     savePrefs(collectPrefs(get()))
   },
   setTabsEnabled: (on) => {
@@ -3839,6 +5917,10 @@ export const useStore = create<Store>((set, get) => {
     set({ wrapTabs: on })
     savePrefs(collectPrefs(get()))
   },
+  setPdfExportUseTheme: (on) => {
+    set({ pdfExportUseTheme: on })
+    savePrefs(collectPrefs(get()))
+  },
   setSettingsOpen: (open) => set({ settingsOpen: open }),
   setTheme: ({ id, family, mode }) => {
     set({ themeId: id, themeFamily: family, themeMode: mode })
@@ -3852,6 +5934,14 @@ export const useStore = create<Store>((set, get) => {
     set({ editorLineHeight: mult })
     savePrefs(collectPrefs(get()))
   },
+  setEditorScrollOff: (lines) => {
+    set({ editorScrollOff: Math.max(0, Math.floor(lines)) })
+    savePrefs(collectPrefs(get()))
+  },
+  setTimeFormat: (format) => {
+    set({ timeFormat: format })
+    savePrefs(collectPrefs(get()))
+  },
   setPreviewMaxWidth: (px) => {
     const clamped = Math.min(1600, Math.max(640, Math.round(px)))
     set({ previewMaxWidth: clamped })
@@ -3859,6 +5949,18 @@ export const useStore = create<Store>((set, get) => {
   },
   setLineNumberMode: (mode) => {
     set({ lineNumberMode: mode })
+    savePrefs(collectPrefs(get()))
+  },
+  setViewSettingsScope: (scope) => {
+    set({ viewSettingsScope: scope })
+    savePrefs(collectPrefs(get()))
+    // Switching to per-vault: overlay this vault's saved view immediately so the
+    // change takes effect without a reopen. Switching to global keeps the live
+    // (global) values as-is. (#292)
+    if (scope === 'vault') set(viewPrefsFromVault(get().vaultSettings))
+  },
+  setLineNumberPosition: (position) => {
+    set({ lineNumberPosition: position })
     savePrefs(collectPrefs(get()))
   },
   setInterfaceFont: (family) => {
@@ -3883,6 +5985,7 @@ export const useStore = create<Store>((set, get) => {
           ) as SystemFolderLabels
     }))
     savePrefs(collectPrefs(get()))
+    persistVaultViewOverride({ systemFolderLabels: get().systemFolderLabels })
   },
   setSidebarWidth: (px) => {
     const clamped = Math.min(520, Math.max(160, Math.round(px)))
@@ -3897,18 +6000,80 @@ export const useStore = create<Store>((set, get) => {
   setNoteSortOrder: (order) => {
     set({ noteSortOrder: order })
     savePrefs(collectPrefs(get()))
+    persistVaultViewOverride({ noteSortOrder: order })
+  },
+  reorderNoteManually: (draggedPath, targetPath, position) => {
+    const dir = parentDirOf(draggedPath)
+    if (draggedPath === targetPath || parentDirOf(targetPath) !== dir) return
+    const s = get()
+    const existing = s.manualNoteOrder[dir]
+    // Current sibling order (manual if set, else file order), then move.
+    const ordered = s.notes
+      .filter((n) => parentDirOf(n.path) === dir)
+      .slice()
+      .sort((a, b) =>
+        manualOrderCompare(existing, a.path, a.siblingOrder, b.path, b.siblingOrder)
+      )
+      .map((n) => n.path)
+    const next = applyManualMove(ordered, draggedPath, targetPath, position)
+    const nextMap = { ...s.manualNoteOrder, [dir]: next }
+    set({ manualNoteOrder: nextMap })
+    writeManualOrder(s.vault?.root ?? '', nextMap)
+  },
+  reorderTaskInNote: async (task, targetTask, position) => {
+    // Reorder is a within-note line move — tasks in different notes live in
+    // different files, so cross-note moves aren't possible here.
+    if (task.sourcePath !== targetTask.sourcePath || task.taskIndex === targetTask.taskIndex) {
+      return
+    }
+    const path = task.sourcePath
+    const openBuffer = get().noteContents[path]
+    let body: string
+    try {
+      body = openBuffer?.body ?? (await window.zen.readNote(path)).body
+    } catch (err) {
+      console.error('readNote (reorder) failed', err)
+      return
+    }
+    const nextBody = moveTaskLine(body, task.taskIndex, targetTask.taskIndex, position)
+    if (nextBody === body) return
+
+    // Optimistically refresh this note's tasks so the list reorders immediately,
+    // whether the note is open (unsaved buffer) or only on disk.
+    const fresh = parseTasksFromBody(nextBody, {
+      path,
+      title: task.noteTitle,
+      folder: task.noteFolder
+    })
+    set((s) => ({
+      vaultTasks: s.vaultTasks.filter((t) => t.sourcePath !== path).concat(fresh)
+    }))
+
+    if (get().noteContents[path]) {
+      get().updateNoteBody(path, nextBody)
+    } else {
+      try {
+        await window.zen.writeNote(path, nextBody)
+      } catch (err) {
+        console.error('writeNote (reorder) failed', err)
+        void get().rescanTasksForPath(path)
+      }
+    }
   },
   setGroupByKind: (on) => {
     set({ groupByKind: on })
     savePrefs(collectPrefs(get()))
+    persistVaultViewOverride({ groupByKind: on })
   },
   setAutoReveal: (on) => {
     set({ autoReveal: on })
     savePrefs(collectPrefs(get()))
+    persistVaultViewOverride({ autoReveal: on })
   },
   setUnifiedSidebar: () => {
     set({ unifiedSidebar: true })
     savePrefs(collectPrefs(get()))
+    persistVaultViewOverride({ unifiedSidebar: true })
   },
   setDarkSidebar: (on) => {
     set({ darkSidebar: on })
@@ -3965,7 +6130,7 @@ export const useStore = create<Store>((set, get) => {
     savePrefs(collectPrefs(get()))
   },
 
-  pinAssetReference: (path) => {
+  pinAssetReference: (path, fragment) => {
     if (!path) return
     const s = get()
     // If we were previously pinning a note, evict its content unless
@@ -3985,6 +6150,7 @@ export const useStore = create<Store>((set, get) => {
     }
     set({
       pinnedRefPath: path,
+      pinnedRefFragment: fragment ?? null,
       pinnedRefKind: 'asset',
       pinnedRefVisible: true,
       noteContents: contents,
@@ -3993,10 +6159,10 @@ export const useStore = create<Store>((set, get) => {
     savePrefs(collectPrefs(get()))
   },
 
-  pinAssetReferenceForNote: (notePath, assetPath) => {
+  pinAssetReferenceForNote: (notePath, assetPath, fragment) => {
     if (!notePath || !assetPath) return
     set((s) => ({
-      noteRefs: { ...s.noteRefs, [notePath]: { path: assetPath, kind: 'asset' } },
+      noteRefs: { ...s.noteRefs, [notePath]: { path: assetPath, kind: 'asset', fragment: fragment ?? null } },
       pinnedRefVisible: true
     }))
     savePrefs(collectPrefs(get()))
@@ -4032,6 +6198,7 @@ export const useStore = create<Store>((set, get) => {
     }
     set({
       pinnedRefPath: null,
+      pinnedRefFragment: null,
       pinnedRefKind: 'note',
       noteContents: contents,
       noteDirty: dirty
@@ -4080,58 +6247,237 @@ export const useStore = create<Store>((set, get) => {
     const state = get()
     const settings = normalizeVaultSettings(state.vaultSettings)
     if (!settings.dailyNotes.enabled) return
-    const title = noteTitleForDate(date)
-    const subpath = normalizeDailyNotesDirectory(settings.dailyNotes.directory)
-    const existing = state.notes.find(
-      (note) =>
-        note.folder === 'inbox' &&
-        note.title === title &&
-        noteFolderSubpath(note, settings) === subpath
-    )
+    const { title, subpath } = dailyNoteLocationForDate(date, settings)
+    const existing = findDailyNoteForDate(state.notes, settings, date)
     if (existing) {
       set({ view: { kind: 'folder', folder: 'inbox', subpath } })
       await get().selectNote(existing.path)
-      return
+    } else {
+      const template = resolveTemplate(state.customTemplates, settings.dailyNotes.templateId)
+      if (template) {
+        await get().createFromTemplate(template, { folder: 'inbox', subpath, title, date })
+      } else {
+        await get().createAndOpen('inbox', subpath, { title })
+      }
     }
-    const template = resolveTemplate(state.customTemplates, settings.dailyNotes.templateId)
-    if (template) {
-      await get().createFromTemplate(template, { folder: 'inbox', subpath, title })
-      return
+    // Land keyboard focus in the editor so `i` starts insert straight away,
+    // instead of leaving focus on the sidebar item that just got selected. The
+    // command is a jump-and-type flow and is often fired from outside the
+    // editor (leader key, palette), where focus would otherwise stay put. (#353)
+    requestEditorFocus()
+    // Opening *today's* note rolls unfinished tasks forward from past daily
+    // notes (Obsidian-style) when enabled. Fire-and-forget so the note shows
+    // right away; the rollover appends into the now-open buffer.
+    if (noteTitleForDate(date) === noteTitleForDate(new Date())) {
+      void get().rolloverUnfinishedTasksIntoToday()
     }
-    await get().createAndOpen('inbox', subpath, { title })
   },
 
   openTodayDailyNote: async () => {
     await get().openDailyNoteForDate(new Date())
   },
 
+  ensureDailyNoteForDate: async (date) => {
+    const state = get()
+    const settings = normalizeVaultSettings(state.vaultSettings)
+    if (!settings.dailyNotes.enabled) return null
+    const existing = findDailyNoteForDate(state.notes, settings, date)
+    if (existing) return existing
+    const { title, subpath } = dailyNoteLocationForDate(date, settings)
+    const template = resolveTemplate(state.customTemplates, settings.dailyNotes.templateId)
+    const body = template ? renderTemplate(template.body, { title, now: date }).body : ''
+    try {
+      const meta = await window.zen.createNote('inbox', title, subpath)
+      if (body) await window.zen.writeNote(meta.path, body)
+      await get().refreshNotes()
+      return get().notes.find((n) => n.path === meta.path) ?? meta
+    } catch (err) {
+      console.error('ensureDailyNoteForDate failed', err)
+      return null
+    }
+  },
+
+  addTaskForDate: async (dateIso, text) => {
+    const content = text.trim()
+    if (!content) return
+    const parsed = parseIsoDateLocal(dateIso)
+    if (!parsed) return
+    const settings = normalizeVaultSettings(get().vaultSettings)
+    if (!settings.dailyNotes.enabled) return
+    let note = findDailyNoteForDate(get().notes, settings, parsed)
+    if (!note) {
+      const ok = await confirmApp({
+        title: 'Create daily note?',
+        description: `No daily note exists for ${dateIso} yet. Create it and add this task?`,
+        confirmLabel: 'Create & add'
+      })
+      if (!ok) return
+      note = await get().ensureDailyNoteForDate(parsed)
+      if (!note) return
+    }
+    const path = note.path
+    // Implicit due already covers daily-note tasks; only write an explicit
+    // `due:` token when inference is off, so the task still lands on this day.
+    const line = settings.dailyNotes.tasksDueOnNoteDate
+      ? `- [ ] ${content}`
+      : `- [ ] ${content} due:${dateIso}`
+    const openBuffer = get().noteContents[path]
+    const body = openBuffer?.body ?? (await window.zen.readNote(path)).body
+    const trimmed = body.replace(/\s+$/u, '')
+    const nextBody = trimmed.length ? `${trimmed}\n${line}\n` : `${line}\n`
+    if (openBuffer) {
+      // Open note: edit through the buffer so unsaved changes aren't stomped;
+      // its autosave + the watcher rescan the tasks (a disk rescan now would be
+      // stale). The common add-from-calendar case hits the writeNote branch.
+      get().updateNoteBody(path, nextBody)
+    } else {
+      try {
+        await window.zen.writeNote(path, nextBody)
+        await get().rescanTasksForPath(path)
+      } catch (err) {
+        console.error('addTaskForDate writeNote failed', err)
+      }
+    }
+  },
+
+  rolloverUnfinishedTasksIntoToday: async (opts) => {
+    const force = opts?.force === true
+    const settings = normalizeVaultSettings(get().vaultSettings)
+    if (!settings.dailyNotes.enabled) return 0
+    const today = new Date()
+    const todayIso = noteTitleForDate(today)
+    const vaultRoot = get().vault?.root ?? ''
+    if (!force) {
+      if (!settings.dailyNotes.rolloverUnfinishedTasks) return 0
+      if (readRolloverMarker(vaultRoot) === todayIso) return 0
+    }
+    const todayNote = await get().ensureDailyNoteForDate(today)
+    if (!todayNote) return 0
+    if (opts?.open) {
+      const { subpath } = dailyNoteLocationForDate(today, settings)
+      set({ view: { kind: 'folder', folder: 'inbox', subpath } })
+      await get().selectNote(todayNote.path)
+    }
+
+    // Gather unfinished task blocks from every *past* daily note, oldest first.
+    const pastNotes: Array<{ note: NoteMeta; iso: string }> = []
+    for (const note of get().notes) {
+      if (note.path === todayNote.path) continue
+      const info = classifyDateNote(note, settings)
+      if (info?.kind !== 'daily') continue
+      const iso = noteTitleForDate(info.date)
+      if (iso < todayIso) pastNotes.push({ note, iso })
+    }
+    pastNotes.sort((a, b) => (a.iso < b.iso ? -1 : a.iso > b.iso ? 1 : 0))
+
+    const movedLines: string[] = []
+    for (const { note } of pastNotes) {
+      const buffer = get().noteContents[note.path]
+      let body: string
+      try {
+        body = buffer?.body ?? (await window.zen.readNote(note.path)).body
+      } catch (err) {
+        console.error('rollover readNote failed', note.path, err)
+        continue
+      }
+      const { moved, rest } = extractUncheckedTaskBlocks(body)
+      if (moved.length === 0) continue
+      movedLines.push(...moved)
+      if (buffer) {
+        // Open buffer: route through the normal edit pipeline (marks dirty,
+        // autosaves, watcher rescans tasks) — same as toggleTaskFromList. A disk
+        // rescan here would read the not-yet-flushed file and go stale.
+        get().updateNoteBody(note.path, rest)
+      } else {
+        try {
+          await window.zen.writeNote(note.path, rest)
+          await get().rescanTasksForPath(note.path)
+        } catch (err) {
+          console.error('rollover writeNote (source) failed', note.path, err)
+          // Don't drop the lines we already pulled — they'll still land in today.
+        }
+      }
+    }
+
+    if (movedLines.length === 0) {
+      writeRolloverMarker(vaultRoot, todayIso)
+      return 0
+    }
+
+    const todayBuffer = get().noteContents[todayNote.path]
+    let todayBody: string
+    try {
+      todayBody = todayBuffer?.body ?? (await window.zen.readNote(todayNote.path)).body
+    } catch (err) {
+      console.error('rollover readNote (today) failed', err)
+      return 0
+    }
+    const trimmed = todayBody.replace(/\s+$/u, '')
+    const block = movedLines.join('\n')
+    const nextBody = trimmed.length ? `${trimmed}\n${block}\n` : `${block}\n`
+    if (todayBuffer) {
+      get().updateNoteBody(todayNote.path, nextBody)
+    } else {
+      try {
+        await window.zen.writeNote(todayNote.path, nextBody)
+        await get().rescanTasksForPath(todayNote.path)
+      } catch (err) {
+        console.error('rollover writeNote (today) failed', err)
+        return 0
+      }
+    }
+    writeRolloverMarker(vaultRoot, todayIso)
+    return movedLines.length
+  },
+
   openWeeklyNoteForDate: async (date) => {
     const state = get()
     const settings = normalizeVaultSettings(state.vaultSettings)
     if (!settings.weeklyNotes.enabled) return
-    const title = weeklyNoteTitle(date)
-    const subpath = normalizeWeeklyNotesDirectory(settings.weeklyNotes.directory)
-    const existing = state.notes.find(
-      (note) =>
-        note.folder === 'inbox' &&
-        note.title === title &&
-        noteFolderSubpath(note, settings) === subpath
-    )
+    const { title, subpath } = weeklyNoteLocationForDate(date, settings)
+    const existing = findWeeklyNoteForDate(state.notes, settings, date)
     if (existing) {
       set({ view: { kind: 'folder', folder: 'inbox', subpath } })
       await get().selectNote(existing.path)
-      return
+    } else {
+      const template = resolveTemplate(state.customTemplates, settings.weeklyNotes.templateId)
+      if (template) {
+        await get().createFromTemplate(template, { folder: 'inbox', subpath, title, date })
+      } else {
+        await get().createAndOpen('inbox', subpath, { title })
+      }
     }
-    const template = resolveTemplate(state.customTemplates, settings.weeklyNotes.templateId)
-    if (template) {
-      await get().createFromTemplate(template, { folder: 'inbox', subpath, title })
-      return
-    }
-    await get().createAndOpen('inbox', subpath, { title })
+    // Focus the editor so `i` starts insert immediately (see openDailyNoteForDate).
+    requestEditorFocus()
   },
 
   openThisWeekWeeklyNote: async () => {
     await get().openWeeklyNoteForDate(new Date())
+  },
+
+  openMonthlyNoteForDate: async (date) => {
+    const state = get()
+    const settings = normalizeVaultSettings(state.vaultSettings)
+    if (!settings.monthlyNotes.enabled) return
+    const { title, subpath } = monthlyNoteLocationForDate(date, settings)
+    const existing = findMonthlyNoteForDate(state.notes, settings, date)
+    if (existing) {
+      set({ view: { kind: 'folder', folder: 'inbox', subpath } })
+      await get().selectNote(existing.path)
+    } else {
+      const template = resolveTemplate(state.customTemplates, settings.monthlyNotes.templateId)
+      if (template) {
+        await get().createFromTemplate(template, { folder: 'inbox', subpath, title, date })
+      } else {
+        await get().createAndOpen('inbox', subpath, { title })
+      }
+    }
+    // Focus the editor so `i` starts insert immediately (see openDailyNoteForDate).
+    requestEditorFocus()
+  },
+
+  openThisMonthMonthlyNote: async () => {
+    await get().openMonthlyNoteForDate(new Date())
   },
 
   setTemplatePaletteOpen: (open) =>
@@ -4219,7 +6565,7 @@ export const useStore = create<Store>((set, get) => {
       // 2. Title.
       let title = opts?.title?.trim() ?? ''
       if (!title && template.titleTemplate) {
-        title = renderTitle(template.titleTemplate, { title: '' })
+        title = renderTitle(template.titleTemplate, { title: '', now: opts?.date })
       }
       if (!title) {
         const entered = await promptApp({
@@ -4232,7 +6578,7 @@ export const useStore = create<Store>((set, get) => {
         title = entered.trim()
       }
       if (!title) title = template.name
-      const { body, cursorOffset } = renderTemplate(template.body, { title })
+      const { body, cursorOffset } = renderTemplate(template.body, { title, now: opts?.date })
       const meta = await window.zen.createNote(folder, title, subpath)
       // Write the rendered body before opening so the editor never flashes the
       // default `# Title` scaffold (mirrors importDroppedMarkdownFiles).
@@ -4244,6 +6590,11 @@ export const useStore = create<Store>((set, get) => {
       } else {
         await get().selectNote(meta.path)
       }
+      // Land keyboard focus in the editor so typing starts immediately. This
+      // flow is usually fired from outside the editor — the Leader menu, the
+      // command palette, a folder menu — where focus would otherwise stay on
+      // the picker/prompt that just closed. (#436, mirrors the daily-note flow)
+      requestEditorFocus()
     } catch (err) {
       console.error('createFromTemplate failed', err)
     }
@@ -4265,8 +6616,43 @@ export const useStore = create<Store>((set, get) => {
     await get().saveCustomTemplate({ slug: slugifyTemplateName(trimmed), raw })
   },
 
+  saveActiveNoteAs: async (newName: string) => {
+    const active = get().activeNote
+    const notePath = active?.path
+    if (!active || !notePath) return
+    // Strip a user-supplied extension so the name stays title-based; the backend
+    // appends the note's real file extension.
+    const trimmedName = newName.trim().replace(/\.md$/i, '')
+    if (!trimmedName || trimmedName === active.title) return
+    if (
+      typeof window.zen.duplicateNote !== 'function' ||
+      typeof window.zen.renameNote !== 'function'
+    ) {
+      return
+    }
+    try {
+      // Vim's :saveas writes the note under a new name and keeps the original.
+      // Save the current note, duplicate it (a copy in the same folder), rename
+      // the copy to the requested name, and open it — the original is untouched.
+      await get().persistNote(notePath)
+      const copy = await window.zen.duplicateNote(notePath)
+      const renamed = await window.zen.renameNote(copy.path, trimmedName)
+      await get().refreshNotes()
+      await get().selectNote(renamed.path)
+      get().setFocusedPanel('editor')
+      requestAnimationFrame(() => get().editorViewRef?.focus())
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : String(err))
+    }
+  },
+
   setWordWrap: (on) => {
     set({ wordWrap: on })
+    savePrefs(collectPrefs(get()))
+  },
+
+  setCursorBlink: (on) => {
+    set({ cursorBlink: on })
     savePrefs(collectPrefs(get()))
   },
 
@@ -4294,6 +6680,18 @@ export const useStore = create<Store>((set, get) => {
     set({ tagsCollapsed: collapsed })
     savePrefs(collectPrefs(get()))
   },
+  setNestedTags: (enabled) => {
+    set({ nestedTags: enabled })
+    savePrefs(collectPrefs(get()))
+  },
+  toggleCollapseTagNode: (path) => {
+    set((s) =>
+      s.collapsedTagNodes.includes(path)
+        ? { collapsedTagNodes: s.collapsedTagNodes.filter((p) => p !== path) }
+        : { collapsedTagNodes: [...s.collapsedTagNodes, path] }
+    )
+    savePrefs(collectPrefs(get()))
+  },
   setAutoCalendarPanel: (enabled) => {
     set({ autoCalendarPanel: enabled })
     savePrefs(collectPrefs(get()))
@@ -4317,6 +6715,21 @@ export const useStore = create<Store>((set, get) => {
   },
   setFocusedPanel: (panel) => set({ focusedPanel: panel }),
   setSidebarCursorIndex: (idx) => set({ sidebarCursorIndex: idx }),
+  // #301: date-nav tree expand/collapse. Ephemeral (no savePrefs) — mirrors
+  // toggleCollapseFolder but for the Daily/Weekly date groups so VimNav's
+  // keyboard nav can drive them like real folders.
+  expandDateNav: (key) =>
+    set((s) =>
+      s.dateNavExpanded.includes(key) ? {} : { dateNavExpanded: [...s.dateNavExpanded, key] }
+    ),
+  collapseDateNav: (key) =>
+    set((s) => ({ dateNavExpanded: s.dateNavExpanded.filter((k) => k !== key) })),
+  toggleDateNav: (key) =>
+    set((s) =>
+      s.dateNavExpanded.includes(key)
+        ? { dateNavExpanded: s.dateNavExpanded.filter((k) => k !== key) }
+        : { dateNavExpanded: [...s.dateNavExpanded, key] }
+    ),
   setNoteListCursorIndex: (idx) => set({ noteListCursorIndex: idx }),
   setConnectionsCursorIndex: (idx) => set({ connectionsCursorIndex: idx }),
   setConnectionPreview: (preview) => set({ connectionPreview: preview }),
@@ -4547,6 +6960,20 @@ export const useStore = create<Store>((set, get) => {
   },
 
   closeTabInPane: async (paneId, path) => {
+    // Capture the tab's pane-local position before removal so Cmd/Ctrl+Shift+T
+    // can reopen multiple closed tabs in the same order and restore pinned state.
+    const closingLeaf = findLeaf(get().paneLayout, paneId)
+    const closingIndex = closingLeaf?.tabs.indexOf(path) ?? -1
+    const closedTabEntry: ClosedTabEntry | null =
+      closingLeaf && closingIndex !== -1
+        ? {
+            paneId,
+            path,
+            index: closingIndex,
+            pinned: closingLeaf.pinnedTabs.includes(path)
+          }
+        : null
+
     // Flush pending save for the tab we're about to drop. Other panes
     // (and the pinned-reference pane) may still reference the note via
     // its content cache — we only evict content when nothing else has
@@ -4567,11 +6994,15 @@ export const useStore = create<Store>((set, get) => {
         delete contents[path]
         delete dirty[path]
       }
+      const closedTabStack = closedTabEntry
+        ? [...s.closedTabStack, closedTabEntry].slice(-MAX_CLOSED_TAB_STACK)
+        : s.closedTabStack
       return {
         paneLayout: ensured.layout,
         activePaneId: ensured.activePaneId,
         noteContents: contents,
         noteDirty: dirty,
+        closedTabStack,
         ...activeFieldsFrom(ensured.layout, ensured.activePaneId, contents, dirty)
       }
     })
@@ -4697,10 +7128,27 @@ export const useStore = create<Store>((set, get) => {
         activePaneId: newLeaf.id,
         noteContents: nextContents,
         noteDirty: nextDirty,
+        // Inherit the source pane's view mode so splitting a preview pane opens
+        // the new pane in preview too, not a reset-to-edit. (#321)
+        paneModes: {
+          ...cur.paneModes,
+          [newLeaf.id]: cur.paneModes[sourcePaneId ?? targetPaneId] ?? {}
+        },
         ...activeFieldsFrom(layout, newLeaf.id, nextContents, nextDirty)
       }
     })
   },
+
+  setPaneModeForPath: (paneId, path, mode) =>
+    set((s) => ({
+      paneModes: {
+        ...s.paneModes,
+        [paneId]: paneModesWithPathMode(s.paneModes[paneId] ?? {}, path, mode)
+      },
+      // Remember the pane's latest mode so `keepViewModeAcrossNotes` can make
+      // every note in this pane follow it.
+      paneStickyModes: { ...s.paneStickyModes, [paneId]: mode }
+    })),
 
   resizeSplit: (splitId, sizes) => {
     set((s) => {
@@ -4806,6 +7254,12 @@ export const useStore = create<Store>((set, get) => {
       oldSubpath,
       newSubpath
     )
+    const nextFolderColors = rewriteFolderColorsForRename(
+      get().vaultSettings.folderColors,
+      folder,
+      oldSubpath,
+      newSubpath
+    )
     set((s) => {
       const nextLayout = rewritePathsInTree(s.paneLayout, rewritePath)
       const ensured = ensureActivePane(nextLayout, s.activePaneId)
@@ -4831,11 +7285,25 @@ export const useStore = create<Store>((set, get) => {
         pinnedRefPath: s.pinnedRefPath ? rewritePath(s.pinnedRefPath) : null,
         vaultSettings: {
           ...s.vaultSettings,
-          folderIcons: nextFolderIcons
+          folderIcons: nextFolderIcons,
+          folderColors: nextFolderColors
         },
         ...activeFieldsFrom(ensured.layout, ensured.activePaneId, contents, dirty)
       }
     })
+
+    // Repoint favorites at the renamed folder (its own key, descendant folder
+    // keys, and note favorites that lived under it) and persist.
+    await get().applyFavorites(
+      rewriteFavoritesForFolderRename(
+        get().vaultSettings.favorites,
+        folder,
+        oldSubpath,
+        newSubpath,
+        oldPrefix,
+        newPrefix
+      )
+    )
 
     await get().refreshNotes()
 
@@ -4863,6 +7331,7 @@ export const useStore = create<Store>((set, get) => {
     }
     const prefix = `${folder}/${subpath}/`
     const nextFolderIcons = removeFolderIcons(get().vaultSettings.folderIcons, folder, subpath)
+    const nextFolderColors = removeFolderColors(get().vaultSettings.folderColors, folder, subpath)
     set((s) => {
       const nextLayout = rewritePathsInTree(s.paneLayout, (p) =>
         p.startsWith(prefix) ? null : p
@@ -4886,11 +7355,16 @@ export const useStore = create<Store>((set, get) => {
           s.pinnedRefPath && s.pinnedRefPath.startsWith(prefix) ? null : s.pinnedRefPath,
         vaultSettings: {
           ...s.vaultSettings,
-          folderIcons: nextFolderIcons
+          folderIcons: nextFolderIcons,
+          folderColors: nextFolderColors
         },
         ...activeFieldsFrom(ensured.layout, ensured.activePaneId, contents, dirty)
       }
     })
+    // Drop favorites for the deleted folder and the notes that lived under it.
+    await get().applyFavorites(
+      removeFavoritesForFolder(get().vaultSettings.favorites, folder, subpath, prefix)
+    )
   },
 
   duplicateFolder: async (folder, subpath) => {
@@ -4902,6 +7376,12 @@ export const useStore = create<Store>((set, get) => {
         ...s.vaultSettings,
         folderIcons: duplicateFolderIcons(
           s.vaultSettings.folderIcons,
+          folder,
+          subpath,
+          newSubpath
+        ),
+        folderColors: duplicateFolderColors(
+          s.vaultSettings.folderColors,
           folder,
           subpath,
           newSubpath
@@ -4952,6 +7432,9 @@ export const useStore = create<Store>((set, get) => {
           ...activeFieldsFrom(ensured.layout, ensured.activePaneId, contents, dirty)
         }
       })
+      await get().applyFavorites(
+        rewriteFavoriteNotePath(get().vaultSettings.favorites, relPath, meta.path)
+      )
     } catch (err) {
       console.error('moveNote failed', err)
     }
@@ -5155,6 +7638,7 @@ export const useStore = create<Store>((set, get) => {
       hasAssetsDir: false,
       assetFiles: [],
       assetUndoStack: [],
+      closedTabStack: [],
       vaultTasks: [],
       selectedTags: [],
       view: { kind: 'folder', folder: 'inbox', subpath: '' },
@@ -5179,7 +7663,12 @@ export const useStore = create<Store>((set, get) => {
 
   openLocalVault: async (root: string) => {
     const trimmed = root.trim()
-    if (!trimmed || trimmed === get().vault?.root) return
+    if (!trimmed) return
+    // Only a no-op when we are already in this exact local vault. In remote
+    // mode vault.root holds the server-reported path, which for a localhost
+    // server equals the local vault's own path -- comparing against it here
+    // would wrongly block switching back from remote to local.
+    if (get().workspaceMode === 'local' && trimmed === get().vault?.root) return
     try {
       await get().flushDirtyNotes()
       set({ workspaceSetupError: null })
@@ -5201,6 +7690,7 @@ export const useStore = create<Store>((set, get) => {
         hasAssetsDir: false,
         assetFiles: [],
         assetUndoStack: [],
+        closedTabStack: [],
         vaultTasks: [],
         selectedTags: [],
         view: { kind: 'folder', folder: 'inbox', subpath: '' },
@@ -5261,6 +7751,7 @@ export const useStore = create<Store>((set, get) => {
           hasAssetsDir: false,
           assetFiles: [],
           assetUndoStack: [],
+          closedTabStack: [],
           vaultTasks: [],
           selectedTags: [],
           view: { kind: 'folder', folder: 'inbox', subpath: '' },
@@ -5296,6 +7787,7 @@ export const useStore = create<Store>((set, get) => {
         hasAssetsDir: false,
         assetFiles: [],
         assetUndoStack: [],
+        closedTabStack: [],
         vaultTasks: [],
         selectedTags: [],
         view: { kind: 'folder', folder: 'inbox', subpath: '' },
@@ -5433,6 +7925,7 @@ export const useStore = create<Store>((set, get) => {
         hasAssetsDir: false,
         assetFiles: [],
         assetUndoStack: [],
+        closedTabStack: [],
         vaultTasks: [],
         selectedTags: [],
         view: { kind: 'folder', folder: 'inbox', subpath: '' },
@@ -5515,6 +8008,7 @@ export const useStore = create<Store>((set, get) => {
         hasAssetsDir: false,
         assetFiles: [],
         assetUndoStack: [],
+        closedTabStack: [],
         vaultTasks: [],
         selectedTags: [],
         view: { kind: 'folder', folder: 'inbox', subpath: '' },
@@ -5595,6 +8089,7 @@ export const useStore = create<Store>((set, get) => {
         hasAssetsDir: false,
         assetFiles: [],
         assetUndoStack: [],
+        closedTabStack: [],
         vaultTasks: [],
         selectedTags: [],
         view: { kind: 'folder', folder: 'inbox', subpath: '' },
@@ -5639,6 +8134,7 @@ export const useStore = create<Store>((set, get) => {
           hasAssetsDir: false,
           assetFiles: [],
           assetUndoStack: [],
+          closedTabStack: [],
           vaultTasks: [],
           selectedTags: [],
           view: { kind: 'folder', folder: 'inbox', subpath: '' },
@@ -5672,6 +8168,7 @@ export const useStore = create<Store>((set, get) => {
         hasAssetsDir: false,
         assetFiles: [],
         assetUndoStack: [],
+        closedTabStack: [],
         vaultTasks: [],
         selectedTags: [],
         view: { kind: 'folder', folder: 'inbox', subpath: '' },
@@ -5743,3 +8240,176 @@ export const useStore = create<Store>((set, get) => {
   }
   }
 })
+
+// --- Portable config file sync (desktop) ------------------------------------
+
+/** Apply an externally-changed portable config (synced dotfile / hand-edit)
+ *  to the live store and the localStorage cache. Uses setState directly so it
+ *  doesn't re-trigger a write back out to the file. */
+function applyPortableConfig(next: AppConfigPortable): void {
+  if (!next || typeof next !== 'object') return
+  const current = collectPrefs(useStore.getState())
+  const merged = normalizePrefs({ ...current, ...(next as Partial<Prefs>) })
+  cachedInitialPrefs = merged
+  try {
+    localStorage.setItem(PREFS_KEY, JSON.stringify(merged))
+  } catch {
+    /* ignore */
+  }
+  const patch: Record<string, unknown> = {}
+  const mergedRecord = merged as unknown as Record<string, unknown>
+  for (const key of PORTABLE_PREF_KEYS) {
+    patch[key] = mergedRecord[key]
+  }
+  useStore.setState(patch as Partial<Store>)
+}
+
+let configSyncInitialized = false
+
+/**
+ * Wire up portable-config syncing. Call once on app startup (desktop only —
+ * a no-op on web). Seeds the config file from current prefs on first run so
+ * existing users keep their setup without reconfiguring, then subscribes to
+ * external edits for live reload.
+ */
+export function initConfigSync(): void {
+  if (configSyncInitialized) return
+  const bridge = typeof window !== 'undefined' ? window.zen : undefined
+  if (!bridge || typeof bridge.getConfigSync !== 'function') return
+  if (!configFileEnabled) return
+  configSyncInitialized = true
+
+  // Migration for existing users: no config file yet → create one from their
+  // current preferences so the dotfile starts as an exact mirror of today's
+  // setup, no reconfiguration needed.
+  if (!configFileHadContent && typeof bridge.setConfig === 'function') {
+    try {
+      const prefs = collectPrefs(useStore.getState())
+      void bridge.setConfig(pickPortablePrefs(prefs as unknown as Record<string, unknown>))
+    } catch {
+      /* ignore */
+    }
+  }
+
+  if (typeof bridge.onConfigChange === 'function') {
+    try {
+      bridge.onConfigChange((nextCfg) => applyPortableConfig(nextCfg))
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+function applyCustomThemes(themes: CustomTheme[]): void {
+  useStore.setState({ customThemes: themes })
+  // App.tsx injects the active theme's CSS in response to the state change.
+  // One-time canonicalization of any legacy two-id custom selection
+  // (`custom-<slug>-<mode>`) persisted by the pre-release WIP: only rewrites
+  // when the stored id doesn't match a loaded theme but its stripped form does,
+  // so a real theme whose slug ends in `-light`/`-dark` is left untouched.
+  const { themeId, themeMode } = useStore.getState()
+  if (isCustomThemeId(themeId)) {
+    const slug = customThemeSlugFromId(themeId)
+    if (slug && !themes.some((t) => t.slug === slug)) {
+      const legacy = /^custom-(.+)-(?:light|dark)$/.exec(themeId)
+      if (legacy && themes.some((t) => t.slug === legacy[1])) {
+        useStore
+          .getState()
+          .setTheme({ id: `custom-${legacy[1]}`, family: 'custom', mode: themeMode })
+      }
+    }
+  }
+}
+
+/** Re-scan the themes dir and apply the result. Used after an in-app change
+ *  (e.g. deleting a theme) so the UI updates without waiting on the watcher. */
+export function refreshCustomThemes(): void {
+  const bridge = typeof window !== 'undefined' ? window.zen : undefined
+  if (!bridge || typeof bridge.listCustomThemes !== 'function') return
+  void bridge.listCustomThemes().then(applyCustomThemes).catch(() => {})
+}
+
+/**
+ * Load user themes from the config dir, inject their CSS, and keep both in sync
+ * as files change. Safe to call on web (no bridge → no-op).
+ */
+export function initCustomThemes(): void {
+  const bridge = typeof window !== 'undefined' ? window.zen : undefined
+  if (!bridge || typeof bridge.listCustomThemes !== 'function') return
+  refreshCustomThemes()
+  if (typeof bridge.onCustomThemesChange === 'function') {
+    try {
+      bridge.onCustomThemesChange(applyCustomThemes)
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+let themeTweaksSaveTimer: ReturnType<typeof setTimeout> | null = null
+/** Debounce persistence of theme tweaks so dragging a color picker (which fires
+ *  continuously) doesn't spam the config file; in-memory state still updates
+ *  immediately for live preview. */
+function scheduleThemeTweaksSave(): void {
+  if (themeTweaksSaveTimer) clearTimeout(themeTweaksSaveTimer)
+  themeTweaksSaveTimer = setTimeout(() => {
+    themeTweaksSaveTimer = null
+    savePrefs(collectPrefs(useStore.getState()))
+  }, 250)
+}
+
+/** Keep only string→string entries (token slug → color). */
+function normalizeThemeTweaks(raw: unknown): Record<string, string> {
+  const out: Record<string, string> = {}
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+      if (typeof value === 'string' && value) out[key] = value
+    }
+  }
+  return out
+}
+
+/** Keep only string→string entries with a `.css` key (tolerant of hand edits). */
+function normalizeEnabledOverrides(raw: unknown): Record<string, string> {
+  const out: Record<string, string> = {}
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+      if (key.toLowerCase().endsWith('.css') && typeof value === 'string' && value) {
+        out[key] = value
+      }
+    }
+  }
+  return out
+}
+
+function applyOverrides(overrides: Override[]): void {
+  useStore.setState({ overrides })
+  // App.tsx injects the enabled overrides in response to the state change.
+}
+
+/** Re-scan the overrides dir and apply the result. */
+export function refreshOverrides(): void {
+  const bridge = typeof window !== 'undefined' ? window.zen : undefined
+  if (!bridge || typeof bridge.listOverrides !== 'function') return
+  void bridge
+    .listOverrides()
+    .then(applyOverrides)
+    .catch(() => {})
+}
+
+/**
+ * Load user overrides from the config dir and keep them in sync as files change.
+ * Safe to call on web (no bridge → no-op).
+ */
+export function initOverrides(): void {
+  const bridge = typeof window !== 'undefined' ? window.zen : undefined
+  if (!bridge || typeof bridge.listOverrides !== 'function') return
+  refreshOverrides()
+  if (typeof bridge.onOverridesChange === 'function') {
+    try {
+      bridge.onOverridesChange(applyOverrides)
+    } catch {
+      /* ignore */
+    }
+  }
+}

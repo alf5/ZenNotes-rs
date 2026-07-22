@@ -86,6 +86,7 @@ pub fn vault_info(root: &Path) -> VaultInfo {
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default(),
+        temporary: None,
     }
 }
 

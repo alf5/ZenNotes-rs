@@ -1,18 +1,39 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { createRoot, type Root } from "react-dom/client";
 import type { NoteMeta } from "@shared/ipc";
-import { renderMarkdown } from "../lib/markdown";
+import {
+  renderMarkdown,
+  setMarkdownLooseMathDelimiters,
+  setMarkdownMathRenderer,
+} from "../lib/markdown";
+import { expandEmbeds, hasNoteEmbeds } from "../lib/transclusion";
 import { useStore } from "../store";
 import { resolveAuto, THEMES } from "../lib/themes";
-import { resolveWikilinkTarget } from "../lib/wikilinks";
+import {
+  isSameFileHeadingLink,
+  resolveWikilinkTarget,
+  wikilinkHeadingAnchor,
+} from "../lib/wikilinks";
+import { openWikilinkHeading } from "../lib/wikilink-navigation";
+import { listDatabaseLinkTargets, resolveDatabaseWikilink } from "../lib/database-links";
+import { externalLinkUrl, resolveInternalNoteHref } from "../lib/internal-links";
 import { toggleTaskAtIndex } from "../lib/tasklists";
 import {
   enhanceLocalAssetNodes,
+  hrefFragment,
   resolveAssetVaultRelativePath,
 } from "../lib/local-assets";
 import { assetTabPath } from "../lib/asset-tabs";
+import { isExcalidrawPath, isObsidianExcalidrawPath } from "@shared/excalidraw";
+import { resolveExcalidrawEmbedPath } from "../lib/excalidraw-preview";
+import { LazyExcalidrawPreview } from "./LazyExcalidrawPreview";
 import { enhancePreviewHeadingFolds } from "../lib/preview-heading-fold";
 import { renderDiagrams } from "../lib/diagram-renderers";
+import { renderEmbeds, renderBookmarks } from "../lib/embed-renderers";
+import { renderTypstMath } from "../lib/typst-math-render";
+import { externalFileLink, openExternalFileLink } from "../lib/external-file-link";
+import { setHoveredLink } from "../lib/hovered-link";
 import { attachInlineDiagramPanZoom } from "../lib/inline-diagram-pan-zoom";
 import {
   CODE_COPY_BUTTON_SELECTOR,
@@ -368,8 +389,16 @@ export const Preview = memo(function Preview({
   onRendered?: (() => void) | null;
 }): JSX.Element {
   const ref = useRef<HTMLDivElement | null>(null);
+  const mathRenderer = useStore((s) => s.mathRenderer);
+  const looseMathDelimiters = useStore((s) => s.looseMathDelimiters);
   const vault = useStore((s) => s.vault);
   const notes = useStore((s) => s.notes);
+  const folders = useStore((s) => s.folders);
+  const vaultSettings = useStore((s) => s.vaultSettings);
+  const databaseTargets = useMemo(
+    () => listDatabaseLinkTargets(folders, vaultSettings),
+    [folders, vaultSettings],
+  );
   const assetFiles = useStore((s) => s.assetFiles);
   const refreshAssets = useStore((s) => s.refreshAssets);
   const deleteAssetAction = useStore((s) => s.deleteAsset);
@@ -432,7 +461,66 @@ export const Preview = memo(function Preview({
     window.zen.getAppInfo().runtime === "desktop" &&
     workspaceMode !== "remote";
 
-  const html = useMemo(() => renderMarkdown(markdown), [markdown]);
+  // #transclusion: expand `![[Note]]` embeds into inline content before
+  // rendering, so the reading view — and PDF export, which renders through this
+  // same Preview — show a "master note" with its sub-notes inlined. Only note
+  // targets expand (images/unknown are left for the normal pipeline), and only
+  // when the note actually contains note-embeds.
+  const resolveEmbedTarget = useMemo(
+    () =>
+      (target: string): { path: string; title: string } | null => {
+        const n = resolveWikilinkTarget(notes, target);
+        if (!n) return null;
+        if (isExcalidrawPath(n.path) || isObsidianExcalidrawPath(n.path)) return null;
+        return { path: n.path, title: n.title };
+      },
+    [notes],
+  );
+  const hasEmbeds = useMemo(
+    () => hasNoteEmbeds(markdown, resolveEmbedTarget, notePath),
+    [markdown, resolveEmbedTarget, notePath],
+  );
+  const [embedExpansion, setEmbedExpansion] = useState<{
+    src: string;
+    out: string;
+  } | null>(null);
+  const expandedForCurrent =
+    embedExpansion?.src === markdown ? embedExpansion.out : null;
+  useEffect(() => {
+    if (!hasEmbeds || expandedForCurrent != null) return;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      void expandEmbeds(markdown, notePath, {
+        resolve: resolveEmbedTarget,
+        loadNote: async (path) => {
+          try {
+            return (await window.zen.readNote(path)).body ?? null;
+          } catch {
+            return null;
+          }
+        },
+      }).then((out) => {
+        if (!cancelled) setEmbedExpansion({ src: markdown, out });
+      });
+    }, 120);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [hasEmbeds, expandedForCurrent, markdown, notePath, resolveEmbedTarget]);
+  // Gate the PDF-ready signal (onRendered) until embeds resolve, so exports
+  // capture the expanded document rather than the bare links.
+  const embedsReady = !hasEmbeds || expandedForCurrent != null;
+  const embedsReadyRef = useRef(embedsReady);
+  embedsReadyRef.current = embedsReady;
+
+  const html = useMemo(() => {
+    // Point the pipeline at the active engine before rendering, so a toggle
+    // takes effect on the very next render without an effect-ordering race.
+    setMarkdownMathRenderer(mathRenderer);
+    setMarkdownLooseMathDelimiters(looseMathDelimiters);
+    return renderMarkdown(expandedForCurrent ?? markdown);
+  }, [expandedForCurrent, markdown, mathRenderer, looseMathDelimiters]);
   const assetFilesKey = useMemo(
     () => assetFiles.map((asset) => asset.path).join("\n"),
     [assetFiles],
@@ -450,6 +538,9 @@ export const Preview = memo(function Preview({
   const openNoteInTabRef = useRef(openNoteInTab);
   const updateActiveBodyRef = useRef(updateActiveBody);
   const persistActiveRef = useRef(persistActive);
+  // React roots for rendered Excalidraw embed placeholders — unmounted on
+  // every re-render and on component teardown to avoid leaks.
+  const excalidrawRootsRef = useRef<Root[]>([]);
 
   useEffect(() => {
     notesRef.current = notes;
@@ -535,13 +626,48 @@ export const Preview = memo(function Preview({
       if (anchor.classList.contains("wikilink")) {
         e.preventDefault();
         const path = anchor.dataset.resolvedPath;
-        if (path) void selectNoteRef.current(path);
+        if (path) {
+          // Scroll to the #heading when the link carries one. (#196)
+          const headingAnchor = wikilinkHeadingAnchor(anchor.dataset.wikilink ?? "");
+          if (headingAnchor) void openWikilinkHeading(path, headingAnchor);
+          else void selectNoteRef.current(path);
+        } else if (anchor.dataset.databaseCsv) {
+          void useStore.getState().openDatabase(anchor.dataset.databaseCsv);
+        }
         return;
       }
       if (anchor.classList.contains("hashtag")) {
         e.preventDefault();
         const tag = anchor.getAttribute("data-tag");
         if (tag) void useStore.getState().openTagView(tag);
+        return;
+      }
+      // A standard Markdown link to another note — `[text](path/to/Note.md)` —
+      // navigates like a wikilink, resolved relative to this note. Checked
+      // before the asset branch: `enhanceLocalAssetNodes` may have tagged a
+      // relative link and rewritten its href, keeping the original in
+      // `data-local-asset-href`. (#201)
+      const linkHref =
+        anchor.dataset.localAssetHref || anchor.getAttribute("href") || "";
+      const internalNote = resolveInternalNoteHref(
+        notePathRef.current,
+        linkHref,
+        notesRef.current,
+      );
+      if (internalNote) {
+        e.preventDefault();
+        if (internalNote.heading)
+          void openWikilinkHeading(internalNote.path, internalNote.heading);
+        else void selectNoteRef.current(internalNote.path);
+        return;
+      }
+      // An external web link — `[site](https://…)` or a bare `[site](google.com)`
+      // a user typed without a scheme — opens in the browser. Checked before the
+      // asset branch since a scheme-less domain looks like a relative path. (#201)
+      const external = externalLinkUrl(linkHref);
+      if (external) {
+        e.preventDefault();
+        window.open(external, "_blank");
         return;
       }
       const localAssetUrl = anchor.dataset.localAssetUrl;
@@ -563,6 +689,36 @@ export const Preview = memo(function Preview({
         window.open(href, "_blank");
         return;
       }
+      // In-page anchors — footnote refs / back-refs and heading links. The
+      // browser's default hash navigation doesn't scroll an element that lives
+      // inside the preview's own overflow:auto container, so resolve the target
+      // and scroll it ourselves. This is what made footnotes feel dead in the
+      // (split) preview, and it works both ways: ref → definition and the ↩
+      // back-ref → reference (#69).
+      if (href.startsWith("#") && href.length > 1) {
+        e.preventDefault();
+        const id = decodeURIComponent(href.slice(1));
+        const dest =
+          root.querySelector<HTMLElement>(`#${CSS.escape(id)}`) ??
+          root.querySelector<HTMLElement>(`[name="${CSS.escape(id)}"]`);
+        if (dest) {
+          dest.scrollIntoView({ behavior: "smooth", block: "center" });
+          // Brief highlight so the jump is obvious in a long note.
+          dest.style.transition = "background-color 700ms ease";
+          dest.style.backgroundColor = "rgb(var(--z-accent) / 0.22)";
+          window.setTimeout(() => {
+            dest.style.backgroundColor = "";
+          }, 900);
+        }
+        return;
+      }
+      // A link to a file outside the vault (`~/…`, `file://…`, an absolute path):
+      // open it with the OS default app instead of silently doing nothing. (#424)
+      if (externalFileLink(href)) {
+        e.preventDefault();
+        void openExternalFileLink(href);
+        return;
+      }
       e.preventDefault();
     };
     const onMouseOver = (e: MouseEvent): void => {
@@ -578,6 +734,16 @@ export const Preview = memo(function Preview({
     };
     const onMouseMove = (e: MouseEvent): void => {
       const target = e.target as HTMLElement;
+      // Status-bar link preview (browser-style): show the target of whatever
+      // link is under the pointer, wikilink or plain markdown link.
+      const anyLink = target.closest("a") as HTMLAnchorElement | null;
+      setHoveredLink(
+        anyLink
+          ? anyLink.dataset.wikilink ||
+              anyLink.dataset.resolvedPath ||
+              anyLink.getAttribute("href")
+          : null,
+      );
       const anchor = target.closest("a.wikilink") as HTMLAnchorElement | null;
       if (!anchor) {
         // Pointer moved off the link. Don't dismiss immediately — the
@@ -632,10 +798,13 @@ export const Preview = memo(function Preview({
       setAssetMenu({ x: e.clientX, y: e.clientY, url, vaultRel, href });
     };
 
+    const onMouseLeave = (): void => setHoveredLink(null);
+
     root.addEventListener("click", onClick);
     root.addEventListener("mouseover", onMouseOver);
     root.addEventListener("mousemove", onMouseMove);
     root.addEventListener("mouseout", onMouseOut);
+    root.addEventListener("mouseleave", onMouseLeave);
     root.addEventListener("change", onChange);
     root.addEventListener("contextmenu", onContextMenu);
 
@@ -644,8 +813,10 @@ export const Preview = memo(function Preview({
       root.removeEventListener("mouseover", onMouseOver);
       root.removeEventListener("mousemove", onMouseMove);
       root.removeEventListener("mouseout", onMouseOut);
+      root.removeEventListener("mouseleave", onMouseLeave);
       root.removeEventListener("change", onChange);
       root.removeEventListener("contextmenu", onContextMenu);
+      setHoveredLink(null);
     };
   }, []);
 
@@ -663,9 +834,26 @@ export const Preview = memo(function Preview({
       if (resolved) {
         a.classList.remove("broken");
         a.dataset.resolvedPath = resolved.path;
+        delete a.dataset.databaseCsv;
+        return;
+      }
+      // `[[#heading]]` (no note part) links to a heading in THIS note — resolve
+      // it to the note being previewed so the click scrolls in place. (#291)
+      if (isSameFileHeadingLink(target)) {
+        a.classList.remove("broken");
+        a.dataset.resolvedPath = notePath;
+        delete a.dataset.databaseCsv;
+        return;
+      }
+      delete a.dataset.resolvedPath;
+      // Not a note — a `.base` database link is still valid (#238).
+      const db = resolveDatabaseWikilink(databaseTargets, target);
+      if (db) {
+        a.classList.remove("broken");
+        a.dataset.databaseCsv = db.csvPath;
       } else {
         a.classList.add("broken");
-        delete a.dataset.resolvedPath;
+        delete a.dataset.databaseCsv;
       }
     });
 
@@ -692,6 +880,36 @@ export const Preview = memo(function Preview({
         input.dataset.taskIndex = String(idx);
         input.setAttribute("role", "checkbox");
         input.classList.add("cursor-pointer");
+        // Tag the item with its OWN checked state and wrap its inline text in a
+        // span, so the completed-task styling (strike/gray) targets just this
+        // line and never bleeds onto nested sub-tasks. Loose items keep their
+        // <p>, which the CSS targets directly; only bare-text (tight) items get
+        // the wrapper.
+        const li = input.closest<HTMLLIElement>("li.task-list-item");
+        if (li) {
+          li.classList.toggle("task-self-done", input.checked);
+          if (!li.querySelector(":scope > .task-item-body")) {
+            const own = Array.from(li.childNodes).filter((node) => {
+              if (node === input) return false;
+              if (node.nodeType === Node.ELEMENT_NODE) {
+                const tag = (node as Element).tagName;
+                if (tag === "UL" || tag === "OL" || tag === "P") return false;
+              }
+              return true;
+            });
+            const hasText = own.some(
+              (node) =>
+                node.nodeType !== Node.TEXT_NODE ||
+                (node.textContent ?? "").trim() !== "",
+            );
+            if (hasText && own.length > 0) {
+              const body = document.createElement("span");
+              body.className = "task-item-body";
+              li.insertBefore(body, own[0]);
+              for (const node of own) body.appendChild(node);
+            }
+          }
+        }
       });
 
     const applyRenderedDom = async (): Promise<void> => {
@@ -700,22 +918,83 @@ export const Preview = memo(function Preview({
       } catch {
         /* render errors are surfaced inline per block */
       }
-      await renderDiagrams(stage, { themeKey: effectiveMode, expanded: false });
       if (cancelled) return;
+      // Attach to the live document BEFORE rendering diagrams. JSXGraph binds to
+      // a real element via document.getElementById and sizes the board from the
+      // laid-out container, so a detached buffer yields "HTML container element
+      // not found" and zero-size boards (#68). Mermaid renders to inline SVG, so
+      // it is safe to render in the detached buffer above.
       root.replaceChildren(...Array.from(stage.childNodes));
+      await renderDiagrams(root, { themeKey: effectiveMode, expanded: false });
+      if (cancelled) return;
+      // Typst math (a no-op when the KaTeX renderer is active, since it emits no
+      // `.zen-typst-math` placeholders). Recolored to currentColor, so a theme
+      // switch needs no re-render.
+      await renderTypstMath(root);
+      if (cancelled) return;
+      renderEmbeds(root);
+      renderBookmarks(root);
+      renderExcalidrawEmbeds(root);
       requestAnimationFrame(() => {
-        if (!cancelled) onRenderedRef.current?.();
+        if (!cancelled && embedsReadyRef.current) onRenderedRef.current?.();
       });
+    };
+
+    const renderExcalidrawEmbeds = (container: HTMLElement): void => {
+      // Unmount roots from the previous render before hydrating the new DOM.
+      for (const r of excalidrawRootsRef.current) {
+        try {
+          r.unmount();
+        } catch {
+          /* node already gone */
+        }
+      }
+      excalidrawRootsRef.current = [];
+      const notePaths = notes.map((n) => n.path);
+      container
+        .querySelectorAll<HTMLElement>("[data-excalidraw-embed]")
+        .forEach((host) => {
+          const target = host.getAttribute("data-excalidraw-embed") || "";
+          if (!target.trim()) return;
+          const wAttr = host.getAttribute("data-embed-width");
+          const hAttr = host.getAttribute("data-embed-height");
+          const resolved = resolveExcalidrawEmbedPath(notePaths, target) ?? target;
+          const r = createRoot(host);
+          excalidrawRootsRef.current.push(r);
+          r.render(
+            <LazyExcalidrawPreview
+              path={resolved}
+              width={wAttr ? Number(wAttr) : undefined}
+              height={hAttr ? Number(hAttr) : undefined}
+              className="excalidraw-embed-preview"
+              onClick={() => {
+                // Open the drawing (isExcalidrawPath → Excalidraw editor). An
+                // asset tab (zen://asset/…) would route to the generic asset
+                // viewer and offer to download the file instead. (#360)
+                void openNoteInTabRef.current(resolved);
+              }}
+            />,
+          );
+        });
     };
 
     void applyRenderedDom();
 
     return () => {
       cancelled = true;
+      for (const r of excalidrawRootsRef.current) {
+        try {
+          r.unmount();
+        } catch {
+          /* node already gone */
+        }
+      }
+      excalidrawRootsRef.current = [];
     };
   }, [
     assetFilesKey,
     effectiveMode,
+    databaseTargets,
     html,
     notePath,
     notes,
@@ -831,13 +1110,15 @@ export const Preview = memo(function Preview({
         if (abs) window.zen.clipboardWriteText(abs);
       },
     });
+    const assetHref = assetMenu.href;
+    const fragment = hrefFragment(assetHref) || null;
     items.push(
       {
         label: "Open as Reference (This Note)",
         disabled: !vaultRel,
         onSelect: async () => {
           if (vaultRel) {
-            pinAssetReferenceForNote(notePath, vaultRel);
+            pinAssetReferenceForNote(notePath, vaultRel, fragment);
           }
         },
       },
@@ -845,7 +1126,7 @@ export const Preview = memo(function Preview({
         label: "Open as Reference (Global)",
         disabled: !vaultRel,
         onSelect: async () => {
-          if (vaultRel) pinAssetReference(vaultRel);
+          if (vaultRel) pinAssetReference(vaultRel, fragment);
         },
       },
     );
@@ -968,7 +1249,7 @@ function ExpandedDiagramModal({
   return createPortal(
     <div
       className={[
-        "fixed inset-0 z-[80] flex bg-black/60 backdrop-blur-sm",
+        "fixed inset-0 z-popover flex bg-black/60 backdrop-blur-sm",
         fullScreen
           ? "items-start justify-center p-0"
           : "items-center justify-center p-4 md:p-6",

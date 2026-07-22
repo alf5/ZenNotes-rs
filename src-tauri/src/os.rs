@@ -27,6 +27,42 @@ fn canonical_or_self(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// v2.15 `revealFilePath` — reveal an arbitrary absolute path (upstream
+/// index.ts:2599: no validation, straight to the file manager).
+pub fn reveal_file_path(app: &AppHandle, abs_path: &str) -> Result<(), String> {
+    reveal(app, Path::new(abs_path))
+}
+
+/// v2.15 `openExternalFile` — resolve `file://…`, `~`/`~/…`, or a plain path
+/// and hand it to the OS default opener (upstream index.ts:2606-2617). The
+/// confirm dialog guarding this lives in app-core; errors are returned, not
+/// thrown, so the caller can build the `{ok, error}` result.
+pub fn open_external_file(app: &AppHandle, href: &str) -> Result<(), String> {
+    let raw = href.trim();
+    if raw.is_empty() {
+        return Err("Empty file path".into());
+    }
+    let path = if let Some(rest) = raw.strip_prefix("file://") {
+        let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+        urlencoding::decode(rest)
+            .map(|c| c.into_owned())
+            .unwrap_or_else(|_| rest.to_string())
+    } else if raw == "~" || raw.starts_with("~/") {
+        let home = app
+            .path()
+            .home_dir()
+            .map_err(|e| format!("Could not resolve home dir: {e}"))?;
+        home.join(raw.trim_start_matches('~').trim_start_matches('/'))
+            .to_string_lossy()
+            .to_string()
+    } else {
+        raw.to_string()
+    };
+    app.opener()
+        .open_path(path, None::<&str>)
+        .map_err(|e| format!("{e}"))
+}
+
 pub fn reveal_note(app: &AppHandle, state: &AppState, rel: &str, follow_symlink: bool) -> Result<(), String> {
     let abs = resolve_safe(&require_root(state)?, rel)?;
     reveal(app, &if follow_symlink { canonical_or_self(&abs) } else { abs })

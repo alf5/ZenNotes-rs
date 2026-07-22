@@ -1,19 +1,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { isTasksViewActive, useStore, type TasksViewMode } from '../store'
-import type { VaultTask } from '@shared/tasks'
+import { inferDailyTaskDueDates, type VaultTask } from '@shared/tasks'
+import { buildDailyNoteDateByPath } from '../lib/vault-layout'
 import { computeTasksRender, isOverdue } from '../lib/tasks-filter'
+import { forwardTaskWithPicker } from '../lib/forward-task'
 import { TasksRow } from './TasksRow'
 import { TasksCalendar } from './TasksCalendar'
 import { TasksKanban } from './TasksKanban'
 import { CalendarIcon, CheckSquareIcon, KanbanIcon, ListIcon } from './icons'
 import { advanceSequence, getKeymapBinding, matchesSequenceToken } from '../lib/keymaps'
+import { isImeComposing } from '../lib/ime'
+import { isAppOverlayOpen } from '../lib/overlay-open'
 
-type GroupKey = 'today' | 'upcoming' | 'waiting' | 'done'
+type GroupKey = 'today' | 'upcoming' | 'waiting' | 'forwarded' | 'done'
 
 const GROUP_LABELS: Record<GroupKey, string> = {
   today: 'Today',
   upcoming: 'Upcoming',
   waiting: 'Waiting',
+  forwarded: 'Forwarded',
   done: 'Done'
 }
 
@@ -28,8 +33,14 @@ const VIEW_BUTTONS: Array<{
   { id: 'kanban', label: 'Kanban', shortcut: '3', Icon: KanbanIcon }
 ]
 
+// Grace period (ms) after toggling a task in the list before it re-groups, so a
+// just-checked task doesn't immediately vanish into the collapsed Done group.
+const TASK_LINGER_MS = 2500
+
 export function TasksView(): JSX.Element {
-  const tasks = useStore((s) => s.vaultTasks)
+  const rawTasks = useStore((s) => s.vaultTasks)
+  const notes = useStore((s) => s.notes)
+  const vaultSettings = useStore((s) => s.vaultSettings)
   const loading = useStore((s) => s.tasksLoading)
   const filter = useStore((s) => s.tasksFilter)
   const cursorIndex = useStore((s) => s.taskCursorIndex)
@@ -38,8 +49,24 @@ export function TasksView(): JSX.Element {
   const refreshTasks = useStore((s) => s.refreshTasks)
   const openTaskAt = useStore((s) => s.openTaskAt)
   const toggleTaskFromList = useStore((s) => s.toggleTaskFromList)
+  const applyTaskMutation = useStore((s) => s.applyTaskMutation)
+  const moveTaskToDate = useStore((s) => s.moveTaskToDate)
+  const addTaskForDate = useStore((s) => s.addTaskForDate)
   const closeTasksView = useStore((s) => s.closeTasksView)
+  const reorderTaskInNote = useStore((s) => s.reorderTaskInNote)
+  const newTaskFile = useStore((s) => s.newTaskFile)
+
+  // Tasks written inside a daily note inherit that note's date as an implicit
+  // due date (a clean line, no `due:` token) so they appear on the calendar.
+  // Done at the display layer so it works on desktop + web identically and
+  // re-derives whenever notes/settings change. Explicit `due:` still wins.
+  const dueByPath = useMemo(
+    () => buildDailyNoteDateByPath(notes, vaultSettings),
+    [notes, vaultSettings]
+  )
+  const tasks = useMemo(() => inferDailyTaskDueDates(rawTasks, dueByPath), [rawTasks, dueByPath])
   const keymapOverrides = useStore((s) => s.keymapOverrides)
+  const vimMode = useStore((s) => s.vimMode)
   const viewMode = useStore((s) => s.tasksViewMode)
   const setViewMode = useStore((s) => s.setTasksViewMode)
   // Only the Tasks panel in the *active* pane should listen for j/k/etc.
@@ -53,14 +80,25 @@ export function TasksView(): JSX.Element {
     today: false,
     upcoming: false,
     waiting: false,
+    forwarded: true,
     done: true
   })
+
+  // Keep a just-toggled task in its pre-toggle group for TASK_LINGER_MS so it
+  // doesn't vanish into (collapsed) Done before you can undo. `groupChecked` is
+  // the checked state to group by while it lingers; toggle again to revert.
+  const lingerRef = useRef<Map<string, { groupChecked: boolean }>>(new Map())
+  const lingerTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+  const [lingerVersion, setLingerVersion] = useState(0)
 
   const filterRef = useRef<HTMLInputElement>(null)
   const rootRef = useRef<HTMLDivElement>(null)
   const exRef = useRef<HTMLInputElement>(null)
   const gPending = useRef(0)
   const gTimer = useRef<ReturnType<typeof setTimeout>>()
+  // After a manual reorder the rows re-sort; keep the cursor on the task that
+  // moved so repeated Shift+J/K keep nudging the same one.
+  const followTaskRef = useRef<string | null>(null)
   // Vim-style command line. Not backed by CodeMirror (Tasks has no CM
   // view) — just a tiny bottom-of-panel input that dispatches a handful
   // of ex commands.
@@ -72,10 +110,25 @@ export function TasksView(): JSX.Element {
   // back, reopening the view is sufficient to refresh the anchor.
   const today = useMemo(() => new Date(), [])
 
-  const render = useMemo(
-    () => computeTasksRender(tasks, filter, today, collapsed),
-    [tasks, filter, today, collapsed]
-  )
+  const render = useMemo(() => {
+    const linger = lingerRef.current
+    if (linger.size === 0) return computeTasksRender(tasks, filter, today, collapsed)
+    // Group lingering tasks by their PRE-toggle checked state so a just-checked
+    // task stays in its current group instead of jumping straight to Done.
+    const source = tasks.map((t) => {
+      const l = linger.get(t.id)
+      return l ? { ...t, checked: l.groupChecked } : t
+    })
+    const r = computeTasksRender(source, filter, today, collapsed)
+    // Render the real task so the checkbox reflects the actual (new) state while
+    // the row lingers in place.
+    const byId = new Map(tasks.map((t) => [t.id, t]))
+    const rows = r.rows.map((row) =>
+      row.kind === 'task' && row.task ? { ...row, task: byId.get(row.task.id) ?? row.task } : row
+    )
+    return { ...r, rows }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tasks, filter, today, collapsed, lingerVersion])
 
   // Index-into-rows map for just the 'task' rows (what the cursor navigates).
   const taskRowIndices = useMemo(() => {
@@ -109,6 +162,21 @@ export function TasksView(): JSX.Element {
     if (el) el.scrollIntoView({ block: 'nearest' })
   }, [currentTask, viewMode])
 
+  // Keep the cursor on a task that was just reordered. We match by
+  // sourcePath + content, not id: a line move changes the task's index (and
+  // therefore its `${path}#${index}` id), but its text stays the same.
+  useEffect(() => {
+    const key = followTaskRef.current
+    if (!key) return
+    followTaskRef.current = null
+    const rowIdx = render.rows.findIndex(
+      (r) => r.kind === 'task' && r.task != null && taskFollowKey(r.task) === key
+    )
+    if (rowIdx < 0) return
+    const ti = taskRowIndices.indexOf(rowIdx)
+    if (ti >= 0) setCursorIndex(ti)
+  }, [render.rows, taskRowIndices, setCursorIndex])
+
   const moveCursor = useCallback(
     (delta: number) => {
       if (taskRowIndices.length === 0) return
@@ -116,6 +184,76 @@ export function TasksView(): JSX.Element {
       setCursorIndex(next)
     },
     [safeCursor, setCursorIndex, taskRowIndices.length]
+  )
+
+  // Toggle a list task, then keep it pinned in place for a grace period (see the
+  // linger refs). The checked state is written immediately; only the re-group is
+  // deferred, so toggling again within the window simply reverts it in place.
+  const lingerToggle = useCallback(
+    (task: VaultTask) => {
+      const key = task.id
+      if (!lingerRef.current.has(key)) lingerRef.current.set(key, { groupChecked: task.checked })
+      const prev = lingerTimers.current.get(key)
+      if (prev) clearTimeout(prev)
+      lingerTimers.current.set(
+        key,
+        setTimeout(() => {
+          lingerRef.current.delete(key)
+          lingerTimers.current.delete(key)
+          setLingerVersion((v) => v + 1)
+        }, TASK_LINGER_MS)
+      )
+      setLingerVersion((v) => v + 1)
+      void toggleTaskFromList(task)
+    },
+    [toggleTaskFromList]
+  )
+
+  // Clear any pending linger timers on unmount.
+  useEffect(() => {
+    const timers = lingerTimers.current
+    return () => {
+      for (const t of timers.values()) clearTimeout(t)
+    }
+  }, [])
+
+  // Move the cursored task one slot up/down by swapping with its neighbor in
+  // the same note — this rewrites the note's markdown line order, the single
+  // source of truth. No-op at a group edge or a note boundary (can't move a
+  // task line into a different file).
+  const moveSelectedTask = useCallback(
+    (delta: -1 | 1) => {
+      if (viewMode !== 'list' || !currentTask) return
+      const row = render.rows[currentRowIdx]
+      if (!row || row.kind !== 'task') return
+      const list = render.groups[row.group]
+      const from = list.findIndex((t) => t.id === currentTask.id)
+      const neighbor = from >= 0 ? list[from + delta] : undefined
+      if (!neighbor || neighbor.sourcePath !== currentTask.sourcePath) return
+      followTaskRef.current = taskFollowKey(currentTask)
+      void reorderTaskInNote(currentTask, neighbor, delta < 0 ? 'before' : 'after')
+    },
+    [viewMode, currentTask, currentRowIdx, render.rows, render.groups, reorderTaskInNote]
+  )
+
+  // Drag-to-reorder: only within the same note (a task line can't move between
+  // files), so cross-note drops are ignored.
+  const reorderTaskByDrag = useCallback(
+    (draggedId: string, targetId: string, position: 'before' | 'after') => {
+      if (draggedId === targetId) return
+      const keys: GroupKey[] = ['today', 'upcoming', 'waiting', 'done']
+      for (const group of keys) {
+        const list = render.groups[group]
+        const dragged = list.find((t) => t.id === draggedId)
+        const target = list.find((t) => t.id === targetId)
+        if (dragged && target && dragged.sourcePath === target.sourcePath) {
+          followTaskRef.current = taskFollowKey(dragged)
+          void reorderTaskInNote(dragged, target, position)
+          return
+        }
+      }
+    },
+    [render.groups, reorderTaskInNote]
   )
 
   const toggleGroup = useCallback((g: GroupKey) => {
@@ -149,6 +287,10 @@ export function TasksView(): JSX.Element {
         case 'refresh':
         case 'r':
           void refreshTasks()
+          return
+        case 'new':
+        case 'add':
+          void store.newTaskFile()
           return
         case 'list':
         case 'ls':
@@ -199,9 +341,29 @@ export function TasksView(): JSX.Element {
   //      own keyboard handlers in those components.
   // Registered in CAPTURE phase + uses `stopImmediatePropagation` so it
   // beats VimNav's global handler.
+  // Activating the Tasks tab claims panel focus for the Tasks view so pane
+  // navigation and the key handler below agree on where focus is. Fires only on
+  // the activation edge, so a later Ctrl+W to another panel isn't overridden. (#412)
+  useEffect(() => {
+    if (isActivePanel) useStore.getState().setFocusedPanel('tasks')
+  }, [isActivePanel])
+
   useEffect(() => {
     if (!isActivePanel) return
     const handler = (e: KeyboardEvent): void => {
+      // A modal/menu owns the keyboard while open — don't fire list shortcuts
+      // through it. (songgenqing report)
+      if (isAppOverlayOpen()) return
+      // While the Vim hint overlay is open it owns the keyboard; don't let
+      // task navigation (or Esc closing the view) steal its keys. (#151)
+      if (document.querySelector('[data-vim-hint-overlay]')) return
+      // The Tasks tab can stay "active" while pane navigation (Ctrl+W h/j/k/l)
+      // moves keyboard focus to another panel. Once focusedPanel is no longer
+      // 'tasks', release the keys so the target panel (e.g. the sidebar) gets
+      // j/k instead of this capture listener beating VimNav to them. A `null`
+      // panel means "no explicit focus yet" — keep handling as before. (#412)
+      const fp = useStore.getState().focusedPanel
+      if (fp != null && fp !== 'tasks') return
       const active = document.activeElement as HTMLElement | null
       if (active) {
         const tag = active.tagName
@@ -211,47 +373,58 @@ export function TasksView(): JSX.Element {
 
       const key = e.key
       const overrides = keymapOverrides
+      // When Vim mode is off, the single-key Vim shortcuts (j/k/gg/G/o/Space/1-3/…)
+      // are disabled — only arrows/Enter/Escape navigate. (songgenqing report)
+      const seq = (id: Parameters<typeof matchesSequenceToken>[2]): boolean =>
+        vimMode && matchesSequenceToken(e, overrides, id)
       const consume = (): void => {
         e.preventDefault()
         e.stopImmediatePropagation()
       }
 
       if (key === 'Escape') {
-        if (filter) {
-          consume()
-          setFilter('')
-          return
-        }
+        // Tasks is a tab like a note tab — Esc clears an active filter but must
+        // never close the tab (other tabs don't close on Esc). Close with :q,
+        // the header ✕, or ⌘W. (#151)
         consume()
-        closeTasksView()
+        if (filter) setFilter('')
         return
       }
 
-      // View switcher works regardless of sub-view.
-      if (key === '1') {
+      // View switcher works regardless of sub-view (Vim mode only).
+      if (vimMode && key === '1') {
         consume()
         setViewMode('list')
         return
       }
-      if (key === '2') {
+      if (vimMode && key === '2') {
         consume()
         setViewMode('calendar')
         return
       }
-      if (key === '3') {
+      if (vimMode && key === '3') {
         consume()
         setViewMode('kanban')
         return
       }
 
-      if (matchesSequenceToken(e, overrides, 'nav.filter')) {
+      // Quick-add a new task file. View-independent (works in list/calendar/
+      // kanban). A single-key shortcut, so it's gated on Vim mode like the rest;
+      // with Vim off, the header "+ New task" button is the way in.
+      if (vimMode && key === 'a') {
+        consume()
+        void newTaskFile()
+        return
+      }
+
+      if (seq('nav.filter')) {
         consume()
         filterRef.current?.focus()
         filterRef.current?.select()
         return
       }
 
-      if (matchesSequenceToken(e, overrides, 'nav.localEx')) {
+      if (seq('nav.localEx')) {
         consume()
         setExValue('')
         setExOpen(true)
@@ -263,22 +436,36 @@ export function TasksView(): JSX.Element {
       // List-mode-only navigation. Calendar and Kanban have their own.
       if (viewMode !== 'list') return
 
-      if (matchesSequenceToken(e, overrides, 'nav.moveDown') || key === 'ArrowDown') {
+      if (seq('nav.moveDown') || key === 'ArrowDown') {
         consume()
         moveCursor(1)
         return
       }
-      if (matchesSequenceToken(e, overrides, 'nav.moveUp') || key === 'ArrowUp') {
+      if (seq('nav.moveUp') || key === 'ArrowUp') {
         consume()
         moveCursor(-1)
         return
       }
-      if (matchesSequenceToken(e, overrides, 'nav.jumpBottom')) {
+      // Task reorder works whether or not Vim mode is on (Shift+J/K are an
+      // explicit action chord, not a single-key list shortcut), so match the
+      // binding directly rather than through the Vim-gated `seq` helper.
+      if (matchesSequenceToken(e, overrides, 'tasks.moveTaskUp')) {
+        consume()
+        moveSelectedTask(-1)
+        return
+      }
+      if (matchesSequenceToken(e, overrides, 'tasks.moveTaskDown')) {
+        consume()
+        moveSelectedTask(1)
+        return
+      }
+      if (seq('nav.jumpBottom')) {
         consume()
         setCursorIndex(taskRowIndices.length - 1)
         return
       }
       if (
+        vimMode &&
         advanceSequence(
           e,
           getKeymapBinding(overrides, 'nav.jumpTop'),
@@ -292,14 +479,20 @@ export function TasksView(): JSX.Element {
         return
       }
 
-      if ((key === 'Enter' || matchesSequenceToken(e, overrides, 'nav.openResult')) && currentTask) {
+      if ((key === 'Enter' || seq('nav.openResult')) && currentTask) {
         consume()
         void openTaskAt(currentTask)
         return
       }
-      if ((key === ' ' || matchesSequenceToken(e, overrides, 'nav.toggleTask')) && currentTask) {
+      if (((vimMode && key === ' ') || seq('nav.toggleTask')) && currentTask) {
         consume()
-        void toggleTaskFromList(currentTask)
+        lingerToggle(currentTask)
+        return
+      }
+      // Forward the selected task to another note (#316). Vim-gated single key.
+      if (vimMode && key === '>' && currentTask) {
+        consume()
+        void forwardTaskWithPicker(currentTask)
         return
       }
     }
@@ -309,16 +502,19 @@ export function TasksView(): JSX.Element {
     isActivePanel,
     filter,
     moveCursor,
+    moveSelectedTask,
     setCursorIndex,
     taskRowIndices.length,
     currentTask,
     keymapOverrides,
+    vimMode,
     openTaskAt,
-    toggleTaskFromList,
+    lingerToggle,
     closeTasksView,
     setFilter,
     viewMode,
-    setViewMode
+    setViewMode,
+    newTaskFile
   ])
 
   return (
@@ -329,10 +525,10 @@ export function TasksView(): JSX.Element {
       <div className="flex items-center gap-2 border-b border-paper-300/45 px-4 py-3">
         <CheckSquareIcon width={18} height={18} />
         <h1 className="text-sm font-semibold">Tasks</h1>
-        <span className="ml-2 rounded bg-paper-300/60 px-1.5 py-0.5 text-[11px] text-current/60">
+        <span className="ml-2 rounded bg-paper-300/60 px-1.5 py-0.5 text-xs text-current/60">
           {tasks.length} total
         </span>
-        {loading && <span className="text-[11px] text-current/50">scanning…</span>}
+        {loading && <span className="text-xs text-current/50">scanning…</span>}
 
         <div className="ml-2 flex items-center gap-0.5 rounded-md bg-paper-200/60 p-0.5">
           {VIEW_BUTTONS.map(({ id, label, shortcut, Icon }) => {
@@ -344,7 +540,7 @@ export function TasksView(): JSX.Element {
                 onClick={() => setViewMode(id)}
                 title={`${label} (${shortcut})`}
                 className={[
-                  'flex items-center gap-1 rounded px-2 py-1 text-[11px] transition-colors',
+                  'flex items-center gap-1 rounded px-2 py-1 text-xs transition-colors',
                   isActive
                     ? 'bg-paper-50 text-current/90 shadow-sm'
                     : 'text-current/55 hover:bg-paper-200/60 hover:text-current/85'
@@ -366,6 +562,8 @@ export function TasksView(): JSX.Element {
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
               onKeyDown={(e) => {
+                // While composing (IME), let the input own Enter/Arrows. (#183)
+                if (isImeComposing(e)) return
                 if (e.key === 'Escape') {
                   e.stopPropagation()
                   if (filter) setFilter('')
@@ -380,6 +578,14 @@ export function TasksView(): JSX.Element {
           )}
           <button
             type="button"
+            onClick={() => void newTaskFile()}
+            className="rounded-md border border-accent/45 bg-accent/10 px-2 py-1 text-xs font-medium text-accent hover:bg-accent/20"
+            title="New task (a)"
+          >
+            + New task
+          </button>
+          <button
+            type="button"
             onClick={() => void refreshTasks()}
             className="rounded-md px-2 py-1 text-xs text-current/70 hover:bg-paper-200/80"
             title="Rescan vault"
@@ -390,7 +596,7 @@ export function TasksView(): JSX.Element {
             type="button"
             onClick={closeTasksView}
             className="rounded-md px-2 py-1 text-xs text-current/70 hover:bg-paper-200/80"
-            title="Close (:q or Esc)"
+            title="Close (:q)"
           >
             Close
           </button>
@@ -419,7 +625,7 @@ export function TasksView(): JSX.Element {
                     <span>{GROUP_LABELS[key]}</span>
                     <span className="text-current/40">{row.count ?? 0}</span>
                     {key === 'today' && row.overdueCount ? (
-                      <span className="ml-1 rounded bg-rose-500/15 px-1.5 py-0.5 text-[10px] font-medium text-rose-300">
+                      <span className="ml-1 rounded bg-rose-500/15 px-1.5 py-0.5 text-2xs font-medium text-rose-300">
                         {row.overdueCount} overdue
                       </span>
                     ) : null}
@@ -435,12 +641,13 @@ export function TasksView(): JSX.Element {
                 task={task}
                 isOverdue={overdue}
                 isCursor={idx === currentRowIdx}
-                onToggle={() => void toggleTaskFromList(task)}
+                onToggle={() => lingerToggle(task)}
                 onOpen={() => void openTaskAt(task)}
                 onFocusRow={() => {
                   const ti = taskRowIndices.indexOf(idx)
                   if (ti >= 0) setCursorIndex(ti)
                 }}
+                onReorder={reorderTaskByDrag}
               />
             )
           })}
@@ -453,6 +660,12 @@ export function TasksView(): JSX.Element {
           today={today}
           onOpenTask={(task) => void openTaskAt(task)}
           onToggleTask={(task) => void toggleTaskFromList(task)}
+          onRescheduleTask={(task, dueIso) =>
+            void applyTaskMutation(task, { kind: 'set-due', due: dueIso })
+          }
+          onMoveTask={(task, dateIso) => void moveTaskToDate(task, dateIso)}
+          onAddTask={(dateIso, text) => addTaskForDate(dateIso, text)}
+          dailyNotesEnabled={vaultSettings.dailyNotes.enabled}
         />
       )}
 
@@ -499,16 +712,22 @@ export function TasksView(): JSX.Element {
           />
         </form>
       ) : (
-        <div className="border-t border-paper-300/45 px-4 py-1.5 text-[11px] text-current/40">
+        <div className="border-t border-paper-300/45 px-4 py-1.5 text-xs text-current/40">
           {viewMode === 'list'
-            ? 'j/k move · Enter/o open · Space/x toggle · / filter · 1/2/3 view · : command · Esc close'
+            ? 'j/k move · J/K reorder · drag to reorder · Enter/o open · Space/x toggle · / filter · :q close'
             : viewMode === 'calendar'
-              ? 'h/j/k/l day · [ ] month · gt today · Enter open · 1/2/3 view · : command · Esc close'
-              : 'h/l column · j/k card · Space toggle · Enter open · 1/2/3 view · : command · Esc close'}
+              ? 'h/j/k/l day · [ ] month · gt today · Tab pick · < > reschedule · drag to move · Enter open · :q'
+              : 'h/l column · j/k card · Space toggle · Enter open · 1/2/3 view · : command · :q close'}
         </div>
       )}
     </div>
   )
+}
+
+/** Stable identity for cursor-follow across a reorder: a task's id encodes its
+ *  index (which a line move changes), but sourcePath + content do not. */
+function taskFollowKey(task: VaultTask): string {
+  return `${task.sourcePath} ${task.content}`
 }
 
 function cssEscape(value: string): string {

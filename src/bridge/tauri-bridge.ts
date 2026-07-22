@@ -37,6 +37,7 @@ import {
   type ExternalFileContent,
   type FolderEntry,
   type ImportedAsset,
+  type LinkMetadata,
   type LocalVaultEntry,
   type MoveExternalFileResult,
   type NoteComment,
@@ -62,6 +63,20 @@ import {
   type VaultTextSearchToolPaths
 } from '@zennotes/bridge-contract/ipc'
 import type { CustomTemplateFile, WriteTemplateInput } from '@zennotes/bridge-contract/templates'
+import type { AppConfigPortable } from '@zennotes/shared-domain/app-config'
+import type { CustomTheme } from '@zennotes/shared-domain/custom-themes'
+import {
+  extractObsidianExcalidrawScene,
+  isObsidianExcalidrawMarkdown,
+  isObsidianExcalidrawPath
+} from '@zennotes/shared-domain/excalidraw'
+import type {
+  DatabaseDoc,
+  DatabaseSidecar,
+  DatabaseSummary,
+  DbRow
+} from '@zennotes/shared-domain/databases'
+import type { Override } from '@zennotes/shared-domain/overrides'
 import type { VaultTask } from '@zennotes/shared-domain/tasks'
 import type {
   McpClientId,
@@ -71,6 +86,15 @@ import type {
 } from '@zennotes/shared-domain/mcp-clients'
 import { TAURI_CAPABILITIES } from './capabilities'
 import { resolveLocalAssetUrl, resolveVaultAssetUrl } from './asset-url'
+import {
+  ensureConfigFile,
+  getConfigFilePathCached,
+  getPortableConfigSnapshot,
+  setPortableConfig,
+  subscribeConfigChange
+} from './portable-config'
+import * as customCss from './custom-css'
+import * as databases from './databases'
 
 const APP_INFO: ZenAppInfo = {
   name: 'zennotes-rs',
@@ -355,7 +379,8 @@ const bridge: ZenBridge = {
     void getCurrentWindow().close().catch(() => {})
   },
   openNoteWindow: (relPath: string): Promise<void> => invoke('window_open_note', { relPath }),
-  openVaultWindow: (): Promise<VaultInfo | null> => invoke('window_open_vault'),
+  openVaultWindow: (root?: string): Promise<VaultInfo | null> =>
+    invoke('window_open_vault', { root: root ?? null }),
   readExternalFile: (): Promise<ExternalFileContent> => invoke('app_read_external_file'),
   writeExternalFile: (body: string): Promise<void> => invoke('app_write_external_file', { body }),
   moveExternalFileToVault: (): Promise<MoveExternalFileResult> =>
@@ -431,7 +456,121 @@ const bridge: ZenBridge = {
       /* ignore */
     }
   },
-  clipboardReadText: (): string => '' // M12 (sync read is not available in the webview)
+  clipboardReadText: (): string => '', // M12 (sync read is not available in the webview)
+
+  // ---- v2.15 contract surface (M17) --------------------------------------
+  // Added by the v2.1.0 -> v2.15.0 re-vendor; the whole surface is
+  // implemented (see GAP-ANALYSIS.md for the per-method history). The one
+  // intentional stub left is `listDatabases` — dead code upstream.
+
+  // Workspace state (<vault>/.zennotes/workspace.json, raw JSON strings —
+  // the renderer owns the schema and reconciles newest-wins vs localStorage).
+  readWorkspaceState: (): Promise<string | null> => invoke('workspace_state_read'),
+  writeWorkspaceState: (json: string): Promise<void> => invoke('workspace_state_write', { json }),
+  rootContentHiddenByInboxMode: (): Promise<boolean> => invoke('vault_root_content_hidden'),
+
+  // Portable config (~/.config/zennotes/config.toml). The TOML format lives
+  // in portable-config.ts (upstream's serializer, verbatim); Rust is the
+  // file layer + watcher. initPortableConfig() runs in main.tsx before React
+  // mounts, so the synchronous snapshot has real data at first paint — {}
+  // when the file is absent, which triggers app-core to seed it from
+  // localStorage (the v2.1.0 → config-file migration, for free).
+  getConfigSync: (): AppConfigPortable | null => getPortableConfigSnapshot(),
+  setConfig: (next: AppConfigPortable): Promise<void> => setPortableConfig(next),
+  getConfigPath: async (): Promise<string | null> => getConfigFilePathCached(),
+  revealConfigFile: async (): Promise<void> => {
+    const path = await ensureConfigFile()
+    if (path) await invoke('vault_reveal_file_path', { absPath: path })
+  },
+  onConfigChange: (cb: (next: AppConfigPortable) => void): (() => void) =>
+    subscribeConfigChange(cb),
+
+  // CSV databases. The parse/infer/serialize logic runs in databases.ts via
+  // the vendored shared-domain functions; Rust does the vault file IO.
+  // listDatabases stays a stub: nothing in app-core ever calls it (upstream
+  // only wires it for the web bridge).
+  openDatabase: (relPath: string): Promise<DatabaseDoc | null> => databases.openDatabase(relPath),
+  writeDatabaseRows: (relPath: string, rows: DbRow[]): Promise<DatabaseDoc> =>
+    databases.writeDatabaseRows(relPath, rows),
+  writeDatabaseSchema: (
+    relPath: string,
+    sidecar: DatabaseSidecar,
+    rows: DbRow[]
+  ): Promise<DatabaseDoc> => databases.writeDatabaseSchema(relPath, sidecar, rows),
+  createDatabase: (folder: NoteFolder, subpath: string, title?: string): Promise<DatabaseDoc> =>
+    databases.createDatabase(folder, subpath, title),
+  renameDatabase: (csvPath: string, newTitle: string): Promise<string> =>
+    databases.renameDatabase(csvPath, newTitle),
+  createRecordPage: (csvPath: string, title: string, body: string): Promise<string> =>
+    databases.createRecordPage(csvPath, title, body),
+  listDatabases: async (): Promise<DatabaseSummary[]> => [],
+
+  // Excalidraw drawings (.excalidraw files; editing goes through the
+  // ordinary readNote/writeNote path).
+  createExcalidraw: (folder: NoteFolder, subpath?: string, title?: string): Promise<NoteMeta> =>
+    invoke('vault_create_excalidraw', {
+      folder,
+      subpath: subpath ?? null,
+      title: title ?? null
+    }),
+  // Obsidian `.excalidraw.md` conversion (upstream vault.ts:3184). The scene
+  // extraction (incl. lz-string decompression) is vendored pure TS; Rust
+  // writes the deduped sibling `.excalidraw` and returns its meta. The
+  // original markdown is left intact.
+  convertObsidianExcalidraw: async (relPath: string): Promise<NoteMeta> => {
+    const markdown = await invoke<string | null>('db_read_text', { relPath })
+    if (markdown === null) throw new Error(`Drawing not found: ${relPath}`)
+    if (!isObsidianExcalidrawPath(relPath) && !isObsidianExcalidrawMarkdown(markdown)) {
+      throw new Error('This file is not an Obsidian Excalidraw drawing.')
+    }
+    const scene = extractObsidianExcalidrawScene(markdown)
+    if (!scene) throw new Error('Could not read an Excalidraw scene from this file.')
+    const fileName = relPath.split('/').pop() ?? relPath
+    const base =
+      (fileName.toLowerCase().endsWith('.excalidraw.md')
+        ? fileName.slice(0, -'.excalidraw.md'.length)
+        : fileName.replace(/\.[^.]*$/, '')) || 'Untitled drawing'
+    const dirRel = relPath.includes('/') ? relPath.slice(0, relPath.lastIndexOf('/')) : ''
+    return invoke('vault_write_drawing', {
+      dirRel,
+      baseTitle: base,
+      body: JSON.stringify(scene, null, 2)
+    })
+  },
+
+  // Deleted-assets store (.zennotes/deleted-assets/<uuid>/ + sidecar).
+  listDeletedAssets: (): Promise<DeletedAsset[]> => invoke('vault_list_deleted_assets'),
+  purgeDeletedAsset: (undoToken: string): Promise<void> =>
+    invoke('vault_purge_deleted_asset', { undoToken }),
+  emptyDeletedAssets: (): Promise<void> => invoke('vault_empty_deleted_assets'),
+
+  // Custom themes + CSS overrides (~/.config/zennotes/{themes,overrides}).
+  // Rust scans/watches; parsing + scaffolding run in custom-css.ts through
+  // the vendored shared-domain functions.
+  listCustomThemes: (): Promise<CustomTheme[]> => customCss.listCustomThemes(),
+  getCustomThemesDir: (): Promise<string | null> => customCss.getCustomThemesDir(),
+  revealCustomThemesDir: (slug?: string): Promise<void> => customCss.revealCustomThemesDir(slug),
+  deleteCustomTheme: (slug: string): Promise<void> => customCss.deleteCustomTheme(slug),
+  createCustomTheme: (input: { name?: string }): Promise<string | null> =>
+    customCss.createCustomTheme(input),
+  onCustomThemesChange: (cb: (next: CustomTheme[]) => void): (() => void) =>
+    customCss.subscribeCustomThemesChange(cb),
+  listOverrides: (): Promise<Override[]> => customCss.listOverrides(),
+  revealOverridesDir: (name?: string): Promise<void> => customCss.revealOverridesDir(name),
+  deleteOverride: (name: string): Promise<void> => customCss.deleteOverride(name),
+  onOverridesChange: (cb: (next: Override[]) => void): (() => void) =>
+    customCss.subscribeOverridesChange(cb),
+
+  // Misc desktop surface.
+  revealFilePath: (absPath: string): Promise<void> =>
+    invoke('vault_reveal_file_path', { absPath }),
+  openExternalFile: (href: string): Promise<{ ok: boolean; error?: string }> =>
+    invoke('vault_open_external_file', { href }),
+  fetchLinkMetadata: (url: string): Promise<LinkMetadata> =>
+    invoke('vault_fetch_link_metadata', { url }),
+  openFolderTemporary: (absPath: string): Promise<void> =>
+    invoke('app_open_folder_temporary', { rawPath: absPath }),
+  toggleDevTools: (): Promise<void> => invoke('devtools_toggle')
 }
 
 export function createTauriBridge(): ZenBridge {

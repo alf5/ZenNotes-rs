@@ -218,7 +218,7 @@ pub fn parse_tasks_from_body(body: &str, path: &str, title: &str, folder: &str) 
 pub fn scan_all_tasks(root: &Path) -> Vec<VaultTask> {
     let mut out = Vec::new();
     for meta in list_notes(root) {
-        if meta.folder == "trash" {
+        if meta.folder == "trash" || crate::vault::notes::is_excalidraw_path(&meta.path) {
             continue;
         }
         let abs = root.join(meta.path.replace('/', std::path::MAIN_SEPARATOR_STR));
@@ -231,6 +231,9 @@ pub fn scan_all_tasks(root: &Path) -> Vec<VaultTask> {
 /// `vault:scan-tasks-for` — rescan a single live note's tasks.
 pub fn scan_tasks_for_path(root: &Path, rel_path: &str) -> Vec<VaultTask> {
     let posix = to_posix(rel_path);
+    if crate::vault::notes::is_excalidraw_path(&posix) {
+        return Vec::new();
+    }
     let Some(folder) = folder_for_relative_path(&posix) else {
         return Vec::new();
     };

@@ -18,6 +18,7 @@ export const IPC = {
   VAULT_GET_CURRENT: 'vault:get-current',
   VAULT_GET_SETTINGS: 'vault:get-settings',
   VAULT_SET_SETTINGS: 'vault:set-settings',
+  VAULT_ROOT_CONTENT_HIDDEN: 'vault:root-content-hidden',
   VAULT_LIST_NOTES: 'vault:list-notes',
   VAULT_LIST_NOTES_STREAM: 'vault:list-notes-stream',
   VAULT_LIST_FOLDERS: 'vault:list-folders',
@@ -37,6 +38,8 @@ export const IPC = {
   VAULT_WRITE_NOTE: 'vault:write-note',
   VAULT_APPEND_NOTE: 'vault:append-note',
   VAULT_CREATE_NOTE: 'vault:create-note',
+  VAULT_CREATE_EXCALIDRAW: 'vault:create-excalidraw',
+  VAULT_CONVERT_OBSIDIAN_EXCALIDRAW: 'vault:convert-obsidian-excalidraw',
   VAULT_RENAME_NOTE: 'vault:rename-note',
   VAULT_DELETE_NOTE: 'vault:delete-note',
   VAULT_MOVE_TO_TRASH: 'vault:move-to-trash',
@@ -56,15 +59,28 @@ export const IPC = {
   VAULT_DUPLICATE_ASSET: 'vault:duplicate-asset',
   VAULT_DELETE_ASSET: 'vault:delete-asset',
   VAULT_RESTORE_DELETED_ASSET: 'vault:restore-deleted-asset',
+  VAULT_LIST_DELETED_ASSETS: 'vault:list-deleted-assets',
+  VAULT_PURGE_DELETED_ASSET: 'vault:purge-deleted-asset',
+  VAULT_EMPTY_DELETED_ASSETS: 'vault:empty-deleted-assets',
   VAULT_CREATE_FOLDER: 'vault:create-folder',
   VAULT_RENAME_FOLDER: 'vault:rename-folder',
   VAULT_DELETE_FOLDER: 'vault:delete-folder',
   VAULT_DUPLICATE_FOLDER: 'vault:duplicate-folder',
   VAULT_REVEAL_FOLDER: 'vault:reveal-folder',
+  VAULT_REVEAL_FILE_PATH: 'vault:reveal-file-path',
+  VAULT_OPEN_EXTERNAL_FILE: 'vault:open-external-file',
+  VAULT_FETCH_LINK_METADATA: 'vault:fetch-link-metadata',
   VAULT_REVEAL_FOLDER_TARGET: 'vault:reveal-folder-target',
   VAULT_REVEAL_ASSETS_DIR: 'vault:reveal-assets-dir',
   VAULT_SCAN_TASKS: 'vault:scan-tasks',
   VAULT_SCAN_TASKS_FOR: 'vault:scan-tasks-for',
+  VAULT_OPEN_DATABASE: 'vault:open-database',
+  VAULT_WRITE_DATABASE_ROWS: 'vault:write-database-rows',
+  VAULT_WRITE_DATABASE_SCHEMA: 'vault:write-database-schema',
+  VAULT_CREATE_DATABASE: 'vault:create-database',
+  VAULT_RENAME_DATABASE: 'vault:rename-database',
+  VAULT_CREATE_RECORD_PAGE: 'vault:create-record-page',
+  VAULT_LIST_DATABASES: 'vault:list-databases',
   APP_LIST_FONTS: 'app:list-fonts',
   APP_ICON_DATA_URL: 'app:icon-data-url',
   APP_OPEN_SETTINGS: 'app:open-settings',
@@ -95,6 +111,7 @@ export const IPC = {
   APP_WRITE_EXTERNAL_FILE: 'app:write-external-file',
   APP_MOVE_EXTERNAL_FILE_TO_VAULT: 'app:move-external-file-to-vault',
   APP_OPEN_MARKDOWN_FILE: 'app:open-markdown-file',
+  APP_OPEN_FOLDER_TEMPORARY: 'app:open-folder-temporary',
   TIKZ_RENDER: 'tikz:render',
   MCP_STATUS: 'mcp:status',
   MCP_INSTALL: 'mcp:install',
@@ -106,7 +123,27 @@ export const IPC = {
   CLI_INSTALL: 'cli:install',
   CLI_UNINSTALL: 'cli:uninstall',
   RAYCAST_GET_STATUS: 'raycast:get-status',
-  RAYCAST_INSTALL: 'raycast:install'
+  RAYCAST_INSTALL: 'raycast:install',
+  CONFIG_GET_SYNC: 'config:get-sync',
+  CONFIG_SET: 'config:set',
+  CONFIG_GET_PATH: 'config:get-path',
+  CONFIG_REVEAL: 'config:reveal',
+  CONFIG_ON_CHANGE: 'config:on-change',
+  CUSTOM_THEMES_LIST: 'custom-themes:list',
+  CUSTOM_THEMES_GET_DIR: 'custom-themes:get-dir',
+  CUSTOM_THEMES_REVEAL: 'custom-themes:reveal',
+  CUSTOM_THEMES_DELETE: 'custom-themes:delete',
+  CUSTOM_THEMES_CREATE: 'custom-themes:create',
+  CUSTOM_THEMES_ON_CHANGE: 'custom-themes:on-change',
+  OVERRIDES_LIST: 'overrides:list',
+  OVERRIDES_REVEAL: 'overrides:reveal',
+  OVERRIDES_DELETE: 'overrides:delete',
+  OVERRIDES_ON_CHANGE: 'overrides:on-change',
+  DEVTOOLS_TOGGLE: 'devtools:toggle',
+  // Per-vault workspace state (open tabs, layout, cursor) persisted to
+  // <vault>/.zennotes/workspace.json so it syncs with the vault. (#292)
+  WORKSPACE_STATE_READ: 'workspace-state:read',
+  WORKSPACE_STATE_WRITE: 'workspace-state:write'
 } as const
 
 export interface TikzRenderResponse {
@@ -143,7 +180,7 @@ export interface CliInstallStatus {
    *  $PATH. False means we'd install but the binary wouldn't be
    *  callable until the user updates their shell config. */
   targetOnPath: boolean
-  /** Shell snippet the user can paste into ~/.zshrc / ~/.bashrc to
+  /** Shell override the user can paste into ~/.zshrc / ~/.bashrc to
    *  put the chosen directory on PATH. Null when targetOnPath is true
    *  or when nothing helpful applies. */
   pathHint: string | null
@@ -208,6 +245,18 @@ export interface AppUpdateState {
 export type NoteFolder = 'inbox' | 'quick' | 'archive' | 'trash'
 
 export type PrimaryNotesLocation = 'inbox' | 'root'
+
+/** Where a newly created Drawing/Database file is stored. (#362) */
+export type FileLocationMode = 'primary' | 'active-note' | 'folder'
+export interface FileLocationSetting {
+  /** `primary` → the primary notes location root; `active-note` → the folder of
+   *  the note you're viewing; `folder` → the `folder` subfolder of the primary
+   *  location. */
+  mode: FileLocationMode
+  /** Vault-relative subfolder used when `mode === 'folder'`, e.g. `assets/drawings`. */
+  folder?: string
+}
+export const DEFAULT_FILE_LOCATION: FileLocationSetting = { mode: 'primary' }
 export type FolderIconId =
   | 'folder'
   | 'bolt'
@@ -239,41 +288,167 @@ export type FolderIconId =
   | 'chart'
   | 'home'
 
+/** Preset folder accent colors (tints the folder's sidebar icon). */
+export type FolderColorId =
+  | 'red'
+  | 'orange'
+  | 'amber'
+  | 'green'
+  | 'teal'
+  | 'sky'
+  | 'blue'
+  | 'indigo'
+  | 'violet'
+  | 'pink'
+
+export interface DateNotePatternSettings {
+  /** Directory or date-based directory pattern inside the primary notes area. */
+  directory: string
+  /** Date-based title/filename pattern. */
+  titlePattern?: string
+  /** BCP 47 locale used for localized pattern tokens. `system` = OS/browser locale. */
+  locale?: string
+}
+
 export interface DailyNotesSettings {
   enabled: boolean
+  /** Directory or date-based directory pattern inside the primary notes area. */
   directory: string
+  /** Date-based title/filename pattern for new daily notes. */
+  titlePattern?: string
+  /** BCP 47 locale used for localized pattern tokens. `system` = OS/browser locale. */
+  locale?: string
+  /** Prior patterns used only to recognize existing daily notes after settings changes. */
+  legacyPatterns?: DateNotePatternSettings[]
   /** Template applied to new daily notes. Empty/undefined = blank note. */
   templateId?: string
+  /**
+   * Treat a task written inside a daily note as due on that note's date, so it
+   * shows up on the calendar without typing `due:`. The line is left untouched —
+   * the due date is derived. An explicit `due:` token still wins. Default `true`.
+   */
+  tasksDueOnNoteDate?: boolean
+  /**
+   * When today's daily note opens, move every unfinished task from previous
+   * daily notes into it (Obsidian-style). Off by default. */
+  rolloverUnfinishedTasks?: boolean
 }
 
 export interface WeeklyNotesSettings {
   enabled: boolean
+  /** Directory or date-based directory pattern inside the primary notes area. */
   directory: string
+  /** Date-based title/filename pattern for new weekly notes. */
+  titlePattern?: string
+  /** BCP 47 locale used for localized pattern tokens. `system` = OS/browser locale. */
+  locale?: string
+  /** Prior patterns used only to recognize existing weekly notes after settings changes. */
+  legacyPatterns?: DateNotePatternSettings[]
   /** Template applied to new weekly notes. Empty/undefined = blank note. */
   templateId?: string
+}
+
+export interface MonthlyNotesSettings {
+  enabled: boolean
+  /** Directory or date-based directory pattern inside the primary notes area. */
+  directory: string
+  /** Date-based title/filename pattern for new monthly notes. */
+  titlePattern?: string
+  /** BCP 47 locale used for localized pattern tokens. `system` = OS/browser locale. */
+  locale?: string
+  /** Prior patterns used only to recognize existing monthly notes after settings changes. */
+  legacyPatterns?: DateNotePatternSettings[]
+  /** Template applied to new monthly notes. Empty/undefined = blank note. */
+  templateId?: string
+}
+
+/**
+ * Per-vault overrides for "how this vault looks" — sort order, grouping, the
+ * tasks view, etc. Each key falls back to the matching global preference
+ * (config.toml) when unset, so a fresh vault inherits the global default and a
+ * customized one keeps its own look. Stored in `<vault>/.zennotes/vault.json`
+ * so it travels with the vault. Values are kept loose here (the IPC boundary)
+ * and validated in the renderer's normalizer. (#292)
+ */
+export interface VaultViewSettings {
+  noteSortOrder?: string
+  groupByKind?: boolean
+  tasksViewMode?: string
+  kanbanGroupBy?: string
+  kanbanColumnTitles?: Record<string, string>
+  kanbanColumnOrder?: Record<string, string[]>
+  kanbanStatuses?: string[]
+  autoReveal?: boolean
+  systemFolderLabels?: Record<string, unknown>
+  unifiedSidebar?: boolean
 }
 
 export interface VaultSettings {
   primaryNotesLocation: PrimaryNotesLocation
   dailyNotes: DailyNotesSettings
   weeklyNotes: WeeklyNotesSettings
+  monthlyNotes: MonthlyNotesSettings
+  /** Where new Excalidraw drawings are created; absent means the default
+   *  (`primary`). Read through `normalizeVaultSettings`, which fills it in. (#362) */
+  drawingsLocation?: FileLocationSetting
+  /** Where new databases are created; absent means the default (`primary`). (#362) */
+  databasesLocation?: FileLocationSetting
+  /** Where new task files (`#task`-tagged notes) are created; absent means the
+   *  default (`primary`, i.e. the inbox). */
+  tasksLocation?: FileLocationSetting
+  /** Per-vault view overrides (#292); absent/empty means "inherit global". */
+  view?: VaultViewSettings
   folderIcons: Record<string, FolderIconId>
+  /** Per-folder accent color, keyed by `folder:subpath` (same key as folderIcons). */
+  folderColors: Record<string, FolderColorId>
+  /**
+   * Favorited notes and folders, pinned to the top of the sidebar. Each entry is
+   * either a note's vault-relative path (e.g. `inbox/Idea.md`) or a folder key
+   * `folder:subpath` (e.g. `inbox:Projects`). Folder keys always contain a `:`;
+   * note paths never do (`:` is a forbidden filename char), so the two are
+   * distinguishable. Order is the display order in the Favorites section.
+   */
+  favorites: string[]
 }
 
 export const DEFAULT_DAILY_NOTES_DIRECTORY = 'Daily Notes'
+export const DEFAULT_DAILY_NOTE_TITLE_PATTERN = 'yyyy-MM-dd'
+export const DEFAULT_DAILY_NOTE_LOCALE = 'system'
 export const DEFAULT_WEEKLY_NOTES_DIRECTORY = 'Weekly Notes'
+export const DEFAULT_WEEKLY_NOTE_TITLE_PATTERN = "yyyy-'W'ww"
+export const DEFAULT_WEEKLY_NOTE_LOCALE = 'system'
+export const DEFAULT_MONTHLY_NOTES_DIRECTORY = 'Monthly Notes'
+export const DEFAULT_MONTHLY_NOTE_TITLE_PATTERN = 'yyyy-MM'
+export const DEFAULT_MONTHLY_NOTE_LOCALE = 'system'
 
 export const DEFAULT_VAULT_SETTINGS: VaultSettings = {
   primaryNotesLocation: 'inbox',
   dailyNotes: {
     enabled: false,
-    directory: DEFAULT_DAILY_NOTES_DIRECTORY
+    directory: DEFAULT_DAILY_NOTES_DIRECTORY,
+    titlePattern: DEFAULT_DAILY_NOTE_TITLE_PATTERN,
+    locale: DEFAULT_DAILY_NOTE_LOCALE,
+    tasksDueOnNoteDate: true,
+    rolloverUnfinishedTasks: false
   },
   weeklyNotes: {
     enabled: false,
-    directory: DEFAULT_WEEKLY_NOTES_DIRECTORY
+    directory: DEFAULT_WEEKLY_NOTES_DIRECTORY,
+    titlePattern: DEFAULT_WEEKLY_NOTE_TITLE_PATTERN,
+    locale: DEFAULT_WEEKLY_NOTE_LOCALE
   },
-  folderIcons: {}
+  monthlyNotes: {
+    enabled: false,
+    directory: DEFAULT_MONTHLY_NOTES_DIRECTORY,
+    titlePattern: DEFAULT_MONTHLY_NOTE_TITLE_PATTERN,
+    locale: DEFAULT_MONTHLY_NOTE_LOCALE
+  },
+  drawingsLocation: { mode: 'primary' },
+  databasesLocation: { mode: 'primary' },
+  tasksLocation: { mode: 'primary' },
+  folderIcons: {},
+  folderColors: {},
+  favorites: []
 }
 
 export interface NoteMeta {
@@ -291,6 +466,9 @@ export interface NoteMeta {
   tags: string[]
   /** Outbound [[wikilink]] targets (note titles), unique. */
   wikilinks: string[]
+  /** Outbound asset-embed targets (`![[asset]]` / `![](asset)`), unique. Used to
+   *  show which notes use a given asset in the Assets view. */
+  assetEmbeds: string[]
   /** True when the body references at least one local non-text asset
    *  (PDF, image, audio, video, generic file). Surfaced in the sidebar
    *  as a small paperclip hint so attachments are discoverable. */
@@ -401,6 +579,8 @@ export interface DeletedAsset {
   name: string
   /** Opaque restore token returned by the desktop bridge. */
   undoToken: string
+  /** ISO timestamp of when the asset was deleted (present for 2.11+ deletes). */
+  deletedAt?: string
 }
 
 export interface ImportedAsset {
@@ -408,7 +588,7 @@ export interface ImportedAsset {
   name: string
   /** Vault-relative path to the imported asset, POSIX-style. */
   path: string
-  /** Markdown snippet to insert into the note. */
+  /** Markdown override to insert into the note. */
   markdown: string
   kind: ImportedAssetKind
 }
@@ -425,6 +605,27 @@ export interface PastedImageInput {
 export interface VaultInfo {
   root: string
   name: string
+  /** True when this is a temporary folder session (a folder dropped on the app
+   *  to read, not opened as a vault): edits save to the files in place, but no
+   *  ZenNotes state is written into the folder and it isn't remembered. The
+   *  renderer shows a banner and the next launch reopens the saved vault. */
+  temporary?: boolean
+}
+
+/** Open-graph-ish metadata for a URL, used to render a bookmark card. All
+ *  fields but `url` are best-effort; `ok: false` means the fetch failed and the
+ *  card should fall back to just the link. */
+export interface LinkMetadata {
+  url: string
+  ok: boolean
+  title?: string
+  description?: string
+  /** Preview image URL (absolute). */
+  image?: string
+  /** Favicon URL (absolute). */
+  favicon?: string
+  /** Human site name, e.g. "GitHub". */
+  siteName?: string
 }
 
 /** A markdown file opened from outside any vault (standalone editor window). */
@@ -522,7 +723,7 @@ export interface FolderEntry {
 }
 
 export type VaultChangeKind = 'add' | 'change' | 'unlink'
-export type VaultChangeScope = 'content' | 'vault-settings' | 'comments'
+export type VaultChangeScope = 'content' | 'vault-settings' | 'comments' | 'database' | 'folder'
 
 export interface VaultChangeEvent {
   kind: VaultChangeKind

@@ -110,7 +110,7 @@ export function HintOverlay({
   onActivate,
   onCancel
 }: {
-  onActivate: () => void
+  onActivate: (element?: HTMLElement) => void
   onCancel: () => void
 }): JSX.Element | null {
   const [buffer, setBuffer] = useState('')
@@ -152,7 +152,7 @@ export function HintOverlay({
       const t = setTimeout(() => {
         target.element.click()
         target.element.focus()
-        onActivate()
+        onActivate(target.element)
       }, 50)
       return () => clearTimeout(t)
     }
@@ -200,7 +200,7 @@ export function HintOverlay({
   if (targets.length === 0) return null
 
   return createPortal(
-    <div className="vim-hint-overlay" style={{ position: 'fixed', inset: 0, zIndex: 9999, pointerEvents: 'none' }}>
+    <div data-vim-hint-overlay className="vim-hint-overlay" style={{ position: 'fixed', inset: 0, zIndex: 9999, pointerEvents: 'none' }}>
       {targets.map((t) => {
         const isMatch = t.label.startsWith(buffer)
         const matchedPart = buffer

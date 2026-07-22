@@ -9,12 +9,18 @@ interface SlashCmd {
   insert: string
   /** Cursor offset from end of inserted text. Negative = move back. */
   cursorOffset?: number
+  /** Ranking nudge for the unfiltered list — higher floats to the top. */
+  boost?: number
+  /** Extra space-separated terms that should also match this command (e.g.
+   *  `/todo` finding "Task"). Folded into the match label, hidden from display. */
+  keywords?: string
 }
 
 type DecoratedCompletion = Completion & {
-  _kind?: 'slash' | 'wikilink' | 'date'
+  _kind?: 'slash' | 'wikilink' | 'date' | 'callout'
   _icon?: string
   _subtitle?: string
+  _group?: string
 }
 
 const COMMANDS: SlashCmd[] = [
@@ -22,14 +28,37 @@ const COMMANDS: SlashCmd[] = [
   { label: 'Heading 2', detail: '##', icon: 'H2', insert: '## ' },
   { label: 'Heading 3', detail: '###', icon: 'H3', insert: '### ' },
   { label: 'Heading 4', detail: '####', icon: 'H4', insert: '#### ' },
+  {
+    label: 'Task',
+    detail: '[ ]',
+    icon: '☐',
+    insert: '- [ ] ',
+    boost: 99,
+    keywords: 'todo to-do checkbox check task list'
+  },
   { label: 'Bulleted list', detail: '-', icon: '•', insert: '- ' },
   { label: 'Numbered list', detail: '1.', icon: '1.', insert: '1. ' },
-  { label: 'To-do list', detail: '[ ]', icon: '☐', insert: '- [ ] ' },
   { label: 'Quote', detail: '>', icon: '❝', insert: '> ' },
   { label: 'Code block', detail: '```', icon: '</>', insert: '```\n\n```', cursorOffset: -4 },
   { label: 'Divider', detail: '---', icon: '—', insert: '---\n' },
   { label: 'Table', detail: '|', icon: '⊞', insert: '| Column 1 | Column 2 |\n| --- | --- |\n| | |' },
   { label: 'Math block', detail: '$$', icon: '∑', insert: '$$\n\n$$', cursorOffset: -3 },
+  {
+    label: 'Embed',
+    detail: 'video / iframe',
+    icon: '▶',
+    insert: '```embed\n\n```',
+    cursorOffset: -4,
+    keywords: 'video youtube vimeo iframe embed url'
+  },
+  {
+    label: 'Bookmark',
+    detail: 'link card',
+    icon: '🔖',
+    insert: '```bookmark\n\n```',
+    cursorOffset: -4,
+    keywords: 'link url card preview bookmark web'
+  },
   { label: 'Callout', detail: '>', icon: '!', insert: '> [!note]\n> ' },
   { label: 'Link', detail: '[]', icon: '🔗', insert: '[]()', cursorOffset: -3 },
   { label: 'Image', detail: '![]', icon: '🖼', insert: '![]()', cursorOffset: -3 },
@@ -39,6 +68,31 @@ const COMMANDS: SlashCmd[] = [
 /** Render a custom completion item matching the app theme. */
 function renderCompletion(completion: Completion): HTMLElement {
   const decorated = completion as DecoratedCompletion
+  if (decorated._kind === 'callout') {
+    const el = document.createElement('div')
+    el.className = 'callout-cmd-item'
+
+    const icon = document.createElement('span')
+    icon.className = `callout-cmd-icon callout-cmd-${decorated._group ?? 'note'}`
+    icon.textContent = decorated._icon ?? ''
+
+    const main = document.createElement('div')
+    main.className = 'callout-cmd-main'
+
+    const label = document.createElement('span')
+    label.className = 'callout-cmd-label'
+    label.textContent = completion.displayLabel ?? completion.label
+
+    const desc = document.createElement('span')
+    desc.className = 'callout-cmd-desc'
+    desc.textContent = decorated._subtitle ?? ''
+
+    main.appendChild(label)
+    main.appendChild(desc)
+    el.appendChild(icon)
+    el.appendChild(main)
+    return el
+  }
   if (decorated._kind === 'wikilink') {
     const el = document.createElement('div')
     el.className = 'wikilink-cmd-item'
@@ -69,7 +123,7 @@ function renderCompletion(completion: Completion): HTMLElement {
 
   const label = document.createElement('span')
   label.className = 'slash-cmd-label'
-  label.textContent = completion.label
+  label.textContent = completion.displayLabel ?? completion.label
 
   const detail = document.createElement('span')
   detail.className = 'slash-cmd-detail'
@@ -85,6 +139,29 @@ function renderCompletion(completion: Completion): HTMLElement {
  * CodeMirror completion source for Notion-style slash commands.
  * Activates when `/` is typed at the start of a line or after whitespace.
  */
+/**
+ * Blank-line padding to drop a block element (a GFM table) into its own
+ * paragraph at an insertion point, given the text immediately before and after.
+ * Without a blank line on each side the table is absorbed into adjacent prose,
+ * so strict parsers (PDF export, `:format`) render it scrambled. (#294)
+ */
+export function blockInsertPadding(
+  before: string,
+  after: string
+): { lead: string; trail: string } {
+  let lead = ''
+  if (before.length > 0 && !before.endsWith('\n\n')) {
+    lead = before.endsWith('\n') ? '\n' : '\n\n'
+  }
+  const trail =
+    after.length === 0 || after.startsWith('\n\n')
+      ? ''
+      : after.startsWith('\n')
+        ? '\n'
+        : '\n\n'
+  return { lead, trail }
+}
+
 export function slashCommandSource(context: CompletionContext): CompletionResult | null {
   const { state, pos } = context
   const line = state.doc.lineAt(pos)
@@ -101,8 +178,12 @@ export function slashCommandSource(context: CompletionContext): CompletionResult
     from: filterFrom,
     options: COMMANDS.map(
       (cmd): Completion => ({
-        label: cmd.label,
+        // Fold alias keywords into the matched label so `/todo`, `/checkbox`,
+        // etc. surface the command; `displayLabel` keeps the menu text clean.
+        label: cmd.keywords ? `${cmd.label} ${cmd.keywords}` : cmd.label,
+        displayLabel: cmd.label,
         detail: cmd.detail,
+        boost: cmd.boost,
         _kind: 'slash',
         // Store icon for the custom renderer
         _icon: cmd.icon,
@@ -123,11 +204,30 @@ export function slashCommandSource(context: CompletionContext): CompletionResult
             }
             return
           }
-          const insert = cmd.insert
+          let insert = cmd.insert
+          let leadPad = ''
+          let tableCaretAfter = false
+          if (cmd.label === 'Table') {
+            // A GFM table must be separated from surrounding text by blank lines,
+            // or strict parsers (PDF export, `:format`) read it as paragraph
+            // text and it renders scrambled. Pad it into its own block. (#294)
+            const after = view.state.doc.sliceString(to)
+            const pad = blockInsertPadding(view.state.doc.sliceString(0, slashStart), after)
+            leadPad = pad.lead
+            // The table renders as a block widget; a caret left inside its
+            // replaced range smears into a tall bar at the pane's edge. Land the
+            // caret on the line AFTER the table instead, adding one at the end of
+            // the document where blockInsertPadding leaves no trailing line. (#340)
+            const trail = after.length === 0 ? pad.trail || '\n' : pad.trail
+            insert = pad.lead + cmd.insert + trail
+            tableCaretAfter = true
+          }
           const cursorPos =
             cmd.cursorOffset != null
               ? slashStart + insert.length + cmd.cursorOffset
-              : slashStart + insert.length
+              : tableCaretAfter
+                ? slashStart + leadPad.length + cmd.insert.length + 1
+                : slashStart + leadPad.length + cmd.insert.length
           view.dispatch({
             changes: { from: slashStart, to, insert },
             selection: { anchor: cursorPos }

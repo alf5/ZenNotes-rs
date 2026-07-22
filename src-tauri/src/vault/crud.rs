@@ -52,12 +52,12 @@ pub fn sanitize_note_title(raw: Option<&str>) -> String {
     }
 }
 
-/// `uniqueTitle` — first free `<base>.md`, else `<base> 2.md`, `<base> 3.md`…
-fn unique_title(dir: &Path, base_title: &str) -> String {
+/// `uniqueTitle` — first free `<base>.<ext>`, else `<base> 2.<ext>`, …
+fn unique_title(dir: &Path, base_title: &str, ext: &str) -> String {
     let mut candidate = base_title.to_string();
     let mut n = 1;
     loop {
-        if !dir.join(format!("{candidate}.md")).exists() {
+        if !dir.join(format!("{candidate}.{ext}")).exists() {
             return candidate;
         }
         n += 1;
@@ -121,10 +121,93 @@ pub fn create_note(
         resolve_safe(&top_root, clean)?
     };
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir failed: {e}"))?;
-    let final_title = unique_title(&dir, &base);
+    let final_title = unique_title(&dir, &base, "md");
     let abs = dir.join(format!("{final_title}.md"));
     fs::write(&abs, format!("# {final_title}\n\n")).map_err(|e| format!("write failed: {e}"))?;
     read_meta(root, &abs, folder, None, None)
+}
+
+/// `vault:create-excalidraw` — `createNote` with an `.excalidraw` extension
+/// and an empty native Excalidraw scene (upstream vault.ts:3152).
+pub fn create_excalidraw(
+    root: &Path,
+    folder: &str,
+    title: Option<&str>,
+    subpath: &str,
+) -> Result<NoteMeta, String> {
+    let base = match title.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(_) => sanitize_note_title(title),
+        None => "Untitled drawing".to_string(),
+    };
+    let clean = subpath.trim_matches('/');
+    let top_root = layout::folder_root(root, folder);
+    let dir = if clean.is_empty() {
+        top_root
+    } else {
+        resolve_safe(&top_root, clean)?
+    };
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir failed: {e}"))?;
+    let final_title = unique_title(&dir, &base, "excalidraw");
+    let abs = dir.join(format!("{final_title}.excalidraw"));
+    let seed = serde_json::json!({
+        "type": "excalidraw",
+        "version": 2,
+        "source": "zennotes",
+        "elements": [],
+        "appState": {},
+        "files": {}
+    });
+    let body = serde_json::to_string_pretty(&seed).map_err(|e| e.to_string())?;
+    fs::write(&abs, body).map_err(|e| format!("write failed: {e}"))?;
+    read_meta(root, &abs, folder, None, None)
+}
+
+/// Create a database record page (`<Name>.base/<title>.md`) with the caller's
+/// pre-composed body; returns its vault-relative path (upstream
+/// databases.ts:305). The sidecar's `pages` map is updated by the frontend.
+pub fn create_database_record_page(
+    root: &Path,
+    form_dir_rel: &str,
+    title: &str,
+    body: &str,
+) -> Result<String, String> {
+    let dir_abs = resolve_safe(root, form_dir_rel)?;
+    fs::create_dir_all(&dir_abs).map_err(|e| format!("mkdir failed: {e}"))?;
+    let final_title = unique_title(&dir_abs, &sanitize_note_title(Some(title)), "md");
+    let abs = dir_abs.join(format!("{final_title}.md"));
+    fs::write(&abs, body).map_err(|e| format!("write failed: {e}"))?;
+    Ok(format!("{}/{final_title}.md", form_dir_rel.trim_matches('/')))
+}
+
+/// Write a native `.excalidraw` drawing next to its source (used by the
+/// Obsidian conversion, upstream vault.ts:3184): dedupe `<base>.excalidraw`
+/// in `dir_rel`, write the scene body, return the new file's meta.
+pub fn write_drawing_file(
+    root: &Path,
+    dir_rel: &str,
+    base_title: &str,
+    body: &str,
+) -> Result<NoteMeta, String> {
+    let clean_dir = dir_rel.trim_matches('/');
+    let dir_abs = if clean_dir.is_empty() {
+        root.to_path_buf()
+    } else {
+        resolve_safe(root, clean_dir)?
+    };
+    fs::create_dir_all(&dir_abs).map_err(|e| format!("mkdir failed: {e}"))?;
+    let base = base_title.trim();
+    let base = if base.is_empty() { "Untitled drawing" } else { base };
+    let final_title = unique_title(&dir_abs, base, "excalidraw");
+    let abs = dir_abs.join(format!("{final_title}.excalidraw"));
+    fs::write(&abs, body).map_err(|e| format!("write failed: {e}"))?;
+    let rel = if clean_dir.is_empty() {
+        format!("{final_title}.excalidraw")
+    } else {
+        format!("{clean_dir}/{final_title}.excalidraw")
+    };
+    let folder = notes::folder_for_relative_path(&rel)
+        .ok_or_else(|| format!("Drawing is not in a known folder: {rel}"))?;
+    read_meta(root, &abs, &folder, None, None)
 }
 
 pub fn rename_note(root: &Path, rel: &str, next_title: &str) -> Result<NoteMeta, String> {
@@ -132,7 +215,9 @@ pub fn rename_note(root: &Path, rel: &str, next_title: &str) -> Result<NoteMeta,
     let folder = folder_of(root, &abs).ok_or_else(|| format!("Note not in a known folder: {rel}"))?;
     let dir = abs.parent().map(Path::to_path_buf).unwrap_or_default();
     let trimmed = sanitize_note_title(Some(next_title));
-    let target = dir.join(format!("{trimmed}.md"));
+    // Preserve the note-like extension: renaming a drawing keeps .excalidraw.
+    let ext = notes::note_extension(rel);
+    let target = dir.join(format!("{trimmed}.{ext}"));
 
     if target != abs {
         let same_file = match (fs::canonicalize(&abs), fs::canonicalize(&target)) {
@@ -192,8 +277,9 @@ fn move_between_folders(root: &Path, rel: &str, target: &str) -> Result<NoteMeta
     };
     fs::create_dir_all(&dest_dir).map_err(|e| format!("mkdir failed: {e}"))?;
     let base_title = notes::title_from_path(Path::new(&filename));
-    let final_title = unique_title(&dest_dir, &base_title);
-    let dest_abs = dest_dir.join(format!("{final_title}.md"));
+    let ext = notes::note_extension(&filename);
+    let final_title = unique_title(&dest_dir, &base_title, ext);
+    let dest_abs = dest_dir.join(format!("{final_title}.{ext}"));
     fs::rename(&abs, &dest_abs).map_err(|e| format!("move failed: {e}"))?;
     let meta = read_meta(root, &dest_abs, target, None, None)?;
     comments::move_note_comments(root, rel, &meta.path);
@@ -265,8 +351,9 @@ pub fn move_note(
 
     fs::create_dir_all(&dest_dir).map_err(|e| format!("mkdir failed: {e}"))?;
     let base_title = notes::title_from_path(Path::new(&filename));
-    let final_title = unique_title(&dest_dir, &base_title);
-    let dest_abs = dest_dir.join(format!("{final_title}.md"));
+    let ext = notes::note_extension(&filename);
+    let final_title = unique_title(&dest_dir, &base_title, ext);
+    let dest_abs = dest_dir.join(format!("{final_title}.{ext}"));
     fs::rename(&old_abs, &dest_abs).map_err(|e| format!("move failed: {e}"))?;
     let meta = read_meta(root, &dest_abs, target_folder, None, None)?;
     comments::move_note_comments(root, old_rel, &meta.path);
@@ -278,8 +365,9 @@ pub fn duplicate_note(root: &Path, rel: &str) -> Result<NoteMeta, String> {
     let folder = folder_of(root, &abs).ok_or_else(|| format!("Note not in a known folder: {rel}"))?;
     let dir = abs.parent().map(Path::to_path_buf).unwrap_or_default();
     let base_title = notes::title_from_path(&abs);
-    let copy_title = unique_title(&dir, &format!("{base_title} copy"));
-    let dest_abs = dir.join(format!("{copy_title}.md"));
+    let ext = notes::note_extension(rel);
+    let copy_title = unique_title(&dir, &format!("{base_title} copy"), ext);
+    let dest_abs = dir.join(format!("{copy_title}.{ext}"));
     let body = fs::read_to_string(&abs).map_err(|e| format!("read failed: {e}"))?;
     fs::write(&dest_abs, body).map_err(|e| format!("write failed: {e}"))?;
     let meta = read_meta(root, &dest_abs, &folder, None, None)?;
@@ -295,6 +383,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         layout::ensure_vault_layout(dir.path()).unwrap();
         dir
+    }
+
+    #[test]
+    fn excalidraw_create_rename_move_preserve_extension() {
+        let v = vault();
+        let meta = create_excalidraw(v.path(), "inbox", None, "").unwrap();
+        assert_eq!(meta.path, "inbox/Untitled drawing.excalidraw");
+        assert!(meta.tags.is_empty() && meta.excerpt.is_empty());
+        let body = fs::read_to_string(v.path().join("inbox/Untitled drawing.excalidraw")).unwrap();
+        assert!(body.contains("\"type\": \"excalidraw\""));
+
+        // De-dup probes the .excalidraw namespace, not .md.
+        let second = create_excalidraw(v.path(), "inbox", None, "").unwrap();
+        assert_eq!(second.path, "inbox/Untitled drawing 2.excalidraw");
+
+        let renamed = rename_note(v.path(), &meta.path, "Sketch").unwrap();
+        assert_eq!(renamed.path, "inbox/Sketch.excalidraw");
+
+        let archived = archive_note(v.path(), &renamed.path).unwrap();
+        assert_eq!(archived.path, "archive/Sketch.excalidraw");
     }
 
     #[test]

@@ -81,6 +81,250 @@ fn open_vault(
     Ok(vault)
 }
 
+// ---- v2.15 phase A: workspace state, drawings, deleted assets -------------
+
+/// Whether the active vault is an ephemeral "open folder temporarily"
+/// session — those never get `.zennotes` state written into them.
+fn active_vault_is_temporary(state: &AppState) -> bool {
+    state.current().and_then(|v| v.temporary).unwrap_or(false)
+}
+
+/// `workspace-state:read` — raw `<vault>/.zennotes/workspace.json` contents.
+/// Never parsed here; the renderer owns the schema. No vault → null, matching
+/// upstream's remote/ephemeral null path.
+#[tauri::command]
+pub fn workspace_state_read(state: State<AppState>) -> Result<Option<String>, String> {
+    if active_vault_is_temporary(&state) {
+        return Ok(None);
+    }
+    let Ok(root) = require_root(&state) else {
+        return Ok(None);
+    };
+    match std::fs::read_to_string(root.join(layout::INTERNAL_VAULT_DIR).join("workspace.json")) {
+        Ok(raw) => Ok(Some(raw)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("workspace state read failed: {e}")),
+    }
+}
+
+/// `workspace-state:write` — persist the renderer's snapshot verbatim.
+#[tauri::command]
+pub fn workspace_state_write(state: State<AppState>, json: String) -> Result<(), String> {
+    if active_vault_is_temporary(&state) {
+        return Ok(());
+    }
+    let Ok(root) = require_root(&state) else {
+        return Ok(());
+    };
+    let dir = root.join(layout::INTERNAL_VAULT_DIR);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir failed: {e}"))?;
+    std::fs::write(dir.join("workspace.json"), json)
+        .map_err(|e| format!("workspace state write failed: {e}"))
+}
+
+/// `vault:root-content-hidden` — true when the saved location says "inbox"
+/// but a fresh scan would infer a root-mode vault (drives the "Switch to
+/// Vault root" banner; upstream vault.ts:1241).
+#[tauri::command]
+pub fn vault_root_content_hidden(state: State<AppState>) -> Result<bool, String> {
+    let Ok(root) = require_root(&state) else {
+        return Ok(false);
+    };
+    if settings::get_vault_settings(&root).primary_notes_location != "inbox" {
+        return Ok(false);
+    }
+    Ok(settings::infer_primary_notes_location(&root) == "root")
+}
+
+/// `vault:create-excalidraw` — new empty drawing (v2.15).
+#[tauri::command]
+pub fn vault_create_excalidraw(
+    state: State<AppState>,
+    folder: String,
+    subpath: Option<String>,
+    title: Option<String>,
+) -> Result<NoteMeta, String> {
+    let root = require_root(&state)?;
+    crud::create_excalidraw(&root, &folder, title.as_deref(), subpath.as_deref().unwrap_or(""))
+}
+
+#[tauri::command]
+pub fn vault_list_deleted_assets(state: State<AppState>) -> Result<Vec<DeletedAsset>, String> {
+    let Ok(root) = require_root(&state) else {
+        return Ok(Vec::new());
+    };
+    Ok(assets::list_deleted_assets(&root))
+}
+
+#[tauri::command]
+pub fn vault_purge_deleted_asset(state: State<AppState>, undo_token: String) -> Result<(), String> {
+    let root = require_root(&state)?;
+    assets::purge_deleted_asset(&root, &undo_token)
+}
+
+#[tauri::command]
+pub fn vault_empty_deleted_assets(state: State<AppState>) -> Result<(), String> {
+    let root = require_root(&state)?;
+    assets::empty_deleted_assets(&root);
+    Ok(())
+}
+
+// ---- v2.15 cluster C: databases file layer --------------------------------
+// The CSV/schema logic lives in src/bridge/databases.ts (vendored
+// shared-domain functions run in the webview); these commands are the raw
+// vault-scoped file IO underneath — same trust boundary as the note CRUD.
+
+fn db_atomic_write(abs: &Path, text: &str) -> Result<(), String> {
+    if let Some(parent) = abs.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir failed: {e}"))?;
+        let tmp = parent.join(format!(
+            ".{}.{}.tmp",
+            abs.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+            std::process::id()
+        ));
+        std::fs::write(&tmp, text).map_err(|e| format!("write failed: {e}"))?;
+        return std::fs::rename(&tmp, abs).map_err(|e| format!("rename failed: {e}"));
+    }
+    std::fs::write(abs, text).map_err(|e| format!("write failed: {e}"))
+}
+
+#[tauri::command]
+pub fn db_read_text(state: State<AppState>, rel_path: String) -> Result<Option<String>, String> {
+    let root = require_root(&state)?;
+    let abs = notes::resolve_safe(&root, &rel_path)?;
+    match std::fs::read_to_string(&abs) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("read failed: {e}")),
+    }
+}
+
+#[tauri::command]
+pub fn db_write_text(state: State<AppState>, rel_path: String, text: String) -> Result<(), String> {
+    let root = require_root(&state)?;
+    let abs = notes::resolve_safe(&root, &rel_path)?;
+    db_atomic_write(&abs, &text)
+}
+
+#[tauri::command]
+pub fn db_exists(state: State<AppState>, rel_path: String) -> Result<bool, String> {
+    let root = require_root(&state)?;
+    Ok(notes::resolve_safe(&root, &rel_path)?.exists())
+}
+
+#[tauri::command]
+pub fn db_mkdir(state: State<AppState>, rel_path: String) -> Result<(), String> {
+    let root = require_root(&state)?;
+    let abs = notes::resolve_safe(&root, &rel_path)?;
+    std::fs::create_dir_all(abs).map_err(|e| format!("mkdir failed: {e}"))
+}
+
+#[tauri::command]
+pub fn db_rename(state: State<AppState>, old_rel: String, new_rel: String) -> Result<(), String> {
+    let root = require_root(&state)?;
+    let old_abs = notes::resolve_safe(&root, &old_rel)?;
+    let new_abs = notes::resolve_safe(&root, &new_rel)?;
+    std::fs::rename(old_abs, new_abs).map_err(|e| format!("rename failed: {e}"))
+}
+
+/// Vault-relative root of a NoteFolder ("" when the primary notes area is the
+/// vault root) — lets the frontend compute create locations like upstream's
+/// `folderRoot` without knowing the layout rules.
+#[tauri::command]
+pub fn db_folder_root_rel(state: State<AppState>, folder: String) -> Result<String, String> {
+    let root = require_root(&state)?;
+    let abs = layout::folder_root(&root, &folder);
+    let root_res = config::resolve_path(&root.to_string_lossy());
+    let abs_res = config::resolve_path(&abs.to_string_lossy());
+    let rel = abs_res
+        .strip_prefix(&format!("{root_res}{}", std::path::MAIN_SEPARATOR))
+        .unwrap_or("");
+    Ok(notes::to_posix(rel))
+}
+
+#[tauri::command]
+pub fn db_create_record_page(
+    state: State<AppState>,
+    form_dir_rel: String,
+    title: String,
+    body: String,
+) -> Result<String, String> {
+    let root = require_root(&state)?;
+    crud::create_database_record_page(&root, &form_dir_rel, &title, &body)
+}
+
+/// `vault:convert-obsidian-excalidraw` write half: the frontend extracts the
+/// scene (shared-domain, lz-string) and this persists it as a sibling
+/// `.excalidraw`, returning the new file's meta.
+#[tauri::command]
+pub fn vault_write_drawing(
+    state: State<AppState>,
+    dir_rel: String,
+    base_title: String,
+    body: String,
+) -> Result<NoteMeta, String> {
+    let root = require_root(&state)?;
+    crud::write_drawing_file(&root, &dir_rel, &base_title, &body)
+}
+
+/// `app:open-folder-temporary` — open a folder as an ephemeral session:
+/// no vault scaffolding, no `.zennotes` writes, not remembered across
+/// restarts (config.vaultRoot is left untouched). This backend keeps a
+/// single active vault shared by all windows, so the session replaces the
+/// active vault until the app restarts or another vault is opened; the
+/// `VaultInfo.temporary` flag drives the renderer's banner.
+#[tauri::command]
+pub fn app_open_folder_temporary(
+    app: AppHandle,
+    state: State<AppState>,
+    raw_path: String,
+) -> Result<(), String> {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() {
+        return Err("Folder path is required.".into());
+    }
+    let resolved = PathBuf::from(config::resolve_path(trimmed));
+    let md = std::fs::metadata(&resolved).map_err(|e| format!("Not a readable folder: {e}"))?;
+    if !md.is_dir() {
+        return Err("Not a folder.".into());
+    }
+    // Already the active root → just focus.
+    if let Some(current) = state.current() {
+        if config::resolve_path(&current.root) == resolved.to_string_lossy() {
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.set_focus();
+            }
+            return Ok(());
+        }
+    }
+    // An empty folder doesn't spawn a session (upstream parity).
+    if !listing::folder_has_markdown(&resolved) {
+        return Ok(());
+    }
+    let mut vault = layout::vault_info(&resolved);
+    vault.temporary = Some(true);
+    state.set_current(Some(vault));
+    match crate::watcher::spawn(app.clone(), resolved.clone()) {
+        Ok(debouncer) => state.set_watcher(Some(debouncer)),
+        Err(err) => {
+            eprintln!("vault watcher failed to start: {err}");
+            state.set_watcher(None);
+        }
+    }
+    crate::windows::open_vault_window(&app, &state)?;
+    Ok(())
+}
+
+/// v2.15 `openVaultWindow(root?)` support: open `root` as the active vault
+/// (used by window_cmds before spawning the new workspace window).
+pub(crate) fn open_local_vault_root(
+    app: &AppHandle,
+    state: &AppState,
+    root: &str,
+) -> Result<VaultInfo, String> {
+    open_vault(app, state, Path::new(root), now_ms())
+}
+
 #[tauri::command]
 pub fn vault_get_current(
     app: AppHandle,
@@ -465,7 +709,14 @@ pub fn vault_get_settings(state: State<AppState>) -> Result<VaultSettings, Strin
 
 #[tauri::command]
 pub fn vault_set_settings(state: State<AppState>, next: serde_json::Value) -> Result<VaultSettings, String> {
-    settings::set_vault_settings(&require_root(&state)?, &next)
+    let root = require_root(&state)?;
+    // Ephemeral session: apply for this run but never write .zennotes state
+    // into a temporarily-opened folder (upstream ephemeral-vaults contract).
+    if active_vault_is_temporary(&state) {
+        let fallback = settings::infer_primary_notes_location(&root);
+        return Ok(settings::normalize_vault_settings(Some(&next), &fallback));
+    }
+    settings::set_vault_settings(&root, &next)
 }
 
 #[tauri::command]
