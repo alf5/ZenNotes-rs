@@ -157,6 +157,90 @@ pub fn vault_empty_deleted_assets(state: State<AppState>) -> Result<(), String> 
     Ok(())
 }
 
+// ---- v2.15 cluster C: databases file layer --------------------------------
+// The CSV/schema logic lives in src/bridge/databases.ts (vendored
+// shared-domain functions run in the webview); these commands are the raw
+// vault-scoped file IO underneath — same trust boundary as the note CRUD.
+
+fn db_atomic_write(abs: &Path, text: &str) -> Result<(), String> {
+    if let Some(parent) = abs.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir failed: {e}"))?;
+        let tmp = parent.join(format!(
+            ".{}.{}.tmp",
+            abs.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+            std::process::id()
+        ));
+        std::fs::write(&tmp, text).map_err(|e| format!("write failed: {e}"))?;
+        return std::fs::rename(&tmp, abs).map_err(|e| format!("rename failed: {e}"));
+    }
+    std::fs::write(abs, text).map_err(|e| format!("write failed: {e}"))
+}
+
+#[tauri::command]
+pub fn db_read_text(state: State<AppState>, rel_path: String) -> Result<Option<String>, String> {
+    let root = require_root(&state)?;
+    let abs = notes::resolve_safe(&root, &rel_path)?;
+    match std::fs::read_to_string(&abs) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("read failed: {e}")),
+    }
+}
+
+#[tauri::command]
+pub fn db_write_text(state: State<AppState>, rel_path: String, text: String) -> Result<(), String> {
+    let root = require_root(&state)?;
+    let abs = notes::resolve_safe(&root, &rel_path)?;
+    db_atomic_write(&abs, &text)
+}
+
+#[tauri::command]
+pub fn db_exists(state: State<AppState>, rel_path: String) -> Result<bool, String> {
+    let root = require_root(&state)?;
+    Ok(notes::resolve_safe(&root, &rel_path)?.exists())
+}
+
+#[tauri::command]
+pub fn db_mkdir(state: State<AppState>, rel_path: String) -> Result<(), String> {
+    let root = require_root(&state)?;
+    let abs = notes::resolve_safe(&root, &rel_path)?;
+    std::fs::create_dir_all(abs).map_err(|e| format!("mkdir failed: {e}"))
+}
+
+#[tauri::command]
+pub fn db_rename(state: State<AppState>, old_rel: String, new_rel: String) -> Result<(), String> {
+    let root = require_root(&state)?;
+    let old_abs = notes::resolve_safe(&root, &old_rel)?;
+    let new_abs = notes::resolve_safe(&root, &new_rel)?;
+    std::fs::rename(old_abs, new_abs).map_err(|e| format!("rename failed: {e}"))
+}
+
+/// Vault-relative root of a NoteFolder ("" when the primary notes area is the
+/// vault root) — lets the frontend compute create locations like upstream's
+/// `folderRoot` without knowing the layout rules.
+#[tauri::command]
+pub fn db_folder_root_rel(state: State<AppState>, folder: String) -> Result<String, String> {
+    let root = require_root(&state)?;
+    let abs = layout::folder_root(&root, &folder);
+    let root_res = config::resolve_path(&root.to_string_lossy());
+    let abs_res = config::resolve_path(&abs.to_string_lossy());
+    let rel = abs_res
+        .strip_prefix(&format!("{root_res}{}", std::path::MAIN_SEPARATOR))
+        .unwrap_or("");
+    Ok(notes::to_posix(rel))
+}
+
+#[tauri::command]
+pub fn db_create_record_page(
+    state: State<AppState>,
+    form_dir_rel: String,
+    title: String,
+    body: String,
+) -> Result<String, String> {
+    let root = require_root(&state)?;
+    crud::create_database_record_page(&root, &form_dir_rel, &title, &body)
+}
+
 /// v2.15 `openVaultWindow(root?)` support: open `root` as the active vault
 /// (used by window_cmds before spawning the new workspace window).
 pub(crate) fn open_local_vault_root(

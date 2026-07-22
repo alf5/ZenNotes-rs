@@ -92,12 +92,56 @@ pub fn classify_change(root: &Path, abs: &Path, kind: &str, is_dir: bool) -> Opt
         });
     }
 
+    // Database files (data.csv / schema.json / legacy loose .csv + sidecar)
+    // normalize to the canonical data.csv path with scope "database"
+    // (upstream watcher.ts:87). Record-page .md files return None here and
+    // ride the normal note path.
+    if let Some(csv_path) = database_csv_path_for(&rel) {
+        return Some(VaultChangeEvent {
+            kind: kind.to_string(),
+            folder: folder_for_relative_path(&csv_path).unwrap_or(folder),
+            path: csv_path,
+            scope: Some("database".to_string()),
+        });
+    }
+
     Some(VaultChangeEvent {
         kind: kind.to_string(),
         path: rel,
         folder,
         scope: None,
     })
+}
+
+/// Rust port of shared-domain `databaseCsvPathFor` (databases.ts:300): map any
+/// database file to its canonical `data.csv` path, or None for non-database
+/// paths (including record pages).
+fn database_csv_path_for(rel: &str) -> Option<String> {
+    let lower = rel.to_lowercase();
+    let parent = rel.rfind('/').map(|i| &rel[..i]);
+    let parent_is_form_dir =
+        parent.is_some_and(|dir| dir.to_lowercase().ends_with(".base"));
+    if lower.ends_with("/schema.json") && parent_is_form_dir {
+        return Some(format!("{}/data.csv", parent.unwrap_or_default()));
+    }
+    if lower.ends_with("/data.csv") && parent_is_form_dir {
+        return Some(rel.to_string());
+    }
+    // Legacy: a `<Name>.csv.base.json` sidecar maps to its `.csv`.
+    if lower.ends_with(".csv.base.json") {
+        return Some(rel[..rel.len() - ".base.json".len()].to_string());
+    }
+    // Legacy loose `.csv` (not inside a `.base` folder).
+    if lower.ends_with(".csv")
+        && !rel
+            .split('/')
+            .rev()
+            .skip(1)
+            .any(|component| component.to_lowercase().ends_with(".base"))
+    {
+        return Some(rel.to_string());
+    }
+    None
 }
 
 /// Whether the notify event kind itself identifies a directory.
@@ -183,6 +227,35 @@ mod tests {
         assert_eq!(ev.scope.as_deref(), Some("comments"));
         assert_eq!(ev.path, "inbox/Note.md");
         assert_eq!(ev.folder, "inbox");
+    }
+
+    #[test]
+    fn classifies_database_files_normalized_to_data_csv() {
+        let root = Path::new("/v");
+        let schema =
+            classify_change(root, Path::new("/v/inbox/Books.base/schema.json"), "change", false)
+                .unwrap();
+        assert_eq!(schema.scope.as_deref(), Some("database"));
+        assert_eq!(schema.path, "inbox/Books.base/data.csv");
+
+        let data = classify_change(root, Path::new("/v/inbox/Books.base/data.csv"), "add", false)
+            .unwrap();
+        assert_eq!(data.scope.as_deref(), Some("database"));
+        assert_eq!(data.path, "inbox/Books.base/data.csv");
+
+        // Legacy loose csv + sidecar.
+        assert_eq!(
+            database_csv_path_for("inbox/Old.csv.base.json").as_deref(),
+            Some("inbox/Old.csv")
+        );
+        assert_eq!(database_csv_path_for("inbox/Old.csv").as_deref(), Some("inbox/Old.csv"));
+
+        // Record pages ride the normal note path.
+        let page =
+            classify_change(root, Path::new("/v/inbox/Books.base/Dune.md"), "change", false)
+                .unwrap();
+        assert_eq!(page.scope, None);
+        assert_eq!(page.path, "inbox/Books.base/Dune.md");
     }
 
     #[test]
