@@ -1,0 +1,9 @@
+# makepkg build artifacts — never commit these.
+/src/
+/pkg/
+/zennotes-rs/
+/*.pkg.tar.*
+/*.log
+/npm-cache/
+/bun-cache/
+/cargo-home/

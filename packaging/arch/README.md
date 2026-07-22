@@ -14,7 +14,7 @@ The binary is installed as **`/usr/bin/zennotes-rs`**.
 ## Dependencies (Arch packages)
 
 - **Runtime:** `webkit2gtk-4.1`, `gtk3`, `hicolor-icon-theme`
-- **Build:** `rust` (provides cargo), `npm`, `nodejs`, `pkgconf`, `git`
+- **Build:** `rust` (provides cargo), `bun`, `nodejs`, `pkgconf`, `git`
 
 ## Build & install locally
 
