@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
 
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { TASKS_TAB_PATH, type VaultTask } from '@shared/tasks'
+import { TAGS_TAB_PATH } from '@shared/tags'
+import { WORKFLOWS_TAB_PATH } from '@shared/workflows-view'
 import { databaseTabPath, type DatabaseDoc } from '@shared/databases'
 import { assetTabPath } from './lib/asset-tabs'
 import { findLeaf, type PaneLayout, type PaneLeaf } from './lib/pane-layout'
@@ -19,6 +21,8 @@ function makeTask(content: string, taskIndex = 0): VaultTask {
     content,
     checked: false,
     forwarded: false,
+    cancelled: false,
+    inProgress: false,
     waiting: false,
     tags: []
   }
@@ -69,16 +73,46 @@ function installZen(overrides: Record<string, unknown> = {}): void {
       getVaultSettings: vi.fn().mockResolvedValue({}),
       closeVault: vi.fn().mockResolvedValue(null),
       readNote: vi.fn().mockResolvedValue(makeNote('- [ ] old task')),
+      // The database save is debounced at the module level, so a write
+      // scheduled by one test can fire while a later test is running, against
+      // whichever `window.zen` is installed by then. These two are called
+      // straight inside the timer callback, so a missing method throws
+      // synchronously and escapes the promise `.catch` as an unhandled error
+      // that fails the whole run. Defaulting them keeps a stray timer inert
+      // regardless of test order; tests that assert on them still override.
+      writeDatabaseRows: vi.fn().mockResolvedValue(undefined),
+      writeDatabaseSchema: vi.fn().mockResolvedValue(undefined),
       ...overrides
     }
   })
 }
 
+// The most recent store module a test loaded. `vi.resetModules` gives every
+// test a fresh module, but timers the OLD module already scheduled keep
+// running: `updateNoteBody` debounces a `persistNote` at 350ms
+// (pathSaveTimers), and database edits debounce a write at 400ms
+// (databaseSaveTimers). A test that schedules either without awaiting it
+// leaves a straggler that fires against whichever `window.zen` spy is
+// installed one or two tests later; a partial mock there turns the write
+// into `undefined.catch`, which is an unhandled error that fails the whole
+// run (seen on the macOS runner). The cure is the afterEach below: it
+// starves both timers' bail-out checks on the old store, so a stray
+// persistNote finds nothing dirty and a stray database write finds no doc,
+// and each returns before touching `window.zen`.
+let lastLoadedStore: { useStore: { setState: (partial: object) => void } } | null = null
+
 async function loadStore() {
   vi.resetModules()
   localStorage.clear()
-  return import('./store')
+  const mod = await import('./store')
+  lastLoadedStore = mod as unknown as typeof lastLoadedStore
+  return mod
 }
+
+afterEach(() => {
+  lastLoadedStore?.useStore.setState({ noteDirty: {}, databases: {} })
+  lastLoadedStore = null
+})
 
 async function flushAsyncWork(): Promise<void> {
   await new Promise((resolve) => window.setTimeout(resolve, 0))
@@ -141,6 +175,66 @@ describe('tasks cache freshness', () => {
 
     expect(scanTasksForPath).toHaveBeenCalledWith('inbox/Note.md')
     expect(useStore.getState().vaultTasks).toEqual(freshTasks)
+  })
+
+  it('isolates tasks from a note until its cloud conflict is resolved', async () => {
+    const conflicted = {
+      ...makeTask('choose this later'),
+      id: 'inbox/Conflict.md#0',
+      sourcePath: 'inbox/Conflict.md'
+    }
+    const unaffected = {
+      ...makeTask('keep showing this'),
+      id: 'inbox/Other.md#0',
+      sourcePath: 'inbox/Other.md'
+    }
+    const scanTasks = vi.fn().mockResolvedValue([conflicted, unaffected])
+    installZen({ scanTasks })
+
+    const { useStore } = await loadStore()
+    const { useCloudSyncStatusStore } = await import('./lib/cloud-auto-sync')
+    useStore.setState({ vaultTasks: [conflicted, unaffected] })
+
+    useCloudSyncStatusStore.setState({
+      phase: 'attention',
+      lastSummary: {
+        cursor: 2,
+        pulled: 1,
+        pushed: 0,
+        conflicts: [],
+        bootstrap_conflicts: [],
+        local_conflicts: [],
+        pending_conflicts: [
+          {
+            id: 'item-1',
+            item_id: 'item-1',
+            path: 'inbox/Conflict.md',
+            cloud_path: 'inbox/Conflict.md',
+            kind: 'content',
+            can_merge: true,
+            has_base: true
+          }
+        ]
+      }
+    })
+
+    expect(useStore.getState().vaultTasks).toEqual([unaffected])
+    await useStore.getState().refreshTasks()
+    expect(useStore.getState().vaultTasks).toEqual([unaffected])
+
+    useCloudSyncStatusStore.setState({
+      lastSummary: {
+        cursor: 3,
+        pulled: 0,
+        pushed: 1,
+        conflicts: [],
+        bootstrap_conflicts: [],
+        local_conflicts: [],
+        pending_conflicts: []
+      }
+    })
+    await useStore.getState().refreshTasks()
+    expect(useStore.getState().vaultTasks).toEqual([conflicted, unaffected])
   })
 })
 
@@ -694,6 +788,171 @@ describe('importDroppedMarkdownFiles (web import-as-note)', () => {
   })
 })
 
+describe('cancelTaskFromList (#450)', () => {
+  it('cancels an inline task by writing `[-]` to the note', async () => {
+    const note = { ...makeNote('- [ ] Write the proposal'), path: 'inbox/Note.md', title: 'Note' }
+    const writeNote = vi.fn().mockResolvedValue(note)
+    installZen({
+      writeNote,
+      listNotes: vi.fn().mockResolvedValue([note]),
+      readNote: vi.fn().mockResolvedValue({ ...note, body: '- [ ] Write the proposal' })
+    })
+    const { useStore } = await loadStore()
+
+    await useStore.getState().cancelTaskFromList(makeTask('Write the proposal', 0))
+
+    expect(writeNote).toHaveBeenCalledWith('inbox/Note.md', '- [-] Write the proposal')
+  })
+
+  it('un-cancels a `[-]` task back to `[ ]`', async () => {
+    const note = { ...makeNote('- [-] Write the proposal'), path: 'inbox/Note.md', title: 'Note' }
+    const writeNote = vi.fn().mockResolvedValue(note)
+    installZen({
+      writeNote,
+      listNotes: vi.fn().mockResolvedValue([note]),
+      readNote: vi.fn().mockResolvedValue({ ...note, body: '- [-] Write the proposal' })
+    })
+    const { useStore } = await loadStore()
+
+    await useStore.getState().cancelTaskFromList({ ...makeTask('Write the proposal', 0), cancelled: true })
+
+    expect(writeNote).toHaveBeenCalledWith('inbox/Note.md', '- [ ] Write the proposal')
+  })
+})
+
+describe('task forwarding carries the subtree (#611)', () => {
+  it('moves subtasks with the parent and leaves the whole block as the source record', async () => {
+    installZen()
+    const { useStore } = await loadStore()
+    const srcBody = ['- [ ] Main task', '    - [ ] sub a', '    - [x] sub b'].join('\n')
+    const task = makeTask('Main task', 0)
+    useStore.setState({
+      notes: [makeNote(srcBody, 'inbox/Note.md'), makeNote('# Work', 'inbox/Work.md')],
+      noteContents: {
+        'inbox/Note.md': makeNote(srcBody, 'inbox/Note.md'),
+        'inbox/Work.md': makeNote('# Work', 'inbox/Work.md')
+      },
+      vaultTasks: [task]
+    })
+
+    await useStore.getState().forwardTask(task, 'inbox/Work.md')
+
+    const state = useStore.getState()
+    expect(state.noteContents['inbox/Note.md'].body).toBe(
+      ['- [>] Main task [[Work]]', '    - [>] sub a', '    - [x] sub b'].join('\n')
+    )
+    expect(state.noteContents['inbox/Work.md'].body).toBe(
+      ['# Work', '- [ ] Main task [[Note]]', '    - [ ] sub a', '    - [x] sub b', ''].join('\n')
+    )
+    // The rebuilt index keeps the open work only in the destination; the
+    // source subtree is a forwarded record plus its done history.
+    const open = state.vaultTasks.filter((t) => !t.checked && !t.forwarded)
+    expect(open.map((t) => t.sourcePath)).toEqual(['inbox/Work.md', 'inbox/Work.md'])
+  })
+})
+
+describe('optimistic task state transitions (#512)', () => {
+  it('starting a completed file task immediately clears every competing state', async () => {
+    installZen()
+    const { useStore } = await loadStore()
+    const body = '---\ntags: [task]\nstatus: done\ncompletedDate: 2026-08-01\n---\n'
+    const task: VaultTask = {
+      ...makeTask('Note', -1),
+      id: 'inbox/Note.md#file',
+      taskIndex: -1,
+      kind: 'file',
+      rawText: '',
+      checked: true,
+      cancelled: false,
+      inProgress: false,
+      waiting: true,
+      status: 'done',
+      fields: { status: 'done' }
+    }
+    useStore.setState({
+      noteContents: { 'inbox/Note.md': makeNote(body) },
+      vaultTasks: [task]
+    })
+
+    await useStore.getState().startTaskFromList(task)
+
+    expect(useStore.getState().vaultTasks[0]).toMatchObject({
+      checked: false,
+      forwarded: false,
+      cancelled: false,
+      inProgress: true,
+      waiting: false,
+      status: 'in-progress',
+      fields: { status: 'in-progress' }
+    })
+  })
+
+  it('starting a forwarded inline task immediately clears the old state marker', async () => {
+    installZen()
+    const { useStore } = await loadStore()
+    const task: VaultTask = {
+      ...makeTask('Send draft', 0),
+      rawText: '- [>] Send draft',
+      forwarded: true
+    }
+    useStore.setState({
+      noteContents: { 'inbox/Note.md': makeNote('- [>] Send draft') },
+      vaultTasks: [task]
+    })
+
+    await useStore.getState().startTaskFromList(task)
+
+    expect(useStore.getState().vaultTasks[0]).toMatchObject({
+      checked: false,
+      forwarded: false,
+      cancelled: false,
+      inProgress: true
+    })
+  })
+
+  it('completing or cancelling a file task immediately clears in-progress', async () => {
+    installZen()
+    const { useStore } = await loadStore()
+    const body = '---\ntags: [task]\nstatus: in-progress\n---\n'
+    const task: VaultTask = {
+      ...makeTask('Note', -1),
+      id: 'inbox/Note.md#file',
+      taskIndex: -1,
+      kind: 'file',
+      rawText: '',
+      inProgress: true,
+      status: 'in-progress',
+      fields: { status: 'in-progress' }
+    }
+    useStore.setState({
+      noteContents: { 'inbox/Note.md': makeNote(body) },
+      vaultTasks: [task]
+    })
+
+    await useStore.getState().toggleTaskFromList(task)
+    expect(useStore.getState().vaultTasks[0]).toMatchObject({
+      checked: true,
+      cancelled: false,
+      inProgress: false,
+      waiting: false,
+      status: 'done'
+    })
+
+    useStore.setState({
+      noteContents: { 'inbox/Note.md': makeNote(body) },
+      vaultTasks: [task]
+    })
+    await useStore.getState().cancelTaskFromList(task)
+    expect(useStore.getState().vaultTasks[0]).toMatchObject({
+      checked: false,
+      cancelled: true,
+      inProgress: false,
+      waiting: false,
+      status: 'cancelled'
+    })
+  })
+})
+
 describe('preview tabs (VS Code-style open flow)', () => {
   function activeLeaf(store: { paneLayout: PaneLayout; activePaneId: string }): PaneLeaf {
     const leaf = findLeaf(store.paneLayout, store.activePaneId)
@@ -783,6 +1042,116 @@ describe('note jump history with database tabs', () => {
     // Ctrl+O → jump back to the grid.
     await useStore.getState().jumpToPreviousNote()
     expect(useStore.getState().selectedPath).toBe(dbTab)
+  })
+})
+
+describe('note jump history with the Tasks and Tags views (#633)', () => {
+  // The panels are destinations the user navigates to on purpose, so the
+  // jumplist must both return TO them and record the note they were opened
+  // FROM. Before #633 they were excluded on both sides: Ctrl+O skipped the
+  // panel, and the origin note never entered the backstack.
+  it('Ctrl+O returns to the Tasks view, then to the note it was opened from', async () => {
+    installZen({
+      readNote: vi
+        .fn()
+        .mockImplementation(async (path: string) => makeNote('body text', path))
+    })
+    const { useStore } = await loadStore()
+
+    await useStore.getState().selectNote('inbox/From.md')
+    await useStore.getState().openTasksView()
+    expect(useStore.getState().selectedPath).toBe(TASKS_TAB_PATH)
+    expect(useStore.getState().noteBackstack.map((l) => l.path)).toContain('inbox/From.md')
+
+    await useStore.getState().selectNote('inbox/Other.md')
+    expect(useStore.getState().noteBackstack.map((l) => l.path)).toContain(TASKS_TAB_PATH)
+
+    await useStore.getState().jumpToPreviousNote()
+    expect(useStore.getState().selectedPath).toBe(TASKS_TAB_PATH)
+    await useStore.getState().jumpToPreviousNote()
+    expect(useStore.getState().selectedPath).toBe('inbox/From.md')
+
+    // And Ctrl+I walks forward through the panel again.
+    await useStore.getState().jumpToNextNote()
+    expect(useStore.getState().selectedPath).toBe(TASKS_TAB_PATH)
+    await useStore.getState().jumpToNextNote()
+    expect(useStore.getState().selectedPath).toBe('inbox/Other.md')
+  })
+
+  it('the Tags view round-trips the same way', async () => {
+    installZen({
+      readNote: vi
+        .fn()
+        .mockImplementation(async (path: string) => makeNote('body text', path))
+    })
+    const { useStore } = await loadStore()
+
+    await useStore.getState().selectNote('inbox/From.md')
+    await useStore.getState().openTagView('demo')
+    expect(useStore.getState().selectedPath).toBe(TAGS_TAB_PATH)
+
+    await useStore.getState().selectNote('inbox/Other.md')
+    await useStore.getState().jumpToPreviousNote()
+    expect(useStore.getState().selectedPath).toBe(TAGS_TAB_PATH)
+    await useStore.getState().jumpToPreviousNote()
+    expect(useStore.getState().selectedPath).toBe('inbox/From.md')
+  })
+})
+
+describe('note jump history for offset opens (#484)', () => {
+  // Opening a note *at an offset* — a template's `{{cursor}}`, a vault-search
+  // hit, a `[[note#heading]]` link — went straight to the raw tab primitive and
+  // recorded nothing, so Ctrl+O skipped straight past the note you left. After
+  // "New Note from Template" with only one note behind you, it did nothing at
+  // all, which is how this was reported.
+  it('records where you came from, so Ctrl+O returns there', async () => {
+    installZen({
+      readNote: vi
+        .fn()
+        .mockImplementation(async (path: string) => makeNote('body text', path))
+    })
+    const { useStore } = await loadStore()
+
+    await useStore.getState().selectNote('inbox/From.md')
+    expect(useStore.getState().selectedPath).toBe('inbox/From.md')
+
+    await useStore.getState().openNoteAtOffset('inbox/Target.md', 4)
+    expect(useStore.getState().selectedPath).toBe('inbox/Target.md')
+    expect(useStore.getState().noteBackstack.map((l) => l.path)).toContain('inbox/From.md')
+
+    await useStore.getState().jumpToPreviousNote()
+    expect(useStore.getState().selectedPath).toBe('inbox/From.md')
+  })
+
+  it('leaves the forward stack ready after jumping back', async () => {
+    installZen({
+      readNote: vi
+        .fn()
+        .mockImplementation(async (path: string) => makeNote('body text', path))
+    })
+    const { useStore } = await loadStore()
+
+    await useStore.getState().selectNote('inbox/From.md')
+    await useStore.getState().openNoteAtOffset('inbox/Target.md', 4)
+    await useStore.getState().jumpToPreviousNote()
+    expect(useStore.getState().selectedPath).toBe('inbox/From.md')
+
+    await useStore.getState().jumpToNextNote()
+    expect(useStore.getState().selectedPath).toBe('inbox/Target.md')
+  })
+
+  it('does not record a jump to the note already open', async () => {
+    installZen({
+      readNote: vi
+        .fn()
+        .mockImplementation(async (path: string) => makeNote('body text', path))
+    })
+    const { useStore } = await loadStore()
+
+    await useStore.getState().selectNote('inbox/Same.md')
+    const before = useStore.getState().noteBackstack.length
+    await useStore.getState().openNoteAtOffset('inbox/Same.md', 8)
+    expect(useStore.getState().noteBackstack.length).toBe(before)
   })
 })
 
@@ -901,6 +1270,18 @@ describe('viewPrefsFromVault (#292 — per-vault view overlay)', () => {
     expect('tasksViewMode' in patch).toBe(false)
   })
 
+  it('overlays the Assets sort order, and drops an invalid one (#473)', async () => {
+    installZen()
+    const { viewPrefsFromVault } = await loadStore()
+    expect(
+      viewPrefsFromVault({ view: { assetSortOrder: 'modified-desc' } } as unknown as ViewArg)
+        .assetSortOrder
+    ).toBe('modified-desc')
+    expect(
+      'assetSortOrder' in
+        viewPrefsFromVault({ view: { assetSortOrder: 'size-sideways' } } as unknown as ViewArg)
+    ).toBe(false)
+  })
   it('returns an empty patch when there is no view block', async () => {
     installZen()
     const { viewPrefsFromVault } = await loadStore()
@@ -924,6 +1305,27 @@ describe('viewPrefsFromVault (#292 — per-vault view overlay)', () => {
     expect(patch.kanbanColumnOrder).toEqual({ 'field:status': ['review', 'backlog', 'done'] })
   })
 
+  it('overlays and normalizes kanbanCardOrder (manual card arrangement)', async () => {
+    installZen()
+    const { viewPrefsFromVault } = await loadStore()
+    const key = (path: string, index: number): string => `${path}\0${index}`
+    const patch = viewPrefsFromVault({
+      view: {
+        kanbanCardOrder: {
+          'status:today': [key('inbox/a.md', 1), key('inbox/b.md', 0), key('inbox/a.md', 1), 42],
+          'field:status:review': [key('inbox/c.md', 3)],
+          'not-a-groupby:today': [key('inbox/d.md', 0)],
+          'status:done': []
+        }
+      }
+    } as unknown as ViewArg)
+    // Dedupes, drops non-strings, drops unknown board keys, drops empty lists.
+    expect(patch.kanbanCardOrder).toEqual({
+      'status:today': [key('inbox/a.md', 1), key('inbox/b.md', 0)],
+      'field:status:review': [key('inbox/c.md', 3)]
+    })
+  })
+
   it('keeps a renamed No-value bucket title through normalization (#389)', async () => {
     installZen()
     const { viewPrefsFromVault } = await loadStore()
@@ -934,6 +1336,55 @@ describe('viewPrefsFromVault (#292 — per-vault view overlay)', () => {
       view: { kanbanColumnTitles: { [key]: 'Unassigned', 'field:status:review': 'In review' } }
     } as unknown as ViewArg)
     expect(patch.kanbanColumnTitles).toEqual({ [key]: 'Unassigned', 'field:status:review': 'In review' })
+  })
+})
+
+describe('assetSortOrder (#473: Assets view sort is sticky)', () => {
+  it('defaults to name-asc and survives a store reload', async () => {
+    installZen()
+    const first = await loadStore()
+    expect(first.useStore.getState().assetSortOrder).toBe('name-asc')
+
+    first.useStore.getState().setAssetSortOrder('modified-desc')
+    expect(first.useStore.getState().assetSortOrder).toBe('modified-desc')
+
+    // Re-import without clearing localStorage: this is the "quit and reopen"
+    // path, and the header choice has to come back with it.
+    vi.resetModules()
+    const reloaded = await import('./store')
+    expect(reloaded.useStore.getState().assetSortOrder).toBe('modified-desc')
+  })
+
+  it('falls back to the default when the persisted value is junk', async () => {
+    installZen()
+    const { DEFAULT_PREFS } = await loadStore()
+    localStorage.setItem(
+      'zen:prefs:v2',
+      JSON.stringify({ ...DEFAULT_PREFS, assetSortOrder: 'nonsense' })
+    )
+    vi.resetModules()
+    const reloaded = await import('./store')
+    expect(reloaded.useStore.getState().assetSortOrder).toBe('name-asc')
+  })
+})
+
+describe('theme persistence', () => {
+  it('keeps Rosé Pine after the app reloads', async () => {
+    installZen()
+    const first = await loadStore()
+
+    first.useStore
+      .getState()
+      .setTheme({ id: 'rose-pine-moon', family: 'rose-pine', mode: 'dark' })
+
+    vi.resetModules()
+    const reloaded = await import('./store')
+
+    expect(reloaded.useStore.getState()).toMatchObject({
+      themeId: 'rose-pine-moon',
+      themeFamily: 'rose-pine',
+      themeMode: 'dark'
+    })
   })
 })
 
@@ -1012,6 +1463,101 @@ describe('pdfExportUseTheme — theme in PDF export', () => {
     vi.resetModules()
     const missing = await import('./store')
     expect(missing.useStore.getState().pdfExportUseTheme).toBe(false)
+  })
+})
+
+describe('vimWrappedLineMotions (#638)', () => {
+  it('defaults to display rows and round-trips the logical-line preference', async () => {
+    installZen()
+    const { useStore } = await loadStore()
+    expect(useStore.getState().vimWrappedLineMotions).toBe('display')
+
+    useStore.getState().setVimWrappedLineMotions('logical')
+    expect(useStore.getState().vimWrappedLineMotions).toBe('logical')
+    const saved = JSON.parse(localStorage.getItem('zen:prefs:v2') ?? '{}')
+    expect(saved.vimWrappedLineMotions).toBe('logical')
+
+    vi.resetModules()
+    const reloaded = await import('./store')
+    expect(reloaded.useStore.getState().vimWrappedLineMotions).toBe('logical')
+  })
+
+  it('normalizes an unknown stored value to display rows', async () => {
+    installZen()
+    localStorage.setItem(
+      'zen:prefs:v2',
+      JSON.stringify({ vimWrappedLineMotions: 'somewhere-else' })
+    )
+    const { useStore } = await loadStore()
+    expect(useStore.getState().vimWrappedLineMotions).toBe('display')
+  })
+})
+
+describe('workflowsEnabled (Workflows feature switch)', () => {
+  it('defaults off and round-trips the opt-in through persistence', async () => {
+    installZen()
+    const { useStore } = await loadStore()
+    // Off by default: workflows can rewrite notes in bulk, so the feature is
+    // something a user turns on once in Settings, not something they stumble
+    // into. The toggle is the front door.
+    expect(useStore.getState().workflowsEnabled).toBe(false)
+
+    useStore.getState().setWorkflowsEnabled(true)
+    expect(useStore.getState().workflowsEnabled).toBe(true)
+    const saved = JSON.parse(localStorage.getItem('zen:prefs:v2') ?? '{}')
+    expect(saved.workflowsEnabled).toBe(true)
+
+    vi.resetModules()
+    const reloaded = await import('./store')
+    expect(reloaded.useStore.getState().workflowsEnabled).toBe(true)
+  })
+
+  it('normalizes missing and non-boolean stored values to off', async () => {
+    installZen()
+    await loadStore() // fresh module + cleared storage
+
+    localStorage.setItem('zen:prefs:v2', JSON.stringify({ workflowsEnabled: 'nope' }))
+    vi.resetModules()
+    const bad = await import('./store')
+    expect(bad.useStore.getState().workflowsEnabled).toBe(false)
+
+    localStorage.setItem('zen:prefs:v2', JSON.stringify({ themeId: 'dark-hard' }))
+    vi.resetModules()
+    const missing = await import('./store')
+    expect(missing.useStore.getState().workflowsEnabled).toBe(false)
+  })
+
+  it('closes an open Workflows tab when the feature is switched off', async () => {
+    installZen()
+    const { useStore } = await loadStore()
+    const paneId = useStore.getState().activePaneId
+    useStore.setState({ notes: [makeNote('A', 'inbox/A.md')] })
+    // Opted in first: the default is off and openWorkflowsView refuses then.
+    useStore.getState().setWorkflowsEnabled(true)
+
+    await useStore.getState().openNoteInPane(paneId, 'inbox/A.md')
+    await useStore.getState().openWorkflowsView()
+    expect(findLeaf(useStore.getState().paneLayout, paneId)?.tabs).toContain(WORKFLOWS_TAB_PATH)
+
+    useStore.getState().setWorkflowsEnabled(false)
+    await flushAsyncWork()
+    // No live canvas may survive behind a disabled feature.
+    expect(findLeaf(useStore.getState().paneLayout, paneId)?.tabs).not.toContain(
+      WORKFLOWS_TAB_PATH
+    )
+  })
+
+  it('refuses to open the view while the feature is off', async () => {
+    installZen()
+    const { useStore } = await loadStore()
+    useStore.getState().setWorkflowsEnabled(false)
+
+    await useStore.getState().openWorkflowsView()
+
+    const paneId = useStore.getState().activePaneId
+    expect(findLeaf(useStore.getState().paneLayout, paneId)?.tabs ?? []).not.toContain(
+      WORKFLOWS_TAB_PATH
+    )
   })
 })
 
@@ -1126,5 +1672,584 @@ describe('deleteDatabaseRows (#391 — purge record-page schema mappings)', () =
     const doc = useStore.getState().databases[CSV]!
     expect(doc.rows.map((r) => r.id)).toEqual(['r1'])
     expect(doc.pages).toEqual({ r1: 'db.base/pages/r1.md' })
+  })
+})
+
+describe('renameNote heading sync (#455)', () => {
+  const BODY = '# Untitled\n\nbody\n'
+  // `listNotes`/`renameNote` hand back NoteMeta — metadata only, no body. The
+  // buffer is the only place a body lives, so the fixtures must not carry one
+  // or a refresh would spread a stale body back over the rewritten heading.
+  function metaOf(path: string, title: string) {
+    const { body: _body, ...meta } = makeNote('', path)
+    return { ...meta, title }
+  }
+  const renamedMeta = metaOf('inbox/Groceries.md', 'Groceries')
+
+  function installRename(overrides: Record<string, unknown> = {}) {
+    const renameNote = vi.fn().mockResolvedValue(renamedMeta)
+    const writeNote = vi.fn().mockResolvedValue(renamedMeta)
+    const readNote = vi
+      .fn()
+      .mockImplementation((path: string) =>
+        Promise.resolve({ ...metaOf(path, 'Untitled'), body: BODY })
+      )
+    installZen({
+      renameNote,
+      writeNote,
+      readNote,
+      listNotes: vi.fn().mockResolvedValue([renamedMeta]),
+      ...overrides
+    })
+    return { renameNote, writeNote, readNote }
+  }
+
+  it('retitles the heading of a note that is not open, straight on disk', async () => {
+    const { writeNote, readNote } = installRename()
+    const { useStore } = await loadStore()
+
+    await useStore.getState().renameNote('inbox/Untitled.md', 'Groceries')
+
+    expect(readNote).toHaveBeenCalledWith('inbox/Groceries.md')
+    expect(writeNote).toHaveBeenCalledWith('inbox/Groceries.md', '# Groceries\n\nbody\n')
+  })
+
+  it('saves dirty linked notes before the rename can rewrite their wikilinks', async () => {
+    const order: string[] = []
+    const dirtyNote = makeNote('See [[Untitled]]\n', 'inbox/Daily.md')
+    const writeNote = vi.fn(async () => {
+      order.push('save')
+      return dirtyNote
+    })
+    const renameNote = vi.fn(async () => {
+      order.push('rename')
+      return renamedMeta
+    })
+    installRename({
+      renameNote,
+      writeNote,
+      readNote: vi.fn().mockResolvedValue(dirtyNote),
+      listNotes: vi.fn().mockResolvedValue([dirtyNote, renamedMeta])
+    })
+    const { useStore } = await loadStore()
+    useStore.setState({
+      notes: [dirtyNote, metaOf('inbox/Untitled.md', 'Untitled')],
+      noteContents: { [dirtyNote.path]: dirtyNote },
+      noteDirty: { [dirtyNote.path]: true }
+    })
+
+    await useStore.getState().renameNote('inbox/Untitled.md', 'Groceries')
+
+    expect(order.slice(0, 2)).toEqual(['save', 'rename'])
+  })
+
+  it('does not rename when a dirty linked note could not be saved', async () => {
+    const dirtyNote = makeNote('See [[Untitled]]\n', 'inbox/Daily.md')
+    const renameNote = vi.fn().mockResolvedValue(renamedMeta)
+    installRename({
+      renameNote,
+      writeNote: vi.fn().mockRejectedValue(new Error('disk unavailable')),
+      readNote: vi.fn().mockResolvedValue(dirtyNote),
+      listNotes: vi.fn().mockResolvedValue([dirtyNote, renamedMeta])
+    })
+    const { useStore } = await loadStore()
+    useStore.setState({
+      notes: [dirtyNote, metaOf('inbox/Untitled.md', 'Untitled')],
+      noteContents: { [dirtyNote.path]: dirtyNote },
+      noteDirty: { [dirtyNote.path]: true }
+    })
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    await useStore.getState().renameNote('inbox/Untitled.md', 'Groceries')
+
+    expect(renameNote).not.toHaveBeenCalled()
+    expect(useStore.getState().noteDirty[dirtyNote.path]).toBe(true)
+  })
+
+  it('retitles through the buffer when the note is open, so panes repaint', async () => {
+    const { writeNote } = installRename()
+    const { useStore } = await loadStore()
+    await useStore.getState().selectNote('inbox/Untitled.md')
+
+    await useStore.getState().renameNote('inbox/Untitled.md', 'Groceries')
+
+    expect(useStore.getState().noteContents['inbox/Groceries.md']?.body).toBe(
+      '# Groceries\n\nbody\n'
+    )
+    expect(writeNote).toHaveBeenCalledWith('inbox/Groceries.md', '# Groceries\n\nbody\n')
+  })
+
+  it('leaves the body alone when the setting is off', async () => {
+    const { writeNote, readNote } = installRename()
+    const { useStore } = await loadStore()
+    useStore.getState().setSyncTitleHeadingOnRename(false)
+
+    await useStore.getState().renameNote('inbox/Untitled.md', 'Groceries')
+
+    expect(readNote).not.toHaveBeenCalled()
+    expect(writeNote).not.toHaveBeenCalled()
+  })
+
+  it('never invents a heading for a note that has none', async () => {
+    const { writeNote } = installRename({
+      readNote: vi
+        .fn()
+        .mockResolvedValue({ ...metaOf('inbox/Groceries.md', 'Groceries'), body: 'just prose\n' })
+    })
+    const { useStore } = await loadStore()
+
+    await useStore.getState().renameNote('inbox/Untitled.md', 'Groceries')
+
+    expect(writeNote).not.toHaveBeenCalled()
+  })
+
+  it('skips non-markdown notes', async () => {
+    const drawing = metaOf('inbox/Sketch.excalidraw', 'Sketch')
+    const { writeNote, readNote } = installRename({
+      renameNote: vi.fn().mockResolvedValue(drawing),
+      listNotes: vi.fn().mockResolvedValue([drawing])
+    })
+    const { useStore } = await loadStore()
+
+    await useStore.getState().renameNote('inbox/Untitled.excalidraw', 'Sketch')
+
+    expect(readNote).not.toHaveBeenCalled()
+    expect(writeNote).not.toHaveBeenCalled()
+  })
+
+  it('leaves an Obsidian drawing stored as .md alone', async () => {
+    const drawing = metaOf('inbox/Sketch.excalidraw.md', 'Sketch')
+    const { writeNote, readNote } = installRename({
+      renameNote: vi.fn().mockResolvedValue(drawing),
+      listNotes: vi.fn().mockResolvedValue([drawing])
+    })
+    const { useStore } = await loadStore()
+
+    await useStore.getState().renameNote('inbox/Old.excalidraw.md', 'Sketch')
+
+    expect(readNote).not.toHaveBeenCalled()
+    expect(writeNote).not.toHaveBeenCalled()
+  })
+
+  it('leaves a plain .md carrying the excalidraw-plugin marker alone', async () => {
+    const body = '---\nexcalidraw-plugin: parsed\n---\n\n# Excalidraw Data\n'
+    const { writeNote } = installRename({
+      readNote: vi
+        .fn()
+        .mockResolvedValue({ ...metaOf('inbox/Groceries.md', 'Groceries'), body })
+    })
+    const { useStore } = await loadStore()
+
+    await useStore.getState().renameNote('inbox/Untitled.md', 'Groceries')
+
+    expect(writeNote).not.toHaveBeenCalled()
+  })
+
+  it('keeps the rename when the heading rewrite fails', async () => {
+    const { writeNote } = installRename({
+      readNote: vi.fn().mockRejectedValue(new Error('gone'))
+    })
+    const { useStore } = await loadStore()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    await useStore.getState().renameNote('inbox/Untitled.md', 'Groceries')
+
+    expect(writeNote).not.toHaveBeenCalled()
+    expect(useStore.getState().notes.map((n) => n.path)).toContain('inbox/Groceries.md')
+  })
+})
+
+describe('applyTaskMutation write queue (#503)', () => {
+  it('rapid mutations on one note serialize, so neither write is lost on disk', async () => {
+    // The second mutation must read the body the FIRST write produced. Without
+    // the per-path queue both read the original inside the first write's
+    // in-flight window, and the second write puts the first task back.
+    let disk = '- [ ] alpha\n- [ ] beta'
+    const readNote = vi.fn(async () => makeNote(disk))
+    const writeNote = vi.fn(async (_path: string, body: string) => {
+      await new Promise((resolve) => window.setTimeout(resolve, 10))
+      disk = body
+    })
+    installZen({ readNote, writeNote })
+    const { useStore } = await loadStore()
+
+    const first = useStore.getState().applyTaskMutation(makeTask('alpha', 0), {
+      kind: 'set-checked',
+      checked: true
+    })
+    const second = useStore.getState().applyTaskMutation(makeTask('beta', 1), {
+      kind: 'set-checked',
+      checked: true
+    })
+    await Promise.all([first, second])
+
+    expect(disk).toBe('- [x] alpha\n- [x] beta')
+    expect(writeNote).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('hidden workflow presets', () => {
+  it('normalizes garbage and keeps unknown ids', async () => {
+    installZen()
+    const { useStore } = await loadStore()
+    const { hideWorkflowPreset } = useStore.getState()
+
+    hideWorkflowPreset('reading-log')
+    // Unknown ids are kept on purpose: a preset renamed away and back across
+    // versions must stay hidden through the gap.
+    hideWorkflowPreset('from-a-future-version')
+    hideWorkflowPreset('reading-log') // duplicate, deduped
+    hideWorkflowPreset('   ') // blank, dropped
+
+    expect(useStore.getState().hiddenWorkflowPresets).toEqual([
+      'reading-log',
+      'from-a-future-version'
+    ])
+  })
+
+  it('restore removes one id; wholesale set covers Hide all and Restore all', async () => {
+    installZen()
+    const { useStore } = await loadStore()
+    const state = useStore.getState()
+
+    state.hideWorkflowPreset('reading-log')
+    state.hideWorkflowPreset('meeting-index')
+    useStore.getState().restoreWorkflowPreset('reading-log')
+    expect(useStore.getState().hiddenWorkflowPresets).toEqual(['meeting-index'])
+
+    useStore.getState().setHiddenWorkflowPresets(['a', 'b', 'a', ' '])
+    expect(useStore.getState().hiddenWorkflowPresets).toEqual(['a', 'b'])
+
+    useStore.getState().setHiddenWorkflowPresets([])
+    expect(useStore.getState().hiddenWorkflowPresets).toEqual([])
+  })
+
+  it('survives a reload through prefs persistence', async () => {
+    installZen()
+    const first = await loadStore()
+    first.useStore.getState().hideWorkflowPreset('reading-log')
+    const prefsRaw = localStorage.getItem('zen:prefs:v2')
+    expect(prefsRaw).toContain('reading-log')
+
+    // A fresh module instance reads prefs back from localStorage, which is
+    // exactly the launch path. Not `loadStore()`: that helper clears the
+    // storage this test just seeded.
+    installZen()
+    vi.resetModules()
+    localStorage.clear()
+    if (prefsRaw !== null) localStorage.setItem('zen:prefs:v2', prefsRaw)
+    const second = await import('./store')
+    expect(second.useStore.getState().hiddenWorkflowPresets).toEqual(['reading-log'])
+  })
+})
+
+describe('Workflows feature switch and the reopen stack', () => {
+  it('does not let Reopen Closed Tab bring the canvas back after the switch is off', async () => {
+    installZen()
+    const { useStore } = await loadStore()
+    const paneId = useStore.getState().activePaneId
+    useStore.setState({ notes: [makeNote('A', 'inbox/A.md')] })
+    useStore.getState().setWorkflowsEnabled(true)
+
+    await useStore.getState().openNoteInPane(paneId, 'inbox/A.md')
+    await useStore.getState().openWorkflowsView()
+    expect(findLeaf(useStore.getState().paneLayout, paneId)?.tabs).toContain(WORKFLOWS_TAB_PATH)
+
+    useStore.getState().setWorkflowsEnabled(false)
+    await flushAsyncWork()
+    // Closing pushed the tab onto the reopen stack; disabling the feature has
+    // to take it back off, or Cmd+Shift+T walks straight past the switch.
+    expect(
+      useStore.getState().closedTabStack.some((entry) => entry.path === WORKFLOWS_TAB_PATH)
+    ).toBe(false)
+
+    await useStore.getState().reopenLastClosedTab()
+    expect(findLeaf(useStore.getState().paneLayout, paneId)?.tabs ?? []).not.toContain(
+      WORKFLOWS_TAB_PATH
+    )
+  })
+
+  it('refuses the virtual tab at openNoteInPane, whichever caller asks', async () => {
+    installZen()
+    const { useStore } = await loadStore()
+    const paneId = useStore.getState().activePaneId
+    useStore.getState().setWorkflowsEnabled(false)
+
+    // The reopen path calls this directly rather than going through
+    // openWorkflowsView, so the gate cannot live only there.
+    await useStore.getState().openNoteInPane(paneId, WORKFLOWS_TAB_PATH)
+    expect(findLeaf(useStore.getState().paneLayout, paneId)?.tabs ?? []).not.toContain(
+      WORKFLOWS_TAB_PATH
+    )
+
+    await useStore.getState().focusTabInPane(paneId, WORKFLOWS_TAB_PATH)
+    expect(findLeaf(useStore.getState().paneLayout, paneId)?.tabs ?? []).not.toContain(
+      WORKFLOWS_TAB_PATH
+    )
+  })
+})
+
+describe('workflow run record across vaults', () => {
+  const runRecord = {
+    workflowId: 'reading-log',
+    receipt: {
+      runId: 'run-1',
+      workflowId: 'reading-log',
+      startedAt: 0,
+      applied: 2,
+      paths: ['inbox/A.md'],
+      irreversible: 0
+    },
+    undone: null,
+    undoError: null
+  }
+
+  it('drops the receipt and the tutorial when another vault is opened', async () => {
+    installZen({
+      openLocalVault: vi.fn().mockResolvedValue({ root: '/Users/test/Work', name: 'Work' }),
+      listLocalVaults: vi.fn().mockResolvedValue([])
+    })
+    const { useStore } = await loadStore()
+    useStore.setState({
+      vault: { root: '/Users/test/Notes', name: 'Notes' },
+      workflowRunRecord: runRecord,
+      workflowTutorialStep: 2
+    })
+
+    await useStore.getState().openLocalVault('/Users/test/Work')
+
+    // A run id means nothing to another vault's journal: offering the Undo
+    // would fail with "Unknown workflow run" on a same-named preset.
+    expect(useStore.getState().workflowRunRecord).toBeNull()
+    expect(useStore.getState().workflowTutorialStep).toBeNull()
+  })
+
+  it('drops them on closing a vault too', async () => {
+    installZen({
+      closeVault: vi.fn().mockResolvedValue(null),
+      listLocalVaults: vi.fn().mockResolvedValue([])
+    })
+    const { useStore } = await loadStore()
+    useStore.setState({
+      vault: { root: '/Users/test/Notes', name: 'Notes' },
+      workspaceMode: 'local',
+      workflowRunRecord: runRecord,
+      workflowTutorialStep: 1
+    })
+
+    await useStore.getState().closeVault()
+
+    expect(useStore.getState().workflowRunRecord).toBeNull()
+    expect(useStore.getState().workflowTutorialStep).toBeNull()
+  })
+})
+
+describe('vault watcher subscription', () => {
+  it('drops the previous listener when init runs again after a reconnect', async () => {
+    const offs: Array<() => void> = []
+    const onVaultChange = vi.fn(() => {
+      const off = vi.fn()
+      offs.push(off)
+      return off
+    })
+    installZen({
+      onVaultChange,
+      getAppInfo: vi.fn().mockReturnValue({ runtime: 'desktop' }),
+      getServerCapabilities: vi.fn().mockResolvedValue({}),
+      getCurrentVault: vi.fn().mockResolvedValue({ root: '/Users/test/Notes', name: 'Notes' }),
+      retryWorkspaceBoot: vi.fn().mockResolvedValue({ root: '/Users/test/Notes', name: 'Notes' })
+    })
+
+    const { useStore } = await loadStore()
+    await useStore.getState().init()
+    expect(onVaultChange).toHaveBeenCalledTimes(1)
+
+    // The reconnect path re-enters init on purpose; every re-entry that
+    // subscribed without disposing left one duplicate IPC listener behind.
+    await useStore.getState().retryWorkspaceBoot()
+    expect(onVaultChange).toHaveBeenCalledTimes(2)
+    expect(offs[0]).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('flushDirtyNotes drains queued task writes (#503)', () => {
+  it('waits for an in-flight task write instead of leaving it behind on quit', async () => {
+    let disk = '- [ ] alpha'
+    const readNote = vi.fn(async () => makeNote(disk))
+    const writeNote = vi.fn(async (_path: string, body: string) => {
+      await new Promise((resolve) => window.setTimeout(resolve, 10))
+      disk = body
+    })
+    installZen({ readNote, writeNote })
+    const { useStore } = await loadStore()
+
+    // Not awaited: this is the Kanban move still in flight when the window
+    // closes. `flushDirtyNotes` is the only quit-time signal, and the note is
+    // clean, so without the drain the write is simply dropped.
+    void useStore.getState().applyTaskMutation(makeTask('alpha', 0), {
+      kind: 'set-checked',
+      checked: true
+    })
+
+    await useStore.getState().flushDirtyNotes()
+
+    expect(disk).toBe('- [x] alpha')
+  })
+})
+
+describe('deleteActivePermanently (#712)', () => {
+  const TRASHED = 'trash/Old idea.md'
+  function trashedNote() {
+    return { ...makeNote('gone soon', TRASHED), folder: 'trash' as const }
+  }
+
+  it('deletes the trashed note for good on confirm and drops its tab and buffer', async () => {
+    const deleteNote = vi.fn().mockResolvedValue(undefined)
+    installZen({ deleteNote, listNotes: vi.fn().mockResolvedValue([]) })
+    const { useStore } = await loadStore()
+    const { getConfirmRequest, settleConfirmRequest } = await import('./lib/confirm-requests')
+    const note = trashedNote()
+    useStore.setState({
+      notes: [note],
+      selectedPath: TRASHED,
+      activeNote: note,
+      noteContents: { [TRASHED]: note }
+    })
+
+    const p = useStore.getState().deleteActivePermanently()
+    const req = getConfirmRequest()
+    expect(req?.options.title).toBe('Delete "Old idea" permanently?')
+    expect(req?.options.confirmLabel).toBe('Delete permanently')
+    expect(req?.options.danger).toBe(true)
+    settleConfirmRequest(req!, true)
+    await p
+
+    expect(deleteNote).toHaveBeenCalledWith(TRASHED)
+    expect(useStore.getState().noteContents[TRASHED]).toBeUndefined()
+    expect(useStore.getState().selectedPath).not.toBe(TRASHED)
+  })
+
+  it('does nothing when the confirmation is declined', async () => {
+    const deleteNote = vi.fn().mockResolvedValue(undefined)
+    installZen({ deleteNote })
+    const { useStore } = await loadStore()
+    const { getConfirmRequest, settleConfirmRequest } = await import('./lib/confirm-requests')
+    const note = trashedNote()
+    useStore.setState({ notes: [note], selectedPath: TRASHED, activeNote: note, noteContents: { [TRASHED]: note } })
+
+    const p = useStore.getState().deleteActivePermanently()
+    settleConfirmRequest(getConfirmRequest()!, false)
+    await p
+
+    expect(deleteNote).not.toHaveBeenCalled()
+    expect(useStore.getState().selectedPath).toBe(TRASHED)
+    expect(useStore.getState().noteContents[TRASHED]).toBeDefined()
+  })
+
+  it('keeps the note open and says so when the host refuses', async () => {
+    const deleteNote = vi.fn().mockRejectedValue(new Error('EACCES'))
+    installZen({ deleteNote })
+    const { useStore } = await loadStore()
+    const { getConfirmRequest, settleConfirmRequest } = await import('./lib/confirm-requests')
+    const { useToastStore } = await import('./lib/toast')
+    const note = trashedNote()
+    useStore.setState({ notes: [note], selectedPath: TRASHED, activeNote: note, noteContents: { [TRASHED]: note } })
+
+    const p = useStore.getState().deleteActivePermanently()
+    settleConfirmRequest(getConfirmRequest()!, true)
+    await p
+
+    expect(deleteNote).toHaveBeenCalledWith(TRASHED)
+    expect(useStore.getState().selectedPath).toBe(TRASHED)
+    expect(useToastStore.getState().toasts.some((t) => /Could not delete/.test(t.message))).toBe(true)
+  })
+
+  it('is a no-op with no active note', async () => {
+    const deleteNote = vi.fn().mockResolvedValue(undefined)
+    installZen({ deleteNote })
+    const { useStore } = await loadStore()
+    useStore.setState({ selectedPath: null, activeNote: null })
+    await useStore.getState().deleteActivePermanently()
+    expect(deleteNote).not.toHaveBeenCalled()
+  })
+})
+
+describe('renaming the open note while the watcher reports the move (#713)', () => {
+  const OLD = 'inbox/Hello.md'
+  const NEW = 'inbox/Hello again.md'
+  const oldNote = { ...makeNote('# Hello\n\nplain note', OLD) }
+  const newNote = { ...makeNote('# Hello\n\nplain note', NEW) }
+
+  function installRenameZen(renameNote: ReturnType<typeof vi.fn>, listNotes: ReturnType<typeof vi.fn>) {
+    installZen({
+      renameNote,
+      listNotes,
+      readNote: vi.fn().mockImplementation(async (path: string) => (path === NEW ? newNote : oldNote)),
+      writeNote: vi.fn().mockResolvedValue(undefined),
+      setVaultSettings: vi.fn().mockImplementation(async (settings: unknown) => settings)
+    })
+  }
+
+  it('keeps the tab when the unlink of the old path lands before the rename reply, then moves it', async () => {
+    let settle: (meta: typeof newNote) => void = () => {}
+    const renameNote = vi.fn().mockImplementation(() => new Promise<typeof newNote>((resolve) => { settle = resolve }))
+    // The listing the watcher-triggered refresh sees mid-rename: the old file
+    // is gone and the new one is not indexed yet.
+    const listNotes = vi.fn().mockResolvedValue([])
+    installRenameZen(renameNote, listNotes)
+    const { useStore } = await loadStore()
+    useStore.setState({ notes: [oldNote], syncTitleHeadingOnRename: false })
+    await useStore.getState().selectNote(OLD)
+    expect(useStore.getState().selectedPath).toBe(OLD)
+
+    const rename = useStore.getState().renameActive('Hello again')
+    await vi.waitFor(() => expect(renameNote).toHaveBeenCalledWith(OLD, 'Hello again'))
+
+    // inotify: the move is an unlink of the old path and an add of the new
+    // one, both delivered before the host has answered the rename.
+    await useStore.getState().applyChange({ kind: 'unlink', path: OLD, folder: 'inbox' })
+    await useStore.getState().applyChange({ kind: 'add', path: NEW, folder: 'inbox' })
+    await useStore.getState().refreshNotes()
+    expect(useStore.getState().selectedPath).toBe(OLD)
+    expect(JSON.stringify(useStore.getState().paneLayout)).toContain(OLD)
+
+    listNotes.mockResolvedValue([newNote])
+    settle(newNote)
+    await rename
+
+    expect(useStore.getState().selectedPath).toBe(NEW)
+    expect(JSON.stringify(useStore.getState().paneLayout)).toContain(NEW)
+    expect(JSON.stringify(useStore.getState().paneLayout)).not.toContain(OLD)
+    expect(useStore.getState().noteContents[NEW]).toBeDefined()
+    expect(useStore.getState().noteContents[OLD]).toBeUndefined()
+  })
+
+  it('still closes a note that was really deleted', async () => {
+    const renameNote = vi.fn()
+    installRenameZen(renameNote, vi.fn().mockResolvedValue([oldNote]))
+    const { useStore } = await loadStore()
+    useStore.setState({ notes: [oldNote] })
+    await useStore.getState().selectNote(OLD)
+
+    await useStore.getState().applyChange({ kind: 'unlink', path: OLD, folder: 'inbox' })
+
+    expect(JSON.stringify(useStore.getState().paneLayout)).not.toContain(OLD)
+    expect(useStore.getState().noteContents[OLD]).toBeUndefined()
+    expect(renameNote).not.toHaveBeenCalled()
+  })
+
+  it('forgets the rename once the host has refused it, so a later unlink counts again', async () => {
+    const renameNote = vi.fn().mockRejectedValue(new Error('EEXIST'))
+    installRenameZen(renameNote, vi.fn().mockResolvedValue([oldNote]))
+    const { useStore } = await loadStore()
+    useStore.setState({ notes: [oldNote], syncTitleHeadingOnRename: false })
+    await useStore.getState().selectNote(OLD)
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    await useStore.getState().renameActive('Taken')
+    expect(useStore.getState().selectedPath).toBe(OLD)
+
+    await useStore.getState().applyChange({ kind: 'unlink', path: OLD, folder: 'inbox' })
+    expect(JSON.stringify(useStore.getState().paneLayout)).not.toContain(OLD)
   })
 })

@@ -15,3 +15,4 @@ pub mod notes;
 pub mod settings;
 pub mod tasks;
 pub mod templates;
+pub mod workflows;

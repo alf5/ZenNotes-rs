@@ -97,3 +97,61 @@ pub fn app_move_external_file_to_vault(
 ) -> Result<MoveExternalFileResult, String> {
     windows::move_external_file_to_vault(&window, &state)
 }
+
+// ---- v2.45 ----------------------------------------------------------------
+
+/// `openFileDialog` — a native "Open File…" for a markdown file, opened the
+/// same vault-aware way as `openMarkdownFile` (upstream #449): a file inside
+/// the open vault becomes a note, anything else gets a standalone window.
+#[tauri::command]
+pub async fn app_open_file_dialog(app: AppHandle, state: State<'_, AppState>) -> Result<bool, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let picked = app
+        .dialog()
+        .file()
+        .set_title("Open markdown file")
+        .add_filter("Markdown", &["md", "markdown"])
+        .blocking_pick_file();
+    let Some(file_path) = picked else {
+        return Ok(false);
+    };
+    let path = file_path
+        .into_path()
+        .map_err(|e| format!("Invalid file selection: {e}"))?;
+    windows::open_markdown_file(&app, &state, &path.to_string_lossy())
+}
+
+/// `followExternalFileLink` — resolve a link clicked in a standalone
+/// external-file window against that file's own directory, then open the
+/// result: a markdown target the vault-aware way, anything else with the OS.
+/// Never throws; the `{ok, error}` shape drives the renderer's toast.
+#[tauri::command]
+pub fn external_file_follow_link(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<AppState>,
+    link: crate::standalone_links::ExternalFileLink,
+) -> crate::ipc::types::OpenExternalFileResult {
+    use crate::standalone_links::{resolve_standalone_link, LinkTarget};
+
+    let result = (|| -> Result<(), String> {
+        let note_path = state
+            .external_file(window.label())
+            .ok_or_else(|| "This window has no file behind it.".to_string())?;
+        match resolve_standalone_link(&note_path, &link) {
+            Some(LinkTarget::Markdown(abs)) => {
+                windows::open_markdown_file(&app, &state, &abs.to_string_lossy()).map(|_| ())
+            }
+            Some(LinkTarget::File(abs)) => {
+                crate::os::open_external_file(&app, &abs.to_string_lossy())
+            }
+            None => Err("That link does not point at a file next to this one.".into()),
+        }
+    })();
+    match result {
+        Ok(()) => crate::ipc::types::OpenExternalFileResult { ok: true, error: None },
+        Err(error) => {
+            crate::ipc::types::OpenExternalFileResult { ok: false, error: Some(error) }
+        }
+    }
+}

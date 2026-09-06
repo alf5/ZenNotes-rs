@@ -12,7 +12,22 @@ export interface KeymapCatalogEntry {
   id: string
   group: string
   defaultBinding: string
+  /** macOS-specific default. On a Mac, Option+<printable> chords are how many
+   *  European layouts type everyday characters (`[` is Option+5 on German
+   *  keyboards), so a binding like `Alt+[` swallows the keystroke instead of
+   *  letting it type (#514). Actions whose cross-platform default is such a
+   *  chord carry a Mac-safe default here. */
+  defaultBindingMac?: string
   title: string
+}
+
+/** The platform-appropriate default binding for a catalog entry (or a full
+ *  keymap definition: anything carrying the two default fields). */
+export function catalogDefaultBinding(
+  entry: { defaultBinding: string; defaultBindingMac?: string },
+  mac: boolean
+): string {
+  return mac && entry.defaultBindingMac ? entry.defaultBindingMac : entry.defaultBinding
 }
 
 /** Display order for keymap groups in the generated config reference. */
@@ -30,7 +45,9 @@ export const KEYMAP_CATALOG: KeymapCatalogEntry[] = [
   { id: "global.searchNotesNonVim", group: "global", defaultBinding: "Mod+F", title: "Search notes in non-Vim mode" },
   { id: "global.commandPalette", group: "global", defaultBinding: "Shift+Mod+P", title: "Open command palette" },
   { id: "global.newQuickNote", group: "global", defaultBinding: "Shift+Mod+N", title: "New quick note" },
+  { id: "global.newNoteHere", group: "global", defaultBinding: "Mod+N", title: "New note in current folder" },
   { id: "global.openSettings", group: "global", defaultBinding: "Mod+,", title: "Open settings" },
+  { id: "global.openFile", group: "global", defaultBinding: "Mod+O", title: "Open file" },
   { id: "global.toggleSidebar", group: "global", defaultBinding: "Mod+1", title: "Toggle sidebar" },
   { id: "global.toggleConnections", group: "global", defaultBinding: "Mod+2", title: "Toggle connections panel" },
   { id: "global.toggleOutlinePanel", group: "global", defaultBinding: "Mod+3", title: "Toggle outline panel" },
@@ -53,8 +70,21 @@ export const KEYMAP_CATALOG: KeymapCatalogEntry[] = [
   { id: "global.zoomReset", group: "global", defaultBinding: "Mod+0", title: "Reset zoom" },
   { id: "global.historyBack", group: "global", defaultBinding: "Alt+ArrowLeft", title: "Go back in note history" },
   { id: "global.historyForward", group: "global", defaultBinding: "Alt+ArrowRight", title: "Go forward in note history" },
+  { id: "global.toggleRecentNote", group: "global", defaultBinding: "Mod+Tab", defaultBindingMac: "Ctrl+Tab", title: "Switch to previous note" },
+  { id: "tabs.select1", group: "global", defaultBinding: "Alt+1", defaultBindingMac: "Ctrl+1", title: "Go to tab 1" },
+  { id: "tabs.select2", group: "global", defaultBinding: "Alt+2", defaultBindingMac: "Ctrl+2", title: "Go to tab 2" },
+  { id: "tabs.select3", group: "global", defaultBinding: "Alt+3", defaultBindingMac: "Ctrl+3", title: "Go to tab 3" },
+  { id: "tabs.select4", group: "global", defaultBinding: "Alt+4", defaultBindingMac: "Ctrl+4", title: "Go to tab 4" },
+  { id: "tabs.select5", group: "global", defaultBinding: "Alt+5", defaultBindingMac: "Ctrl+5", title: "Go to tab 5" },
+  { id: "tabs.select6", group: "global", defaultBinding: "Alt+6", defaultBindingMac: "Ctrl+6", title: "Go to tab 6" },
+  { id: "tabs.select7", group: "global", defaultBinding: "Alt+7", defaultBindingMac: "Ctrl+7", title: "Go to tab 7" },
+  { id: "tabs.select8", group: "global", defaultBinding: "Alt+8", defaultBindingMac: "Ctrl+8", title: "Go to tab 8" },
+  { id: "tabs.select9", group: "global", defaultBinding: "Alt+9", defaultBindingMac: "Ctrl+9", title: "Go to tab 9" },
   { id: "vim.leaderPrefix", group: "vim", defaultBinding: "Space", title: "Leader key" },
   { id: "vim.leaderOpenBuffers", group: "vim", defaultBinding: "o", title: "Leader: open buffers" },
+  { id: "vim.leaderCloudConflicts", group: "vim", defaultBinding: "r", title: "Leader: review Cloud conflicts" },
+  { id: "vim.leaderWorkflows", group: "vim", defaultBinding: "a", title: "Leader: open workflows" },
+  { id: "vim.leaderAtlas", group: "vim", defaultBinding: "g", title: "Leader: open atlas" },
   { id: "vim.leaderSearchNotes", group: "vim", defaultBinding: "f", title: "Leader: search notes" },
   { id: "vim.leaderSearchGroup", group: "vim", defaultBinding: "s", title: "Leader: search…" },
   { id: "vim.leaderSearchVaultText", group: "vim", defaultBinding: "t", title: "Leader search: vault text" },
@@ -91,6 +121,11 @@ export const KEYMAP_CATALOG: KeymapCatalogEntry[] = [
   { id: "vim.unfoldCurrent", group: "vim", defaultBinding: "z o", title: "Unfold heading at cursor" },
   { id: "vim.foldAll", group: "vim", defaultBinding: "z M", title: "Fold all headings" },
   { id: "vim.unfoldAll", group: "vim", defaultBinding: "z R", title: "Unfold all headings" },
+  { id: "vim.harperNext", group: "vim", defaultBinding: "] s", title: "Next Harper suggestion" },
+  { id: "vim.harperPrevious", group: "vim", defaultBinding: "[ s", title: "Previous Harper suggestion" },
+  { id: "vim.harperSuggest", group: "vim", defaultBinding: "z =", title: "Harper suggestions at cursor" },
+  { id: "vim.harperAddWord", group: "vim", defaultBinding: "z g", title: "Add word to Harper dictionary" },
+  { id: "vim.harperIgnore", group: "vim", defaultBinding: "z G", title: "Ignore Harper suggestion" },
   { id: "nav.moveDown", group: "navigation", defaultBinding: "j", title: "Move selection down" },
   { id: "nav.moveUp", group: "navigation", defaultBinding: "k", title: "Move selection up" },
   { id: "nav.moveLeft", group: "navigation", defaultBinding: "h", title: "Move selection left" },
@@ -111,8 +146,14 @@ export const KEYMAP_CATALOG: KeymapCatalogEntry[] = [
   { id: "nav.toggleTask", group: "view-actions", defaultBinding: "x", title: "Toggle task" },
   { id: "tasks.moveTaskUp", group: "view-actions", defaultBinding: "K", title: "Move task up" },
   { id: "tasks.moveTaskDown", group: "view-actions", defaultBinding: "J", title: "Move task down" },
+  { id: "editor.hopMarkerForward", group: "view-actions", defaultBinding: "Alt+]", defaultBindingMac: "Ctrl+.", title: "Hop past next marker" },
+  { id: "editor.hopMarkerBackward", group: "view-actions", defaultBinding: "Alt+[", defaultBindingMac: "Ctrl+,", title: "Hop before previous marker" },
+  { id: "editor.foldHeading", group: "view-actions", defaultBinding: "Alt+Mod+F", title: "Fold heading" },
+  { id: "editor.unfoldHeading", group: "view-actions", defaultBinding: "Alt+Mod+U", title: "Unfold heading" },
   { id: "editor.moveLineUp", group: "view-actions", defaultBinding: "Alt+ArrowUp", title: "Move line up" },
   { id: "editor.moveLineDown", group: "view-actions", defaultBinding: "Alt+ArrowDown", title: "Move line down" },
+  { id: "editor.toggleCheckbox", group: "view-actions", defaultBinding: "Mod+L", title: "Toggle checkbox" },
+  { id: "editor.reflowParagraph", group: "view-actions", defaultBinding: "Alt+Q", defaultBindingMac: "Ctrl+Q", title: "Reflow paragraph" },
   { id: "nav.localEx", group: "view-actions", defaultBinding: ":", title: "Open local ex prompt" },
   { id: "nav.newQuickNote", group: "view-actions", defaultBinding: "n", title: "New quick note from Quick Notes view" },
   { id: "nav.unarchive", group: "view-actions", defaultBinding: "u", title: "Unarchive selected note" }

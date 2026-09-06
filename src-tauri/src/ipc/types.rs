@@ -131,6 +131,29 @@ pub struct WriteTemplateInput {
     pub previous_source_path: Option<String>,
 }
 
+/// One workflow file, raw. Mirrors `WorkflowFile` in
+/// packages/bridge-contract/src/workflows.ts: bytes plus the two identifiers,
+/// never a parse.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowFile {
+    /// Filename stem, used as the workflow id, e.g. `reading-log`.
+    pub id: String,
+    /// Vault-relative path, e.g. `.zennotes/workflows/reading-log.md`.
+    pub source_path: String,
+    /// Whole file, frontmatter included.
+    pub raw: String,
+}
+
+/// A file the user picked to import, as bytes plus the name it had. Untrusted
+/// until `@shared/workflows/share` has reviewed it in the renderer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedWorkflowFile {
+    pub name: String,
+    pub raw: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoteComment {

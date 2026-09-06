@@ -15,7 +15,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { NoteContent, NoteMeta } from '@shared/ipc'
 import {
+  filterTasksForDisplay,
   inferDailyTaskDueDates,
+  isTaskOpen,
   parseTasksFromBody,
   tasksDueOn,
   type VaultTask,
@@ -35,9 +37,11 @@ import { resolveWeekStartDay } from '../lib/week-start'
 import { ChevronLeftIcon, ChevronRightIcon } from './icons'
 import { confirmApp } from '../lib/confirm-requests'
 import { confirmMoveToTrash } from '../lib/confirm-trash'
+import { moveNoteToTrash } from '../lib/trash-note'
 import { usePanelResize } from '../lib/use-panel-resize'
 import { PanelResizeHandle } from './PanelResizeHandle'
 import { ContextMenu, type ContextMenuItem } from './ContextMenu'
+import { buildTaskMenuItems } from '../lib/task-context-menu'
 
 const FULL_DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const WORDS_PER_DOT = 80
@@ -79,7 +83,11 @@ function parseIsoDate(iso: string): Date {
   return new Date(y, m - 1, d)
 }
 
-const TASK_PREFIX_RE = /^\s*(?:>\s*)*(?:[-+*]|\d+[.)])\s+\[[ xX]\]\s?/
+// Every task state, so the "lossless" promise below actually holds for a `[>]`
+// or `[/]` task too: an unmatched prefix falls back to the token-stripped
+// `content`, which an inline edit would then write back over the real line.
+// (#512)
+const TASK_PREFIX_RE = /^\s*(?:>\s*)*(?:[-+*]|\d+[.)])\s+\[[ xX>/-]\]\s?/
 
 /** The raw text after the checkbox (content + any `due:`/`!priority` tokens) —
  *  what an inline edit field prefills with so editing is lossless. */
@@ -109,6 +117,7 @@ export function CalendarPanel({ note }: { note: NoteContent }): JSX.Element {
   const openDailyNoteForDate = useStore((s) => s.openDailyNoteForDate)
   const openWeeklyNoteForDate = useStore((s) => s.openWeeklyNoteForDate)
   const vaultTasks = useStore((s) => s.vaultTasks)
+  const showArchivedTasks = useStore((s) => s.showArchivedTasks)
   const tasksLoading = useStore((s) => s.tasksLoading)
   const refreshTasks = useStore((s) => s.refreshTasks)
   const addTaskForDate = useStore((s) => s.addTaskForDate)
@@ -180,8 +189,8 @@ export function CalendarPanel({ note }: { note: NoteContent }): JSX.Element {
     [notes, vaultSettings]
   )
   const inferredTasks = useMemo(
-    () => inferDailyTaskDueDates(vaultTasks, dueByPath),
-    [vaultTasks, dueByPath]
+    () => inferDailyTaskDueDates(filterTasksForDisplay(vaultTasks, showArchivedTasks), dueByPath),
+    [vaultTasks, showArchivedTasks, dueByPath]
   )
   // The 7 days of the selected day's week (respecting the week-start setting),
   // shown as an agenda under the calendar.
@@ -297,7 +306,7 @@ export function CalendarPanel({ note }: { note: NoteContent }): JSX.Element {
           path: n.path,
           title: n.title,
           folder: n.folder,
-        }).filter((t) => !t.checked).length
+        }).filter(isTaskOpen).length
         updates.push([n.path, { sig, words: countWords(body), openTasks }])
       }
       if (!cancelled && updates.length) {
@@ -379,7 +388,10 @@ export function CalendarPanel({ note }: { note: NoteContent }): JSX.Element {
   // --- Context menu --------------------------------------------------------
   const [menu, setMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null)
   const trashNote = useCallback(async (meta: NoteMeta) => {
-    if (await confirmMoveToTrash(meta.title)) await window.zen.moveToTrash(meta.path)
+    if (!(await confirmMoveToTrash(meta.title))) return
+    await moveNoteToTrash(meta.path, {
+      temporarySession: useStore.getState().vault?.temporary === true
+    })
   }, [])
   const openDayMenu = useCallback(
     (e: React.MouseEvent, day: Date, iso: string) => {
@@ -421,46 +433,30 @@ export function CalendarPanel({ note }: { note: NoteContent }): JSX.Element {
     [weeklyEnabled, weeklyByWeek, openWeeklyNoteForDate, handleWeekClick, trashNote, clearHover]
   )
 
-  // Right-click a task in the detail panel: reschedule presets, inline edit, or
-  // delete. Arbitrary dates are assigned by dragging the task onto a day.
+  // Right-click a task in the detail panel: the same shared task menu the Tasks
+  // list, board and calendar use, plus inline edit which only exists here.
+  // Arbitrary dates are still assigned by dragging the task onto a day.
   const openTaskMenu = useCallback(
     (e: React.MouseEvent, task: VaultTask) => {
       e.preventDefault()
       e.stopPropagation()
       clearHover()
-      const reschedule = (iso: string | null): void =>
-        void applyTaskMutation(task, { kind: 'set-due', due: iso })
-      const items: ContextMenuItem[] = [
-        { label: 'Due today', hint: addDaysIso(0), onSelect: () => reschedule(addDaysIso(0)) },
-        {
-          label: 'Due tomorrow',
-          hint: addDaysIso(1),
-          onSelect: () => reschedule(addDaysIso(1)),
-        },
-        {
-          label: 'Due next week',
-          hint: addDaysIso(7),
-          onSelect: () => reschedule(addDaysIso(7)),
-        },
-      ]
-      if (task.due && !task.dueInferred) {
-        items.push({ label: 'Clear due date', onSelect: () => reschedule(null) })
-      }
-      items.push(
-        { kind: 'separator' },
-        {
-          label: 'Edit',
-          onSelect: () => {
+      setMenu({
+        x: e.clientX,
+        y: e.clientY,
+        items: buildTaskMenuItems(task, {
+          today,
+          // The side panel has no single-key task shortcuts of its own, so the
+          // hints would name keys that do nothing here.
+          showKeyHints: false,
+          onEdit: () => {
             setEditingTaskId(task.id)
             setEditValue(taskTail(task))
-          },
-        },
-        { kind: 'separator' },
-        { label: 'Delete', danger: true, onSelect: () => void deleteTaskFromList(task) }
-      )
-      setMenu({ x: e.clientX, y: e.clientY, items })
+          }
+        })
+      })
     },
-    [clearHover, applyTaskMutation, deleteTaskFromList, addDaysIso]
+    [clearHover, today]
   )
 
   // After dropping a task on a day (calendar cell or week-agenda row), offer to

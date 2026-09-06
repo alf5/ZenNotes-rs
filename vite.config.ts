@@ -1,9 +1,10 @@
-import { createReadStream } from 'node:fs'
+import { createReadStream, readFileSync } from 'node:fs'
 import { cp } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { dirname, resolve, sep } from 'node:path'
 import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
+import { harperWasmAsset } from './tooling/vite/harper-wasm-asset'
 
 // Mirror of the ZenNotes web/desktop renderer build (apps/web/vite.config.ts).
 // Same manual-chunk + module-preload strategy so the reused frontend bundles
@@ -21,6 +22,27 @@ const excalidrawFontsDir = resolve(
   'fonts'
 )
 const EXCALIDRAW_FONTS_URL_PREFIX = '/excalidraw-assets/fonts/'
+
+function onigurumaDataUrl(): Plugin {
+  const virtualId = '\0zennotes:oniguruma-wasm-data-url'
+  const wasmPath = createRequire(resolve(__dirname, 'package.json')).resolve(
+    'vscode-oniguruma/release/onig.wasm'
+  )
+  return {
+    name: 'zennotes-oniguruma-data-url',
+    enforce: 'pre',
+    resolveId(id) {
+      if (id === 'vscode-oniguruma/release/onig.wasm?url') return virtualId
+      return null
+    },
+    load(id) {
+      if (id !== virtualId) return null
+      const bytes = readFileSync(wasmPath)
+      const url = `data:application/wasm;base64,${bytes.toString('base64')}`
+      return `export default ${JSON.stringify(url)}`
+    }
+  }
+}
 
 function excalidrawFontMime(path: string): string {
   if (/\.woff2$/i.test(path)) return 'font/woff2'
@@ -81,7 +103,17 @@ function rendererManualChunk(id: string): string | undefined {
 
   if (!id.includes('node_modules')) return undefined
 
-  if (id.includes('/react/') || id.includes('/react-dom/') || id.includes('/zustand/')) {
+  // `@xyflow/react` (and the zustand 4 nested under it) must NOT ride this
+  // rule: `/react/` matches it as a substring, and vendor-react is the one
+  // chunk the entry both statically imports and modulepreloads, so React Flow
+  // was fetched and evaluated on every launch for a feature that is off by
+  // default. No named chunk for it either (see the mermaid comment below):
+  // left alone, it lands in the lazily-imported WorkflowsView chunk and is
+  // fetched the first time a Workflows tab renders.
+  if (
+    (id.includes('/react/') || id.includes('/react-dom/') || id.includes('/zustand/')) &&
+    !id.includes('/@xyflow/')
+  ) {
     return 'vendor-react'
   }
   if (id.includes('/@codemirror/language-data/')) {
@@ -108,9 +140,21 @@ function rendererManualChunk(id: string): string | undefined {
   if (id.includes('/highlight.js/')) {
     return 'vendor-highlight'
   }
-  if (id.includes('/mermaid/') || id.includes('/cytoscape/') || id.includes('/dagre/')) {
-    return 'vendor-mermaid'
+  if (id.includes('/vscode-textmate/') || id.includes('/vscode-oniguruma/')) {
+    return 'vendor-textmate'
   }
+  // No manualChunks rule for mermaid / cytoscape / dagre on purpose. Mermaid is
+  // only ever reached through a dynamic import (Preview.tsx does
+  // `import("mermaid")`, behind LazyPreview), but forcing its modules into a
+  // named chunk made Rollup hoist that chunk into the entry's STATIC graph:
+  // `index-*.js` ended up with `import{m as gt}from"./vendor-mermaid-*.js"`,
+  // where gt is mermaid itself, so every launch fetched and evaluated 2.5MB of
+  // diagram code (and vendor-markdown with it, which vendor-mermaid imports)
+  // before the user opened a note. Narrowing the rule to just '/mermaid/' does
+  // not help; the grouping itself is what breaks the async boundary. Left to
+  // Rollup, mermaid lands in its own async chunks (mermaid.core-*.js and
+  // friends) and is fetched the first time a diagram actually renders. Total
+  // bundle size is unchanged; only the boot path is.
   if (id.includes('/jsxgraph/')) {
     return 'vendor-jsxgraph'
   }
@@ -145,11 +189,18 @@ function isDeferredRendererPreload(dep: string): boolean {
   return (
     dep.includes('NoteHoverPreview-') ||
     dep.includes('Preview-') ||
+    dep.includes('WorkflowsView-') ||
+    dep.includes('xyflow') ||
     dep.includes('wardley-') ||
     dep.includes('vendor-markdown') ||
     dep.includes('vendor-highlight') ||
+    dep.includes('vendor-textmate') ||
     dep.includes('vendor-d3') ||
-    dep.includes('vendor-mermaid') ||
+    // Mermaid is no longer one named chunk; it splits into mermaid.core plus a
+    // chunk per diagram type, with cytoscape/dagre alongside.
+    dep.includes('mermaid') ||
+    dep.includes('cytoscape') ||
+    dep.includes('dagre') ||
     dep.includes('vendor-jsxgraph') ||
     dep.includes('vendor-function-plot') ||
     dep.includes('vendor-typst')
@@ -185,14 +236,17 @@ export default defineConfig({
       ignored: ['**/src-tauri/**']
     }
   },
-  plugins: [react(), excalidrawFonts()],
+  plugins: [onigurumaDataUrl(), harperWasmAsset(), react(), excalidrawFonts()],
   // Typst ships a WASM compiler loaded lazily via `?url` + dynamic import; keep
-  // it out of the esbuild dep pre-bundler so the wasm glue stays intact.
+  // it out of the esbuild dep pre-bundler so the wasm glue stays intact. The
+  // same goes for Harper, whose worker is an inline blob the pre-bundler
+  // would otherwise rewrite.
   optimizeDeps: {
     exclude: [
       '@myriaddreamin/typst.ts',
       '@myriaddreamin/typst-ts-web-compiler',
-      '@myriaddreamin/typst-ts-renderer'
+      '@myriaddreamin/typst-ts-renderer',
+      'harper.js'
     ]
   },
   build: {

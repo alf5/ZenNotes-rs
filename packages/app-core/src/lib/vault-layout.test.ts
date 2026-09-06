@@ -20,7 +20,8 @@ import {
   rewriteFavoritesForFolderRename,
   toggleFavorite,
   weeklyNoteLocationForDate,
-  monthlyNoteLocationForDate
+  monthlyNoteLocationForDate,
+  sidebarRevealTarget
 } from './vault-layout'
 
 function note(path: string, title: string): NoteMeta {
@@ -574,6 +575,46 @@ describe('folderForVaultRelativePath — case-insensitive system folders (#186)'
   })
 })
 
+// A folder is wherever it RESOLVES to (#398). Testing the default names first
+// meant a vault that moved its archive still classified a leftover `archive/`
+// as the system archive, so the same directory read one way here and another
+// way in the listings that walk the remapped path.
+describe('folderForVaultRelativePath with remapped system folders (#398)', () => {
+  const remapped = {
+    primaryNotesLocation: 'inbox',
+    systemFolderPaths: { archive: '99 - Archive' }
+  } as VaultSettings
+
+  it('classifies the remapped directory as its system folder', () => {
+    expect(folderForVaultRelativePath('99 - Archive/scan.pdf', remapped)).toBe('archive')
+    expect(folderForVaultRelativePath('99 - archive/scan.pdf', remapped)).toBe('archive')
+  })
+
+  it('stops classifying the default name once that folder has moved', () => {
+    expect(folderForVaultRelativePath('archive/scan.pdf', remapped)).toBeNull()
+  })
+
+  it('classifies a swap by resolved names, not by the defaults', () => {
+    const swapped = {
+      primaryNotesLocation: 'inbox',
+      systemFolderPaths: { inbox: 'archive', archive: 'inbox' }
+    } as VaultSettings
+    expect(folderForVaultRelativePath('archive/a.md', swapped)).toBe('inbox')
+    expect(folderForVaultRelativePath('inbox/b.md', swapped)).toBe('archive')
+  })
+
+  it('treats a moved-away default name as ordinary root content in root mode', () => {
+    const rootMode = {
+      primaryNotesLocation: 'root',
+      systemFolderPaths: { archive: '99 - Archive' }
+    } as VaultSettings
+    expect(folderForVaultRelativePath('archive/scan.pdf', rootMode)).toBe('inbox')
+    // The dirs that are reserved no matter what stay reserved.
+    expect(folderForVaultRelativePath('assets/scan.pdf', rootMode)).toBeNull()
+    expect(folderForVaultRelativePath('99 - Archive/scan.pdf', rootMode)).toBe('archive')
+  })
+})
+
 describe('favorites', () => {
   it('discriminates folder keys from note paths by the colon', () => {
     expect(isFavoriteFolderKey('inbox:Projects')).toBe(true)
@@ -724,5 +765,74 @@ describe('isCalendarToggleAvailable (#413)', () => {
 
   it('is unavailable in the Quick Notes scratchpad', () => {
     expect(isCalendarToggleAvailable(daily, { folder: 'quick' })).toBe(false)
+  })
+})
+
+describe('sidebarRevealTarget (auto-reveal, Kta 2.24)', () => {
+  const inboxMode = normalizeVaultSettings({
+    primaryNotesLocation: 'inbox'
+  } as unknown as VaultSettings)
+  const rootMode = normalizeVaultSettings({
+    primaryNotesLocation: 'root'
+  } as unknown as VaultSettings)
+
+  it('walks ancestors in inbox mode with the folder prefix stripped', () => {
+    const target = sidebarRevealTarget('inbox/Work/Research/Note.md', inboxMode)
+    expect(target).toEqual({
+      folder: 'inbox',
+      parts: ['Work', 'Research', 'Note.md'],
+      ancestors: ['inbox:', 'inbox:Work', 'inbox:Work/Research']
+    })
+  })
+
+  it('classifies a Vault Root mode path (no folder prefix) as inbox', () => {
+    // The reported case: the raw first segment is a user folder, not a
+    // NoteFolder, so the old first-segment keys matched nothing.
+    const target = sidebarRevealTarget('Facturi/Invoice.md', rootMode)
+    expect(target).toEqual({
+      folder: 'inbox',
+      parts: ['Facturi', 'Invoice.md'],
+      ancestors: ['inbox:', 'inbox:Facturi']
+    })
+  })
+
+  it('reaches a database data.csv through its .base folder in root mode', () => {
+    const target = sidebarRevealTarget('Facturi/Facturi 2026.base/data.csv', rootMode)
+    expect(target?.ancestors).toEqual([
+      'inbox:',
+      'inbox:Facturi',
+      'inbox:Facturi/Facturi 2026.base'
+    ])
+  })
+
+  it('follows remapped system folders instead of literal names', () => {
+    const remapped = normalizeVaultSettings({
+      primaryNotesLocation: 'inbox',
+      systemFolderPaths: { trash: 'deleted' }
+    } as unknown as VaultSettings)
+    const target = sidebarRevealTarget('deleted/Old/Note.md', remapped)
+    expect(target).toEqual({
+      folder: 'trash',
+      parts: ['Old', 'Note.md'],
+      ancestors: ['trash:', 'trash:Old']
+    })
+  })
+
+  it('returns null for paths outside the tree', () => {
+    expect(sidebarRevealTarget('.zennotes/vault.json', rootMode)).toBeNull()
+    expect(sidebarRevealTarget('stray.md', inboxMode)).toBeNull()
+  })
+})
+
+describe('normalizeVaultSettings: harper', () => {
+  it('keeps the vault dictionary and ignored suggestions, cleaned, and drops an empty block', () => {
+    const base = settings('Daily Notes', 'Weekly Notes')
+    const kept = normalizeVaultSettings({
+      ...base,
+      harper: { words: [' zennotes ', 'zennotes'], ignoredLints: ['9722060015410969502', 'nope'] }
+    })
+    expect(kept.harper).toEqual({ words: ['zennotes'], ignoredLints: ['9722060015410969502'] })
+    expect(normalizeVaultSettings({ ...base, harper: { words: [], ignoredLints: [] } }).harper).toBeUndefined()
+    expect(normalizeVaultSettings(base).harper).toBeUndefined()
   })
 })

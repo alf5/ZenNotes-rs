@@ -13,7 +13,9 @@ export type KeymapId =
   | "global.searchNotesNonVim"
   | "global.commandPalette"
   | "global.newQuickNote"
+  | "global.newNoteHere"
   | "global.openSettings"
+  | "global.openFile"
   | "global.toggleSidebar"
   | "global.toggleConnections"
   | "global.toggleOutlinePanel"
@@ -36,8 +38,21 @@ export type KeymapId =
   | "global.zoomReset"
   | "global.historyBack"
   | "global.historyForward"
+  | "global.toggleRecentNote"
+  | "tabs.select1"
+  | "tabs.select2"
+  | "tabs.select3"
+  | "tabs.select4"
+  | "tabs.select5"
+  | "tabs.select6"
+  | "tabs.select7"
+  | "tabs.select8"
+  | "tabs.select9"
   | "vim.leaderPrefix"
   | "vim.leaderOpenBuffers"
+  | "vim.leaderWorkflows"
+  | "vim.leaderCloudConflicts"
+  | "vim.leaderAtlas"
   | "vim.leaderSearchNotes"
   | "vim.leaderSearchGroup"
   | "vim.leaderSearchVaultText"
@@ -74,6 +89,11 @@ export type KeymapId =
   | "vim.unfoldCurrent"
   | "vim.foldAll"
   | "vim.unfoldAll"
+  | "vim.harperNext"
+  | "vim.harperPrevious"
+  | "vim.harperSuggest"
+  | "vim.harperAddWord"
+  | "vim.harperIgnore"
   | "nav.moveDown"
   | "nav.moveUp"
   | "nav.moveLeft"
@@ -98,7 +118,13 @@ export type KeymapId =
   | "tasks.moveTaskUp"
   | "tasks.moveTaskDown"
   | "editor.moveLineUp"
-  | "editor.moveLineDown";
+  | "editor.moveLineDown"
+  | "editor.hopMarkerForward"
+  | "editor.hopMarkerBackward"
+  | "editor.foldHeading"
+  | "editor.unfoldHeading"
+  | "editor.toggleCheckbox"
+  | "editor.reflowParagraph";
 
 export type KeymapOverrides = Partial<Record<KeymapId, string>>;
 
@@ -110,11 +136,17 @@ export interface KeymapDefinition {
   title: string;
   description: string;
   defaultBinding: string;
+  /** macOS-specific default. On a Mac, Option+<printable> chords are how many
+   *  European layouts type everyday characters (`[` is Option+5 on German
+   *  keyboards), so a binding like `Alt+[` swallows the keystroke instead of
+   *  letting it type (#514). Actions whose cross-platform default is such a
+   *  chord carry a Mac-safe default here; keep this in sync with the slim
+   *  catalog in `@shared/keymaps-catalog`. */
+  defaultBindingMac?: string;
   vimOnly?: boolean;
   nonVimOnly?: boolean;
   maxTokens?: number;
 }
-
 const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
   {
     id: "global.searchNotes",
@@ -122,7 +154,8 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     scope: "app",
     group: "global",
     title: "Search notes",
-    description: "Open the vault-wide note search palette.",
+    description:
+      "Open the vault-wide note search palette. Wins over Vim's Ctrl+P (cursor up) when Mod is Ctrl.",
     defaultBinding: "Mod+P",
   },
   {
@@ -154,6 +187,16 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     defaultBinding: "Shift+Mod+N",
   },
   {
+    id: "global.newNoteHere",
+    kind: "shortcut",
+    scope: "app",
+    group: "global",
+    title: "New note in current folder",
+    description:
+      "Create a note in the active note's folder (or the browsed folder when no note is open) and focus its title. Wins over Vim's Ctrl+N (cursor down) when Mod is Ctrl.",
+    defaultBinding: "Mod+N",
+  },
+  {
     id: "global.openSettings",
     kind: "shortcut",
     scope: "app",
@@ -161,6 +204,16 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     title: "Open settings",
     description: "Open the Settings modal.",
     defaultBinding: "Mod+,",
+  },
+  {
+    id: "global.openFile",
+    kind: "shortcut",
+    scope: "app",
+    group: "global",
+    title: "Open file",
+    description:
+      "Open a single markdown file from outside the vault. On macOS the File menu also binds ⌘O. In Vim mode on Windows/Linux the editor keeps Ctrl+O for the jumplist and insert-mode i_CTRL-O, so this fires when focus is outside the editor or with Vim off — rebind either to change that.",
+    defaultBinding: "Mod+O",
   },
   {
     id: "global.toggleSidebar",
@@ -285,7 +338,8 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     scope: "app",
     group: "global",
     title: "Close active tab",
-    description: "Close the current note or virtual tab.",
+    description:
+      "Close the current note or virtual tab. With Vim mode on and Mod resolving to Ctrl, Ctrl+W stays Vim's pane prefix while a tab is open; close the tab with :q or :bd, or rebind this.",
     defaultBinding: "Mod+W",
   },
   {
@@ -361,6 +415,36 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     defaultBinding: "Alt+ArrowRight",
   },
   {
+    id: "global.toggleRecentNote",
+    kind: "shortcut",
+    scope: "app",
+    group: "global",
+    title: "Switch to previous note",
+    description:
+      "Switch to the most recently used note. Press again to alternate between the last two notes.",
+    defaultBinding: "Mod+Tab",
+    defaultBindingMac: "Ctrl+Tab",
+  },
+  // Direct tab selection (#497), browser-style. Alt+digit cross-platform; on
+  // macOS Option+digit types characters on many layouts (the #514 trap) and
+  // Cmd+1/2/4/5/6 already mean sidebar, connections, and the pane modes, so
+  // the Mac default is Ctrl+digit (same escape toggleRecentNote uses for
+  // Ctrl+Tab). Known limit: with multiple Spaces, macOS auto-enables Mission
+  // Control's Ctrl+digit "Switch to Desktop" shortcuts and consumes the key
+  // before the app sees it; the description tells those users to rebind.
+  ...([1, 2, 3, 4, 5, 6, 7, 8, 9] as const).map(
+    (n): KeymapDefinition => ({
+      id: `tabs.select${n}` as KeymapId,
+      kind: "shortcut",
+      scope: "app",
+      group: "global",
+      title: `Go to tab ${n}`,
+      description: `Jump straight to tab ${n}, counted across panes in the same order gt cycles. On macOS with multiple Spaces, Mission Control claims Ctrl+${n} for Switch to Desktop; rebind here (or free the key in System Settings) if nothing happens.`,
+      defaultBinding: `Alt+${n}`,
+      defaultBindingMac: `Ctrl+${n}`,
+    }),
+  ),
+  {
     id: "vim.leaderPrefix",
     kind: "sequence",
     scope: "leader",
@@ -379,6 +463,42 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     title: "Leader: open buffers",
     description: "Open the buffer switcher.",
     defaultBinding: "o",
+    vimOnly: true,
+    maxTokens: 1,
+  },
+  {
+    id: "vim.leaderAtlas",
+    kind: "sequence",
+    scope: "leader",
+    group: "vim",
+    title: "Leader: open atlas",
+    description: "Open the Atlas map of the vault.",
+    defaultBinding: "g",
+    vimOnly: true,
+    maxTokens: 1,
+  },
+  {
+    id: "vim.leaderWorkflows",
+    kind: "sequence",
+    scope: "leader",
+    group: "vim",
+    title: "Leader: open workflows",
+    // `w` already belongs to the weekly note, so this takes `a` for automation.
+    description: "Open the Workflows canvas.",
+    defaultBinding: "a",
+    vimOnly: true,
+    maxTokens: 1,
+  },
+  {
+    id: "vim.leaderCloudConflicts",
+    kind: "sequence",
+    scope: "leader",
+    group: "vim",
+    title: "Leader: review Cloud conflicts",
+    // `c` is the calendar and `s` the search group, so review takes `r`.
+    description:
+      "Open the Cloud sync conflict queue. Available while files are waiting on a decision.",
+    defaultBinding: "r",
     vimOnly: true,
     maxTokens: 1,
   },
@@ -575,7 +695,8 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     scope: "pane",
     group: "vim",
     title: "Pane command prefix",
-    description: "Start pane focus and split commands.",
+    description:
+      "Start pane focus and split commands. One of the chords Vim mode reserves for itself from a focused editor, with Ctrl+O / Ctrl+I (jumplist) and Ctrl+D / Ctrl+U (half page).",
     defaultBinding: "Ctrl+W",
     vimOnly: true,
     maxTokens: 1,
@@ -775,6 +896,61 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     title: "Unfold all headings",
     description: "Expand every heading section in the note.",
     defaultBinding: "z R",
+    vimOnly: true,
+    maxTokens: 2,
+  },
+  {
+    id: "vim.harperNext",
+    kind: "sequence",
+    scope: "vim-editor",
+    group: "vim",
+    title: "Next Harper suggestion",
+    description: "Jump to the next grammar or spelling problem Harper found. Needs Grammar and spelling with Harper on.",
+    defaultBinding: "] s",
+    vimOnly: true,
+    maxTokens: 2,
+  },
+  {
+    id: "vim.harperPrevious",
+    kind: "sequence",
+    scope: "vim-editor",
+    group: "vim",
+    title: "Previous Harper suggestion",
+    description: "Jump to the previous grammar or spelling problem Harper found.",
+    defaultBinding: "[ s",
+    vimOnly: true,
+    maxTokens: 2,
+  },
+  {
+    id: "vim.harperSuggest",
+    kind: "sequence",
+    scope: "vim-editor",
+    group: "vim",
+    title: "Harper suggestions at cursor",
+    description: "Open the list of fixes for the problem under the cursor; a digit or Enter applies one.",
+    defaultBinding: "z =",
+    vimOnly: true,
+    maxTokens: 2,
+  },
+  {
+    id: "vim.harperAddWord",
+    kind: "sequence",
+    scope: "vim-editor",
+    group: "vim",
+    title: "Add word to Harper dictionary",
+    description: "Teach the vault's dictionary the word under the cursor so Harper stops flagging it.",
+    defaultBinding: "z g",
+    vimOnly: true,
+    maxTokens: 2,
+  },
+  {
+    id: "vim.harperIgnore",
+    kind: "sequence",
+    scope: "vim-editor",
+    group: "vim",
+    title: "Ignore Harper suggestion",
+    description: "Hide this one suggestion here from now on without teaching the dictionary a word.",
+    defaultBinding: "z G",
     vimOnly: true,
     maxTokens: 2,
   },
@@ -985,6 +1161,46 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     maxTokens: 1,
   },
   {
+    id: "editor.hopMarkerForward",
+    kind: "shortcut",
+    scope: "vim-editor",
+    group: "view-actions",
+    title: "Hop past next marker",
+    description:
+      "Move the cursor to the far side of the next inline marker on the line: `**bold|**` becomes `**bold**|`, so finishing a formatted word never needs the arrow keys. Crosses `**`, `*`, `~~`, `==`, backticks, `$` and the bracket pairs, plus straight quotes wherever they auto-pair (the Auto-pair quotes setting, or inside code), so `\"quoted|\"` becomes `\"quoted\"|` too; an apostrophe inside a word is never a stop. Works with Vim mode on or off.",
+    defaultBinding: "Alt+]",
+    defaultBindingMac: "Ctrl+.",
+  },
+  {
+    id: "editor.hopMarkerBackward",
+    kind: "shortcut",
+    scope: "vim-editor",
+    group: "view-actions",
+    title: "Hop before previous marker",
+    description:
+      "Move the cursor to the near side of the previous inline marker on the line — `**bold**|` becomes `**bold|**`, and again to land before the opening `**`. Works with Vim mode on or off.",
+    defaultBinding: "Alt+[",
+    defaultBindingMac: "Ctrl+,",
+  },
+  {
+    id: "editor.foldHeading",
+    kind: "shortcut",
+    scope: "vim-editor",
+    group: "view-actions",
+    title: "Fold heading",
+    description: "Fold the heading section containing the cursor.",
+    defaultBinding: "Mod+Alt+F",
+  },
+  {
+    id: "editor.unfoldHeading",
+    kind: "shortcut",
+    scope: "vim-editor",
+    group: "view-actions",
+    title: "Unfold heading",
+    description: "Unfold the heading section containing the cursor.",
+    defaultBinding: "Mod+Alt+U",
+  },
+  {
     id: "editor.moveLineUp",
     kind: "shortcut",
     scope: "vim-editor",
@@ -1003,6 +1219,27 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     description:
       "Move the current line (or selected lines) down in the note editor — reorders the markdown, so it sticks in the file. Works with Vim mode on or off.",
     defaultBinding: "Alt+ArrowDown",
+  },
+  {
+    id: "editor.toggleCheckbox",
+    kind: "shortcut",
+    scope: "vim-editor",
+    group: "view-actions",
+    title: "Toggle checkbox",
+    description:
+      "Turn the current line (or selected lines) into a checkbox, and toggle it between unchecked and checked on repeat. Plain text becomes `- [ ]`, keeping any list marker or blockquote prefix. Works with Vim mode on or off.",
+    defaultBinding: "Mod+L",
+  },
+  {
+    id: "editor.reflowParagraph",
+    kind: "shortcut",
+    scope: "vim-editor",
+    group: "view-actions",
+    title: "Reflow paragraph",
+    description:
+      "Join the hard-wrapped lines of the paragraph under the cursor (or of every paragraph in the selection) into one line, so the editor wraps it to the pane the way the preview does. Headings, list markers, tables, code, and explicit line breaks are left alone. Works with Vim mode on or off; Vim mode also has it as the `gq` operator (`gqip`, `gqj`, `gw` to keep the cursor).",
+    defaultBinding: "Alt+Q",
+    defaultBindingMac: "Ctrl+Q",
   },
   {
     id: "nav.localEx",
@@ -1048,6 +1285,21 @@ const KEYMAP_INDEX = new Map<KeymapId, KeymapDefinition>(
   KEYMAP_DEFINITIONS.map((definition) => [definition.id, definition] as const),
 );
 
+/** The nine direct tab-selection shortcuts (#497), index = position in the
+ *  array + 1. Kept as a list so dispatchers can loop instead of hand-writing
+ *  nine matches. */
+export const TAB_SELECT_KEYMAP_IDS: readonly KeymapId[] = [
+  "tabs.select1",
+  "tabs.select2",
+  "tabs.select3",
+  "tabs.select4",
+  "tabs.select5",
+  "tabs.select6",
+  "tabs.select7",
+  "tabs.select8",
+  "tabs.select9",
+];
+
 const KEYMAP_GROUP_LABELS: Record<KeymapGroup, string> = {
   global: "Global shortcuts",
   vim: "Vim-specific shortcuts",
@@ -1070,7 +1322,10 @@ export function getKeymapGroupLabel(group: KeymapGroup): string {
 }
 
 export function getDefaultKeymapBinding(id: KeymapId): string {
-  return getKeymapDefinition(id).defaultBinding;
+  const def = getKeymapDefinition(id);
+  return isMacPlatform() && def.defaultBindingMac
+    ? def.defaultBindingMac
+    : def.defaultBinding;
 }
 
 export function getKeymapBinding(
@@ -1111,6 +1366,17 @@ export function isMacPlatform(): boolean {
   if (runtimePlatform) return runtimePlatform === "darwin";
   if (typeof navigator === "undefined") return true;
   return /Mac|iPhone|iPad|iPod/i.test(navigator.platform);
+}
+
+export function isLinuxPlatform(): boolean {
+  const runtimePlatform = getRuntimePlatform();
+  if (runtimePlatform) return runtimePlatform === "linux";
+  if (typeof navigator === "undefined") return false;
+  // Android's user agent also says "Linux"; the X11/Wayland desktops this
+  // distinguishes are the ones that say "Linux" without saying "Android".
+  return (
+    /Linux|X11/i.test(navigator.platform) && !/Android/i.test(navigator.userAgent)
+  );
 }
 
 function isModifierKey(key: string): boolean {
@@ -1368,24 +1634,50 @@ export function normalizeKeymapOverrides(input: unknown): KeymapOverrides {
     const raw = (input as Record<string, unknown>)[definition.id];
     if (typeof raw !== "string") continue;
     const normalized = normalizeKeymapBinding(definition.id, raw);
-    if (normalized && normalized !== definition.defaultBinding) {
+    // The platform's default, not the cross-platform one: a definition with a
+    // `defaultBindingMac` has two defaults, and comparing against the wrong one
+    // on macOS threw away a deliberate rebind back to the Mac default (it read
+    // as "same as default, drop it") while keeping the Mac default itself as a
+    // stored override on Windows/Linux.
+    if (normalized && normalized !== getDefaultKeymapBinding(definition.id)) {
       overrides[definition.id] = normalized;
     }
   }
   return overrides;
 }
 
-export function shortcutBindingFromEvent(event: KeyboardEvent): string | null {
+function shortcutModifiersFromEvent(event: KeyboardEvent): string[] {
   const mac = isMacPlatform();
-  const resolved = resolveKeyFromEvent(event);
-  const key = resolved ?? normalizeKeyName(event.key);
-  if (!key) return null;
   const modifiers: string[] = [];
   if (event.ctrlKey) modifiers.push(mac ? "Ctrl" : "Mod");
   if (event.metaKey) modifiers.push(mac ? "Mod" : "Meta");
   if (event.altKey) modifiers.push("Alt");
   if (event.shiftKey) modifiers.push("Shift");
-  return normalizeShortcutBinding([...modifiers, key].join("+"));
+  return modifiers;
+}
+
+export function shortcutBindingFromEvent(event: KeyboardEvent): string | null {
+  // Alt+numpad digits are the Windows Alt-code input method (hold Alt, type
+  // 0233 on the numpad for an accented character). Numpad digits resolve to
+  // the bare digit, so with Alt+1..9 shipped as tab defaults (#497) every
+  // Alt-code keystroke would switch tabs mid-entry: on Windows those chords
+  // belong to the OS and never resolve to a binding.
+  if (
+    event.altKey &&
+    !event.ctrlKey &&
+    !event.metaKey &&
+    /^Numpad\d$/.test(event.code) &&
+    !isMacPlatform() &&
+    !isLinuxPlatform()
+  ) {
+    return null;
+  }
+  const resolved = resolveKeyFromEvent(event);
+  const key = resolved ?? normalizeKeyName(event.key);
+  if (!key) return null;
+  return normalizeShortcutBinding(
+    [...shortcutModifiersFromEvent(event), key].join("+"),
+  );
 }
 
 export function sequenceTokenFromEvent(event: KeyboardEvent): string | null {
@@ -1418,7 +1710,19 @@ export function matchesShortcutBinding(
   binding: string,
 ): boolean {
   const normalized = shortcutBindingFromEvent(event);
-  return !!normalized && normalized === binding;
+  if (!!normalized && normalized === binding) return true;
+  // Layouts with shifted digits (French AZERTY, Czech) type punctuation on
+  // the digit row, so a digit binding like the Alt+1..9 tab defaults (#497)
+  // would never fire by typed character (Alt+1 arrives as "Alt+&"). Fall
+  // back to the physical digit-row position, the same shield class the Mac
+  // Option+printable defaults needed (#514). Numpad digits stay out of this
+  // fallback on purpose: see the Alt-code guard in shortcutBindingFromEvent.
+  const digit = /^Digit(\d)$/.exec(event.code)?.[1];
+  if (!digit) return false;
+  const physical = normalizeShortcutBinding(
+    [...shortcutModifiersFromEvent(event), digit].join("+"),
+  );
+  return !!physical && physical !== normalized && physical === binding;
 }
 
 export function matchesShortcut(
@@ -1427,6 +1731,30 @@ export function matchesShortcut(
   id: KeymapId,
 ): boolean {
   return matchesShortcutBinding(event, getKeymapBinding(overrides, id));
+}
+
+/**
+ * True when the event lands on a combination the user has explicitly rebound
+ * to some other action. The #497 tab shortcuts shipped nine new defaults into
+ * the middle of an ordered dispatch chain, so without this check a
+ * pre-existing override on e.g. Alt+3 (checked later in the chain) would
+ * silently lose to the new default. An explicit rebind outranks a shipped
+ * default; callers skip their default binding when this returns true.
+ */
+export function eventMatchesUserOverride(
+  event: KeyboardEvent,
+  overrides: KeymapOverrides | null | undefined,
+  excludeId: KeymapId,
+): boolean {
+  if (!overrides) return false;
+  for (const [id, binding] of Object.entries(overrides)) {
+    if (id === excludeId || typeof binding !== "string") continue;
+    const definition = KEYMAP_INDEX.get(id as KeymapId);
+    if (!definition || definition.kind !== "shortcut") continue;
+    if (definition.scope !== "app") continue;
+    if (matchesShortcutBinding(event, binding)) return true;
+  }
+  return false;
 }
 
 export function matchesSequenceToken(

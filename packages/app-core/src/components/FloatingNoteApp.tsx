@@ -27,16 +27,22 @@ import {
 } from '@codemirror/view'
 import { Vim, vim } from '@replit/codemirror-vim'
 import { history, historyKeymap, indentWithTab } from '@codemirror/commands'
-import { vimAwareDefaultKeymap, vimAwareMarkdownKeymap } from '../lib/cm-vim-default-keymap'
+import { vimAwareDefaultKeymap, vimAwareMarkdownKeymap, vimAwareSearchKeymap } from '../lib/cm-vim-default-keymap'
+import { vimVisualHighlightExtension } from '../lib/cm-vim-visual-highlight'
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
 import { resolveCodeLanguage } from '../lib/cm-code-languages'
+import { customCodeFenceHighlightExtension } from '../lib/cm-custom-code-languages'
 import { applyVimInsertEscape } from '../lib/vim-insert-escape'
+import { registerDisplayLineMotion } from '../lib/cm-vim-display-line'
+import { registerHeadingMotion } from '../lib/cm-vim-heading-motion'
+import { registerReflowOperator } from '../lib/cm-vim-reflow'
+import { isTouchPrimaryDevice, vimImeGuard } from '../lib/cm-vim-ime-guard'
 import { markdownListIndentPlugin } from '../lib/cm-markdown-list-indent'
 import { appMarkdownSnippetExtension } from '../lib/markdown-snippets-config'
 import { syntaxHighlighting, HighlightStyle, defaultHighlightStyle } from '@codemirror/language'
 import { tags as t } from '@lezer/highlight'
-import { searchKeymap } from '@codemirror/search'
 import type { NoteContent, VaultChangeEvent } from '@shared/ipc'
+import type { VimWrappedLineMotionMode } from '@shared/app-config'
 import type { LineNumberMode } from '../store'
 import { livePreviewPlugin } from '../lib/cm-live-preview'
 import { headingFolding } from '../lib/cm-heading-fold'
@@ -49,6 +55,7 @@ import {
   type ThemeFamily,
   type ThemeMode
 } from '../lib/themes'
+import { editorTabSize, normalizeEditorTabSize } from '../lib/editor-tab-size'
 
 const PREFS_KEY = 'zen:prefs:v2'
 const SAVE_DEBOUNCE_MS = 350
@@ -93,12 +100,16 @@ export const paperHighlight = HighlightStyle.define([
 export interface FloatingPrefs {
   vimMode: boolean
   vimInsertEscape: string
+  vimWrappedLineMotions: VimWrappedLineMotionMode
+  vimBlockImeInNormalMode: boolean
   livePreview: boolean
   themeId: string
   themeFamily: ThemeFamily
   themeMode: ThemeMode
   editorFontSize: number
   editorLineHeight: number
+  editorTabSize: number
+  showHeadingLevelLabels: boolean
   lineNumberMode: LineNumberMode
   wordWrap: boolean
   interfaceFont: string | null
@@ -110,12 +121,16 @@ export function loadFloatingPrefs(): FloatingPrefs {
   const fallback: FloatingPrefs = {
     vimMode: true,
     vimInsertEscape: '',
+    vimWrappedLineMotions: 'display',
+    vimBlockImeInNormalMode: true,
     livePreview: true,
     themeId: DEFAULT_THEME_ID,
     themeFamily: 'gruvbox',
     themeMode: 'dark',
     editorFontSize: 16,
     editorLineHeight: 1.7,
+    editorTabSize: 4,
+    showHeadingLevelLabels: false,
     lineNumberMode: 'off',
     wordWrap: true,
     interfaceFont: null,
@@ -135,9 +150,13 @@ export function loadFloatingPrefs(): FloatingPrefs {
     return {
       ...fallback,
       ...parsed,
+      vimWrappedLineMotions:
+        parsed.vimWrappedLineMotions === 'logical' ? 'logical' : 'display',
+      vimBlockImeInNormalMode: parsed.vimBlockImeInNormalMode !== false,
       themeFamily: (parsed.themeFamily as ThemeFamily) ?? fallback.themeFamily,
       themeMode: (parsed.themeMode as ThemeMode) ?? fallback.themeMode,
-      lineNumberMode
+      lineNumberMode,
+      editorTabSize: normalizeEditorTabSize(parsed.editorTabSize)
     }
   } catch {
     return fallback
@@ -235,6 +254,26 @@ export function FloatingNoteApp({ notePath }: { notePath: string }): JSX.Element
   // Sync to external changes (file watcher broadcasts to all windows).
   useEffect(() => {
     const off = window.zen.onVaultChange((ev: VaultChangeEvent) => {
+      // A resync fires after a change-feed gap (a reconnected watch socket)
+      // and carries no path: this note's own events, if any, were swallowed
+      // by the gap, so re-read unconditionally. Bailing on the path filter
+      // below left the window rendering the pre-gap body forever, and a
+      // save from it would overwrite what another device wrote meanwhile.
+      if (ev.scope === 'resync') {
+        void window.zen
+          .readNote(notePath)
+          .then((c) => {
+            if (lastWrittenBodyRef.current === c.body) return
+            dirtyBodyRef.current = c.body
+            setContent(c)
+          })
+          .catch(() => {
+            // Unreadable right after a reconnect: could be deleted on the
+            // server, could be a blip. Keep the window open; closing it
+            // would drop unsaved keystrokes on a guess.
+          })
+        return
+      }
       if (ev.path !== notePath) return
       if (ev.kind === 'unlink') {
         // Note deleted — close the window.
@@ -295,14 +334,18 @@ export function FloatingNoteApp({ notePath }: { notePath: string }): JSX.Element
         extensions: [
           appMarkdownSnippetExtension(),
           new Compartment().of(prefs.vimMode ? vim() : []),
+          vimImeGuard(() => prefs.vimBlockImeInNormalMode && !isTouchPrimaryDevice()),
+          vimVisualHighlightExtension,
           history(),
           drawSelection(),
+          editorTabSize(prefs.editorTabSize),
           highlightActiveLine(),
           prefs.wordWrap ? EditorView.lineWrapping : [],
           markdown({ base: markdownLanguage, codeLanguages: resolveCodeLanguage, addKeymap: false }),
+          customCodeFenceHighlightExtension,
           vimAwareMarkdownKeymap,
           markdownListIndentPlugin,
-          headingFolding(),
+          headingFolding({ showLevelLabels: prefs.showHeadingLevelLabels }),
           syntaxHighlighting(paperHighlight),
           syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
           prefs.livePreview ? livePreviewPlugin : [],
@@ -311,7 +354,7 @@ export function FloatingNoteApp({ notePath }: { notePath: string }): JSX.Element
             indentWithTab,
             ...vimAwareDefaultKeymap(prefs.vimMode),
             ...historyKeymap,
-            ...searchKeymap
+            ...vimAwareSearchKeymap(prefs.vimMode)
           ]),
           EditorView.updateListener.of((upd) => {
             if (!upd.docChanged) return
@@ -397,9 +440,9 @@ export function FloatingNoteApp({ notePath }: { notePath: string }): JSX.Element
     floatingHandlers.close = (): void => {
       window.zen.windowClose()
     }
-    registerFloatingVimCommands()
+    registerFloatingVimCommands(() => prefs.vimWrappedLineMotions)
     applyVimInsertEscape(prefs.vimInsertEscape)
-  }, [persist, prefs.vimInsertEscape])
+  }, [persist, prefs.vimInsertEscape, prefs.vimWrappedLineMotions])
 
   const title = useMemo(() => {
     if (content?.title) return content.title
@@ -513,9 +556,15 @@ function deferredClose(): void {
   setTimeout(() => floatingHandlers.close?.(), 0)
 }
 
-function registerFloatingVimCommands(): void {
+function registerFloatingVimCommands(
+  getWrappedLineMotionMode: () => VimWrappedLineMotionMode
+): void {
+  registerDisplayLineMotion(getWrappedLineMotionMode)
   if (floatingVimRegistered) return
   floatingVimRegistered = true
+
+  registerHeadingMotion()
+  registerReflowOperator()
 
   Vim.defineEx('write', 'w', () => {
     void floatingHandlers.persist?.()

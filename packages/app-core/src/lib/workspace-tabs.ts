@@ -4,6 +4,8 @@ import { isQuickNotesTabPath } from '@shared/quick-notes'
 import { isTagsTabPath } from '@shared/tags'
 import { isTasksTabPath } from '@shared/tasks'
 import { isTrashTabPath } from '@shared/trash'
+import { isWorkflowsTabPath } from '@shared/workflows-view'
+import { isAtlasTabPath } from '@shared/atlas-view'
 import { isDatabaseTabPath } from '@shared/databases'
 import { isAssetsViewTabPath } from '@shared/assets-view'
 import { isAssetTabPath } from './asset-tabs'
@@ -14,6 +16,8 @@ export function isWorkspaceVirtualTabPath(path: string): boolean {
   return (
     isQuickNotesTabPath(path) ||
     isTasksTabPath(path) ||
+    isWorkflowsTabPath(path) ||
+    isAtlasTabPath(path) ||
     isTagsTabPath(path) ||
     isHelpTabPath(path) ||
     isArchiveTabPath(path) ||
@@ -25,16 +29,16 @@ export function isWorkspaceVirtualTabPath(path: string): boolean {
   )
 }
 
-export function initialWorkspaceRestoreContentPaths(
-  layout: PaneLayout,
-  existingPaths: Set<string>
-): string[] {
+/** Restore runs before the vault index exists (#564), so the snapshot's active
+ *  tabs cannot be checked against a note list here: each path is read straight
+ *  from disk, and a failed read prunes its tab. */
+export function initialWorkspaceRestoreContentPaths(layout: PaneLayout): string[] {
   const seen = new Set<string>()
   const paths: string[] = []
 
   for (const leaf of allLeaves(layout)) {
     const path = leaf.activeTab
-    if (!path || isWorkspaceVirtualTabPath(path) || !existingPaths.has(path) || seen.has(path)) {
+    if (!path || isWorkspaceVirtualTabPath(path) || seen.has(path)) {
       continue
     }
     seen.add(path)

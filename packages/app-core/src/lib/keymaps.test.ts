@@ -1,8 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import {
+  eventMatchesUserOverride,
   findKeymapConflict,
   getDefaultKeymapBinding,
   getKeymapDefinition,
+  getKeymapDefinitions,
+  matchesShortcutBinding,
+  normalizeKeymapOverrides,
+  normalizeShortcutBinding,
   shortcutBindingFromEvent,
   sequenceTokenFromEvent
 } from './keymaps'
@@ -120,6 +125,68 @@ describe('shortcutBindingFromEvent', () => {
       expect(shortcutBindingFromEvent(event)).toBe('Shift+Mod+=')
     })
   })
+
+  it('never resolves Alt+numpad digits on Windows (Alt-code character entry)', () => {
+    // Hold Alt, type 0233 on the numpad: an input method, not a shortcut.
+    // With Alt+1..9 shipped as tab defaults (#497) each digit would
+    // otherwise switch tabs mid-entry.
+    const event = fakeEvent({ key: '2', code: 'Numpad2', altKey: true })
+    withPlatform('win32', () => {
+      expect(shortcutBindingFromEvent(event)).toBeNull()
+    })
+    withPlatform('linux', () => {
+      expect(shortcutBindingFromEvent(event)).toBe('Alt+2')
+    })
+  })
+})
+
+describe('matchesShortcutBinding (digit-row layouts, #497)', () => {
+  it('matches Alt+1 on AZERTY where the digit row types punctuation', () => {
+    // French AZERTY: unshifted Digit1 types '&', so the typed-character
+    // binding is "Alt+&" and the stored default "Alt+1" needs the physical
+    // digit-row fallback to fire.
+    const event = fakeEvent({ key: '&', code: 'Digit1', altKey: true })
+    withPlatform('win32', () => {
+      expect(matchesShortcutBinding(event, 'Alt+1')).toBe(true)
+    })
+  })
+
+  it('still matches a binding recorded from the typed character first', () => {
+    const event = fakeEvent({ key: '&', code: 'Digit1', altKey: true })
+    withPlatform('win32', () => {
+      expect(matchesShortcutBinding(event, 'Alt+&')).toBe(true)
+    })
+  })
+
+  it('keeps the numpad out of the digit-row fallback', () => {
+    const event = fakeEvent({ key: '2', code: 'Numpad2', altKey: true })
+    withPlatform('win32', () => {
+      expect(matchesShortcutBinding(event, 'Alt+2')).toBe(false)
+    })
+  })
+})
+
+describe('eventMatchesUserOverride (#497, rebinds outrank new defaults)', () => {
+  it('flags an event landing on a combination the user rebound elsewhere', () => {
+    const event = fakeEvent({ key: '3', code: 'Digit3', altKey: true })
+    withPlatform('win32', () => {
+      expect(
+        eventMatchesUserOverride(event, { 'global.zoomIn': 'Alt+3' }, 'tabs.select3')
+      ).toBe(true)
+    })
+  })
+
+  it('ignores the excluded id and unrelated overrides', () => {
+    const event = fakeEvent({ key: '3', code: 'Digit3', altKey: true })
+    withPlatform('win32', () => {
+      expect(
+        eventMatchesUserOverride(event, { 'tabs.select3': 'Alt+3' }, 'tabs.select3')
+      ).toBe(false)
+      expect(
+        eventMatchesUserOverride(event, { 'global.zoomIn': 'Alt+4' }, 'tabs.select3')
+      ).toBe(false)
+    })
+  })
 })
 
 describe('sequenceTokenFromEvent', () => {
@@ -156,6 +223,38 @@ describe('sequenceTokenFromEvent', () => {
 })
 
 describe('leader keymap definitions', () => {
+  it('keeps the recent-note toggle portable with a literal Ctrl+Tab Mac default', () => {
+    withPlatform('darwin', () => {
+      expect(getDefaultKeymapBinding('global.toggleRecentNote')).toBe('Ctrl+Tab')
+    })
+    withPlatform('linux', () => {
+      expect(getDefaultKeymapBinding('global.toggleRecentNote')).toBe('Mod+Tab')
+    })
+    withPlatform('win32', () => {
+      expect(getDefaultKeymapBinding('global.toggleRecentNote')).toBe('Mod+Tab')
+    })
+  })
+
+  it('keeps every shortcut default in the portable Mod spelling', () => {
+    // The shortcut normalizer canonicalizes the platform-primary modifier to
+    // Mod (Ctrl on Windows/Linux, Meta on the Mac), so a default written as
+    // "Ctrl+..." reads back differently on Linux CI than on the Mac this
+    // suite usually runs on, and the shared-domain catalog can only mirror
+    // one of the two spellings. Every shortcut default must round-trip
+    // unchanged on every platform.
+    for (const def of getKeymapDefinitions()) {
+      if (def.kind !== 'shortcut') continue
+      for (const platform of ['darwin', 'linux', 'win32'] as const) {
+        const roundTripped = withPlatform(platform, () =>
+          normalizeShortcutBinding(def.defaultBinding)
+        )
+        expect(roundTripped, `${def.id} default is not portable on ${platform}`).toBe(
+          def.defaultBinding
+        )
+      }
+    }
+  })
+
   it('includes switch vault in leader bindings', () => {
     expect(getKeymapDefinition('vim.leaderSwitchVault')).toMatchObject({
       title: 'Leader: switch vault',
@@ -251,5 +350,40 @@ describe('findKeymapConflict (#298 — global shortcut conflicts)', () => {
     expect(findKeymapConflict({}, 'nav.moveRight', 'l')).toBeNull()
     // Even a genuine cross-action duplicate in a sequence group is allowed.
     expect(findKeymapConflict({}, 'nav.delete', 'x')).toBeNull()
+  })
+})
+
+// An action with a `defaultBindingMac` has two defaults, and "is this an
+// override?" has to be asked against the one for THIS platform. Comparing
+// against the cross-platform default silently dropped a deliberate macOS
+// rebind on the next prefs load, and stored the Mac default as an override
+// everywhere else.
+describe('normalizeKeymapOverrides', () => {
+  const macDefault = 'Ctrl+.' // editor.hopMarkerForward on macOS
+  const otherDefault = 'Alt+]' // …and everywhere else
+
+  it('keeps a macOS rebind back to the cross-platform default', () => {
+    withPlatform('darwin', () => {
+      expect(getDefaultKeymapBinding('editor.hopMarkerForward')).toBe(macDefault)
+      expect(normalizeKeymapOverrides({ 'editor.hopMarkerForward': otherDefault })).toEqual({
+        'editor.hopMarkerForward': otherDefault
+      })
+    })
+  })
+
+  it('drops a macOS binding that just restates the macOS default', () => {
+    withPlatform('darwin', () => {
+      expect(normalizeKeymapOverrides({ 'editor.hopMarkerForward': macDefault })).toEqual({})
+    })
+  })
+
+  it('mirrors both rules off macOS', () => {
+    withPlatform('win32', () => {
+      expect(normalizeKeymapOverrides({ 'editor.hopMarkerForward': otherDefault })).toEqual({})
+      // Kept as an override, normalized the way Windows/Linux spell Ctrl.
+      expect(normalizeKeymapOverrides({ 'editor.hopMarkerForward': macDefault })).toEqual({
+        'editor.hopMarkerForward': 'Mod+.'
+      })
+    })
   })
 })

@@ -150,6 +150,43 @@ function rangeForHeading(
   return { from, to }
 }
 
+function exactFoldAtRange(
+  state: EditorState,
+  range: { from: number; to: number }
+): { from: number; to: number } | null {
+  let existing: { from: number; to: number } | null = null
+  foldedRanges(state).between(range.from, range.to, (from, to) => {
+    if (from === range.from && to === range.to) {
+      existing = { from, to }
+      return false
+    }
+    return undefined
+  })
+  return existing
+}
+
+function headingRangeAtCursor(view: EditorView): { from: number; to: number } | null {
+  const line = view.state.doc.lineAt(view.state.selection.main.head)
+  const level = headingLevelAt(view.state, line.number)
+  return level === null ? null : rangeForHeading(view.state, line.number, level)
+}
+
+export function foldHeadingAtCursor(view: EditorView): boolean {
+  const range = headingRangeAtCursor(view)
+  if (!range || exactFoldAtRange(view.state, range)) return false
+  view.dispatch({ effects: foldEffect.of(range) })
+  return true
+}
+
+export function unfoldHeadingAtCursor(view: EditorView): boolean {
+  const range = headingRangeAtCursor(view)
+  if (!range) return false
+  const existing = exactFoldAtRange(view.state, range)
+  if (!existing) return false
+  view.dispatch({ effects: unfoldEffect.of(existing) })
+  return true
+}
+
 class HeadingFoldArrow extends WidgetType {
   constructor(
     private readonly line: number,
@@ -195,6 +232,28 @@ class HeadingFoldArrow extends WidgetType {
   }
 }
 
+class HeadingLevelLabel extends WidgetType {
+  constructor(private readonly level: number) {
+    super()
+  }
+
+  eq(other: HeadingLevelLabel): boolean {
+    return other.level === this.level
+  }
+
+  toDOM(): HTMLElement {
+    const el = document.createElement('span')
+    el.className = 'cm-heading-level-label'
+    el.setAttribute('aria-hidden', 'true')
+    el.textContent = `H${this.level}`
+    return el
+  }
+
+  ignoreEvent(): boolean {
+    return true
+  }
+}
+
 /** Toggle the fold at the given heading line. We compute the target
  *  range ourselves (same logic the foldService uses) instead of going
  *  through `foldable()` so the click is resilient to fold-service
@@ -205,21 +264,13 @@ function toggleHeadingFold(view: EditorView, lineNumber: number): void {
   if (level === null) return
   const range = rangeForHeading(state, lineNumber, level)
   if (!range) return
-  const folded = foldedRanges(state)
-  let existing: { from: number; to: number } | null = null
-  folded.between(range.from, range.to, (from, to) => {
-    if (from === range.from && to === range.to) {
-      existing = { from, to }
-      return false
-    }
-    return undefined
-  })
+  const existing = exactFoldAtRange(state, range)
   view.dispatch({
     effects: existing ? unfoldEffect.of(existing) : foldEffect.of(range)
   })
 }
 
-function buildDecorations(view: EditorView): DecorationSet {
+function buildDecorations(view: EditorView, showLevelLabels: boolean): DecorationSet {
   const { state } = view
   const builder: { from: number; to: number; deco: Decoration }[] = []
   const folded = foldedRanges(state)
@@ -257,6 +308,17 @@ function buildDecorations(view: EditorView): DecorationSet {
         deco: Decoration.line({ class: classes.join(' ') })
       })
 
+      if (showLevelLabels) {
+        builder.push({
+          from: line.from,
+          to: line.from,
+          deco: Decoration.widget({
+            side: -2,
+            widget: new HeadingLevelLabel(level)
+          })
+        })
+      }
+
       // Widget sits at the very start of the line. side: -1 places
       // it before text content in the DOM so the vim fat-cursor at
       // position 0 measures the first # glyph, not the widget.
@@ -275,47 +337,57 @@ function buildDecorations(view: EditorView): DecorationSet {
   return Decoration.set(builder.map((b) => b.deco.range(b.from, b.to)))
 }
 
+function headingArrowPlugin(showLevelLabels: boolean): Extension {
+  return ViewPlugin.fromClass(
+    class {
+      private readonly view: EditorView
+      decorations: DecorationSet
 
-const headingArrowPlugin = ViewPlugin.fromClass(
-  class {
-    private readonly view: EditorView
-    decorations: DecorationSet
+      private cursorFixFrame = 0
 
-    private cursorFixFrame = 0
-
-    constructor(view: EditorView) {
-      this.view = view
-      this.decorations = buildDecorations(view)
-      this.cursorFixFrame = requestAnimationFrame(() => fixFatCursorHeight(this.view))
-    }
-
-    update(update: ViewUpdate): void {
-      if (
-        update.docChanged ||
-        update.viewportChanged ||
-        update.selectionSet ||
-        update.transactions.some((tr) =>
-          tr.effects.some((e) => e.is(foldEffect) || e.is(unfoldEffect))
-        )
-      ) {
-        this.decorations = buildDecorations(update.view)
-      }
-      if (update.selectionSet || update.geometryChanged || update.docChanged || update.viewportChanged) {
-        cancelAnimationFrame(this.cursorFixFrame)
+      constructor(view: EditorView) {
+        this.view = view
+        this.decorations = buildDecorations(view, showLevelLabels)
         this.cursorFixFrame = requestAnimationFrame(() => fixFatCursorHeight(this.view))
       }
-    }
 
-    destroy(): void {
-      cancelAnimationFrame(this.cursorFixFrame)
-    }
-  },
-  {
-    decorations: (plugin) => plugin.decorations
-  }
-)
+      update(update: ViewUpdate): void {
+        if (
+          update.docChanged ||
+          update.viewportChanged ||
+          update.selectionSet ||
+          update.transactions.some((tr) =>
+            tr.effects.some((e) => e.is(foldEffect) || e.is(unfoldEffect))
+          )
+        ) {
+          this.decorations = buildDecorations(update.view, showLevelLabels)
+        }
+        if (
+          update.selectionSet ||
+          update.geometryChanged ||
+          update.docChanged ||
+          update.viewportChanged
+        ) {
+          cancelAnimationFrame(this.cursorFixFrame)
+          this.cursorFixFrame = requestAnimationFrame(() => fixFatCursorHeight(this.view))
+        }
+      }
 
-export function headingFolding(): Extension {
+      destroy(): void {
+        cancelAnimationFrame(this.cursorFixFrame)
+      }
+    },
+    {
+      decorations: (plugin) => plugin.decorations
+    }
+  )
+}
+
+export interface HeadingFoldingOptions {
+  showLevelLabels?: boolean
+}
+
+export function headingFolding(options: HeadingFoldingOptions = {}): Extension {
   const service = foldService.of((state, from, _to) => {
     const lineNumber = state.doc.lineAt(from).number
     const level = headingLevelAt(state, lineNumber)
@@ -327,5 +399,18 @@ export function headingFolding(): Extension {
   // for foldEffect / unfoldEffect and installs the replace-decorations
   // that hide folded ranges. Without it, our dispatches go through
   // with no visible effect.
-  return [codeFolding(), service, headingArrowPlugin]
+  const showLevelLabels = options.showLevelLabels ?? false
+  return [
+    codeFolding(),
+    service,
+    headingArrowPlugin(showLevelLabels),
+    // The level chips sit LEFT of the arrow slot, wider than .cm-content's
+    // default 32px padding. The centered column's auto margin cannot host
+    // them: it is zero whenever the pane is narrower than the column cap,
+    // and anything positioned beyond the content box lands under the
+    // sidebar. This class makes the content box reserve the chip gutter.
+    ...(showLevelLabels
+      ? [EditorView.editorAttributes.of({ class: 'zen-heading-level-labels' })]
+      : [])
+  ]
 }

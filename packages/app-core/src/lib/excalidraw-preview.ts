@@ -6,20 +6,11 @@ import {
   extractObsidianExcalidrawScene
 } from '@shared/excalidraw'
 
-export interface EmbedSize {
-  width?: number
-  height?: number
-}
-
-/** Parse an Obsidian-style embed size hint: `600`, `600x400`. */
-const SIZE_HINT_RE = /^(\d+)(?:x(\d+))?$/
-
-export function parseEmbedSizeHint(hint: string | null | undefined): EmbedSize | null {
-  if (!hint) return null
-  const m = hint.trim().match(SIZE_HINT_RE)
-  if (!m) return null
-  return { width: Number(m[1]), height: m[2] ? Number(m[2]) : undefined }
-}
+// Size hints moved to shared-domain so the Word export in the desktop main
+// process reads `|600` the same way the editor does (#629). Re-exported here
+// because the editor and preview import them from this module.
+export { parseEmbedSizeHint, splitEmbedLabel } from '@shared/embed-size'
+export type { EmbedSize } from '@shared/embed-size'
 
 interface CacheEntry {
   mtime: number
@@ -152,6 +143,13 @@ export function peekExcalidrawPreview(path: string): string | null {
 /** Drop a single cached preview (called by the vault watcher on change). */
 export function invalidateExcalidrawPreview(path: string): void {
   previewCache.delete(path)
+}
+
+/** Drop every cached preview. After a change-feed gap (watch socket
+ *  reconnect) the per-path change events are gone for good, so any drawing
+ *  may be stale; previews re-render lazily from disk. */
+export function invalidateAllExcalidrawPreviews(): void {
+  previewCache.clear()
 }
 
 /**

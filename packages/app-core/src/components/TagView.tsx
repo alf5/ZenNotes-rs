@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { isTagsViewActive, useStore } from '../store'
 import type { NoteMeta } from '@shared/ipc'
-import { buildTagTree, extractTags, flattenTagTree, matchesSelectedTags } from '../lib/tags'
+import { buildTagTree, flattenTagTree, matchesSelectedTags, noteTagsForCount } from '../lib/tags'
+import { resolveTypstPreambleFolder } from '../lib/typst-preamble'
 import { TagIcon, CloseIcon, DocumentIcon } from './icons'
 import { ContextMenu, type ContextMenuItem } from './ContextMenu'
 import { advanceSequence, getKeymapBinding, matchesSequenceToken } from '../lib/keymaps'
@@ -32,6 +33,9 @@ function folderLabel(note: NoteMeta): string {
 export function TagView(): JSX.Element {
   const notes = useStore((s) => s.notes)
   const activeNote = useStore((s) => s.activeNote)
+  const preambleFolder = useStore((s) =>
+    resolveTypstPreambleFolder(s.vaultSettings?.typstPreambles?.folder)
+  )
   const selectedTags = useStore((s) => s.selectedTags)
   const tagMatchMode = useStore((s) => s.tagMatchMode)
   const setTagMatchMode = useStore((s) => s.setTagMatchMode)
@@ -65,16 +69,12 @@ export function TagView(): JSX.Element {
     const counter = new Map<string, number>()
     for (const note of notes) {
       if (note.folder === 'trash') continue
-      const tags =
-        activeNote && activeNote.path === note.path
-          ? extractTags(activeNote.body)
-          : note.tags
-      for (const t of tags) {
+      for (const t of noteTagsForCount(note, activeNote, preambleFolder)) {
         counter.set(t, (counter.get(t) ?? 0) + 1)
       }
     }
     return [...counter.entries()].sort((a, b) => a[0].localeCompare(b[0]))
-  }, [notes, activeNote])
+  }, [notes, activeNote, preambleFolder])
 
   // Nested-tag tree (#439). Shares the collapsed-node set with the sidebar so
   // expand/collapse stays in sync across both surfaces.
@@ -94,12 +94,11 @@ export function TagView(): JSX.Element {
     return notes
       .filter((n) => {
         if (n.folder === 'trash') return false
-        const tags =
-          activeNote && activeNote.path === n.path ? extractTags(activeNote.body) : n.tags
+        const tags = noteTagsForCount(n, activeNote, preambleFolder)
         return matchesSelectedTags(tags, selectedTags, tagMatchMode)
       })
       .sort((a, b) => b.updatedAt - a.updatedAt)
-  }, [notes, activeNote, selectedTags, tagMatchMode])
+  }, [notes, activeNote, selectedTags, tagMatchMode, preambleFolder])
 
   const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase()
@@ -465,7 +464,10 @@ export function TagView(): JSX.Element {
                   <span className="w-16 shrink-0 pt-1 text-2xs font-semibold uppercase tracking-wider text-current/40">
                     Tags
                   </span>
-                  <div className="flex min-w-0 flex-1 flex-col gap-px">
+                  {/* Cap the tag list so a vault with many tags scrolls here
+                      instead of pushing the results (and the app frame) off the
+                      bottom of the viewport. (#451) */}
+                  <div className="flex max-h-[40vh] min-w-0 flex-1 flex-col gap-px overflow-y-auto overscroll-contain">
                     {tagTreeRows.map((node) => {
                       const hasChildren = node.children.length > 0
                       const collapsed = collapsedTagSet.has(node.path)
@@ -536,23 +538,27 @@ export function TagView(): JSX.Element {
                 </div>
               )
             : allTags.length > selectedTags.length && (
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <span className="w-16 shrink-0 text-2xs font-semibold uppercase tracking-wider text-current/40">
+                <div className="flex items-start gap-1.5">
+                  <span className="w-16 shrink-0 pt-1 text-2xs font-semibold uppercase tracking-wider text-current/40">
                     {selectedTags.length > 0 ? 'Add' : 'Tags'}
                   </span>
-                  {allTags
-                    .filter(([t]) => !selectedTags.includes(t))
-                    .map(([t, count]) => (
-                      <button
-                        key={`pick-${t}`}
-                        type="button"
-                        onClick={() => toggleTagSelection(t)}
-                        className="rounded-full bg-current/5 px-2 py-0.5 text-xs text-current/70 hover:bg-current/15 hover:text-current/90"
-                      >
-                        #{t}
-                        <span className="ml-1 text-current/40">{count}</span>
-                      </button>
-                    ))}
+                  {/* Cap the tag chips so many tags scroll here rather than
+                      overflowing the app frame. (#451) */}
+                  <div className="flex max-h-[40vh] min-w-0 flex-1 flex-wrap items-center gap-1.5 overflow-y-auto overscroll-contain">
+                    {allTags
+                      .filter(([t]) => !selectedTags.includes(t))
+                      .map(([t, count]) => (
+                        <button
+                          key={`pick-${t}`}
+                          type="button"
+                          onClick={() => toggleTagSelection(t)}
+                          className="rounded-full bg-current/5 px-2 py-0.5 text-xs text-current/70 hover:bg-current/15 hover:text-current/90"
+                        >
+                          #{t}
+                          <span className="ml-1 text-current/40">{count}</span>
+                        </button>
+                      ))}
+                  </div>
                 </div>
               )}
         </div>

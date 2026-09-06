@@ -2,22 +2,27 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import type { NoteMeta } from "@shared/ipc";
+import { renderMarkdown } from "../lib/markdown";
 import {
-  renderMarkdown,
   setMarkdownLooseMathDelimiters,
   setMarkdownMathRenderer,
-} from "../lib/markdown";
+} from "../lib/markdown-settings";
 import { expandEmbeds, hasNoteEmbeds } from "../lib/transclusion";
+import { todayIso } from "../lib/task-metadata-tokens";
+import { selectTypstPreambleFor } from "../lib/typst-preamble-select";
 import { useStore } from "../store";
-import { resolveAuto, THEMES } from "../lib/themes";
+import { useDiagramTheme } from "../lib/use-diagram-theme-mode";
 import {
+  isSameFileBlockLink,
   isSameFileHeadingLink,
   resolveWikilinkTarget,
-  wikilinkHeadingAnchor,
 } from "../lib/wikilinks";
-import { openWikilinkHeading } from "../lib/wikilink-navigation";
+import {
+  openWikilinkTarget,
+} from "../lib/wikilink-navigation";
 import { listDatabaseLinkTargets, resolveDatabaseWikilink } from "../lib/database-links";
 import { externalLinkUrl, resolveInternalNoteHref } from "../lib/internal-links";
+import { copyableLink, linkMenuItems, type CopyableLink } from "../lib/link-copy";
 import { toggleTaskAtIndex } from "../lib/tasklists";
 import {
   enhanceLocalAssetNodes,
@@ -60,206 +65,11 @@ import { NoteHoverPreview } from "./NoteHoverPreview";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import { ArrowUpRightIcon, MaximizeIcon, MinimizeIcon } from "./icons";
 import { promptApp } from "../lib/prompt-requests";
+import { peekMermaidSvg, renderMermaidSvg } from "../lib/mermaid-render";
 import { confirmApp } from "../lib/confirm-requests";
 
-// ---------------------------------------------------------------------------
-// Mermaid: lazy singleton + theme-aware render
-// ---------------------------------------------------------------------------
-
-let mermaidPromise: Promise<typeof import("mermaid").default> | null = null;
-function loadMermaid(): Promise<typeof import("mermaid").default> {
-  if (!mermaidPromise) {
-    mermaidPromise = import("mermaid").then((m) => m.default);
-  }
-  return mermaidPromise;
-}
-
-/** Read a `--z-*` CSS variable (stored as `"R G B"` triplet) as a hex
- *  color string. Mermaid's themeVariables expect real color values, not
- *  raw triplets. Falls back to a neutral grey if the var is missing. */
-function readThemeColor(name: string, fallback = "#888888"): string {
-  const raw = getComputedStyle(document.documentElement)
-    .getPropertyValue(name)
-    .trim();
-  if (!raw) return fallback;
-  const parts = raw.split(/[\s,]+/).map((n) => Number(n));
-  if (parts.length < 3 || parts.some((n) => Number.isNaN(n))) return fallback;
-  const hex = (n: number): string =>
-    Math.max(0, Math.min(255, Math.round(n)))
-      .toString(16)
-      .padStart(2, "0");
-  return `#${hex(parts[0])}${hex(parts[1])}${hex(parts[2])}`;
-}
-
-interface MermaidThemeConfig {
-  theme: "base";
-  themeVariables: Record<string, string>;
-  darkMode: boolean;
-}
-
-/** Build a complete Mermaid themeVariables map from the current `--z-*`
- *  CSS custom properties on `<html>`. We use mermaid's `base` theme and
- *  drive every color from the app theme so the diagram naturally matches
- *  whichever of the 16+ app themes is active. */
-function buildMermaidTheme(mode: "light" | "dark"): MermaidThemeConfig {
-  const bg = readThemeColor("--z-bg");
-  const bg1 = readThemeColor("--z-bg-1");
-  const bg2 = readThemeColor("--z-bg-2");
-  const bg3 = readThemeColor("--z-bg-3");
-  const bgSofter = readThemeColor("--z-bg-softer", bg1);
-  const fg = readThemeColor("--z-fg");
-  const fg1 = readThemeColor("--z-fg-1", fg);
-  const grey = readThemeColor("--z-grey-1");
-  const accent = readThemeColor("--z-accent", "#c35e0a");
-  const red = readThemeColor("--z-red", "#c14a4a");
-  const green = readThemeColor("--z-green", "#6c782e");
-  const yellow = readThemeColor("--z-yellow", "#b47109");
-  const blue = readThemeColor("--z-blue", "#45707a");
-  const purple = readThemeColor("--z-purple", "#945e80");
-  const aqua = readThemeColor("--z-aqua", "#4c7a5d");
-
-  return {
-    theme: "base",
-    darkMode: mode === "dark",
-    themeVariables: {
-      // Typography
-      fontFamily: "inherit",
-      fontSize: "14px",
-
-      // Core palette — mermaid derives most diagrams from these.
-      background: bg,
-      primaryColor: bg2,
-      primaryTextColor: fg1,
-      primaryBorderColor: bg3,
-      secondaryColor: bg1,
-      secondaryTextColor: fg,
-      secondaryBorderColor: bg3,
-      tertiaryColor: bgSofter,
-      tertiaryTextColor: fg,
-      tertiaryBorderColor: bg3,
-
-      // Flow nodes + edges
-      mainBkg: bg2,
-      nodeBorder: bg3,
-      nodeTextColor: fg1,
-      lineColor: grey,
-      arrowheadColor: grey,
-      edgeLabelBackground: bg,
-
-      // Cluster / subgraph
-      clusterBkg: bgSofter,
-      clusterBorder: bg3,
-      titleColor: fg1,
-
-      // Sequence diagrams
-      actorBkg: bg2,
-      actorBorder: bg3,
-      actorTextColor: fg1,
-      actorLineColor: grey,
-      signalColor: fg,
-      signalTextColor: fg,
-      labelBoxBkgColor: bg2,
-      labelBoxBorderColor: bg3,
-      labelTextColor: fg1,
-      loopTextColor: fg,
-      noteBkgColor: bgSofter,
-      noteBorderColor: bg3,
-      noteTextColor: fg1,
-      activationBkgColor: bg3,
-      activationBorderColor: grey,
-      sequenceNumberColor: bg,
-
-      // State / class diagrams
-      labelColor: fg1,
-      altBackground: bgSofter,
-      transitionColor: grey,
-      transitionLabelColor: fg,
-      stateLabelColor: fg1,
-      stateBkg: bg2,
-      compositeBackground: bgSofter,
-      compositeBorder: bg3,
-      compositeTitleBackground: bg1,
-      specialStateColor: accent,
-      innerEndBackground: fg1,
-
-      // ER diagrams
-      attributeBackgroundColorOdd: bg,
-      attributeBackgroundColorEven: bgSofter,
-
-      // Gantt
-      taskBkgColor: accent,
-      taskTextColor: bg,
-      taskTextOutsideColor: fg1,
-      taskTextLightColor: bg,
-      taskTextDarkColor: fg1,
-      taskTextClickableColor: accent,
-      activeTaskBkgColor: accent,
-      activeTaskBorderColor: accent,
-      doneTaskBkgColor: bg3,
-      doneTaskBorderColor: grey,
-      gridColor: bg3,
-      sectionBkgColor: bg1,
-      sectionBkgColor2: bgSofter,
-      altSectionBkgColor: bgSofter,
-
-      // XY chart
-      xyChart: JSON.stringify({
-        backgroundColor: bg,
-        titleColor: fg1,
-        xAxisLabelColor: fg,
-        xAxisTitleColor: fg1,
-        xAxisTickColor: grey,
-        xAxisLineColor: grey,
-        yAxisLabelColor: fg,
-        yAxisTitleColor: fg1,
-        yAxisTickColor: grey,
-        yAxisLineColor: grey,
-        plotColorPalette: [accent, blue, green, purple, yellow, red, aqua].join(
-          ", ",
-        ),
-      }),
-
-      // Git graph
-      git0: accent,
-      git1: blue,
-      git2: green,
-      git3: purple,
-      git4: yellow,
-      git5: red,
-      git6: aqua,
-      git7: fg,
-      gitBranchLabel0: bg,
-      gitBranchLabel1: bg,
-      gitBranchLabel2: bg,
-      gitBranchLabel3: bg,
-      gitBranchLabel4: fg1,
-      gitBranchLabel5: bg,
-      gitBranchLabel6: bg,
-      gitBranchLabel7: bg,
-
-      // Pie
-      pie1: accent,
-      pie2: blue,
-      pie3: green,
-      pie4: purple,
-      pie5: yellow,
-      pie6: red,
-      pie7: aqua,
-      pie8: fg1,
-      pie9: grey,
-      pie10: bg3,
-      pieTitleTextColor: fg1,
-      pieSectionTextColor: bg,
-      pieLegendTextColor: fg1,
-      pieStrokeColor: bg,
-      pieOuterStrokeColor: grey,
-
-      // Signals / errors
-      errorBkgColor: red,
-      errorTextColor: bg,
-    },
-  };
-}
+// Mermaid's lazy loader and theme live in `lib/mermaid-render`, shared with
+// the editor's live preview so both draw the same diagram the same way.
 
 type ExpandedDiagramKind = DiagramTabKind;
 
@@ -310,23 +120,35 @@ function prepareMermaidShell(el: HTMLElement, source: string): HTMLDivElement {
   return surface;
 }
 
+// Every preview rebuild hands over fresh DOM, so the diagrams went back
+// through mermaid's parse-and-layout on each keystroke in split view, which
+// is what made typing next to a diagram feel laggy (#184). The rendered SVG
+// only depends on the source and the theme, so it comes from the cache the
+// editor's live widget already keeps in `mermaid-render`; a rebuild costs an
+// innerHTML assignment, and the two surfaces share one render per diagram.
 async function renderMermaidBlocks(
   root: HTMLElement,
   mode: "light" | "dark",
-  opts: { expanded?: boolean } = {},
+  opts: { expanded?: boolean; themeKey?: string } = {},
 ): Promise<void> {
   const blocks = Array.from(root.querySelectorAll<HTMLElement>(".mermaid"));
   if (blocks.length === 0) return;
-  const mermaid = await loadMermaid();
-  const cfg = buildMermaidTheme(mode);
-  try {
-    mermaid.initialize({
-      startOnLoad: false,
-      securityLevel: "strict",
-      ...cfg,
-    });
-  } catch {
-    /* initialize is tolerant across versions — ignore */
+  const themeKey = opts.themeKey ?? mode;
+  const needsRender = blocks.some((el) => {
+    const source = el.getAttribute("data-mermaid-source") ?? el.textContent ?? "";
+    return source.trim() !== "" && peekMermaidSvg(source, mode, themeKey) === null;
+  });
+  // Mermaid measures text in a temporary element. If the active font is
+  // still loading, metrics are taken against a fallback and the rendered
+  // labels end up clipped once the real font applies. Wait for fonts first
+  // so the measured widths match the final painted text. A cached diagram
+  // was measured already and skips the wait.
+  if (needsRender && typeof document !== "undefined" && document.fonts) {
+    try {
+      await document.fonts.ready;
+    } catch {
+      /* ignore font-api failures and render anyway */
+    }
   }
 
   for (let i = 0; i < blocks.length; i++) {
@@ -338,43 +160,18 @@ async function renderMermaidBlocks(
     if (!source.trim()) continue;
     el.setAttribute("data-mermaid-source", source);
     const surface = prepareMermaidShell(el, source);
-    const id = `zen-mermaid-${Date.now()}-${i}-${opts.expanded ? "expanded" : "inline"}`;
-    try {
-      const { svg } = await mermaid.render(id, source);
-      surface.innerHTML = svg;
+    // The preview renders into a detached stage and commits afterwards, so
+    // the block is not in the document yet: always paint it.
+    const result = await renderMermaidSvg(source, mode, themeKey, "zen-mermaid-preview");
+    if (result.ok) {
+      surface.innerHTML = result.svg;
       // Inline pan/zoom (Cmd/Ctrl+wheel, drag, dblclick reset). The
       // expanded modal has its own React pan/zoom frame.
       if (!opts.expanded) attachInlineDiagramPanZoom(surface);
-    } catch (err) {
-      surface.innerHTML = `<pre class="whitespace-pre-wrap text-xs text-[color:rgb(var(--z-red))]">Mermaid error: ${
-        (err as Error).message
-      }</pre>`;
+    } else {
+      surface.innerHTML = `<pre class="whitespace-pre-wrap text-xs text-[color:rgb(var(--z-red))]">Mermaid error: ${result.error}</pre>`;
     }
   }
-}
-
-function usePreviewDiagramThemeMode(): "light" | "dark" {
-  const themeId = useStore((s) => s.themeId);
-  const themeFamily = useStore((s) => s.themeFamily);
-  const themeMode = useStore((s) => s.themeMode);
-  // Track the OS-level preference so `mode: 'auto'` themes still pick
-  // the right mermaid palette when the system toggles between light/dark.
-  const [prefersDark, setPrefersDark] = useState(() =>
-    typeof window !== "undefined"
-      ? window.matchMedia("(prefers-color-scheme: dark)").matches
-      : false,
-  );
-  useEffect(() => {
-    const mql = window.matchMedia("(prefers-color-scheme: dark)");
-    const handler = (e: MediaQueryListEvent): void => setPrefersDark(e.matches);
-    mql.addEventListener("change", handler);
-    return () => mql.removeEventListener("change", handler);
-  }, []);
-  return useMemo(() => {
-    const resolvedId =
-      themeMode === "auto" ? resolveAuto(themeFamily, prefersDark, themeId) : themeId;
-    return THEMES.find((t) => t.id === resolvedId)?.mode ?? "light";
-  }, [themeId, themeFamily, themeMode, prefersDark]);
 }
 
 export const Preview = memo(function Preview({
@@ -400,9 +197,10 @@ export const Preview = memo(function Preview({
     [folders, vaultSettings],
   );
   const assetFiles = useStore((s) => s.assetFiles);
+  const customCodeLanguagesRevision = useStore((s) => s.customCodeLanguagesRevision);
   const refreshAssets = useStore((s) => s.refreshAssets);
   const deleteAssetAction = useStore((s) => s.deleteAsset);
-  const effectiveMode = usePreviewDiagramThemeMode();
+  const diagramTheme = useDiagramTheme();
   const selectNote = useStore((s) => s.selectNote);
   const openNoteInTab = useStore((s) => s.openNoteInTab);
   const setView = useStore((s) => s.setView);
@@ -445,6 +243,11 @@ export const Preview = memo(function Preview({
     url: string;
     vaultRel: string | null;
     href: string;
+  } | null>(null);
+  const [linkMenu, setLinkMenu] = useState<{
+    x: number;
+    y: number;
+    link: CopyableLink;
   } | null>(null);
   const [expandedDiagram, setExpandedDiagram] =
     useState<ExpandedDiagram | null>(null);
@@ -520,11 +323,24 @@ export const Preview = memo(function Preview({
     setMarkdownMathRenderer(mathRenderer);
     setMarkdownLooseMathDelimiters(looseMathDelimiters);
     return renderMarkdown(expandedForCurrent ?? markdown);
-  }, [expandedForCurrent, markdown, mathRenderer, looseMathDelimiters]);
+    // customCodeLanguagesRevision re-renders when a grammar is installed,
+    // toggled, or removed; renderMarkdown keys its cache on it too.
+  }, [
+    expandedForCurrent,
+    markdown,
+    mathRenderer,
+    looseMathDelimiters,
+    customCodeLanguagesRevision,
+  ]);
   const assetFilesKey = useMemo(
     () => assetFiles.map((asset) => asset.path).join("\n"),
     [assetFiles],
   );
+  // Tag-driven Typst definitions for this note (#486). Empty unless the setting
+  // is on and the note's tags match a preamble, so most notes pay one lookup.
+  const typstPreamble = useStore((s) => selectTypstPreambleFor(s, notePath));
+  const typstPreambleRef = useRef(typstPreamble);
+  typstPreambleRef.current = typstPreamble;
   const notesRef = useRef(notes);
   const markdownRef = useRef(markdown);
   const notePathRef = useRef(notePath);
@@ -587,6 +403,31 @@ export const Preview = memo(function Preview({
     if (!root) return;
     const onClick = (e: MouseEvent): void => {
       const target = e.target as HTMLElement;
+      // A `[/]` task has no checkbox input, but its half-filled marker is
+      // still a checkbox shape making a checkbox promise: clicking checks the
+      // task off, matching the editor widget and the Tasks list. The
+      // forwarded/cancelled markers stay inert records. (#599)
+      const inProgressMarker = target.closest<HTMLElement>(
+        ".zen-task-state-in-progress[data-task-index]",
+      );
+      if (inProgressMarker) {
+        e.preventDefault();
+        e.stopPropagation();
+        const taskIndex = Number.parseInt(
+          inProgressMarker.dataset.taskIndex ?? "-1",
+          10,
+        );
+        if (!Number.isFinite(taskIndex) || taskIndex < 0) return;
+        const nextMarkdown = toggleTaskAtIndex(
+          markdownRef.current,
+          taskIndex,
+          true,
+        );
+        if (nextMarkdown === markdownRef.current) return;
+        updateActiveBodyRef.current(nextMarkdown);
+        void persistActiveRef.current();
+        return;
+      }
       const copyButton = target.closest<HTMLButtonElement>(
         CODE_COPY_BUTTON_SELECTOR,
       );
@@ -627,10 +468,9 @@ export const Preview = memo(function Preview({
         e.preventDefault();
         const path = anchor.dataset.resolvedPath;
         if (path) {
-          // Scroll to the #heading when the link carries one. (#196)
-          const headingAnchor = wikilinkHeadingAnchor(anchor.dataset.wikilink ?? "");
-          if (headingAnchor) void openWikilinkHeading(path, headingAnchor);
-          else void selectNoteRef.current(path);
+          // Scroll to the #heading or the ^block when the link carries one.
+          // (#196, #601)
+          void openWikilinkTarget(path, anchor.dataset.wikilink ?? "");
         } else if (anchor.dataset.databaseCsv) {
           void useStore.getState().openDatabase(anchor.dataset.databaseCsv);
         }
@@ -656,8 +496,10 @@ export const Preview = memo(function Preview({
       );
       if (internalNote) {
         e.preventDefault();
-        if (internalNote.heading)
-          void openWikilinkHeading(internalNote.path, internalNote.heading);
+        // `#<anchor>` lets openWikilinkTarget decide heading vs block, so the
+        // Obsidian form `Note.md#^id` reaches the block here too. (#601)
+        if (internalNote.anchor)
+          void openWikilinkTarget(internalNote.path, `#${internalNote.anchor}`);
         else void selectNoteRef.current(internalNote.path);
         return;
       }
@@ -780,6 +622,31 @@ export const Preview = memo(function Preview({
     };
     const onContextMenu = (e: MouseEvent): void => {
       const target = e.target as HTMLElement;
+      // A web link or an email address gets open / copy. Resolved the way the
+      // click handler resolves it, so a bare `google.com` copies as the URL
+      // that would have opened; note links, wikilinks and local assets fall
+      // through to their own handling.
+      const anchor = target.closest("a") as HTMLAnchorElement | null;
+      if (
+        anchor &&
+        !anchor.classList.contains("wikilink") &&
+        !anchor.classList.contains("hashtag")
+      ) {
+        const linkHref =
+          anchor.dataset.localAssetHref || anchor.getAttribute("href") || "";
+        const link = resolveInternalNoteHref(
+          notePathRef.current,
+          linkHref,
+          notesRef.current,
+        )
+          ? null
+          : copyableLink(linkHref);
+        if (link) {
+          e.preventDefault();
+          setLinkMenu({ x: e.clientX, y: e.clientY, link });
+          return;
+        }
+      }
       // Find the closest embedded-asset host (figure/anchor) that we
       // tagged in `enhanceLocalAssetNodes` or the CM PDF widget.
       const host = target.closest<HTMLElement>(
@@ -837,9 +704,10 @@ export const Preview = memo(function Preview({
         delete a.dataset.databaseCsv;
         return;
       }
-      // `[[#heading]]` (no note part) links to a heading in THIS note — resolve
-      // it to the note being previewed so the click scrolls in place. (#291)
-      if (isSameFileHeadingLink(target)) {
+      // `[[#heading]]` / `[[^block]]` (no note part) point inside THIS note:
+      // resolve them to the note being previewed so the click scrolls in
+      // place. (#291, #601)
+      if (isSameFileHeadingLink(target) || isSameFileBlockLink(target)) {
         a.classList.remove("broken");
         a.dataset.resolvedPath = notePath;
         delete a.dataset.databaseCsv;
@@ -873,48 +741,85 @@ export const Preview = memo(function Preview({
     enhancePreviewHeadingFolds(stage);
     enhanceCodeBlockCopy(stage, { notePath });
 
-    stage
-      .querySelectorAll<HTMLInputElement>('li.task-list-item input[type="checkbox"]')
-      .forEach((input, idx) => {
+    // The task index a click writes back with must count the way the markdown
+    // parser counts: EVERY task line, including the states with no checkbox of
+    // their own (`[/]`, `[-]`, `[>]`). Numbering the checkboxes alone made the
+    // index drift by one for each such line above them, so in a note that
+    // opened with a cancelled task, clicking the first real checkbox toggled
+    // the cancelled line instead. Task items are in document order here, which
+    // is line order. (#512)
+    const taskItems = Array.from(
+      stage.querySelectorAll<HTMLLIElement>("li.task-list-item"),
+    );
+    const today = todayIso();
+    taskItems.forEach((li, idx) => {
+      const input = li.querySelector<HTMLInputElement>(
+        ':scope > input[type="checkbox"], :scope > p > input[type="checkbox"]',
+      );
+      if (input) {
         input.disabled = false;
         input.dataset.taskIndex = String(idx);
         input.setAttribute("role", "checkbox");
         input.classList.add("cursor-pointer");
-        // Tag the item with its OWN checked state and wrap its inline text in a
-        // span, so the completed-task styling (strike/gray) targets just this
-        // line and never bleeds onto nested sub-tasks. Loose items keep their
-        // <p>, which the CSS targets directly; only bare-text (tight) items get
-        // the wrapper.
-        const li = input.closest<HTMLLIElement>("li.task-list-item");
-        if (li) {
-          li.classList.toggle("task-self-done", input.checked);
-          if (!li.querySelector(":scope > .task-item-body")) {
-            const own = Array.from(li.childNodes).filter((node) => {
-              if (node === input) return false;
-              if (node.nodeType === Node.ELEMENT_NODE) {
-                const tag = (node as Element).tagName;
-                if (tag === "UL" || tag === "OL" || tag === "P") return false;
-              }
-              return true;
-            });
-            const hasText = own.some(
-              (node) =>
-                node.nodeType !== Node.TEXT_NODE ||
-                (node.textContent ?? "").trim() !== "",
-            );
-            if (hasText && own.length > 0) {
-              const body = document.createElement("span");
-              body.className = "task-item-body";
-              li.insertBefore(body, own[0]);
-              for (const node of own) body.appendChild(node);
-            }
-          }
+        li.classList.toggle("task-self-done", input.checked);
+      } else {
+        // `[/]` renders a marker span instead of an input; make it a real
+        // control that checks the task off (see onClick). `[-]`/`[>]` keep
+        // their inert record markers. (#599)
+        const marker = li.querySelector<HTMLElement>(
+          ":scope > .zen-task-state-in-progress, :scope > p > .zen-task-state-in-progress",
+        );
+        if (marker) {
+          marker.dataset.taskIndex = String(idx);
+          marker.setAttribute("role", "checkbox");
+          marker.setAttribute("aria-checked", "mixed");
+          marker.setAttribute("aria-label", "Mark task done");
+          marker.title = "In progress. Click to mark done.";
+          marker.classList.add("cursor-pointer");
         }
+      }
+      // An item is still open unless its own checkbox is checked; the `[/]` and
+      // `[>]` states have no checkbox and are open by definition, `[-]` is not.
+      const closed = input?.checked === true || li.classList.contains("zen-task-cancelled");
+      // Due chips are rendered date-neutral (the HTML is cached and outlives
+      // "today"), so the overdue tint is decided here, at attach time, the
+      // same rule the editor uses: past due and the task still open. (#479)
+      li.querySelectorAll<HTMLElement>(":scope .zen-task-due[data-due]").forEach((chip) => {
+        const due = chip.dataset.due ?? "";
+        chip.classList.toggle("zen-task-due-overdue", !closed && due !== "" && due < today);
       });
+      // Wrap the item's OWN inline text in a span, so state styling (strike/gray
+      // for done and cancelled) targets just this line and never bleeds onto
+      // nested sub-tasks. Loose items keep their <p>, which the CSS targets
+      // directly; only bare-text (tight) items get the wrapper. The state marker
+      // span stays outside it: it sits in the gutter and must not be struck
+      // along with the text. (#512)
+      if (!li.querySelector(":scope > .task-item-body")) {
+        const own = Array.from(li.childNodes).filter((node) => {
+          if (node === input) return false;
+          if (node.nodeType === Node.ELEMENT_NODE) {
+            const el = node as Element;
+            if (el.tagName === "UL" || el.tagName === "OL" || el.tagName === "P") return false;
+            if (el.classList.contains("zen-task-state")) return false;
+          }
+          return true;
+        });
+        const hasText = own.some(
+          (node) =>
+            node.nodeType !== Node.TEXT_NODE || (node.textContent ?? "").trim() !== "",
+        );
+        if (hasText && own.length > 0) {
+          const body = document.createElement("span");
+          body.className = "task-item-body";
+          li.insertBefore(body, own[0]);
+          for (const node of own) body.appendChild(node);
+        }
+      }
+    });
 
     const applyRenderedDom = async (): Promise<void> => {
       try {
-        await renderMermaidBlocks(stage, effectiveMode);
+        await renderMermaidBlocks(stage, diagramTheme.mode, { themeKey: diagramTheme.key });
       } catch {
         /* render errors are surfaced inline per block */
       }
@@ -925,12 +830,12 @@ export const Preview = memo(function Preview({
       // not found" and zero-size boards (#68). Mermaid renders to inline SVG, so
       // it is safe to render in the detached buffer above.
       root.replaceChildren(...Array.from(stage.childNodes));
-      await renderDiagrams(root, { themeKey: effectiveMode, expanded: false });
+      await renderDiagrams(root, { themeKey: diagramTheme.key, expanded: false });
       if (cancelled) return;
       // Typst math (a no-op when the KaTeX renderer is active, since it emits no
       // `.zen-typst-math` placeholders). Recolored to currentColor, so a theme
       // switch needs no re-render.
-      await renderTypstMath(root);
+      await renderTypstMath(root, typstPreambleRef.current);
       if (cancelled) return;
       renderEmbeds(root);
       renderBookmarks(root);
@@ -993,7 +898,8 @@ export const Preview = memo(function Preview({
     };
   }, [
     assetFilesKey,
-    effectiveMode,
+    diagramTheme.key,
+    diagramTheme.mode,
     databaseTargets,
     html,
     notePath,
@@ -1002,6 +908,9 @@ export const Preview = memo(function Preview({
     pinnedAssetPath,
     pinnedRefVisible,
     togglePinnedRefVisible,
+    // Editing a note's tags, or the preamble note itself, changes the Typst
+    // definitions its formulas compile against — re-render when it moves (#486).
+    typstPreamble,
     vault?.root,
   ]);
 
@@ -1201,10 +1110,19 @@ export const Preview = memo(function Preview({
           onClose={closeAssetMenu}
         />
       )}
+      {linkMenu && (
+        <ContextMenu
+          x={linkMenu.x}
+          y={linkMenu.y}
+          items={linkMenuItems(linkMenu.link)}
+          onClose={() => setLinkMenu(null)}
+        />
+      )}
       {expandedDiagram && (
         <ExpandedDiagramModal
           diagram={expandedDiagram}
-          themeKey={effectiveMode}
+          diagramMode={diagramTheme.mode}
+          themeKey={diagramTheme.key}
           onOpenInTab={() => {
             const path = diagramTabPath(expandedDiagram.kind, expandedDiagram.source);
             setExpandedDiagram(null);
@@ -1219,12 +1137,14 @@ export const Preview = memo(function Preview({
 
 function ExpandedDiagramModal({
   diagram,
+  diagramMode,
   themeKey,
   onOpenInTab,
   onClose,
 }: {
   diagram: ExpandedDiagram;
-  themeKey: "light" | "dark";
+  diagramMode: "light" | "dark";
+  themeKey: string;
   onOpenInTab: () => void;
   onClose: () => void;
 }): JSX.Element {
@@ -1258,6 +1178,7 @@ function ExpandedDiagramModal({
     >
       <DiagramPanZoomFrame
         diagram={diagram}
+        diagramMode={diagramMode}
         themeKey={themeKey}
         variant="modal"
         title="Expanded diagram"
@@ -1276,7 +1197,7 @@ export function DiagramTabView({
 }: {
   diagram: DiagramTabPayload | null;
 }): JSX.Element {
-  const themeKey = usePreviewDiagramThemeMode();
+  const diagramTheme = useDiagramTheme();
 
   if (!diagram) {
     return (
@@ -1289,7 +1210,8 @@ export function DiagramTabView({
   return (
     <DiagramPanZoomFrame
       diagram={diagram}
-      themeKey={themeKey}
+      diagramMode={diagramTheme.mode}
+      themeKey={diagramTheme.key}
       variant="tab"
       title={diagramTitleFromKind(diagram.kind)}
     />
@@ -1298,6 +1220,7 @@ export function DiagramTabView({
 
 function DiagramPanZoomFrame({
   diagram,
+  diagramMode,
   themeKey,
   variant,
   title,
@@ -1307,7 +1230,8 @@ function DiagramPanZoomFrame({
   onClose,
 }: {
   diagram: ExpandedDiagram;
-  themeKey: "light" | "dark";
+  diagramMode: "light" | "dark";
+  themeKey: string;
   variant: "modal" | "tab";
   title: string;
   fullScreen?: boolean;
@@ -1406,7 +1330,7 @@ function DiagramPanZoomFrame({
 
     const render = async (): Promise<void> => {
       if (diagram.kind === "mermaid") {
-        await renderMermaidBlocks(host, themeKey, { expanded: true });
+        await renderMermaidBlocks(host, diagramMode, { expanded: true, themeKey });
       } else {
         await renderDiagrams(host, { themeKey, expanded: true });
       }
@@ -1418,7 +1342,7 @@ function DiagramPanZoomFrame({
     return () => {
       cancelled = true;
     };
-  }, [centerDiagram, diagram, themeKey]);
+  }, [centerDiagram, diagram, diagramMode, themeKey]);
 
   const handleWheel = useCallback(
     (e: React.WheelEvent<HTMLDivElement>): void => {

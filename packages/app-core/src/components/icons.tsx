@@ -29,6 +29,26 @@ export const SearchIcon = (p: IconProps): JSX.Element => (
   </I>
 )
 
+/** A source node fanning out to two downstream nodes: the shape of a pipeline. */
+export const WorkflowIcon = (p: IconProps): JSX.Element => (
+  <I {...p}>
+    <rect x="2.5" y="9.5" width="6" height="5" rx="1.5" />
+    <rect x="15.5" y="3.5" width="6" height="5" rx="1.5" />
+    <rect x="15.5" y="15.5" width="6" height="5" rx="1.5" />
+    <path d="M8.5 12h3.5V6h3.5M12 12v6h3.5" />
+  </I>
+)
+
+/** Three linked nodes: a constellation, the shape of the Atlas map. */
+export const AtlasIcon = (p: IconProps): JSX.Element => (
+  <I {...p}>
+    <circle cx="6" cy="6" r="2.5" />
+    <circle cx="18" cy="9" r="2.5" />
+    <circle cx="10" cy="18" r="2.5" />
+    <path d="M8.3 7 15.6 8.6M16.4 11 11.5 16M7 8.2l2.2 7.4" />
+  </I>
+)
+
 export const TableIcon = (p: IconProps): JSX.Element => (
   <I {...p}>
     <rect x="3" y="3" width="18" height="18" rx="2" />
@@ -232,6 +252,12 @@ export const CloseIcon = (p: IconProps): JSX.Element => (
   </I>
 )
 
+export const CheckIcon = (p: IconProps): JSX.Element => (
+  <I {...p}>
+    <path d="M20 6 9 17l-5-5" />
+  </I>
+)
+
 export const MaximizeIcon = (p: IconProps): JSX.Element => (
   <I {...p}>
     <path d="M8 3H5a2 2 0 0 0-2 2v3" />
@@ -274,6 +300,12 @@ export const SortIcon = (p: IconProps): JSX.Element => (
     <path d="M3 18h5" />
     <path d="m17 8 3-3 3 3" />
     <path d="M20 5v14" />
+  </I>
+)
+
+export const FilterIcon = (p: IconProps): JSX.Element => (
+  <I {...p}>
+    <path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z" />
   </I>
 )
 

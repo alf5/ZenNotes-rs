@@ -11,14 +11,35 @@ import { confirmApp } from './confirm-requests'
 import { promptApp } from './prompt-requests'
 import { buildMoveNotePrompt, parseMoveNoteTarget } from './move-note'
 import { focusPaneInDirection } from './pane-nav'
+import { focusSidebarPanel } from './sidebar-focus'
 import { findLeaf } from './pane-layout'
 import { requestPaneMode } from './pane-mode'
 import { resolveQuickNoteTitle } from './quick-note-title'
 import { forwardTaskWithPicker, taskAtEditorCursor } from './forward-task'
+import { canManageWorkflows } from './workflow-workspace'
+import { toggleCheckbox } from './cm-toggle-checkbox'
+import {
+  harperAddWordAtCursor,
+  harperApplyFirstSuggestion,
+  harperIgnoreAtCursor,
+  harperNextSuggestion,
+  harperOpenSuggestions,
+  harperPreviousSuggestion
+} from './cm-harper'
+import { harperEditorConfig, harperSupported } from './harper-runtime'
+import { reflowParagraph } from './cm-reflow'
+import { promptImageWidth } from './image-resize'
+import { copyLinkAtCursor } from './link-copy'
 import { getKeymapDisplay, type KeymapId } from './keymaps'
 import { dispatchKeyboardContextMenu, findTabContextMenuTarget } from './keyboard-context-menu'
 import { resolveSystemFolderLabels } from './system-folder-labels'
 import { isCalendarToggleAvailable, noteFolderSubpath } from './vault-layout'
+import { runWorkflowById } from './workflow-trigger'
+import { requestPublishNote } from './publish-note-requests'
+import {
+  hasResolvableCloudConflicts,
+  openCloudConflictReview
+} from './cloud-auto-sync'
 import { DEMO_TOUR_START_PATH } from '@shared/demo-tour'
 
 const APP_WEBSITE_URL = 'https://zennotes.org'
@@ -202,6 +223,22 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       run: () => void getState().embedNewDrawing()
     },
     {
+      id: 'note.publish',
+      title: 'Publish Note',
+      category: 'Note',
+      keywords: 'share public link web cloud update',
+      when: () => {
+        const note = getState().activeNote
+        return window.zen.getCapabilities().supportsCloudSync === true
+          && note !== null
+          && note.folder !== 'trash'
+      },
+      run: () => {
+        const note = getState().activeNote
+        if (note) requestPublishNote(note)
+      }
+    },
+    {
       id: 'template.removeBuiltins',
       title: 'Remove Built-in Templates',
       category: 'Note',
@@ -239,6 +276,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       id: 'note.new.here',
       title: 'New Note in Current Folder',
       category: 'Note',
+      shortcut: shortcut('global.newNoteHere'),
       keywords: 'create add write',
       when: () => {
         const s = getState()
@@ -246,24 +284,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
         if (s.activeNote && s.activeNote.folder !== 'trash') return true
         return s.view.kind === 'folder' && s.view.folder !== 'trash'
       },
-      run: () => {
-        const s = getState()
-        if (isTrashViewActive(s)) return
-        // "Current folder" is the folder of the active note (the one you're
-        // editing), not the sidebar's browse view. Those drift apart when notes
-        // from different folders are open, since switching tabs doesn't move the
-        // view, so reading the view created the note in the wrong directory.
-        // (#403) Fall back to the browsed folder only when no note is open.
-        const active = s.activeNote
-        if (active && active.folder !== 'trash') {
-          return s.createAndOpen(active.folder, noteFolderSubpath(active, s.vaultSettings), {
-            focusTitle: true
-          })
-        }
-        const v = s.view
-        if (v.kind !== 'folder' || v.folder === 'trash') return
-        return s.createAndOpen(v.folder, v.subpath, { focusTitle: true })
-      }
+      run: () => getState().createNoteInCurrentFolder()
     },
     {
       id: 'note.save',
@@ -332,6 +353,14 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       run: () => getState().restoreActive()
     },
     {
+      id: 'note.delete-permanently',
+      title: 'Delete Note Permanently',
+      category: 'Note',
+      keywords: 'trash purge forever remove',
+      when: () => getState().activeNote?.folder === 'trash',
+      run: () => getState().deleteActivePermanently()
+    },
+    {
       id: 'note.copy-wikilink',
       title: 'Copy Note as Wikilink',
       category: 'Note',
@@ -355,6 +384,16 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       }
     },
     {
+      id: 'note.copy-html',
+      title: 'Copy Note as HTML (for email)',
+      category: 'Note',
+      keywords: 'copy clipboard html email rich mail paste share formatted',
+      when: () => !!getState().activeNote,
+      run: async () => {
+        await getState().copyActiveNoteAsHtml()
+      }
+    },
+    {
       id: 'note.export-pdf',
       title: 'Export Note as PDF…',
       category: 'Note',
@@ -366,6 +405,22 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
           window.zen.getAppInfo().runtime === 'web'),
       run: async () => {
         await getState().exportActiveNotePdf()
+      }
+    },
+    {
+      id: 'note.export-docx',
+      title: 'Export Note as Word Document…',
+      category: 'Note',
+      keywords: 'save word docx doc export office editable',
+      // Desktop-only: the serializer embeds local images from the main
+      // process, which the web app has no access to.
+      when: () =>
+        !!getState().activeNote &&
+        getState().workspaceMode !== 'remote' &&
+        window.zen.getAppInfo().runtime === 'desktop' &&
+        typeof window.zen.exportNoteDocx === 'function',
+      run: async () => {
+        await getState().exportActiveNoteDocx()
       }
     },
     {
@@ -813,6 +868,97 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       }
     },
     {
+      id: 'task.start',
+      title: 'Mark Task In Progress',
+      category: 'Editor',
+      keywords: 'start begin task in progress doing wip partial half started',
+      when: () => {
+        const view = getState().editorViewRef
+        return !!view && !!getState().activeNote && !!taskAtEditorCursor(view)
+      },
+      run: async () => {
+        const view = getState().editorViewRef
+        if (!view) return
+        const task = taskAtEditorCursor(view)
+        if (!task) {
+          window.alert('Put the cursor on a task line to mark it in progress.')
+          return
+        }
+        await getState().startTaskFromList(task)
+      }
+    },
+    {
+      id: 'task.cancel',
+      title: 'Cancel Task',
+      category: 'Editor',
+      keywords: 'cancel task abandon drop dropped scrap wontfix strike',
+      when: () => {
+        const view = getState().editorViewRef
+        return !!view && !!getState().activeNote && !!taskAtEditorCursor(view)
+      },
+      run: async () => {
+        const view = getState().editorViewRef
+        if (!view) return
+        const task = taskAtEditorCursor(view)
+        if (!task) {
+          window.alert('Put the cursor on a task line to cancel it.')
+          return
+        }
+        await getState().cancelTaskFromList(task)
+      }
+    },
+    {
+      id: 'task.toggle-checkbox',
+      title: 'Toggle Checkbox',
+      category: 'Editor',
+      shortcut: shortcut('editor.toggleCheckbox'),
+      keywords: 'toggle checkbox task check uncheck line todo checklist convert done',
+      when: () => !!getState().editorViewRef && !!getState().activeNote,
+      run: () => {
+        const view = getState().editorViewRef
+        if (view) toggleCheckbox(view)
+      }
+    },
+    {
+      id: 'editor.reflow-paragraph',
+      title: 'Reflow Paragraph',
+      category: 'Editor',
+      shortcut: shortcut('editor.reflowParagraph'),
+      keywords: 'reflow join lines unwrap hard wrap word wrap format paragraph gq fill',
+      when: () => !!getState().editorViewRef && !!getState().activeNote,
+      run: () => {
+        const view = getState().editorViewRef
+        if (!view) return
+        reflowParagraph(view)
+        view.focus()
+      }
+    },
+    {
+      id: 'editor.copy-link',
+      title: 'Copy Link Under Cursor',
+      category: 'Editor',
+      keywords: 'copy link url email address clipboard gy',
+      when: () => !!getState().editorViewRef && !!getState().activeNote,
+      run: () => {
+        const view = getState().editorViewRef
+        if (!view) return
+        copyLinkAtCursor(view)
+        view.focus()
+      }
+    },
+    {
+      id: 'editor.resize-image',
+      title: 'Resize Image…',
+      category: 'Editor',
+      keywords: 'image picture width size resize embed px hint shrink grow',
+      when: () => !!getState().editorViewRef && !!getState().activeNote,
+      run: async () => {
+        const view = getState().editorViewRef
+        if (!view) return
+        await promptImageWidth(view)
+      }
+    },
+    {
       id: 'nav.back',
       title: 'Go Back',
       category: 'Tabs',
@@ -827,6 +973,14 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       shortcut: shortcut('vim.historyForward'),
       keywords: 'history next',
       run: () => getState().jumpToNextNote()
+    },
+    {
+      id: 'nav.toggle-recent',
+      title: 'Switch to Previous Note',
+      category: 'Tabs',
+      shortcut: shortcut('global.toggleRecentNote'),
+      keywords: 'recent last previous alternate toggle switch note',
+      run: () => getState().toggleRecentNote()
     }
   )
 
@@ -969,7 +1123,11 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       run: () => {
         const st = getState()
         if (!st.sidebarOpen) st.toggleSidebar()
-        st.setFocusedPanel('sidebar')
+        // Moves DOM focus too (with retries), not just the store panel: the
+        // closing palette restores focus on unmount, and if that lands in a
+        // self-keyed surface (database grid) it re-steals every key while the
+        // sidebar paints its vim cursor. See focusSidebarPanel.
+        focusSidebarPanel()
       }
     },
     {
@@ -994,6 +1152,27 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       keywords: 'tasks todo checklist due waiting done vault',
       when: () => !isTasksViewActive(getState()),
       run: () => getState().openTasksView()
+    },
+    {
+      id: 'view.workflows',
+      title: 'Open Workflows',
+      category: 'View',
+      shortcut: ':workflows',
+      keywords: 'workflow automation pipeline graph canvas nodes run dry',
+      // Hidden entirely when the feature is switched off in Settings, so the
+      // palette never offers a command that would open nothing.
+      when: () => getState().workflowsEnabled,
+      run: () => getState().openWorkflowsView()
+    },
+    {
+      id: 'view.atlas',
+      title: 'Open Atlas',
+      category: 'View',
+      shortcut: leaderShortcut('vim.leaderAtlas'),
+      keywords: 'atlas map graph vault visualize notes links regions sky 3d',
+      // Hidden entirely when the feature is switched off in Settings
+      when: () => getState().atlasEnabled,
+      run: () => getState().openAtlasView()
     },
     {
       id: 'view.tags',
@@ -1209,6 +1388,82 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       category: 'Editor',
       keywords: 'decoration inline',
       run: () => getState().setLivePreview(!getState().livePreview)
+    },
+    {
+      id: 'editor.harper.toggle',
+      title: getState().harperEnabled
+        ? 'Disable Grammar and Spelling with Harper'
+        : 'Enable Grammar and Spelling with Harper',
+      category: 'Editor',
+      keywords: 'harper grammar spelling spell check lint',
+      when: () => harperSupported(),
+      run: () => getState().setHarperEnabled(!getState().harperEnabled)
+    },
+    {
+      id: 'editor.harper.next',
+      title: 'Harper: Next Suggestion',
+      category: 'Editor',
+      keywords: 'harper grammar spelling',
+      when: () => harperSupported() && getState().harperEnabled && !!getState().editorViewRef,
+      run: () => {
+        const view = getState().editorViewRef
+        if (view) harperNextSuggestion(view)
+      }
+    },
+    {
+      id: 'editor.harper.previous',
+      title: 'Harper: Previous Suggestion',
+      category: 'Editor',
+      keywords: 'harper grammar spelling',
+      when: () => harperSupported() && getState().harperEnabled && !!getState().editorViewRef,
+      run: () => {
+        const view = getState().editorViewRef
+        if (view) harperPreviousSuggestion(view)
+      }
+    },
+    {
+      id: 'editor.harper.suggest',
+      title: 'Harper: Show Suggestions at Cursor',
+      category: 'Editor',
+      keywords: 'harper grammar spelling fix',
+      when: () => harperSupported() && getState().harperEnabled && !!getState().editorViewRef,
+      run: () => {
+        const view = getState().editorViewRef
+        if (view) harperOpenSuggestions(view)
+      }
+    },
+    {
+      id: 'editor.harper.apply',
+      title: 'Harper: Apply First Suggestion',
+      category: 'Editor',
+      keywords: 'harper grammar spelling fix',
+      when: () => harperSupported() && getState().harperEnabled && !!getState().editorViewRef,
+      run: () => {
+        const view = getState().editorViewRef
+        if (view) harperApplyFirstSuggestion(view)
+      }
+    },
+    {
+      id: 'editor.harper.addWord',
+      title: 'Harper: Add Word to Dictionary',
+      category: 'Editor',
+      keywords: 'harper spelling dictionary',
+      when: () => harperSupported() && getState().harperEnabled && !!getState().editorViewRef,
+      run: () => {
+        const view = getState().editorViewRef
+        if (view) harperAddWordAtCursor(view, harperEditorConfig())
+      }
+    },
+    {
+      id: 'editor.harper.ignore',
+      title: 'Harper: Ignore Suggestion',
+      category: 'Editor',
+      keywords: 'harper grammar spelling',
+      when: () => harperSupported() && getState().harperEnabled && !!getState().editorViewRef,
+      run: () => {
+        const view = getState().editorViewRef
+        if (view) harperIgnoreAtCursor(view, harperEditorConfig())
+      }
     },
     {
       id: 'editor.tabs.toggle',
@@ -1488,6 +1743,19 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       }
     },
     {
+      id: 'app.file.open',
+      title: 'Open File…',
+      category: 'Vault',
+      keywords: 'open file markdown external outside vault one-off document proofread standalone',
+      shortcut: shortcut('global.openFile'),
+      when: () =>
+        window.zen.getAppInfo().runtime === 'desktop' &&
+        window.zen.getCapabilities().supportsLocalFilesystemPickers,
+      run: async () => {
+        await window.zen.openFileDialog()
+      }
+    },
+    {
       id: 'app.vault.close',
       title: 'Close Current Vault',
       category: 'Vault',
@@ -1497,6 +1765,17 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
         getState().workspaceMode !== 'remote' &&
         !!getState().vault,
       run: () => getState().closeVault()
+    },
+    {
+      id: 'app.cloud.reviewConflicts',
+      title: 'Review Cloud Sync Conflicts',
+      category: 'Vault',
+      keywords: 'cloud sync conflict merge review resolve queue two devices differ',
+      shortcut: leaderShortcut('vim.leaderCloudConflicts'),
+      // Hidden with an empty queue: the same dialog the status bar's Review
+      // now opens, and there is nothing to review without it.
+      when: () => hasResolvableCloudConflicts(),
+      run: () => openCloudConflictReview()
     },
     {
       id: 'app.vault.switch',
@@ -1708,6 +1987,74 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
           return getState().connectRemoteWorkspaceProfile(profile.id)
         }
       })
+    }
+  }
+
+  /* ---------------- Workflows: the picker, and one Run entry each ---------------- */
+  // Built from the store's workflow index the same way the remote profiles
+  // above are built from theirs, so the palette always reflects the vault as
+  // of the moment it opened. Drafts are left out on purpose: a draft cannot
+  // run, and a row that only answers with an error is worse than no row.
+  {
+    const state = getState()
+    // Where a workflow could run at all: any host that can keep workflow
+    // files and journals, the same predicate the Workflows view uses. Gating
+    // on runtime === 'desktop' left capable web workspaces (a 2.29 server
+    // advertising supportsWorkflows) with a working view but no palette rows
+    // and no vim ex-commands, on the keyboard-first surface of all places.
+    // Deliberately NOT gated on the feature switch, because the tutorial below
+    // must be findable BEFORE someone has opted in: starting it IS the opt-in,
+    // exactly like the button in Settings.
+    const workflowsPossibleHere =
+      canManageWorkflows(
+        window.zen.getAppInfo().runtime,
+        state.workspaceMode,
+        window.zen.getCapabilities()
+      ) && typeof window.zen.applyWorkflow === 'function'
+    if (workflowsPossibleHere) {
+      cmds.push({
+        id: 'workflow.tutorial',
+        title: 'Start Workflows Tutorial',
+        category: 'Workflow',
+        keywords: 'workflow tutorial learn guide walkthrough practice lesson automation onboarding',
+        when: () => getState().workspaceMode !== 'remote',
+        run: () => {
+          // Lazy on purpose: the tutorial's chapters and seeds belong to the
+          // lazy layer, and a palette command must not drag them into boot.
+          void import('./workflow-tutorial-flow').then((mod) => mod.startWorkflowTutorial())
+        }
+      })
+    }
+    const runnableHere = state.workflowsEnabled && workflowsPossibleHere
+    if (runnableHere) {
+      // `runnableHere` gates what this build of the list contains; the `when`
+      // guard gates every LATER use of a captured command object. The vim ex
+      // registry snapshots commands at editor mount, so without `when`, a
+      // `:workflow_run_…` name kept running the full write ladder after the
+      // feature was switched off in Settings.
+      const stillOn = (): boolean => getState().workflowsEnabled
+      // The browsable list, in the same drill-down shape as `Switch Vault…`.
+      cmds.push({
+        id: 'workflow.runPicker',
+        title: 'Run Workflow…',
+        category: 'Workflow',
+        keywords: 'workflow run list pick choose automation trigger pipeline',
+        when: stillOn,
+        run: () => {
+          /* handled by CommandPalette */
+        }
+      })
+      for (const entry of state.workflowIndex) {
+        if (entry.status !== 'active') continue
+        cmds.push({
+          id: `workflow.run.${entry.id}`,
+          title: `Run: ${entry.name}`,
+          category: 'Workflow',
+          keywords: `${entry.name} ${entry.description} ${entry.id} workflow run automation trigger pipeline`,
+          when: stillOn,
+          run: () => runWorkflowById(entry.id)
+        })
+      }
     }
   }
 

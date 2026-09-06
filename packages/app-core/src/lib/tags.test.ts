@@ -23,6 +23,27 @@ describe('extractTags — code fences are never scanned for tags (#293)', () => 
   it('extracts a real tag sitting right after a closed indented fence', () => {
     expect(extractTags('- item\n  ```\n  #include\n  ```\n  #after')).toEqual(['after'])
   })
+
+  it('includes first-class frontmatter tags', () => {
+    expect(extractTags('---\ntags: [frontmatter, "#quoted", project/nested]\ntitle: #ignored\n---\n\n#inline')).toEqual([
+      'frontmatter',
+      'quoted',
+      'project/nested',
+      'inline'
+    ])
+  })
+
+  it('splits a bare frontmatter scalar into separate tags', () => {
+    // `tags: daily, work` is two tags everywhere else that reads this field,
+    // and a tag can hold neither a comma nor a space. (#444)
+    expect(extractTags('---\ntags: daily, work\n---\nbody')).toEqual(['daily', 'work'])
+    expect(extractTags('---\ntags: solo\n---\nbody')).toEqual(['solo'])
+    expect(extractTags('---\ntags: "#quoted two"\n---\nbody')).toEqual(['quoted', 'two'])
+  })
+
+  it('supports block-list frontmatter tags', () => {
+    expect(extractTags('---\ntags:\n  - daily\n  - "#log"\n---\n\nbody')).toEqual(['daily', 'log'])
+  })
 })
 
 describe('matchesSelectedTags', () => {

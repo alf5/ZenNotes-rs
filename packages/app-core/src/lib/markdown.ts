@@ -2,7 +2,6 @@ import { unified } from 'unified'
 import DOMPurify from 'dompurify'
 import remarkParse from 'remark-parse'
 import remarkGfm from 'remark-gfm'
-import remarkBreaks from 'remark-breaks'
 import remarkMath from 'remark-math'
 import remarkFrontmatter from 'remark-frontmatter'
 import remarkRehype from 'remark-rehype'
@@ -15,9 +14,23 @@ import type { Root as MdRoot } from 'mdast'
 import type { Root as HastRoot, Element as HastElement } from 'hast'
 import type { VFile } from 'vfile'
 import { recordRendererPerf } from './perf'
+import { stripBlockAnchorMarkers } from './block-anchors'
+import { wikilinkDisplayLabel } from './wikilinks'
 import { classifyLocalAssetHref } from './local-assets'
-import { parseEmbedSizeHint } from './excalidraw-preview'
+import { parseEmbedSizeHint, splitEmbedLabel } from './excalidraw-preview'
 import { parseColWidthsComment } from './markdown-table'
+import { scanTaskMetadata, type TaskMetaToken } from './task-metadata-tokens'
+import { rollupChildDone, rollupCountsChild, rollupLabel, type ChildTaskState } from './task-rollup'
+import {
+  customCodeLanguageRegistry,
+  PREVIEW_TOKEN_CLASS
+} from './custom-code-languages'
+import {
+  markdownLooseMathDelimiters,
+  markdownMathRenderer,
+  markdownSettingsRevision
+} from './markdown-settings'
+import { numberLatexEquationEnvironments } from './latex-equation-numbering'
 
 /**
  * Remark plugin: `[[target]]` and `[[target|label]]` → link nodes
@@ -69,7 +82,6 @@ function ensureSanitizerHooks(): void {
   })
   sanitizerHooksInstalled = true
 }
-
 function sanitizeRenderedHtml(html: string): string {
   ensureSanitizerHooks()
   return DOMPurify.sanitize(html, {
@@ -88,7 +100,11 @@ function remarkWikilinks() {
         type: 'image',
         url: target,
         title: null,
-        alt: label
+        alt: label,
+        // Marks the label as wikilink-sourced for remarkImageSizeHints: a
+        // bare `600x400` is a size hint there, but ordinary markdown alt
+        // text keeps it as the caption.
+        data: { zenWikilinkEmbed: true }
       }
     }
     if (bang === '!' && assetKind === 'excalidraw') {
@@ -99,6 +115,18 @@ function remarkWikilinks() {
       return {
         type: 'html',
         value: `<div class="excalidraw-embed-host" data-excalidraw-embed="${safeTarget}"${w}${h}></div>`
+      }
+    }
+    // A generic non-previewable file embedded as `![[file.tldraw]]` becomes an
+    // image node so it flows through the same attachment-chip path as
+    // `![](file.tldraw)`. PDF/audio/video keep their rich embeds (link node
+    // below → media embed). (#463)
+    if (bang === '!' && assetKind === 'file') {
+      return {
+        type: 'image',
+        url: target,
+        title: null,
+        alt: label
       }
     }
     if (bang === '!' && assetKind) {
@@ -119,7 +147,12 @@ function remarkWikilinks() {
           'data-wikilink': target
         }
       },
-      children: [{ type: 'text', value: label }]
+      // An un-aliased anchored link would otherwise read `Daily Note^note-two`
+      // mid-sentence; the label is `target` exactly when no alias was
+      // given. (#601)
+      children: [
+        { type: 'text', value: label === target ? wikilinkDisplayLabel(target) : label }
+      ]
     }
   }
 
@@ -259,12 +292,257 @@ function remarkHashtags() {
 }
 
 /**
+ * The task states markdown itself does not know. GFM understands `[ ]` and
+ * `[x]` only, so ZenNotes' other three states arrive here as a plain list item
+ * whose text happens to start with `[/]`, `[-]` or `[>]` — which is exactly how
+ * they used to render: as literal characters, in the preview, in HTML and PDF
+ * export, and in a note shared with someone through the public viewer, while
+ * the editor drew a proper marker for the same line. (#316, #450, #512)
+ */
+const NON_GFM_TASK_STATES: Record<string, { state: string; label: string }> = {
+  '/': { state: 'in-progress', label: 'In progress' },
+  '-': { state: 'cancelled', label: 'Cancelled' },
+  '>': { state: 'forwarded', label: 'Forwarded to another note' }
+}
+// The marker must be followed by a space (or end the item), so `[-]this` and a
+// stray `[>]` mid-sentence are left alone.
+const NON_GFM_TASK_RE = /^\[([/>-])\](?:[ \t]+|$)/
+
+/**
+ * Remark plugin: give `- [/]`, `- [-]` and `- [>]` items the same shape as a
+ * GFM task item — the `task-list-item` class (so they line up in the list
+ * gutter with real checkboxes) plus a state marker span the CSS draws, in
+ * place of the literal `[/]` text.
+ *
+ * The state is also recorded on the node as `zenTaskState`, which is what
+ * `remarkTaskMetadata` keys off to chip `due:`/`!high` on these lines too, and
+ * what makes them countable as tasks when the preview maps a clicked checkbox
+ * back to its line.
+ */
+function remarkTaskStates() {
+  return (tree: MdRoot): void => {
+    visit(tree, 'listItem', (node) => {
+      const item = node as unknown as AnyParent & {
+        checked?: boolean | null
+        data?: Record<string, unknown>
+      }
+      // A real GFM task already renders a checkbox; leave it alone.
+      if (item.checked !== null && item.checked !== undefined) return
+      const para = item.children[0] as (AnyNode & { children?: AnyNode[] }) | undefined
+      if (!para || para.type !== 'paragraph' || !Array.isArray(para.children)) return
+      const first = para.children[0] as (AnyNode & { value?: string }) | undefined
+      if (!first || first.type !== 'text' || typeof first.value !== 'string') return
+      const match = first.value.match(NON_GFM_TASK_RE)
+      if (!match) return
+      const { state, label } = NON_GFM_TASK_STATES[match[1]]
+
+      first.value = first.value.slice(match[0].length)
+      para.children.unshift({
+        type: 'emphasis',
+        data: {
+          hName: 'span',
+          hProperties: {
+            className: ['zen-task-state', `zen-task-state-${state}`],
+            title: label
+          }
+        },
+        children: []
+      } as AnyNode)
+
+      const data = (item.data ??= {})
+      data.zenTaskState = state
+      const hProperties = ((data.hProperties ??= {}) as Record<string, unknown>)
+      const existing = hProperties.className
+      hProperties.className = [
+        ...(Array.isArray(existing) ? (existing as string[]) : []),
+        'task-list-item',
+        `zen-task-${state}`
+      ]
+    })
+  }
+}
+
+/**
+ * Remark plugin: a parent task with subtasks shows its children's progress as
+ * a `2/5` chip, derived at render time and never written into the markdown
+ * (#512: the vault stays the single source of truth no matter who edits it).
+ * Counts direct children only, one nesting level down; the state semantics
+ * (cancelled and forwarded children out of the denominator, in-progress not
+ * yet done) are shared with the editor widget via `task-rollup.ts`, so both
+ * renderers always show the same number. Runs after `remarkTaskStates` so the
+ * non-GFM child states are already on the nodes.
+ */
+function remarkTaskRollup() {
+  return (tree: MdRoot): void => {
+    visit(tree, 'listItem', (node) => {
+      const item = node as unknown as AnyParent & {
+        checked?: boolean | null
+        data?: { zenTaskState?: string }
+      }
+      const isTask = item.checked != null || item.data?.zenTaskState != null
+      if (!isTask) return
+
+      let done = 0
+      let total = 0
+      for (const child of item.children) {
+        if ((child as AnyNode).type !== 'list') continue
+        for (const li of (child as unknown as AnyParent).children) {
+          const sub = li as unknown as {
+            type: string
+            checked?: boolean | null
+            data?: { zenTaskState?: string }
+          }
+          if (sub.type !== 'listItem') continue
+          const state =
+            sub.checked === true
+              ? 'done'
+              : sub.checked === false
+                ? 'open'
+                : (sub.data?.zenTaskState as ChildTaskState | undefined)
+          if (!state || !rollupCountsChild(state)) continue
+          total += 1
+          if (rollupChildDone(state)) done += 1
+        }
+      }
+      if (total === 0) return
+
+      const para = item.children[0] as (AnyNode & { children?: AnyNode[] }) | undefined
+      if (!para || para.type !== 'paragraph' || !Array.isArray(para.children)) return
+      const label = rollupLabel({ done, total })
+      para.children.push({
+        type: 'emphasis',
+        data: {
+          hName: 'span',
+          hProperties: {
+            className:
+              done === total
+                ? ['zen-task-meta', 'zen-task-rollup', 'zen-task-rollup-complete']
+                : ['zen-task-meta', 'zen-task-rollup'],
+            title: label,
+            'aria-label': label
+          }
+        },
+        children: [{ type: 'text', value: `${done}/${total}` }]
+      } as AnyNode)
+    })
+  }
+}
+
+/**
+ * Remark plugin: task metadata (`!high`, `due:2026-01-31`, `@waiting`) inside a
+ * task list item becomes chips, matching what the editor shows for the same
+ * line (#454, #479). Every task item is scanned: the GFM ones (`listItem.checked`
+ * is non-null exactly for those) plus the states `remarkTaskStates` marked. Only
+ * their own content, though — nested lists are skipped here because each nested
+ * item is visited in its own right.
+ *
+ * Inline code is a separate mdast node, so `` `!high` `` is never touched.
+ * The due chip carries `data-due` rather than an overdue class: whether a date
+ * is overdue depends on today, which the rendered HTML outlives (it is cached),
+ * so the Preview component decides that when it attaches the DOM.
+ */
+function remarkTaskMetadata() {
+  const SKIP_TYPES = new Set(['list', 'link', 'linkReference', 'inlineCode', 'code', 'html'])
+
+  const chipFor = (token: TaskMetaToken): AnyNode => {
+    const className =
+      token.kind === 'priority'
+        ? ['zen-task-prio', `zen-task-prio-${token.level}`]
+        : token.kind === 'due'
+          ? ['zen-task-meta', 'zen-task-due']
+          : ['zen-task-meta', 'zen-task-field']
+    const hProperties: Record<string, unknown> = { className }
+    if (token.kind === 'due' && token.date) hProperties['data-due'] = token.date
+    return {
+      type: 'emphasis',
+      data: { hName: 'span', hProperties },
+      children: [{ type: 'text', value: token.text }]
+    } as AnyNode
+  }
+
+  const splitText = (parent: AnyParent, index: number): number => {
+    const value = (parent.children[index] as unknown as { value: string }).value
+    const tokens = scanTaskMetadata(value)
+    if (tokens.length === 0) return 1
+    const next: AnyNode[] = []
+    let last = 0
+    for (const token of tokens) {
+      if (token.start > last) {
+        next.push({ type: 'text', value: value.slice(last, token.start) } as AnyNode)
+      }
+      next.push(chipFor(token))
+      last = token.end
+    }
+    if (last < value.length) {
+      next.push({ type: 'text', value: value.slice(last) } as AnyNode)
+    }
+    parent.children.splice(index, 1, ...next)
+    return next.length
+  }
+
+  const walk = (parent: AnyParent): void => {
+    for (let i = 0; i < parent.children.length; i++) {
+      const child = parent.children[i] as AnyNode & { children?: AnyNode[] }
+      if (SKIP_TYPES.has(child.type)) continue
+      if (child.type === 'text') {
+        i += splitText(parent, i) - 1
+        continue
+      }
+      if (Array.isArray(child.children)) walk(child as unknown as AnyParent)
+    }
+  }
+
+  return (tree: MdRoot): void => {
+    visit(tree, 'listItem', (node) => {
+      const item = node as unknown as AnyParent & {
+        checked?: boolean | null
+        data?: { zenTaskState?: string }
+      }
+      const isTask = item.checked != null || item.data?.zenTaskState != null
+      if (!isTask) return
+      walk(item)
+    })
+  }
+}
+
+/**
  * Remark plugin: `==text==` → `<mark>` (Obsidian-style highlight). Colored
  * highlights are authored as raw `<mark class="hl-green">…</mark>` HTML and ride
  * through `rehypeRaw`; this plugin only handles the bare `==…==` shorthand,
  * which maps to the default highlight color. Inline code is a separate mdast
  * node (not a `text` child), so code spans are skipped automatically.
  */
+/** Honor Obsidian-style size hints on image embeds (#570). Both spellings
+ *  arrive here as image nodes with the hint in their alt: `![[img|600x400]]`
+ *  via remarkWikilinks (the whole label is the hint) and `![alt|600](img)`
+ *  straight from the markdown alt text. The hint is stripped from the alt and
+ *  applied through hProperties so remarkRehype writes real width/height
+ *  attributes. Attachment chips (non-image files riding the image node type)
+ *  keep their labels untouched: only image-classified and remote urls
+ *  participate. */
+function remarkImageSizeHints() {
+  return (tree: MdRoot): void => {
+    visit(tree, 'image', (node) => {
+      const image = node as unknown as AnyNode
+      const url = String(image.url ?? '')
+      const isRemote = /^(https?:|data:)/i.test(url)
+      if (!isRemote && classifyLocalAssetHref(url) !== 'image') return
+      const fromWikilink =
+        (image.data as { zenWikilinkEmbed?: boolean } | undefined)?.zenWikilinkEmbed === true
+      const { alt, size } = splitEmbedLabel(
+        typeof image.alt === 'string' ? image.alt : '',
+        fromWikilink ? 'wikilink' : 'markdown'
+      )
+      if (!size) return
+      image.alt = alt
+      const data = (image.data ??= {}) as { hProperties?: Record<string, unknown> }
+      const hProperties = (data.hProperties ??= {})
+      if (size.width) hProperties.width = size.width
+      if (size.height) hProperties.height = size.height
+    })
+  }
+}
+
 function remarkHighlight() {
   return (tree: MdRoot): void => {
     visit(tree, 'text', (node, index, parent) => {
@@ -314,21 +592,60 @@ function remarkCallouts() {
       const firstText = first.children?.[0]
       if (!firstText || firstText.type !== 'text') return
 
-      const raw = firstText.value
-      const headerEnd = raw.indexOf('\n')
-      const header = headerEnd >= 0 ? raw.slice(0, headerEnd) : raw
-      const match = header.match(/^\[!(\w+)\](?:\s+(.*))?$/)
-      if (!match) return
+      // The marker must open the paragraph and be followed by whitespace (or
+      // nothing). The title is EVERYTHING else on the first line, inline
+      // nodes included — a [link](x) or $math$ in the title used to be
+      // orphaned into an uncolored body paragraph, because only this leading
+      // text fragment was consulted for the title. (#549)
+      const marker = firstText.value.match(/^\[!(\w+)\](?:[ \t]+|(?=\n)|$)/)
+      if (!marker) return
+      const type = marker[1].toLowerCase()
 
-      const type = match[1].toLowerCase()
-      const title = (match[2] ?? '').trim() || type.charAt(0).toUpperCase() + type.slice(1)
-      const rest = headerEnd >= 0 ? raw.slice(headerEnd + 1) : ''
-
-      firstText.value = rest
-      if (rest === '') {
-        first.children.shift()
+      // Split the paragraph's inline children into the title line and the
+      // body. Explicit Markdown breaks arrive as `break` nodes, while ordinary
+      // source newlines remain inside text nodes. The first one ends the title;
+      // the delimiter itself is dropped, or the body paragraph opens with a
+      // stray <br> that reads as a phantom empty line.
+      type Inline = (typeof first.children)[number]
+      const titleChildren: Inline[] = []
+      const bodyChildren: Inline[] = []
+      let inBody = false
+      const pushText = (value: string, into: Inline[]): void => {
+        if (value !== '') into.push({ type: 'text', value } as Inline)
       }
-      if (first.children.length === 0) {
+      first.children.forEach((child, i) => {
+        if (inBody) {
+          bodyChildren.push(child)
+          return
+        }
+        if (child.type === 'break') {
+          inBody = true
+          return
+        }
+        if (i === 0 || child.type === 'text') {
+          const value =
+            i === 0 ? firstText.value.slice(marker[0].length) : (child as { value: string }).value
+          const nl = value.indexOf('\n')
+          if (nl >= 0) {
+            pushText(value.slice(0, nl), titleChildren)
+            pushText(value.slice(nl + 1), bodyChildren)
+            inBody = true
+          } else {
+            pushText(value, titleChildren)
+          }
+          return
+        }
+        titleChildren.push(child)
+      })
+
+      const hasTitle = titleChildren.some(
+        (child) => child.type !== 'text' || (child as { value: string }).value.trim() !== ''
+      )
+      const fallbackTitle = type.charAt(0).toUpperCase() + type.slice(1)
+
+      if (bodyChildren.length > 0) {
+        first.children = bodyChildren
+      } else {
         node.children.shift()
       }
 
@@ -349,7 +666,7 @@ function remarkCallouts() {
           hName: 'div',
           hProperties: { className: ['callout-title'] }
         },
-        children: [{ type: 'text', value: title }]
+        children: hasTitle ? titleChildren : [{ type: 'text', value: fallbackTitle }]
       } as never)
     })
   }
@@ -446,6 +763,48 @@ function rehypeMathDiagrams() {
   }
 }
 
+/** Highlight unknown fenced tags through the user-installed TextMate registry. */
+function rehypeCustomCodeLanguages() {
+  return (tree: HastRoot): void => {
+    // Skip the tree walk when no grammar is installed — the usual case.
+    if (customCodeLanguageRegistry.isEmpty) return
+    visit(tree, 'element', (node) => {
+      if (node.tagName !== 'code') return
+      const classNames = (node.properties?.className as string[] | undefined) ?? []
+      const languageClass = classNames.find((name) => name.startsWith('language-'))
+      if (!languageClass) return
+      const tag = languageClass.slice('language-'.length)
+      if (!customCodeLanguageRegistry.resolve(tag)) return
+      const textContent = (child: HastElement['children'][number]): string => {
+        if (child.type === 'text') return child.value
+        if (child.type === 'element') return child.children.map(textContent).join('')
+        return ''
+      }
+      const source = node.children.map(textContent).join('')
+      const tokens = customCodeLanguageRegistry.tokenize(tag, source)
+      if (tokens.length === 0) return
+      const children: HastElement['children'] = []
+      let offset = 0
+      for (const token of tokens) {
+        if (token.from > offset) children.push({ type: 'text', value: source.slice(offset, token.from) })
+        children.push({
+          type: 'element',
+          tagName: 'span',
+          properties: { className: PREVIEW_TOKEN_CLASS[token.kind].split(' ') },
+          children: [{ type: 'text', value: source.slice(token.from, token.to) }]
+        })
+        offset = token.to
+      }
+      if (offset < source.length) children.push({ type: 'text', value: source.slice(offset) })
+      node.children = children
+      node.properties = {
+        ...node.properties,
+        className: Array.from(new Set([...classNames, 'hljs']))
+      }
+    })
+  }
+}
+
 /**
  * Honor a `<!-- zen:cols=120,auto,90 -->` width hint that follows a table (#294):
  * turn it into a <colgroup> so the preview and PDF export render the columns at
@@ -514,6 +873,14 @@ function remarkSourceLines() {
 const STRICT_INLINE_MATH_RE = /^\$(?!\s)(?:\\.|[^$\\])*(?<!\s)\$$/
 
 /**
+ * Mid-line `$$…$$` with non-empty content, the shape remark-math parses as an
+ * inline-math node when display math lives inside other markdown (a table
+ * cell, in practice). Two dollars on each side can never be currency, so the
+ * guard lets these through where the single-`$` rule would demote them.
+ */
+const CELL_DISPLAY_MATH_RE = /^\$\$[\s\S]+\$\$$/
+
+/**
  * remark-math is more permissive than the editor: it renders `$5 and got $10` as
  * a formula (the content only has to avoid *both-sided* padding), so a currency
  * line shows up as math in the reading view while the editor keeps it literal.
@@ -533,8 +900,52 @@ function remarkCurrencyGuard() {
       if (start == null || end == null) return
       const token = source.slice(start, end)
       if (STRICT_INLINE_MATH_RE.test(token)) return
+      // `$$…$$` in a table cell: genuine display math, not currency. The
+      // editor's table widget renders it in display mode, so swap the node's
+      // math-inline class for math-display (rehype-katex keys displayMode off
+      // it) and flag it for the Typst placeholder plugin, which overwrites
+      // hProperties wholesale and cannot see the class. Cell-scoped on
+      // purpose: in prose the editor leaves mid-line `$$…$$` literal (#399),
+      // so the reading view must keep demoting it there.
+      const mathNode = node as typeof node & { value?: string; data?: Record<string, unknown> }
+      if (
+        (parent as { type?: string }).type === 'tableCell' &&
+        CELL_DISPLAY_MATH_RE.test(token) &&
+        String(mathNode.value ?? '').trim() !== ''
+      ) {
+        const data = (mathNode.data ??= {})
+        data.zenDisplayMath = true
+        const hProperties = ((data.hProperties ??= {}) as Record<string, unknown>)
+        const classes = Array.isArray(hProperties.className)
+          ? (hProperties.className as string[]).filter((c) => c !== 'math-inline')
+          : []
+        hProperties.className = [...classes, 'math-display']
+        return
+      }
       ;(parent as unknown as AnyParent).children.splice(index, 1, { type: 'text', value: token })
       return [SKIP, index + 1]
+    })
+  }
+}
+
+function remarkNumberLatexEquations() {
+  return (tree: MdRoot): void => {
+    let equationNumber = 0
+    visit(tree, 'math', (node) => {
+      const mathNode = node as AnyNode & { value?: string }
+      const numbered = numberLatexEquationEnvironments(
+        String(mathNode.value ?? ''),
+        equationNumber
+      )
+      mathNode.value = numbered.latex
+      const hChildren = (
+        mathNode.data as
+          | { hChildren?: Array<{ children?: Array<{ value?: string }> }> }
+          | undefined
+      )?.hChildren
+      const hastText = hChildren?.[0]?.children?.[0]
+      if (hastText) hastText.value = numbered.latex
+      equationNumber = numbered.nextNumber
     })
   }
 }
@@ -551,7 +962,9 @@ function remarkTypstMathPlaceholders() {
   return (tree: MdRoot): void => {
     visit(tree, ['math', 'inlineMath'], (node) => {
       const mathNode = node as AnyNode & { value?: string; data?: Record<string, unknown> }
-      const display = mathNode.type === 'math'
+      // zenDisplayMath: a `$$…$$` living inside a table cell, flagged by the
+      // currency guard; inline position, display rendering.
+      const display = mathNode.type === 'math' || mathNode.data?.zenDisplayMath === true
       const value = String(mathNode.value ?? '')
       const data = (mathNode.data ??= {})
       data.hName = display ? 'div' : 'span'
@@ -577,16 +990,23 @@ function createProcessor(mathRenderer: 'katex' | 'typst') {
     .use(remarkParse)
     .use(remarkFrontmatter, ['yaml', 'toml'])
     .use(remarkGfm)
-    .use(remarkBreaks)
     .use(remarkMath)
     .use(remarkCurrencyGuard)
 
   const withTypst =
-    mathRenderer === 'typst' ? base.use(remarkTypstMathPlaceholders) : base
+    mathRenderer === 'typst'
+      ? base.use(remarkTypstMathPlaceholders)
+      : base.use(remarkNumberLatexEquations)
 
   const rehyped = withTypst
+    // Before the wikilink/hashtag splitters, so the state marker is still the
+    // head of one unsplit text node when it is matched.
+    .use(remarkTaskStates)
+    .use(remarkTaskRollup)
     .use(remarkWikilinks)
+    .use(remarkImageSizeHints)
     .use(remarkHashtags)
+    .use(remarkTaskMetadata)
     .use(remarkHighlight)
     .use(remarkCallouts)
     .use(remarkSourceLines)
@@ -596,6 +1016,9 @@ function createProcessor(mathRenderer: 'katex' | 'typst') {
     .use(rehypeMermaid)
     .use(rehypeMathDiagrams)
     .use(rehypeHighlight, { detect: true, ignoreMissing: true })
+    // After rehype-highlight so a user-installed TextMate grammar wins over
+    // highlight.js' guess for a fence tag it does not actually know.
+    .use(rehypeCustomCodeLanguages)
 
   const withKatex =
     mathRenderer === 'katex' ? rehyped.use(rehypeKatex) : rehyped
@@ -606,37 +1029,14 @@ function createProcessor(mathRenderer: 'katex' | 'typst') {
 const katexProcessor = createProcessor('katex')
 let typstProcessor: ReturnType<typeof createProcessor> | null = null
 
-// Which typesetter `renderMarkdown` uses. Driven by the `mathRenderer` setting
-// (App.tsx pushes changes here). Default KaTeX keeps existing notes unchanged.
-let activeMathRenderer: 'katex' | 'typst' = 'katex'
-
-/**
- * Point the preview pipeline at KaTeX or Typst. Clears the render cache so the
- * current note re-renders under the new engine on the next `renderMarkdown`.
- */
-export function setMarkdownMathRenderer(mathRenderer: 'katex' | 'typst'): void {
-  if (mathRenderer === activeMathRenderer) return
-  activeMathRenderer = mathRenderer
-  markdownRenderCache.clear()
-}
-
-// When on, a `$$…$$` display block also renders when prose sits before the
-// opening fence (`Note: $$…$$`) or after the closing fence (`$$…$$ done`); the
-// prose is split onto its own paragraph so the fence owns its line. Off by
-// default (the `looseMathDelimiters` setting drives it); the editor keeps
-// showing source for those shapes, so this only relaxes the reading view.
-let looseMathDelimiters = false
-
-/** Toggle relaxed `$$` display-math delimiters (prose before/after the fence).
- *  Clears the render cache so the current note re-renders under the new rule. */
-export function setMarkdownLooseMathDelimiters(loose: boolean): void {
-  if (loose === looseMathDelimiters) return
-  looseMathDelimiters = loose
-  markdownRenderCache.clear()
-}
-
+// Which typesetter `renderMarkdown` uses, and whether `$$` delimiters are
+// relaxed, both live in `./markdown-settings` so that pushing a setting down
+// (App.tsx does, on every pref change) does not make this whole module — and
+// with it remark/rehype/highlight — a static dependency of the app entry.
+// A switch invalidates cached HTML through the revision in the cache key rather
+// than by clearing the cache from the setter.
 function activeProcessor() {
-  if (activeMathRenderer === 'typst') {
+  if (markdownMathRenderer() === 'typst') {
     return (typstProcessor ??= createProcessor('typst'))
   }
   return katexProcessor
@@ -842,7 +1242,8 @@ function normalizeBlockMathFences(src: string, loose = false): string {
 }
 
 export function renderMarkdown(src: string): string {
-  const cached = getCachedMarkdown(src)
+  const cacheKey = `${customCodeLanguageRegistry.revision}\0${markdownSettingsRevision()}\0${src}`
+  const cached = getCachedMarkdown(cacheKey)
   if (cached != null) {
     recordRendererPerf('markdown.render.cache-hit', 0, { chars: src.length })
     return cached
@@ -850,14 +1251,20 @@ export function renderMarkdown(src: string): string {
 
   const startedAt = performance.now()
   try {
+    // Anchor markers are stripped from the SOURCE, with the parser's own
+    // line-level grammar, before remark ever sees it. Stripping per mdast
+    // text node deleted real prose (a mid-line `^word` before emphasis) and
+    // missed genuine anchors on non-final paragraph lines. (#601)
     const html = sanitizeRenderedHtml(
       String(
         activeProcessor().processSync(
-          escapeTableMathPipes(normalizeBlockMathFences(src, looseMathDelimiters))
+          escapeTableMathPipes(
+            normalizeBlockMathFences(stripBlockAnchorMarkers(src), markdownLooseMathDelimiters())
+          )
         )
       )
     )
-    cacheRenderedMarkdown(src, html)
+    cacheRenderedMarkdown(cacheKey, html)
     recordRendererPerf('markdown.render', performance.now() - startedAt, {
       chars: src.length
     })

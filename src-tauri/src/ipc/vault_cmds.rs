@@ -9,9 +9,10 @@ use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::ipc::types::{
-    AssetMeta, CustomTemplateFile, DeletedAsset, FolderEntry, ImportedAsset, LocalVaultEntry,
-    NoteComment, NoteContent, NoteMeta, VaultDemoTourResult, VaultInfo, VaultSettings, VaultTask,
-    VaultTextSearchCapabilities, VaultTextSearchMatch, WriteTemplateInput,
+    AssetMeta, CustomTemplateFile, DeletedAsset, FolderEntry, ImportedAsset,
+    ImportedWorkflowFile, LocalVaultEntry, NoteComment, NoteContent, NoteMeta,
+    VaultDemoTourResult, VaultInfo, VaultSettings, VaultTask, VaultTextSearchCapabilities,
+    VaultTextSearchMatch, WorkflowFile, WriteTemplateInput,
 };
 use crate::search;
 use crate::state::AppState;
@@ -27,6 +28,7 @@ use crate::vault::notes;
 use crate::vault::settings;
 use crate::vault::tasks;
 use crate::vault::templates;
+use crate::vault::workflows;
 
 /// Absolute root of the currently open vault, or an error when none is open.
 fn require_root(state: &AppState) -> Result<PathBuf, String> {
@@ -747,4 +749,264 @@ pub fn vault_generate_demo_tour(state: State<AppState>) -> Result<VaultDemoTourR
 #[tauri::command]
 pub fn vault_remove_demo_tour(state: State<AppState>) -> Result<VaultDemoTourResult, String> {
     demo_tour::remove_demo_tour(&require_root(&state)?)
+}
+
+// ---- v2.45 M18: workflows -------------------------------------------------
+// File layer only. The applier runs in src/bridge/workflows.ts over the
+// generic `db_*` primitives above, because every op transform it needs is
+// already vendored in `@shared/workflows/apply-ops` — the same split the CSV
+// databases use.
+
+#[tauri::command]
+pub fn vault_list_workflows(state: State<AppState>) -> Result<Vec<WorkflowFile>, String> {
+    Ok(workflows::list_workflow_files(&require_root(&state)?))
+}
+
+#[tauri::command]
+pub fn vault_write_workflow(
+    state: State<AppState>,
+    slug: String,
+    raw: String,
+    previous_source_path: Option<String>,
+) -> Result<WorkflowFile, String> {
+    workflows::write_workflow_file(
+        &require_root(&state)?,
+        &slug,
+        &raw,
+        previous_source_path.as_deref(),
+    )
+}
+
+#[tauri::command]
+pub fn vault_delete_workflow(state: State<AppState>, source_path: String) -> Result<(), String> {
+    workflows::delete_workflow_file(&require_root(&state)?, &source_path)
+}
+
+/// Save a copy of a workflow file anywhere on disk, through a native save
+/// dialog. `None` when the dialog was cancelled.
+#[tauri::command]
+pub async fn vault_export_workflow(
+    app: AppHandle,
+    suggested_name: String,
+    raw: String,
+) -> Result<Option<String>, String> {
+    let picked = app
+        .dialog()
+        .file()
+        .set_title("Export workflow")
+        .set_file_name(workflows::safe_export_filename(&suggested_name))
+        .add_filter("Markdown", &["md"])
+        .blocking_save_file();
+    let Some(file_path) = picked else {
+        return Ok(None);
+    };
+    let path = file_path
+        .into_path()
+        .map_err(|e| format!("Invalid save location: {e}"))?;
+    std::fs::write(&path, raw).map_err(|e| format!("write failed: {e}"))?;
+    Ok(Some(path.to_string_lossy().to_string()))
+}
+
+/// Read a workflow file the user picks. Reading is ALL this does: the bytes
+/// stay untrusted until `@shared/workflows/share` has reviewed them in the
+/// renderer, and nothing reaches `.zennotes/workflows` except through
+/// `vault_write_workflow` afterwards.
+#[tauri::command]
+pub async fn vault_import_workflow_file(
+    app: AppHandle,
+) -> Result<Option<ImportedWorkflowFile>, String> {
+    let picked = app
+        .dialog()
+        .file()
+        .set_title("Import workflow")
+        .add_filter("Markdown", &["md"])
+        .blocking_pick_file();
+    let Some(file_path) = picked else {
+        return Ok(None);
+    };
+    let path = file_path
+        .into_path()
+        .map_err(|e| format!("Invalid file selection: {e}"))?;
+    workflows::read_workflow_import_file(&path).map(Some)
+}
+
+// ---- v2.45: generic vault file primitives ---------------------------------
+// Used by the TypeScript workflow applier for its journal and run ledgers.
+// Same trust boundary as the `db_*` commands: every path goes through
+// `notes::resolve_safe`, so nothing addresses outside the open vault.
+
+/// File names directly inside a vault-relative directory (no recursion, no
+/// directories). A missing directory reads as empty, which is the normal case
+/// for a vault that has never run a workflow.
+#[tauri::command]
+pub fn db_list_dir(state: State<AppState>, rel_path: String) -> Result<Vec<String>, String> {
+    let root = require_root(&state)?;
+    let abs = notes::resolve_safe(&root, &rel_path)?;
+    let Ok(entries) = std::fs::read_dir(&abs) else {
+        return Ok(Vec::new());
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    names.sort();
+    Ok(names)
+}
+
+/// Size in bytes, or 0 when the file is missing — the callers are pruning by
+/// total size, where an absent file contributing nothing is the right answer.
+#[tauri::command]
+pub fn db_file_size(state: State<AppState>, rel_path: String) -> Result<u64, String> {
+    let root = require_root(&state)?;
+    let abs = notes::resolve_safe(&root, &rel_path)?;
+    Ok(std::fs::metadata(&abs).map(|m| m.len()).unwrap_or(0))
+}
+
+/// Append a line to a file, creating it and its parents if needed. The crash
+/// journal is written this way rather than through `db_write_text`: rewriting
+/// the whole journal per entry is quadratic, and an append is also the only
+/// form where a killed process leaves every completed entry intact.
+#[tauri::command]
+pub fn db_append_text(state: State<AppState>, rel_path: String, text: String) -> Result<(), String> {
+    use std::io::Write;
+    let root = require_root(&state)?;
+    let abs = notes::resolve_safe(&root, &rel_path)?;
+    if let Some(parent) = abs.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir failed: {e}"))?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&abs)
+        .map_err(|e| format!("open failed: {e}"))?;
+    file.write_all(text.as_bytes()).map_err(|e| format!("write failed: {e}"))?;
+    // The journal's whole job is to survive a kill, which it only does once the
+    // bytes are on the device rather than in the page cache.
+    file.sync_all().map_err(|e| format!("fsync failed: {e}"))
+}
+
+/// Delete a vault file. An already-missing file is success.
+#[tauri::command]
+pub fn db_delete_file(state: State<AppState>, rel_path: String) -> Result<(), String> {
+    let root = require_root(&state)?;
+    let abs = notes::resolve_safe(&root, &rel_path)?;
+    let _ = std::fs::remove_file(abs);
+    Ok(())
+}
+
+// ---- v2.45: vault assets --------------------------------------------------
+
+/// `readVaultAssetBase64` — an asset's bytes without handing the renderer a
+/// host path. Upstream needs this because a remote workspace has no local file
+/// to point at; here it is simply the honest way to read an asset the webview
+/// cannot reach through the asset protocol.
+#[tauri::command]
+pub fn vault_read_asset_base64(state: State<AppState>, asset_path: String) -> Result<String, String> {
+    use base64::Engine;
+    let root = require_root(&state)?;
+    let abs = notes::resolve_safe(&root, &asset_path)?;
+    let bytes = std::fs::read(&abs).map_err(|e| format!("read failed: {e}"))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+/// `openAssetExternally` — open a VAULT asset with the OS default app. The
+/// vault is always local in this build, so this is a containment check away
+/// from `vault_open_external_file`; the `{ok, error}` shape (never a throw)
+/// drives the renderer's toast the same way.
+#[tauri::command]
+pub fn vault_open_asset_externally(
+    app: AppHandle,
+    state: State<AppState>,
+    rel_path: String,
+) -> crate::ipc::types::OpenExternalFileResult {
+    let result = require_root(&state)
+        .and_then(|root| notes::resolve_safe(&root, &rel_path))
+        .and_then(|abs| {
+            if !abs.is_file() {
+                return Err(format!("No such asset: {rel_path}"));
+            }
+            crate::os::open_external_file(&app, &abs.to_string_lossy())
+        });
+    match result {
+        Ok(()) => crate::ipc::types::OpenExternalFileResult { ok: true, error: None },
+        Err(error) => {
+            crate::ipc::types::OpenExternalFileResult { ok: false, error: Some(error) }
+        }
+    }
+}
+
+// ---- v2.45: link-aware primitives for the workflow applier ----------------
+// `db_write_text` is temp-file + rename, and a rename replaces the DIRECTORY
+// ENTRY: pointed at a symlinked note it would leave a regular file where the
+// link was and detach the link from its target for good. `write_note` in
+// crud.rs writes through the link, so a workflow editing a note must too.
+// Resolving the link and doing the atomic dance at the target keeps both
+// properties: the link survives and no reader sees a half-written file.
+//
+// The target may sit outside the vault. That is what following a link means,
+// and it is the same reach every other save in the app has — containment is
+// enforced on the vault-relative path that named the link.
+
+/// The file a note path really writes to: the symlink's target, or the path
+/// itself. Returns the resolved absolute path.
+fn through_links(abs: &std::path::Path) -> PathBuf {
+    match std::fs::symlink_metadata(abs) {
+        Ok(meta) if meta.file_type().is_symlink() => std::fs::canonicalize(abs).unwrap_or_else(|_| {
+            // A dangling link still names where it points.
+            match std::fs::read_link(abs) {
+                Ok(target) if target.is_absolute() => target,
+                Ok(target) => abs.parent().map(|p| p.join(target)).unwrap_or_else(|| abs.to_path_buf()),
+                Err(_) => abs.to_path_buf(),
+            }
+        }),
+        _ => abs.to_path_buf(),
+    }
+}
+
+#[tauri::command]
+pub fn db_write_through_links(
+    state: State<AppState>,
+    rel_path: String,
+    text: String,
+) -> Result<(), String> {
+    let root = require_root(&state)?;
+    let abs = notes::resolve_safe(&root, &rel_path)?;
+    db_atomic_write(&through_links(&abs), &text)
+}
+
+/// Remove what a note path names, following a symlink to its target: undo
+/// deletes the file the run CREATED, and through a link that file is the
+/// target, never the link. Then walk up removing directories the run emptied,
+/// stopping before the vault's top-level folders — `inbox/2026` left by an
+/// undone create is clutter, but `inbox` itself is furniture.
+#[tauri::command]
+pub fn db_remove_through_links(state: State<AppState>, rel_path: String) -> Result<(), String> {
+    let root = require_root(&state)?;
+    let abs = notes::resolve_safe(&root, &rel_path)?;
+    let target = through_links(&abs);
+    let _ = std::fs::remove_file(&target);
+    // Only prune inside the vault: a link's target can live anywhere.
+    if target.starts_with(&root) {
+        prune_empty_dirs(&root, target.parent());
+    }
+    Ok(())
+}
+
+fn prune_empty_dirs(root: &std::path::Path, start: Option<&std::path::Path>) {
+    let Some(mut dir) = start.map(|d| d.to_path_buf()) else { return };
+    while dir.starts_with(root) && dir != root {
+        // Strictly below a top-level folder, so `inbox` survives.
+        if dir.parent() == Some(root) {
+            return;
+        }
+        // Best effort: a leftover empty directory is not a reason to fail.
+        if std::fs::remove_dir(&dir).is_err() {
+            return;
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent.to_path_buf(),
+            None => return,
+        }
+    }
 }

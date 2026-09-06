@@ -19,6 +19,29 @@ a very recent `binutils` + `gdk-pixbuf`). Both are worked around below.
 
 ---
 
+## Tests
+
+```bash
+# Rust backend
+(cd src-tauri && cargo test)
+
+# Vendored frontend packages. app-core must run from its OWN directory: its
+# vendored vitest.config.ts registers the Harper and oniguruma wasm plugins,
+# and passing `--root` from elsewhere overrides the config, after which ~19
+# tests fail on an unresolvable `harper.js/...wasm?url` import.
+(cd packages/shared-domain && ../../node_modules/.bin/vitest run)
+(cd packages/app-core && NODE_OPTIONS='--no-experimental-webstorage' \
+  LC_ALL=en_US.UTF-8 ../../node_modules/.bin/vitest run)
+```
+
+`NODE_OPTIONS`/`LC_ALL` work around Node 26 shadowing jsdom's `localStorage`
+and resolving the default ICU locale as `und`. One vendored app-core test
+(`CloudSettings.test.ts`, restore-from-date) assumes a non-UTC+8 timezone and
+fails there; it is byte-identical to upstream, so run it under `TZ=UTC` to see
+it pass.
+
+---
+
 ## Is this an Arch-only problem?
 
 Mostly, yes — it's a "your system libraries are newer than `linuxdeploy`"

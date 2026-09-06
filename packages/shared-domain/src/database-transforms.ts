@@ -2,7 +2,7 @@
  * Pure, type-aware filter / sort / group transforms over database rows.
  * Reused by both the Table view (filter + sort) and the Board view (group-by).
  */
-import type { DbField, DbRow, FilterRule, SortRule } from './databases'
+import type { DbField, DbRow, FilterConjunction, FilterRule, SortRule } from './databases'
 import { EMPTY_GROUP } from './databases'
 
 const MULTISELECT_SEP = ', '
@@ -22,6 +22,26 @@ export function joinMultiSelect(values: string[]): string {
 const TRUE_VALUES = new Set(['true', 'x', '1', 'yes', 'checked'])
 export function isCheckboxTrue(cell: string): boolean {
   return TRUE_VALUES.has(cell.trim().toLowerCase())
+}
+
+/**
+ * Extract the `[[wikilink]]` targets of a note / noteMulti cell, in order.
+ * Bracket-delimited on purpose: unlike multiSelect's comma joins, a target
+ * (a note title or path) may itself contain commas. Text outside brackets is
+ * ignored, so a hand-edited cell degrades to "whatever links it contains".
+ */
+export function splitNoteLinks(cell: string): string[] {
+  const out: string[] = []
+  for (const m of cell.matchAll(/\[\[([^\]|]+)(?:\|[^\]]*)?\]\]/g)) {
+    const target = m[1].trim()
+    if (target) out.push(target)
+  }
+  return out
+}
+
+/** Compose a note / noteMulti cell from targets: `[[A]] [[B]]`. */
+export function joinNoteLinks(targets: string[]): string {
+  return targets.map((t) => `[[${t}]]`).join(' ')
 }
 
 function cell(row: DbRow, fieldId: string): string {
@@ -72,11 +92,17 @@ function matchesRule(row: DbRow, rule: FilterRule, field: DbField | undefined): 
 export function filterRows(
   rows: DbRow[],
   filters: FilterRule[] | undefined,
-  fieldsById: Map<string, DbField>
+  fieldsById: Map<string, DbField>,
+  conjunction: FilterConjunction = 'and'
 ): DbRow[] {
   if (!filters || filters.length === 0) return rows
-  // All rules AND together (MVP).
-  return rows.filter((row) => filters.every((rule) => matchesRule(row, rule, fieldsById.get(rule.fieldId))))
+  // `and` (default) keeps rows matching every rule; `or` keeps rows matching
+  // any rule. (#394)
+  const test = (row: DbRow, rule: FilterRule): boolean =>
+    matchesRule(row, rule, fieldsById.get(rule.fieldId))
+  return conjunction === 'or'
+    ? rows.filter((row) => filters.some((rule) => test(row, rule)))
+    : rows.filter((row) => filters.every((rule) => test(row, rule)))
 }
 
 // ---------------------------------------------------------------------------

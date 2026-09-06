@@ -35,6 +35,7 @@ import {
   type DeletedAsset,
   type DirectoryBrowseResult,
   type ExternalFileContent,
+  type ExternalFileLink,
   type FolderEntry,
   type ImportedAsset,
   type LinkMetadata,
@@ -63,6 +64,16 @@ import {
   type VaultTextSearchToolPaths
 } from '@zennotes/bridge-contract/ipc'
 import type { CustomTemplateFile, WriteTemplateInput } from '@zennotes/bridge-contract/templates'
+import type {
+  ApplyWorkflowInput,
+  ExportWorkflowInput,
+  ImportedWorkflowFile,
+  WorkflowFile,
+  WorkflowRunReceipt,
+  WorkflowRunSummary,
+  WorkflowUndoResult,
+  WriteWorkflowInput
+} from '@zennotes/bridge-contract/workflows'
 import type { AppConfigPortable } from '@zennotes/shared-domain/app-config'
 import type { CustomTheme } from '@zennotes/shared-domain/custom-themes'
 import {
@@ -76,6 +87,11 @@ import type {
   DatabaseSummary,
   DbRow
 } from '@zennotes/shared-domain/databases'
+import type {
+  CustomCodeLanguage,
+  CustomCodeLanguageInstallInput,
+  CustomCodeLanguageUpdateInput
+} from '@zennotes/shared-domain/custom-code-languages'
 import type { Override } from '@zennotes/shared-domain/overrides'
 import type { VaultTask } from '@zennotes/shared-domain/tasks'
 import type {
@@ -95,11 +111,14 @@ import {
 } from './portable-config'
 import * as customCss from './custom-css'
 import * as databases from './databases'
+import { cloudSyncSurface } from './cloud-sync'
+import * as codeLanguages from './code-languages'
+import * as workflows from './workflows'
 
 const APP_INFO: ZenAppInfo = {
   name: 'zennotes-rs',
   productName: 'ZenNotes-rs',
-  version: '2.1.0',
+  version: '2.45.0',
   description: 'ZenNotes-rs desktop',
   homepage: 'https://github.com/alf5/ZenNotes-rs',
   runtime: 'desktop'
@@ -135,6 +154,9 @@ function notImplemented(name: string): Promise<never> {
 function unsupportedUpdateState(): AppUpdateState {
   return {
     phase: 'unsupported',
+    // No in-app updater in this build; on Arch the AUR package owns the
+    // install anyway, which is exactly the case `installable: false` names.
+    installable: false,
     currentVersion: APP_INFO.version,
     availableVersion: null,
     releaseName: null,
@@ -570,7 +592,85 @@ const bridge: ZenBridge = {
     invoke('vault_fetch_link_metadata', { url }),
   openFolderTemporary: (absPath: string): Promise<void> =>
     invoke('app_open_folder_temporary', { rawPath: absPath }),
-  toggleDevTools: (): Promise<void> => invoke('devtools_toggle')
+  toggleDevTools: (): Promise<void> => invoke('devtools_toggle'),
+
+  // ---- v2.45 contract surface (M18+) -------------------------------------
+  // Added by the v2.15.0 -> v2.45.0 re-vendor. See GAP-ANALYSIS.md for the
+  // per-cluster plan; the stubs below reproduce the web bridge's degradation
+  // so an unimplemented feature is hidden by its capability flag rather than
+  // crashing, and a stray call fails with a message instead of hitting a
+  // Tauri command that was never registered.
+
+  // Cloud sync (33 members) — out of scope for this port; see cloud-sync.ts.
+  ...cloudSyncSurface,
+
+  // Boot retry. Upstream re-attempts a remote workspace that was unreachable
+  // at launch; this build has no remote workspace (supportsRemoteWorkspace is
+  // false), so the only workspace there is to retry is the local vault and
+  // reporting the current one is both truthful and idempotent.
+  retryWorkspaceBoot: (): Promise<VaultInfo | null> => invoke('vault_get_current'),
+
+  // Workflows — M18.
+  listWorkflows: (): Promise<WorkflowFile[]> => invoke('vault_list_workflows'),
+  writeWorkflow: (input: WriteWorkflowInput): Promise<WorkflowFile> =>
+    invoke('vault_write_workflow', {
+      slug: input.slug,
+      raw: input.raw,
+      previousSourcePath: input.previousSourcePath ?? null
+    }),
+  deleteWorkflow: (sourcePath: string): Promise<void> =>
+    invoke('vault_delete_workflow', { sourcePath }),
+  exportWorkflow: (input: ExportWorkflowInput): Promise<string | null> =>
+    invoke('vault_export_workflow', { suggestedName: input.suggestedName, raw: input.raw }),
+  importWorkflowFile: (): Promise<ImportedWorkflowFile | null> =>
+    invoke('vault_import_workflow_file'),
+  applyWorkflow: (input: ApplyWorkflowInput): Promise<WorkflowRunReceipt> =>
+    workflows.applyWorkflow(input),
+  undoWorkflowRun: (runId: string): Promise<WorkflowUndoResult> => workflows.undoWorkflowRun(runId),
+  listWorkflowRuns: (): Promise<WorkflowRunSummary[]> => workflows.listWorkflowRuns(),
+  deleteWorkflowRuns: (workflowId: string): Promise<number> =>
+    workflows.deleteWorkflowRuns(workflowId),
+
+  // Custom code languages (installed TextMate grammars) — M19.
+  listCustomCodeLanguages: (): Promise<CustomCodeLanguage[]> => codeLanguages.list(),
+  installCustomCodeLanguage: (
+    input: CustomCodeLanguageInstallInput
+  ): Promise<CustomCodeLanguage> => codeLanguages.install(input),
+  updateCustomCodeLanguage: (input: CustomCodeLanguageUpdateInput): Promise<CustomCodeLanguage> =>
+    codeLanguages.update(input),
+  revealCustomCodeLanguagesDir: (id?: string): Promise<void> => codeLanguages.revealDir(id),
+  deleteCustomCodeLanguage: (id: string): Promise<void> => codeLanguages.remove(id),
+  onCustomCodeLanguagesChange: (cb: (next: CustomCodeLanguage[]) => void): (() => void) =>
+    codeLanguages.subscribe(cb),
+
+  // Word export. Upstream renders in the main process with the `docx` npm
+  // package (apps/desktop/src/main/note-docx.ts); no Rust equivalent yet, so
+  // this is the web bridge's honest message rather than a silent no-op.
+  exportNoteDocx: (): Promise<string | null> =>
+    Promise.reject(new Error('Word export is not implemented in this build yet.')),
+
+  // Open a VAULT asset with the OS default app. The vault is always local
+  // here, so this is a path resolve away from the existing opener.
+  openAssetExternally: (relPath: string): Promise<{ ok: boolean; error?: string }> =>
+    invoke('vault_open_asset_externally', { relPath }),
+
+  // Read a vault asset without handing the renderer a host path.
+  readVaultAssetBase64: (assetPath: string): Promise<string> =>
+    invoke('vault_read_asset_base64', { assetPath }),
+
+  // Escape pressed inside a cross-origin subframe. Electron relays it from
+  // the main process via a WebContents key handler; WRY exposes no equivalent
+  // hook below the page, so this build has no way to observe it. Optional in
+  // the contract precisely so a host without the hook can omit it — omitted
+  // rather than registered as a listener that could never fire.
+  // onFrameEscape: intentionally absent.
+
+  // Follow a link out of a standalone external-file window.
+  followExternalFileLink: (link: ExternalFileLink): Promise<{ ok: boolean; error?: string }> =>
+    invoke('external_file_follow_link', { link }),
+
+  // Native "Open File…" for a markdown file, opened the vault-aware way.
+  openFileDialog: (): Promise<boolean> => invoke('app_open_file_dialog')
 }
 
 export function createTauriBridge(): ZenBridge {
