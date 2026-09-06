@@ -1,7 +1,11 @@
 import type { VaultTask, VaultTaskGroups } from '@shared/tasks'
 import { groupTasks, isOverdue } from '@shared/tasks'
 
-/** Simple substring filter across content, note title, tags, and priority. */
+/** Simple substring filter across content, note title, tags, fields, and
+ *  priority. Tags match with the leading `#` so `#proj` narrows the way it
+ *  reads in a note. `@key:value` fields are stripped from the display content,
+ *  so they match against the reassembled token: `@project`, `project:alpha`,
+ *  and plain `alpha` all reach a task carrying `@project:alpha`. */
 export function filterTasks(tasks: VaultTask[], query: string): VaultTask[] {
   const q = query.trim().toLowerCase()
   if (!q) return tasks
@@ -9,7 +13,12 @@ export function filterTasks(tasks: VaultTask[], query: string): VaultTask[] {
     if (task.content.toLowerCase().includes(q)) return true
     if (task.noteTitle.toLowerCase().includes(q)) return true
     if (task.priority && `!${task.priority}`.includes(q)) return true
-    if (task.tags.some((t) => t.toLowerCase().includes(q))) return true
+    if (task.tags.some((t) => `#${t.toLowerCase()}`.includes(q))) return true
+    if (task.fields) {
+      for (const [key, value] of Object.entries(task.fields)) {
+        if (`@${key}:${value}`.toLowerCase().includes(q)) return true
+      }
+    }
     return false
   })
 }
@@ -17,7 +26,7 @@ export function filterTasks(tasks: VaultTask[], query: string): VaultTask[] {
 export interface FlattenedTaskRow {
   kind: 'header' | 'task'
   /** Group the row belongs to — drives the collapse state for 'task' rows. */
-  group: 'today' | 'upcoming' | 'waiting' | 'forwarded' | 'done'
+  group: 'today' | 'upcoming' | 'waiting' | 'forwarded' | 'done' | 'cancelled'
   /** Only set when kind === 'task'. */
   task?: VaultTask
   /** Only set when kind === 'header'. */
@@ -36,6 +45,7 @@ export function flattenRows(
     waiting: boolean
     forwarded: boolean
     done: boolean
+    cancelled: boolean
   }
 ): FlattenedTaskRow[] {
   const rows: FlattenedTaskRow[] = []
@@ -59,6 +69,7 @@ export function flattenRows(
   push('waiting', groups.waiting)
   push('forwarded', groups.forwarded)
   push('done', groups.done)
+  push('cancelled', groups.cancelled)
   return rows
 }
 
@@ -87,7 +98,8 @@ export function applyFileOrder(groups: VaultTaskGroups): VaultTaskGroups {
     upcoming: sortByFileOrder(groups.upcoming),
     waiting: sortByFileOrder(groups.waiting),
     forwarded: sortByFileOrder(groups.forwarded),
-    done: sortByFileOrder(groups.done)
+    done: sortByFileOrder(groups.done),
+    cancelled: sortByFileOrder(groups.cancelled)
   }
 }
 
@@ -104,6 +116,7 @@ export function computeTasksRender(
     waiting: boolean
     forwarded: boolean
     done: boolean
+    cancelled: boolean
   }
 ): TasksRender {
   const filtered = filterTasks(tasks, filter)

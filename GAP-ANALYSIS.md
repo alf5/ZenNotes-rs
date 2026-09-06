@@ -1,11 +1,106 @@
-# Gap analysis: upstream ZenNotes v2.1.0 → v2.15.0
+# Gap analysis: upstream ZenNotes v2.15.0 → v2.45.0
 
-Status of the mirror as of 2026-07-22. Phase 1 (re-vendor + frontend parity) is
-**done**; this document is the work plan for the Rust backend (phase 2+).
+Status of the mirror as of 2026-09-07. Phase 1 (re-vendor + frontend parity) is
+**done**, and so is most of the new backend surface; the open items are listed
+under "Not carried over" below.
 
-Upstream reference clone: `~/delme/zennotes` (tags `v2.1.0` … `v2.15.0`).
+Upstream reference clone: `~/delme/zennotes` (tags `v2.1.0` … `v2.45.0`).
 All `apps/desktop/...` references below are upstream files — the spec for each
 Rust implementation, exactly like the original port.
+
+The gap crossed here was 400 upstream commits: ~84k changed lines across the
+three vendored packages, a bridge contract 51 members wider, and five new
+main-process subsystems.
+
+## Phase 1 — completed
+
+- `packages/{app-core,bridge-contract,shared-domain}` re-vendored **verbatim**
+  from upstream `v2.45.0` (they were verbatim v2.15.0 before; keep it that way —
+  never patch vendored code, port-specific code lives in `src/` + `src-tauri/`).
+  Confirmed byte-identical before replacing, and `shared-ui` is still unused by
+  app-core so it stays unvendored.
+- New frontend deps: `@codemirror/lint`, `@xyflow/react` (the Workflows canvas),
+  `harper.js` (offline grammar/spell check, ~15 MB wasm), `vscode-oniguruma` +
+  `vscode-textmate` (user-installed code grammars). `remark-breaks` dropped.
+  Vite 5 → 6, Vitest 2 → 3.
+- `vite.config.ts` re-mirrored from upstream `apps/web/vite.config.ts@v2.45.0`
+  by three-way merge, keeping every Tauri adaptation (relative `base`, dev-server
+  block, `target: 'esnext'`, aliases into `./packages`). New from upstream: the
+  oniguruma data-URL plugin, `harperWasmAsset()`, the `vendor-textmate` chunk,
+  `@xyflow/react` excluded from `vendor-react`, and mermaid deliberately left
+  unchunked so it stays off the boot path.
+- `tooling/vite/harper-wasm-asset.ts` vendored verbatim (upstream keeps it
+  outside the app, and `packages/app-core/vitest.config.ts` — which is vendored —
+  imports it by the same `../../tooling/...` path, so the location is load-bearing).
+- `tailwind.config.js` and the tsconfigs needed no changes (unchanged upstream).
+- Verified: `tsc --noEmit` clean at the root and in all three packages;
+  `vite build` clean; shared-domain 1556 passed; app-core 1889 passed, 1 skipped,
+  1 failed (see below); `cargo test` 96 passed, 1 ignored; `tauri build` produces
+  deb + rpm + AppImage at 2.45.0.
+
+Harper and Typst both work without a privileged scheme here: Tauri serves the
+renderer over `http://tauri.localhost`, so `bundledAssetUrl` passes the URL
+through untouched. Electron needs `zen-harper://` only because its renderer is
+`file://`. `supportsHarper` is therefore on.
+
+### Test-runner quirks on this machine (not code bugs)
+
+```sh
+# Node 26 ships an experimental localStorage global that shadows jsdom's,
+# and resolves the default ICU locale as "und". app-core must run from its own
+# directory so the vendored vitest.config.ts (harper + oniguruma plugins) applies
+# — passing `--root` overrides it and 19 tests fail on an unresolvable wasm URL.
+cd packages/app-core && NODE_OPTIONS='--no-experimental-webstorage' LC_ALL=en_US.UTF-8 \
+  ../../node_modules/.bin/vitest run
+```
+
+`CloudSettings.test.ts > restore from date > falls back to the closest earlier
+backup` fails at UTC+8 and passes at UTC and America/New_York. The file is
+byte-identical to upstream v2.45.0, so this is an upstream timezone assumption,
+not a porting defect. It is also in dead-for-this-port code (cloud sync).
+
+## Phase 2 — the new backend surface
+
+### Implemented
+
+| Cluster | Where | Notes |
+|---|---|---|
+| **Workflows** (10 members) | `src-tauri/src/vault/workflows.rs` + `src/bridge/workflows.ts` | Thin-backend split, same as the CSV databases: Rust owns `.zennotes/workflows/*.md` CRUD, the native export/import dialogs and the file primitives; the applier runs in the webview over vendored `@shared/workflows/*`, so the rules a plan is applied by are the rules it was planned by. Ports upstream's guarantees intact: pre-run bytes journalled to a fsynced `.jsonl` before each write, whole-run rollback on any failure, undo from recorded state (never computed inverses), drift reporting, interrupted-run recovery, and ledger pruning by count and by total bytes. |
+| **Custom code languages** (6) | `src-tauri/src/code_languages.rs` + `src/bridge/code-languages.ts` | Same split as custom themes: Rust owns `~/.config/zennotes/languages/<id>/{manifest.json,grammar.tmLanguage.json}`, the traversal guards and the watcher; parsing and validation run in the webview through vendored shared-domain, so reserved fence tags have one definition. |
+| `followExternalFileLink` | `src-tauri/src/standalone_links.rs` | Full port of upstream's `standalone-links.ts` (#626), incl. the bounded wikilink search (depth 4, 5000 entries, skips `node_modules`/dotdirs) and the scheme/anchor rules. 11 tests. |
+| `openFileDialog` | `ipc/window_cmds.rs` | Native picker into the existing vault-aware `open_markdown_file` (#449). |
+| `openAssetExternally`, `readVaultAssetBase64` | `ipc/vault_cmds.rs` | Both go through `notes::resolve_safe`, so neither can address outside the vault. |
+| `retryWorkspaceBoot` | `tauri-bridge.ts` | This build has no remote workspace, so the only workspace to retry is the local vault; reporting the current one is truthful and idempotent. |
+| `AppUpdateState.installable` | `tauri-bridge.ts` | `false` — no in-app updater, and on Arch the AUR package owns the install, which is exactly the case the field names. |
+
+New Rust file primitives backing the applier: `db_list_dir`, `db_file_size`,
+`db_append_text` (fsyncs — the journal's whole job is to survive a kill),
+`db_delete_file`, `db_write_through_links`, `db_remove_through_links`. The last
+two exist because `db_write_text` is temp-file-plus-rename, and a rename over a
+symlinked note would replace the link with a regular file and detach it from its
+target for good.
+
+### Not carried over
+
+| Gap | Why | Cost to close |
+|---|---|---|
+| **Cloud sync** (33 bridge members) | Deliberate non-goal: a local-first port has no hosted companion service. Every member reproduces the web bridge's degradation exactly and `supportsCloudSync` is false, so app-core hides the feature. See `src/bridge/cloud-sync.ts`. | Large. Upstream spends ~90 KB across `apps/desktop/src/main/cloud-{auth,auth-loopback,sync-client,sync-filesystem,sync-service,sync-upload-source}.ts`, incl. an OAuth loopback flow and a conflict-resolving sync engine. Much of the engine is already portable TS in `shared-domain/cloud-sync-*`, so a port would mostly be the auth flow, the HTTP client and a filesystem adapter. |
+| **`exportNoteDocx`** | No Rust equivalent of the `docx` npm package, which upstream uses in-process to embed local images. Rejects with the web bridge's message. | Medium. Spec: `apps/desktop/src/main/note-docx.ts` (19 KB). `docx-rs` covers the document model. |
+| **Grammar vetting for code languages** | Upstream tokenizes a corpus in a `worker_threads` worker with a 2 s ceiling, so a catastrophically backtracking grammar cannot hang the editor. Not ported: no node worker here. A self-installed pathological grammar can therefore stall the editor. | Medium. Both `vscode-textmate` and `vscode-oniguruma` are already in the renderer bundle, so the natural shape is a Web Worker plus `terminate()` on timeout, mirroring `isGrammarFastEnough`. |
+| **`onFrameEscape`** | Electron relays Escape out of a cross-origin subframe from the main process; WRY exposes no hook below the page. Optional in the contract, so it is omitted rather than registered as a listener that could never fire. | Blocked on upstream WRY support. |
+| **Workflow run lock is per-window** | Upstream holds the per-vault lock in its single main process. Here the promise chain lives in the webview, so two windows on one vault serialize only within each. | Small: move the queue behind a Rust mutex keyed by vault root. |
+
+Still open from the previous mirror, unchanged: theme-dir first-run seeding, a
+`zen-theme://` asset protocol, per-window vault sessions, and `listDatabases`
+(dead code upstream). The remote-workspace and auto-updater clusters remain out
+of scope, as does `supportsCliInstall`.
+
+---
+
+# Gap analysis: upstream ZenNotes v2.1.0 → v2.15.0 (historical)
+
+Kept for the per-method history of the first mirror. Upstream reference clone
+and conventions are the same as above.
 
 ## Phase 1 — completed
 

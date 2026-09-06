@@ -5,6 +5,7 @@ export const IPC = {
   WORKSPACE_GET_INFO: 'workspace:get-info',
   WORKSPACE_CONNECT_REMOTE: 'workspace:connect-remote',
   WORKSPACE_DISCONNECT_REMOTE: 'workspace:disconnect-remote',
+  WORKSPACE_RETRY_BOOT: 'workspace:retry-boot',
   WORKSPACE_LIST_REMOTE_PROFILES: 'workspace:list-remote-profiles',
   WORKSPACE_SAVE_REMOTE_PROFILE: 'workspace:save-remote-profile',
   WORKSPACE_DELETE_REMOTE_PROFILE: 'workspace:delete-remote-profile',
@@ -26,6 +27,15 @@ export const IPC = {
   VAULT_HAS_ASSETS_DIR: 'vault:has-assets-dir',
   VAULT_GENERATE_DEMO_TOUR: 'vault:generate-demo-tour',
   VAULT_REMOVE_DEMO_TOUR: 'vault:remove-demo-tour',
+  VAULT_LIST_WORKFLOWS: 'vault:list-workflows',
+  VAULT_APPLY_WORKFLOW: 'vault:apply-workflow',
+  VAULT_UNDO_WORKFLOW_RUN: 'vault:undo-workflow-run',
+  VAULT_LIST_WORKFLOW_RUNS: 'vault:list-workflow-runs',
+  VAULT_DELETE_WORKFLOW_RUNS: 'vault:delete-workflow-runs',
+  VAULT_WRITE_WORKFLOW: 'vault:write-workflow',
+  VAULT_DELETE_WORKFLOW: 'vault:delete-workflow',
+  VAULT_EXPORT_WORKFLOW: 'vault:export-workflow',
+  VAULT_IMPORT_WORKFLOW_FILE: 'vault:import-workflow-file',
   VAULT_LIST_TEMPLATES: 'vault:list-templates',
   VAULT_READ_TEMPLATE: 'vault:read-template',
   VAULT_WRITE_TEMPLATE: 'vault:write-template',
@@ -49,11 +59,13 @@ export const IPC = {
   VAULT_UNARCHIVE_NOTE: 'vault:unarchive-note',
   VAULT_DUPLICATE_NOTE: 'vault:duplicate-note',
   VAULT_EXPORT_NOTE_PDF: 'vault:export-note-pdf',
+  VAULT_EXPORT_NOTE_DOCX: 'vault:export-note-docx',
   VAULT_REVEAL_NOTE: 'vault:reveal-note',
   VAULT_REVEAL_NOTE_TARGET: 'vault:reveal-note-target',
   VAULT_MOVE_NOTE: 'vault:move-note',
   VAULT_IMPORT_FILES: 'vault:import-files',
   VAULT_IMPORT_PASTED_IMAGE: 'vault:import-pasted-image',
+  VAULT_READ_ASSET_BASE64: 'vault:read-asset-base64',
   VAULT_RENAME_ASSET: 'vault:rename-asset',
   VAULT_MOVE_ASSET: 'vault:move-asset',
   VAULT_DUPLICATE_ASSET: 'vault:duplicate-asset',
@@ -69,6 +81,7 @@ export const IPC = {
   VAULT_REVEAL_FOLDER: 'vault:reveal-folder',
   VAULT_REVEAL_FILE_PATH: 'vault:reveal-file-path',
   VAULT_OPEN_EXTERNAL_FILE: 'vault:open-external-file',
+  VAULT_OPEN_ASSET_EXTERNALLY: 'vault:open-asset-externally',
   VAULT_FETCH_LINK_METADATA: 'vault:fetch-link-metadata',
   VAULT_REVEAL_FOLDER_TARGET: 'vault:reveal-folder-target',
   VAULT_REVEAL_ASSETS_DIR: 'vault:reveal-assets-dir',
@@ -85,6 +98,7 @@ export const IPC = {
   APP_ICON_DATA_URL: 'app:icon-data-url',
   APP_OPEN_SETTINGS: 'app:open-settings',
   APP_OPEN_NOTE_REQUESTED: 'app:open-note-requested',
+  APP_FRAME_ESCAPE: 'app:frame-escape',
   APP_RENDERER_READY: 'app:renderer-ready',
   APP_ZOOM_IN: 'app:zoom-in',
   APP_ZOOM_OUT: 'app:zoom-out',
@@ -95,6 +109,38 @@ export const IPC = {
   APP_UPDATER_DOWNLOAD: 'app-updater:download',
   APP_UPDATER_INSTALL: 'app-updater:install',
   APP_UPDATER_ON_STATE: 'app-updater:on-state',
+  CLOUD_ACCOUNT_GET: 'cloud-account:get',
+  CLOUD_ACCOUNT_CONNECT: 'cloud-account:connect',
+  CLOUD_ACCOUNT_LOGOUT: 'cloud-account:logout',
+  CLOUD_ACCOUNT_ON_CHANGE: 'cloud-account:on-change',
+  CLOUD_VAULTS_LIST: 'cloud-vaults:list',
+  CLOUD_SERVICE_ACCOUNT_GET: 'cloud-service-account:get',
+  CLOUD_PUBLISHED_NOTES_LIST: 'cloud-published-notes:list',
+  CLOUD_PUBLISHED_NOTE_CREATE: 'cloud-published-note:create',
+  CLOUD_PUBLISHED_NOTE_UPDATE: 'cloud-published-note:update',
+  CLOUD_PUBLISHED_NOTE_DELETE: 'cloud-published-note:delete',
+  CLOUD_VAULT_LINK_GET: 'cloud-vault-link:get',
+  CLOUD_VAULT_LINK_SET: 'cloud-vault-link:set',
+  CLOUD_VAULT_LINK_CREATE: 'cloud-vault-link:create',
+  CLOUD_VAULT_LINK_DELETE: 'cloud-vault-link:delete',
+  CLOUD_VAULT_DELETE: 'cloud-vault:delete',
+  CLOUD_VAULT_SYNC: 'cloud-vault:sync',
+  CLOUD_VAULT_BOOTSTRAP_CONFLICT_GET: 'cloud-vault-bootstrap-conflict:get',
+  CLOUD_VAULT_BOOTSTRAP_CONFLICT_RESOLVE: 'cloud-vault-bootstrap-conflict:resolve',
+  CLOUD_VAULT_CONFLICT_GET: 'cloud-vault-conflict:get',
+  CLOUD_VAULT_CONFLICT_DRAFT_SAVE: 'cloud-vault-conflict-draft:save',
+  CLOUD_VAULT_CONFLICT_RESOLVE: 'cloud-vault-conflict:resolve',
+  CLOUD_VAULT_SETTINGS_CONFLICT_GET: 'cloud-vault-settings-conflict:get',
+  CLOUD_VAULT_SETTINGS_CONFLICT_RESOLVE: 'cloud-vault-settings-conflict:resolve',
+  CLOUD_BACKUPS_LIST: 'cloud-backups:list',
+  CLOUD_BACKUP_SCHEDULE_GET: 'cloud-backup-schedule:get',
+  CLOUD_BACKUP_SCHEDULE_UPDATE: 'cloud-backup-schedule:update',
+  CLOUD_BACKUP_ITEMS_LIST: 'cloud-backup-items:list',
+  CLOUD_BACKUP_CREATE: 'cloud-backup:create',
+  CLOUD_BACKUP_DOWNLOAD: 'cloud-backup:download',
+  CLOUD_BACKUP_DELETE: 'cloud-backup:delete',
+  CLOUD_BACKUP_RESTORE: 'cloud-backup:restore',
+  CLOUD_BACKUP_NOTE_RESTORE: 'cloud-backup-note:restore',
   VAULT_ON_CHANGE: 'vault:on-change',
   WINDOW_TOGGLE_MAXIMIZE: 'window:toggle-maximize',
   WINDOW_MINIMIZE: 'window:minimize',
@@ -110,7 +156,9 @@ export const IPC = {
   APP_READ_EXTERNAL_FILE: 'app:read-external-file',
   APP_WRITE_EXTERNAL_FILE: 'app:write-external-file',
   APP_MOVE_EXTERNAL_FILE_TO_VAULT: 'app:move-external-file-to-vault',
+  APP_FOLLOW_EXTERNAL_FILE_LINK: 'app:follow-external-file-link',
   APP_OPEN_MARKDOWN_FILE: 'app:open-markdown-file',
+  APP_OPEN_FILE_DIALOG: 'app:open-file-dialog',
   APP_OPEN_FOLDER_TEMPORARY: 'app:open-folder-temporary',
   TIKZ_RENDER: 'tikz:render',
   MCP_STATUS: 'mcp:status',
@@ -135,6 +183,12 @@ export const IPC = {
   CUSTOM_THEMES_DELETE: 'custom-themes:delete',
   CUSTOM_THEMES_CREATE: 'custom-themes:create',
   CUSTOM_THEMES_ON_CHANGE: 'custom-themes:on-change',
+  CUSTOM_CODE_LANGUAGES_LIST: 'custom-code-languages:list',
+  CUSTOM_CODE_LANGUAGES_INSTALL: 'custom-code-languages:install',
+  CUSTOM_CODE_LANGUAGES_UPDATE: 'custom-code-languages:update',
+  CUSTOM_CODE_LANGUAGES_REVEAL: 'custom-code-languages:reveal',
+  CUSTOM_CODE_LANGUAGES_DELETE: 'custom-code-languages:delete',
+  CUSTOM_CODE_LANGUAGES_ON_CHANGE: 'custom-code-languages:on-change',
   OVERRIDES_LIST: 'overrides:list',
   OVERRIDES_REVEAL: 'overrides:reveal',
   OVERRIDES_DELETE: 'overrides:delete',
@@ -230,6 +284,13 @@ export interface RaycastExtensionStatus {
 
 export interface AppUpdateState {
   phase: AppUpdatePhase
+  /**
+   * Whether the host can download and install an update itself. False for
+   * installs a package manager owns (the AUR package, a tarball install):
+   * there the app only reports that a newer version exists, and the user
+   * installs it the way they installed ZenNotes.
+   */
+  installable: boolean
   currentVersion: string
   availableVersion: string | null
   releaseName: string | null
@@ -372,11 +433,13 @@ export interface MonthlyNotesSettings {
  */
 export interface VaultViewSettings {
   noteSortOrder?: string
+  assetSortOrder?: string
   groupByKind?: boolean
   tasksViewMode?: string
   kanbanGroupBy?: string
   kanbanColumnTitles?: Record<string, string>
   kanbanColumnOrder?: Record<string, string[]>
+  kanbanCardOrder?: Record<string, string[]>
   kanbanStatuses?: string[]
   autoReveal?: boolean
   systemFolderLabels?: Record<string, unknown>
@@ -409,6 +472,40 @@ export interface VaultSettings {
    * distinguishable. Order is the display order in the Favorites section.
    */
   favorites: string[]
+  /**
+   * Per-system-folder on-disk path overrides (#115). Maps internal folder IDs
+   * to vault-relative directory names (e.g. `{ inbox: '01 - Entry', archive: 'Archive' }`).
+   * Absent entries fall back to the default folder name (same as the ID).
+   * Notes stored in remapped folders retain their vault-relative paths as-is
+   * (e.g. `01 - Entry/Projects/Idea.md`), while `NoteMeta.folder` remains the
+   * internal ID (`inbox`).
+   */
+  systemFolderPaths?: Partial<Record<NoteFolder, string>>
+  /**
+   * Tasks-system settings (#458). `excludedFolders` lists vault-relative
+   * directory paths (as they exist on disk) whose notes never feed the Tasks
+   * surfaces, on any runtime. Absent means nothing is excluded. An object
+   * rather than a bare list so the deferred per-vault `mode: all | tagged`
+   * can land beside it without another migration.
+   */
+  tasks?: { excludedFolders?: string[] }
+  /**
+   * Typst preamble settings (#486, #562). `folder` names the directory whose
+   * notes are Typst preambles, matched at any depth; absent means `typst`.
+   * Those notes are Typst source rather than prose, so no scanner reads their
+   * `#let` / `#var` tokens as tags on any runtime. Configurable so a vault that
+   * already keeps ordinary notes in a folder called `typst` can move the
+   * preambles instead of losing those notes' tags. An object rather than a bare
+   * string so later preamble settings land beside it without another migration.
+   */
+  typstPreambles?: { folder?: string }
+  /**
+   * Harper grammar checker data that belongs to the vault: the words added to
+   * its dictionary and the context hashes of ignored suggestions (digit
+   * strings; see shared-domain harper-settings). Absent means nothing yet.
+   * Every runtime preserves it on a settings round-trip.
+   */
+  harper?: { words: string[]; ignoredLints: string[] }
 }
 
 export const DEFAULT_DAILY_NOTES_DIRECTORY = 'Daily Notes'
@@ -448,7 +545,8 @@ export const DEFAULT_VAULT_SETTINGS: VaultSettings = {
   tasksLocation: { mode: 'primary' },
   folderIcons: {},
   folderColors: {},
-  favorites: []
+  favorites: [],
+  systemFolderPaths: {}
 }
 
 export interface NoteMeta {
@@ -645,6 +743,15 @@ export interface MoveExternalFileResult {
   relPath: string
 }
 
+/**
+ * A link clicked inside a standalone external-file window, for the host to
+ * resolve against that file's own directory (#626): a `[[wikilink]]` target
+ * (alias and anchors may still be attached) or a Markdown href.
+ */
+export type ExternalFileLink =
+  | { kind: 'wikilink'; target: string }
+  | { kind: 'href'; href: string }
+
 export interface LocalVaultEntry extends VaultInfo {
   lastOpenedAt: number
 }
@@ -658,6 +765,17 @@ export interface ServerCapabilities {
   supportsVaultSelection: boolean
   supportsDirectoryBrowsing: boolean
   supportsWatch: boolean
+  /** The server answers 404 (not 500) for a file that is not there. Optional
+   *  because no server before 2.20.2 said so, and its ABSENCE is the useful
+   *  half: it marks the servers whose 500 might only mean "missing". */
+  reportsMissingAsNotFound?: boolean
+  /** The full asset mutation family incl. the deleted-assets store
+   *  (delete/duplicate/restore/purge). Absent on servers before 2.24, which
+   *  is what turns a bare 404 into a "server needs an update" message. */
+  supportsAssetOps?: boolean
+  /** Server-side workflow file CRUD plus journalled apply/undo. Absent before
+   *  2.29, where the web client must keep Workflows read-only. */
+  supportsWorkflows?: boolean
 }
 
 export interface ServerSessionStatus {
@@ -674,6 +792,11 @@ export interface RemoteWorkspaceInfo {
   authConfigured: boolean
   capabilities: ServerCapabilities | null
   profileId: string | null
+  /** Why the configured remote workspace failed to connect at boot, or null
+   *  when it connected (or was never tried). Lets the renderer show a
+   *  reconnect screen instead of the first-boot Welcome (a configured
+   *  workspace that is unreachable is not the same as no workspace). */
+  bootError: string | null
 }
 
 export interface RemoteWorkspaceProfile {
@@ -723,7 +846,17 @@ export interface FolderEntry {
 }
 
 export type VaultChangeKind = 'add' | 'change' | 'unlink'
-export type VaultChangeScope = 'content' | 'vault-settings' | 'comments' | 'database' | 'folder'
+/** `resync` is synthesized client-side after a change-feed gap (a dropped
+ *  watch socket that reconnected): anything may have happened while the feed
+ *  was down, so the renderer re-pulls every surface the feed keeps fresh.
+ *  Servers never emit it. */
+export type VaultChangeScope =
+  | 'content'
+  | 'vault-settings'
+  | 'comments'
+  | 'database'
+  | 'folder'
+  | 'resync'
 
 export interface VaultChangeEvent {
   kind: VaultChangeKind

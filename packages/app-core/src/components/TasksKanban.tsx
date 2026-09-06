@@ -30,12 +30,25 @@ import type { NoteFolder } from '@shared/ipc'
 import type { VaultTask } from '@shared/tasks'
 import { groupTasks, isOverdue as isTaskOverdue, toIsoDateLocal } from '@shared/tasks'
 import { useStore, type KanbanGroupBy, type TaskMutation } from '../store'
+import { filterTasks } from '../lib/tasks-filter'
+import { ContextMenu, type ContextMenuItem } from './ContextMenu'
+import { buildTaskMenuItems } from '../lib/task-context-menu'
 import { ArrowUpRightIcon, PencilIcon } from './icons'
 import { InlineMarkdown } from '../lib/inline-markdown'
+import { TaskStateBox } from './TaskStateBox'
 import { isImeComposing } from '../lib/ime'
+import {
+  getSequenceTokens,
+  sequenceTokenFromEvent,
+  type KeymapOverrides
+} from '../lib/keymaps'
 
 interface Props {
   tasks: VaultTask[]
+  /** The Tasks header's filter query. Narrows the cards on the board; the
+   *  column set, group-by options, and card-order persistence keep working
+   *  from the full task list. (#583) */
+  filter?: string
   today: Date
   onOpenTask: (task: VaultTask) => void
   onToggleTask: (task: VaultTask) => void
@@ -61,7 +74,7 @@ function columnAccent(id: string): string | null {
  *  that should land. Returns `null` when the drop has no defined
  *  semantics (e.g. when group-by is 'folder'). Returns `[]` when the
  *  task is already in the target column — caller can short-circuit. */
-function dropMutationsFor(
+export function dropMutationsFor(
   groupBy: KanbanGroupBy,
   columnId: string,
   task: VaultTask,
@@ -71,11 +84,12 @@ function dropMutationsFor(
     const todayIso = toIsoDateLocal(today)
     switch (columnId) {
       case 'today':
-        // "Live" columns — make sure neither @waiting nor [x] keep the
+        // "Live" columns — make sure neither @waiting, [x] nor [/] keep the
         // task glued to a different bucket.
         return [
           { kind: 'set-checked', checked: false },
           { kind: 'set-waiting', waiting: false },
+          { kind: 'set-in-progress', inProgress: false },
           { kind: 'set-due', due: todayIso }
         ]
       case 'upcoming': {
@@ -84,13 +98,24 @@ function dropMutationsFor(
         return [
           { kind: 'set-checked', checked: false },
           { kind: 'set-waiting', waiting: false },
+          { kind: 'set-in-progress', inProgress: false },
           {
             kind: 'set-due',
             due: task.due && task.due > todayIso ? task.due : toIsoDateLocal(tomorrow)
           }
         ]
       }
+      case IN_PROGRESS_COLUMN_ID:
+        // Started work: `[/]`. The due date is left alone, so a card dragged
+        // back to Today or Upcoming keeps the date it had.
+        return [
+          { kind: 'set-checked', checked: false },
+          { kind: 'set-waiting', waiting: false },
+          { kind: 'set-in-progress', inProgress: true }
+        ]
       case 'waiting':
+        // `[/]` survives underneath on purpose: clearing the wait returns the
+        // card to In progress, where it came from.
         return [
           { kind: 'set-checked', checked: false },
           { kind: 'set-waiting', waiting: true }
@@ -127,22 +152,60 @@ export interface Column {
   tasks: VaultTask[]
 }
 
-function statusColumns(tasks: VaultTask[], today: Date): Column[] {
+/** Column id of the Status board's started-work bucket. */
+export const IN_PROGRESS_COLUMN_ID = 'in-progress'
+
+export function statusColumns(tasks: VaultTask[], today: Date): Column[] {
   const groups = groupTasks(tasks, today)
+  // `[/]` is an open task everywhere else: it keeps its place in Today, on the
+  // calendar and in the rollups (#512). A board is about flow, though, so
+  // started work gets its own column between the to-do buckets and Done, and
+  // a glance shows how much is in flight (#677). `@waiting` still wins: a
+  // blocked card reads as blocked and comes back here when the wait clears.
+  const inProgress = [...groups.today, ...groups.upcoming].filter((t) => t.inProgress)
+  const today_ = groups.today.filter((t) => !t.inProgress)
+  const upcoming = groups.upcoming.filter((t) => !t.inProgress)
+  const overdueBadge = (list: VaultTask[]): Column['badge'] => {
+    const value = list.filter((t) => isTaskOverdue(t, today)).length
+    return value > 0 ? { kind: 'overdue', value } : undefined
+  }
   return [
+    { id: 'today', label: 'Today', tasks: today_, badge: overdueBadge(today_) },
+    { id: 'upcoming', label: 'Upcoming', tasks: upcoming },
     {
-      id: 'today',
-      label: 'Today',
-      tasks: groups.today,
-      badge:
-        groups.overdueCount > 0
-          ? { kind: 'overdue', value: groups.overdueCount }
-          : undefined
+      id: IN_PROGRESS_COLUMN_ID,
+      label: 'In progress',
+      tasks: inProgress,
+      badge: overdueBadge(inProgress)
     },
-    { id: 'upcoming', label: 'Upcoming', tasks: groups.upcoming },
     { id: 'waiting', label: 'Waiting', tasks: groups.waiting },
     { id: 'done', label: 'Done', tasks: groups.done }
   ]
+}
+
+/** A saved Status-board column order predates the In progress column for
+ *  anyone who reordered that board before 2.38. `arrangeColumns` would park an
+ *  unlisted column after the saved ones, i.e. after Done, so a built column
+ *  missing from the saved order is slotted right after the built neighbour
+ *  that precedes it instead. Field boards keep the append rule: there a new
+ *  value really is new. */
+export function completeStatusOrder(saved: string[], builtIds: string[]): string[] {
+  if (saved.length === 0) return saved
+  const result = saved.filter((id) => builtIds.includes(id))
+  for (let i = 0; i < builtIds.length; i += 1) {
+    const id = builtIds[i]
+    if (result.includes(id)) continue
+    let at = 0
+    for (let j = i - 1; j >= 0; j -= 1) {
+      const prevAt = result.indexOf(builtIds[j])
+      if (prevAt >= 0) {
+        at = prevAt + 1
+        break
+      }
+    }
+    result.splice(at, 0, id)
+  }
+  return result
 }
 
 function priorityColumns(tasks: VaultTask[]): Column[] {
@@ -185,7 +248,7 @@ const FOLDER_LABEL: Record<NoteFolder, string> = {
   trash: 'Trash'
 }
 
-function folderColumns(tasks: VaultTask[]): Column[] {
+function folderColumns(tasks: VaultTask[], showArchived: boolean): Column[] {
   const map = new Map<NoteFolder, VaultTask[]>()
   for (const task of tasks) {
     if (task.checked) continue
@@ -193,7 +256,10 @@ function folderColumns(tasks: VaultTask[]): Column[] {
     if (list) list.push(task)
     else map.set(task.noteFolder, [task])
   }
-  return FOLDER_ORDER.map((folder) => ({
+  // With archived tasks hidden (#540) the Archive column would only ever be
+  // empty, so it leaves the board instead of standing as a hollow promise.
+  const order = showArchived ? FOLDER_ORDER : FOLDER_ORDER.filter((f) => f !== 'archive')
+  return order.map((folder) => ({
     id: folder,
     label: FOLDER_LABEL[folder],
     tasks: map.get(folder) ?? []
@@ -220,7 +286,7 @@ function fieldColumns(tasks: VaultTask[], fieldKey: string, order: string[]): Co
   const byValue = new Map<string, VaultTask[]>()
   const noValue: VaultTask[] = []
   for (const task of tasks) {
-    if (task.checked || task.forwarded) continue
+    if (task.checked || task.forwarded || task.cancelled) continue
     const value = task.fields?.[fieldKey]
     if (value) {
       const list = byValue.get(value)
@@ -273,10 +339,11 @@ function buildColumns(
   groupBy: KanbanGroupBy,
   tasks: VaultTask[],
   today: Date,
-  statuses: string[]
+  statuses: string[],
+  showArchived: boolean
 ): Column[] {
   if (groupBy === 'priority') return priorityColumns(tasks)
-  if (groupBy === 'folder') return folderColumns(tasks)
+  if (groupBy === 'folder') return folderColumns(tasks, showArchived)
   const fieldKey = fieldKeyOf(groupBy)
   if (fieldKey) {
     // The status field keeps its friendly `kanban_statuses` order; other fields
@@ -290,8 +357,34 @@ function sameTaskIdentity(a: VaultTask, b: VaultTask): boolean {
   return a.sourcePath === b.sourcePath && a.taskIndex === b.taskIndex
 }
 
-function taskIdentityKey(task: VaultTask): string {
+/** Identity of a task on the board: the note it lives in plus its position in
+ *  that note. Survives a column move, which only rewrites the task's tokens. */
+export function taskIdentityKey(task: VaultTask): string {
   return `${task.sourcePath}\0${task.taskIndex}`
+}
+
+/**
+ * Where the keyboard cursor belongs once a card has moved to another column:
+ * on the moved card itself, wherever the rebuilt board put it.
+ *
+ * Index arithmetic is not enough. The card rarely lands at the top of its new
+ * column (columns sort by priority and due date), and when the last card
+ * leaves a discovered-value column that column disappears, shifting every
+ * column to its right down one — so the old "target column index, card 0"
+ * could land on a different task entirely, which the next Shift+H/L would then
+ * move by mistake. (#492)
+ */
+export function cursorAfterCardMove(
+  columns: Column[],
+  targetColumnId: string,
+  movedTaskKey: string
+): { colIdx: number; cardIdx: number } {
+  const colIdx = columns.findIndex((column) => column.id === targetColumnId)
+  if (colIdx < 0) return { colIdx: Math.max(0, columns.length - 1), cardIdx: 0 }
+  const cardIdx = columns[colIdx].tasks.findIndex(
+    (task) => taskIdentityKey(task) === movedTaskKey
+  )
+  return { colIdx, cardIdx: Math.max(0, cardIdx) }
 }
 
 function sameFields(a: Record<string, string> = {}, b: Record<string, string> = {}): boolean {
@@ -348,7 +441,10 @@ function columnOrderKey(groupBy: KanbanGroupBy, columnId: string): string {
   return `${groupBy}:${columnId}`
 }
 
-function applyColumnOrder(
+/** Replay a manual card arrangement onto built columns. Listed cards sort
+ *  first in their saved order; unlisted cards keep their built position after
+ *  them, so new tasks appear and stale entries decay harmlessly. */
+export function applyColumnOrder(
   groupBy: KanbanGroupBy,
   columns: Column[],
   orderMap: Map<string, string[]>
@@ -399,6 +495,60 @@ export function arrangeColumns(columns: Column[], order: string[]): Column[] {
   return [...sorted, ...noValue]
 }
 
+/** How long an armed `g` waits for a tab-sequence completion before the
+ *  group-by cycle fires. Matches VimNav's own gt/gT pending window. */
+export const GROUP_BY_PENDING_MS = 500
+
+/** What a `g` keydown on the board should do (#573). Bare `g` cycles the
+ *  grouping, but Vim's gt/gT tab switches begin with the same token, and this
+ *  handler runs in the capture phase ahead of VimNav, so consuming `g`
+ *  outright made the tab keys unreachable from the Kanban. When the pressed
+ *  key opens one of the (rebindable) tab sequences in Vim mode, the cycle is
+ *  deferred for one pending window instead. */
+export function kanbanGroupByKeyPlan(
+  vimMode: boolean,
+  overrides: KeymapOverrides | null | undefined,
+  event: KeyboardEvent
+): 'cycle-now' | 'defer' {
+  if (!vimMode) return 'cycle-now'
+  const token = sequenceTokenFromEvent(event)
+  if (!token) return 'cycle-now'
+  const next = getSequenceTokens(overrides, 'vim.tabNext')
+  const previous = getSequenceTokens(overrides, 'vim.tabPrevious')
+  const opensTabSequence =
+    (next.length === 2 && token === next[0]) ||
+    (previous.length === 2 && token === previous[0])
+  return opensTabSequence ? 'defer' : 'cycle-now'
+}
+
+/** Resolve the key that follows an armed `g` (#573). Bare modifier presses
+ *  keep the prefix alive (Shift precedes the T of gT), a tab-sequence
+ *  completion stands the deferred cycle down (VimNav performs the switch),
+ *  another prefix press cycles for the buffered one and re-arms, and any
+ *  other key drops the prefix vim-style and acts normally. */
+export function kanbanPendingGroupByPlan(
+  overrides: KeymapOverrides | null | undefined,
+  event: KeyboardEvent
+): 'keep-pending' | 'yield-to-tabs' | 'repeat-prefix' | 'interrupt' {
+  const token = sequenceTokenFromEvent(event)
+  if (!token) return 'keep-pending'
+  const next = getSequenceTokens(overrides, 'vim.tabNext')
+  const previous = getSequenceTokens(overrides, 'vim.tabPrevious')
+  if (
+    (next.length === 2 && token === next[1]) ||
+    (previous.length === 2 && token === previous[1])
+  ) {
+    return 'yield-to-tabs'
+  }
+  if (
+    (next.length === 2 && token === next[0]) ||
+    (previous.length === 2 && token === previous[0])
+  ) {
+    return 'repeat-prefix'
+  }
+  return 'interrupt'
+}
+
 interface ActiveColumnDrag {
   columnId: string
   pointerId: number
@@ -436,15 +586,20 @@ interface DragPreview {
 
 const POINTER_DRAG_THRESHOLD = 5
 
-export function TasksKanban({ tasks, today, onOpenTask, onToggleTask }: Props): JSX.Element {
+export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: Props): JSX.Element {
   const groupBy = useStore((s) => s.kanbanGroupBy)
   const setGroupBy = useStore((s) => s.setKanbanGroupBy)
   const kanbanColumnTitles = useStore((s) => s.kanbanColumnTitles)
   const setKanbanColumnTitle = useStore((s) => s.setKanbanColumnTitle)
   const kanbanColumnOrder = useStore((s) => s.kanbanColumnOrder)
   const setKanbanColumnOrder = useStore((s) => s.setKanbanColumnOrder)
+  const setKanbanCardOrder = useStore((s) => s.setKanbanCardOrder)
   const kanbanStatuses = useStore((s) => s.kanbanStatuses)
+  const showArchivedTasks = useStore((s) => s.showArchivedTasks)
   const applyTaskMutation = useStore((s) => s.applyTaskMutation)
+  const startTaskFromList = useStore((s) => s.startTaskFromList)
+  const cancelTaskFromList = useStore((s) => s.cancelTaskFromList)
+  const vimMode = useStore((s) => s.vimMode)
   const [colIdx, setColIdx] = useState(0)
   const [cardIdx, setCardIdx] = useState(0)
   const [draggingId, setDraggingId] = useState<string | null>(null)
@@ -457,11 +612,25 @@ export function TasksKanban({ tasks, today, onOpenTask, onToggleTask }: Props): 
   const [columnDropTarget, setColumnDropTarget] = useState<{ id: string; after: boolean } | null>(
     null
   )
+  const [menu, setMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null)
   const latestTasksRef = useRef(tasks)
   const displayTasksRef = useRef(tasks)
   const pendingTaskMovesRef = useRef(new Map<string, VaultTask>())
-  const columnOrderRef = useRef(new Map<string, string[]>())
+  // Seeded from the persisted pref exactly once, before the first columns
+  // build, so a hand-arranged column comes back arranged instead of flashing
+  // the default sort. After mount the ref is the live truth and the store
+  // trails it (every drop writes both through setKanbanCardOrder), so later
+  // store changes are deliberately not re-imported.
+  const [initialCardOrder] = useState(() => {
+    const map = new Map<string, string[]>()
+    for (const [key, order] of Object.entries(useStore.getState().kanbanCardOrder)) {
+      map.set(key, [...order])
+    }
+    return map
+  })
+  const columnOrderRef = useRef(initialCardOrder)
   const columnsRef = useRef<Column[]>([])
+  const fullColumnsRef = useRef<Column[]>([])
   const columnTitleInputRef = useRef<HTMLInputElement | null>(null)
   const boardRef = useRef<HTMLDivElement | null>(null)
   const pointerDragRef = useRef<ActivePointerDrag | null>(null)
@@ -477,19 +646,34 @@ export function TasksKanban({ tasks, today, onOpenTask, onToggleTask }: Props): 
   const dragOverColumnRef = useRef<string | null>(null)
   const dragOverElementRef = useRef<HTMLElement | null>(null)
   const suppressCardClickUntilRef = useRef(0)
+  // #573: a pressed `g` waiting out the gt/gT window before cycling group-by.
+  const groupByPendingRef = useRef(false)
+  const groupByTimerRef = useRef<number | null>(null)
+
+  const openTaskMenu = useCallback(
+    (e: React.MouseEvent, task: VaultTask): void => {
+      e.preventDefault()
+      e.stopPropagation()
+      setMenu({
+        x: e.clientX,
+        y: e.clientY,
+        items: buildTaskMenuItems(task, { today, showKeyHints: vimMode })
+      })
+    },
+    [today, vimMode]
+  )
 
   const mergeTasksWithPendingMoves = useCallback((incomingTasks: VaultTask[]) => {
     const pending = pendingTaskMovesRef.current
     if (pending.size === 0) return incomingTasks
-
-    for (const [key, pendingTask] of pending) {
-      const incoming = incomingTasks.find((task) => taskIdentityKey(task) === key)
-      if (incoming && sameBoardPlacement(incoming, pendingTask)) {
-        pending.delete(key)
-      }
-    }
-
-    if (pending.size === 0) return incomingTasks
+    // The overlay is NOT dropped here, even when a delivery already matches
+    // its placement. The first matching delivery is usually the store's own
+    // optimistic echo, and dropping the shield on it leaves the board naked
+    // when the stale watcher refresh from the PREVIOUS write arrives moments
+    // later: the card snaps back and the cursor is left pointing into an
+    // empty column (#503). Each entry is retired by its own persist timer in
+    // `persistTaskMutationAfterPaint`; until then overlaying a delivery that
+    // already agrees is a no-op.
     return incomingTasks.map((task) => pending.get(taskIdentityKey(task)) ?? task)
   }, [])
 
@@ -500,13 +684,20 @@ export function TasksKanban({ tasks, today, onOpenTask, onToggleTask }: Props): 
     setDisplayTasks(mergedTasks)
   }, [mergeTasksWithPendingMoves, tasks])
 
-  const columns = useMemo(
+  const fullColumns = useMemo(
     () => {
+      const built = buildColumns(groupBy, displayTasks, today, kanbanStatuses, showArchivedTasks)
+      const savedOrder = kanbanColumnOrder[groupBy] ?? []
       const orderedColumns = applyColumnOrder(
         groupBy,
         arrangeColumns(
-          buildColumns(groupBy, displayTasks, today, kanbanStatuses),
-          kanbanColumnOrder[groupBy] ?? []
+          built,
+          groupBy === 'status'
+            ? completeStatusOrder(
+                savedOrder,
+                built.map((c) => c.id)
+              )
+            : savedOrder
         ),
         columnOrderRef.current
       )
@@ -522,10 +713,32 @@ export function TasksKanban({ tasks, today, onOpenTask, onToggleTask }: Props): 
       kanbanColumnOrder,
       kanbanColumnTitles,
       kanbanStatuses,
+      showArchivedTasks,
       today
     ]
   )
+
+  // The filter narrows cards, never columns: the board keeps its full column
+  // set while typing (a discovered-value column doesn't vanish because its
+  // cards are filtered out), and the unfiltered columns stay the source of
+  // truth for card-order persistence so a focused board can't prune hidden
+  // cards out of a hand-made arrangement. (#583)
+  const filterQuery = (filter ?? '').trim()
+  const columns = useMemo(() => {
+    if (!filterQuery) return fullColumns
+    return fullColumns.map((column) => {
+      const visible = filterTasks(column.tasks, filterQuery)
+      if (visible.length === column.tasks.length) return column
+      let badge = column.badge
+      if (badge?.kind === 'overdue') {
+        const value = visible.filter((t) => isTaskOverdue(t, today)).length
+        badge = value > 0 ? { kind: 'overdue', value } : undefined
+      }
+      return { ...column, tasks: visible, badge }
+    })
+  }, [fullColumns, filterQuery, today])
   columnsRef.current = columns
+  fullColumnsRef.current = fullColumns
 
   // Group-by options: the three static boards, the default custom-status field,
   // then one option per `@key:` field discovered across the current tasks. This
@@ -595,7 +808,8 @@ export function TasksKanban({ tasks, today, onOpenTask, onToggleTask }: Props): 
       movable.splice(to, 0, moved)
       setKanbanColumnOrder(groupBy, movable)
       setColIdx(to)
-      setCardIdx(0)
+      // Reordering columns doesn't touch the cards inside them, so the focused
+      // card travels with its column rather than being dropped for card 0.
     },
     [colIdx, groupBy, setKanbanColumnOrder]
   )
@@ -749,13 +963,17 @@ export function TasksKanban({ tasks, today, onOpenTask, onToggleTask }: Props): 
   )
 
   const persistTaskMutationAfterPaint = useCallback(
-    (task: VaultTask, mutations: TaskMutation[]) => {
+    (task: VaultTask, mutations: TaskMutation[], overlayTask: VaultTask | null) => {
       const pendingKey = taskIdentityKey(task)
       const run = (): void => {
         void applyTaskMutation(task, mutations).finally(() => {
           window.setTimeout(() => {
             const pending = pendingTaskMovesRef.current
-            if (pending.has(pendingKey)) {
+            // Identity-guarded: this timer retires only the overlay entry ITS
+            // move created. In a rapid chain the same key holds a newer move's
+            // entry by now, and wiping that would revert the newer move on
+            // screen mid-flight (#503); the newer move's own timer owns it.
+            if (overlayTask !== null && pending.get(pendingKey) === overlayTask) {
               pending.delete(pendingKey)
               const mergedTasks = mergeTasksWithPendingMoves(latestTasksRef.current)
               displayTasksRef.current = mergedTasks
@@ -786,30 +1004,49 @@ export function TasksKanban({ tasks, today, onOpenTask, onToggleTask }: Props): 
       if (targetIndex == null) return
 
       const movingKey = taskIdentityKey(task)
-      const nextOrderMap = new Map(columnOrderRef.current)
+      // The drop index counts the VISIBLE cards (the DOM the user aimed at),
+      // which the filter may have narrowed. Resolve it to the visible card the
+      // drop landed in front of, then splice next to that card in the FULL
+      // column, so filtered-out cards keep their hand-arranged positions
+      // instead of being pruned by the persist below. Unfiltered, the two
+      // boards are identical and this is the plain bounded insert.
+      const visibleTarget = columnsRef.current.find((column) => column.id === targetColumnId)
+      const visibleKeys = (visibleTarget?.tasks ?? [])
+        .map((columnTask) => taskIdentityKey(columnTask))
+        .filter((key) => key !== movingKey)
+      const anchorKey = visibleKeys[targetIndex] ?? null
 
-      for (const column of columnsRef.current) {
+      const nextOrderMap = new Map(columnOrderRef.current)
+      const persistedEntries: Record<string, string[]> = {}
+
+      for (const column of fullColumnsRef.current) {
         const keys = column.tasks
           .map((columnTask) => taskIdentityKey(columnTask))
           .filter((key) => key !== movingKey)
 
         if (column.id === targetColumnId) {
-          const boundedIndex = Math.max(0, Math.min(targetIndex, keys.length))
-          keys.splice(boundedIndex, 0, movingKey)
+          const anchorIndex = anchorKey ? keys.indexOf(anchorKey) : -1
+          keys.splice(anchorIndex === -1 ? keys.length : anchorIndex, 0, movingKey)
         }
 
         nextOrderMap.set(columnOrderKey(groupBy, column.id), keys)
+        persistedEntries[columnOrderKey(groupBy, column.id)] = keys
       }
 
       columnOrderRef.current = nextOrderMap
       setColumnOrderVersion((version) => version + 1)
+      // Persist the whole board's arrangement, not just the touched column:
+      // the lists carry only tasks currently on the board, so each write also
+      // prunes entries for tasks that were completed, deleted, or moved away.
+      setKanbanCardOrder(persistedEntries)
     },
-    [groupBy]
+    [groupBy, setKanbanCardOrder]
   )
 
   const applyTaskToBoard = useCallback(
-    (task: VaultTask, mutations: TaskMutation[]) => {
-      if (mutations.length === 0) return
+    (task: VaultTask, mutations: TaskMutation[]): VaultTask | null => {
+      if (mutations.length === 0) return null
+      let overlayTask: VaultTask | null = null
       flushSync(() => {
         setDisplayTasks((current) => {
           let movedTask: VaultTask | null = null
@@ -821,11 +1058,13 @@ export function TasksKanban({ tasks, today, onOpenTask, onToggleTask }: Props): 
 
           if (movedTask) {
             pendingTaskMovesRef.current.set(taskIdentityKey(task), movedTask)
+            overlayTask = movedTask
           }
           displayTasksRef.current = next
           return next
         })
       })
+      return overlayTask
     },
     []
   )
@@ -841,8 +1080,8 @@ export function TasksKanban({ tasks, today, onOpenTask, onToggleTask }: Props): 
         placeTaskInColumnOrder(task, targetColumnId, targetIndex)
       }
       if (mutations.length === 0) return
-      applyTaskToBoard(task, mutations)
-      persistTaskMutationAfterPaint(task, mutations)
+      const overlayTask = applyTaskToBoard(task, mutations)
+      persistTaskMutationAfterPaint(task, mutations, overlayTask)
     },
     [applyTaskToBoard, persistTaskMutationAfterPaint, placeTaskInColumnOrder]
   )
@@ -858,16 +1097,27 @@ export function TasksKanban({ tasks, today, onOpenTask, onToggleTask }: Props): 
       if (cols.length === 0) return
       const fromIdx = Math.min(colIdx, cols.length - 1)
       const clamped = Math.max(0, Math.min(cols.length - 1, toIdx))
-      if (clamped === fromIdx) return
+      if (clamped === fromIdx) {
+        return
+      }
       const fromColumn = cols[fromIdx]
       const task = fromColumn?.tasks[Math.min(cardIdx, fromColumn.tasks.length - 1)]
-      if (!task) return
+      if (!task) {
+        return
+      }
       const targetColumn = cols[clamped]
       const mutations = dropMutationsFor(groupBy, targetColumn.id, task, today)
-      if (!mutations || mutations.length === 0) return
+      if (!mutations || mutations.length === 0) {
+        return
+      }
+      const movedKey = taskIdentityKey(task)
       moveTaskOnBoard(task, mutations, targetColumn.id, null)
-      setColIdx(clamped)
-      setCardIdx(0)
+      // The board rebuild is flushed synchronously, so columnsRef already holds
+      // the post-move columns: read the card's new home out of them instead of
+      // assuming it sits at the top of the column we aimed at. (#492)
+      const next = cursorAfterCardMove(columnsRef.current, targetColumn.id, movedKey)
+      setColIdx(next.colIdx)
+      setCardIdx(next.cardIdx)
     },
     [cardIdx, colIdx, dndEnabled, groupBy, moveTaskOnBoard, today]
   )
@@ -883,12 +1133,15 @@ export function TasksKanban({ tasks, today, onOpenTask, onToggleTask }: Props): 
   // never needs the mouse. (#354)
   const cycleGroupBy = useCallback(() => {
     if (groupByOptions.length === 0) return
-    const i = groupByOptions.findIndex((o) => o.value === groupBy)
+    // Read at call time: the deferred #573 cycle fires from a timer, and a
+    // captured value would replay the previous board instead of advancing.
+    const current = useStore.getState().kanbanGroupBy
+    const i = groupByOptions.findIndex((o) => o.value === current)
     const next = groupByOptions[(i + 1) % groupByOptions.length]
     setGroupBy(next.value)
     setColIdx(0)
     setCardIdx(0)
-  }, [groupBy, groupByOptions, setGroupBy])
+  }, [groupByOptions, setGroupBy])
 
   const scheduleDropIndicatorPosition = useCallback((x: number, y: number, width: number) => {
     dropIndicatorRectRef.current = { x, y, width }
@@ -987,18 +1240,30 @@ export function TasksKanban({ tasks, today, onOpenTask, onToggleTask }: Props): 
   )
 
   const finishPointerDrag = useCallback(
-    (drag: ActivePointerDrag): void => {
-      const columnId = drag.lastColumnId
-      if (!columnId || !dndEnabled) return
+    (drag: ActivePointerDrag, releaseX: number, releaseY: number): void => {
+      if (!dndEnabled) return
+      // The drop belongs to the column under the RELEASE point. `lastColumnId`
+      // trails the last delivered pointermove, and a fast flick can release a
+      // column past it: the hand says Today, the trailing state says Upcoming,
+      // and the "moved to Today" card comes back due tomorrow. Falling back to
+      // the last hovered column covers a release the board can't resolve (the
+      // gap between columns, the padding above them), where the indicator the
+      // user last saw is still the honest target.
+      const releaseTarget = columnAtPoint(releaseX, releaseY)
+      const columnId = releaseTarget?.id ?? drag.lastColumnId
+      if (!columnId) return
+      // The remembered insertion index was computed for the hovered column; a
+      // release that resolves elsewhere appends instead of importing it.
+      const insertionIndex = columnId === drag.lastColumnId ? drag.lastInsertionIndex : null
       const mutations =
         columnId === drag.sourceColumnId
           ? []
           : dropMutationsFor(groupBy, columnId, drag.task, today)
       if (mutations) {
-        moveTaskOnBoard(drag.task, mutations, columnId, drag.lastInsertionIndex)
+        moveTaskOnBoard(drag.task, mutations, columnId, insertionIndex)
       }
     },
-    [dndEnabled, groupBy, moveTaskOnBoard, today]
+    [columnAtPoint, dndEnabled, groupBy, moveTaskOnBoard, today]
   )
 
   const beginPointerDrag = useCallback(
@@ -1074,7 +1339,7 @@ export function TasksKanban({ tasks, today, onOpenTask, onToggleTask }: Props): 
       if (drag.dragging) {
         e.preventDefault()
         setDraggingId(null)
-        finishPointerDrag(drag)
+        finishPointerDrag(drag, e.clientX, e.clientY)
         suppressCardClickUntilRef.current = Date.now() + 140
       } else {
         setDraggingId(null)
@@ -1134,6 +1399,19 @@ export function TasksKanban({ tasks, today, onOpenTask, onToggleTask }: Props): 
 
   useEffect(() => clearDropTarget, [clearDropTarget])
 
+  const clearGroupByPending = useCallback((): void => {
+    groupByPendingRef.current = false
+    if (groupByTimerRef.current !== null) {
+      window.clearTimeout(groupByTimerRef.current)
+      groupByTimerRef.current = null
+    }
+  }, [])
+
+  // A tab switch can unmount the board before the deferred group-by cycle
+  // fires (VimNav may consume the completing key before this handler sees
+  // it); a pending must not outlive the board that armed it.
+  useEffect(() => clearGroupByPending, [clearGroupByPending])
+
   // Local key handler — capture phase + stopImmediatePropagation so we
   // beat VimNav's global handler (which otherwise hijacks h/j/k/l).
   useEffect(() => {
@@ -1145,6 +1423,19 @@ export function TasksKanban({ tasks, today, onOpenTask, onToggleTask }: Props): 
         const tag = active.tagName
         if (tag === 'INPUT' || tag === 'TEXTAREA' || active.isContentEditable) return
       }
+
+      // A deferred group-by cycle is waiting on the gt/gT window (#573).
+      // Resolved before the modifier guard so a chord also drops the prefix.
+      if (groupByPendingRef.current) {
+        const plan = kanbanPendingGroupByPlan(useStore.getState().keymapOverrides, e)
+        if (plan === 'keep-pending') return
+        clearGroupByPending()
+        if (plan === 'yield-to-tabs') return
+        if (plan === 'repeat-prefix') cycleGroupBy()
+        // repeat-prefix re-arms through the `g` case below; an interrupting
+        // key just drops the prefix and acts normally.
+      }
+
       if (e.metaKey || e.ctrlKey || e.altKey) return
 
       const consume = (): void => {
@@ -1154,8 +1445,20 @@ export function TasksKanban({ tasks, today, onOpenTask, onToggleTask }: Props): 
 
       switch (e.key) {
         case 'g':
-          consume()
-          cycleGroupBy()
+          if (kanbanGroupByKeyPlan(vimMode, useStore.getState().keymapOverrides, e) === 'cycle-now') {
+            consume()
+            cycleGroupBy()
+            return
+          }
+          // Vim's gt/gT open with this token. Leave the keydown unconsumed so
+          // VimNav arms its own tab pending, and only cycle when nothing
+          // completes the sequence.
+          groupByPendingRef.current = true
+          groupByTimerRef.current = window.setTimeout(() => {
+            groupByPendingRef.current = false
+            groupByTimerRef.current = null
+            cycleGroupBy()
+          }, GROUP_BY_PENDING_MS)
           return
         case 'h':
         case 'ArrowLeft':
@@ -1214,6 +1517,22 @@ export function TasksKanban({ tasks, today, onOpenTask, onToggleTask }: Props): 
             onToggleTask(focusedTask)
           }
           return
+        // Same task states the list and the right-click menu offer, so a card
+        // is not a second-class task. Vim-gated, per the rule that single-key
+        // shortcuts only exist in Vim mode; the menu hides its key hints in
+        // step, so it never advertises a key that would do nothing here.
+        case 'i':
+          if (vimMode && focusedTask) {
+            consume()
+            void startTaskFromList(focusedTask)
+          }
+          return
+        case 'c':
+          if (vimMode && focusedTask) {
+            consume()
+            void cancelTaskFromList(focusedTask)
+          }
+          return
         default:
           return
       }
@@ -1221,6 +1540,7 @@ export function TasksKanban({ tasks, today, onOpenTask, onToggleTask }: Props): 
     window.addEventListener('keydown', handler, true)
     return () => window.removeEventListener('keydown', handler, true)
   }, [
+    clearGroupByPending,
     columns.length,
     cycleGroupBy,
     dndEnabled,
@@ -1229,7 +1549,8 @@ export function TasksKanban({ tasks, today, onOpenTask, onToggleTask }: Props): 
     moveFocusedCard,
     moveFocusedColumn,
     onOpenTask,
-    onToggleTask
+    onToggleTask,
+    vimMode
   ])
 
   return (
@@ -1251,8 +1572,8 @@ export function TasksKanban({ tasks, today, onOpenTask, onToggleTask }: Props): 
         </div>
         <div className="text-xs text-current/40">
           {dndEnabled
-            ? 'Drag or Shift+H·L move card · drag header or </> reorder columns · h/l · j/k · g group-by · Space · Enter'
-            : 'Drag header or </> reorder columns · h/l column · j/k card · g group-by · Space · Enter'}
+            ? 'Drag or Shift+H·L move card · drag header or </> reorder columns · h/l · j/k · g group-by · x · Enter · right-click actions'
+            : 'Drag header or </> reorder columns · h/l column · j/k card · g group-by · x · Enter · right-click actions'}
         </div>
       </div>
 
@@ -1406,6 +1727,7 @@ export function TasksKanban({ tasks, today, onOpenTask, onToggleTask }: Props): 
                           shouldSuppressClick={shouldSuppressCardClick}
                           onToggle={() => onToggleTask(task)}
                           onPointerDown={(e) => beginPointerDrag(task, e)}
+                          onContextMenu={openTaskMenu}
                         />
                       )
                     })}
@@ -1453,6 +1775,10 @@ export function TasksKanban({ tasks, today, onOpenTask, onToggleTask }: Props): 
         className="task-kanban-drop-indicator pointer-events-none fixed left-0 top-0 z-[999]"
         aria-hidden="true"
       />
+
+      {menu && (
+        <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />
+      )}
     </div>
   )
 }
@@ -1470,6 +1796,8 @@ interface CardProps {
   shouldSuppressClick: () => boolean
   onToggle: () => void
   onPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void
+  /** Right-click actions. Omitted on the drag preview, which is not a real card. */
+  onContextMenu?: (e: React.MouseEvent, task: VaultTask) => void
 }
 
 function formatDue(iso: string | undefined): string {
@@ -1491,13 +1819,24 @@ function TaskCard({
   onOpen,
   shouldSuppressClick,
   onToggle,
-  onPointerDown
+  onPointerDown,
+  onContextMenu
 }: CardProps): JSX.Element {
   return (
     <div
       ref={cardRef ?? undefined}
       hidden={isDragging}
       data-kanban-task-id={taskDomId}
+      onContextMenu={
+        onContextMenu
+          ? (e) => {
+              // Focus the card first, so the menu and the keyboard agree on
+              // which task is being acted on.
+              onClickRow()
+              onContextMenu(e, task)
+            }
+          : undefined
+      }
       onClick={() => {
         if (shouldSuppressClick()) return
         onClickRow()
@@ -1518,39 +1857,12 @@ function TaskCard({
     >
       <div className="flex items-start gap-2">
         {/* Interactive controls stop pointerdown so they do not start a card drag. */}
-        <button
-          type="button"
-          role="checkbox"
-          aria-checked={task.checked}
-          draggable={false}
-          onPointerDown={(e) => e.stopPropagation()}
-          onMouseDown={(e) => e.stopPropagation()}
-          onClick={(e) => {
-            e.stopPropagation()
-            onToggle()
-          }}
-          className={[
-            'mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded transition-colors',
-            task.checked
-              ? 'border border-accent bg-accent text-white'
-              : 'border border-paper-400/70 hover:bg-paper-200/80'
-          ].join(' ')}
-        >
-          {task.checked && (
-            <svg
-              viewBox="0 0 24 24"
-              width="11"
-              height="11"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="3.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <path d="m5 12 5 5L20 7" />
-            </svg>
-          )}
-        </button>
+        <TaskStateBox
+          task={task}
+          onToggle={onToggle}
+          idleClassName="border border-paper-400/70 hover:bg-paper-200/80"
+          stopPointerEvents
+        />
         {/* The card body stays focusable so clicks open the note and drags move it. */}
         <div
           role="button"

@@ -4,6 +4,7 @@ import type {
   CliInstallStatus,
   DeletedAsset,
   ExternalFileContent,
+  ExternalFileLink,
   FolderEntry,
   ImportedAsset,
   LinkMetadata,
@@ -35,6 +36,39 @@ import type {
   VaultTextSearchToolPaths
 } from './ipc'
 import type { CustomTemplateFile, WriteTemplateInput } from './templates'
+import type {
+  CloudAccountConnectResult,
+  CloudAccountStatus,
+  CloudBackupNoteRestoreResult,
+  CloudBackupRestoreResult,
+  CloudBackupSchedule,
+  CloudBackupSnapshot,
+  CloudBackupSnapshotItem,
+  CloudPublishedNote,
+  CloudPublishedNoteResult,
+  CloudPublishNoteInput,
+  CloudServiceAccount,
+  CloudSyncBootstrapConflict,
+  CloudSyncBootstrapConflictDetails,
+  CloudSyncBootstrapConflictResolution,
+  CloudSyncPendingConflictDetails,
+  CloudSyncPendingConflictResolution,
+  CloudSyncRunSummary,
+  CloudSyncSettingsChoice,
+  CloudSyncSettingsConflict,
+  CloudSyncVault,
+  CloudVaultLink
+} from './cloud-sync'
+import type {
+  ApplyWorkflowInput,
+  ExportWorkflowInput,
+  ImportedWorkflowFile,
+  WorkflowFile,
+  WorkflowRunReceipt,
+  WorkflowRunSummary,
+  WorkflowUndoResult,
+  WriteWorkflowInput
+} from './workflows'
 import type { VaultTask } from '@zennotes/shared-domain/tasks'
 import type {
   DatabaseDoc,
@@ -51,6 +85,11 @@ import type {
 import type { AppConfigPortable } from '@zennotes/shared-domain/app-config'
 import type { CustomTheme } from '@zennotes/shared-domain/custom-themes'
 import type { Override } from '@zennotes/shared-domain/overrides'
+import type {
+  CustomCodeLanguage,
+  CustomCodeLanguageInstallInput,
+  CustomCodeLanguageUpdateInput
+} from '@zennotes/shared-domain/custom-code-languages'
 
 export interface ZenCapabilities {
   supportsUpdater: boolean
@@ -58,9 +97,18 @@ export interface ZenCapabilities {
   supportsFloatingWindows: boolean
   supportsLocalFilesystemPickers: boolean
   supportsRemoteWorkspace: boolean
+  supportsCloudSync?: boolean
   supportsCliInstall: boolean
   /** Custom templates require local-filesystem CRUD; false on web/remote. */
   supportsCustomTemplates: boolean
+  supportsCustomCodeLanguages?: boolean
+  /** Local desktop support, or a web client paired with a server that owns
+   *  workflow files and journalled apply/undo. */
+  supportsWorkflows?: boolean
+  /** Grammar and spelling with Harper: the host can serve the wasm to
+   *  Harper's worker and ships it. Absent on hosts that have not verified
+   *  that yet (the mobile shells), which hides the setting there. */
+  supportsHarper?: boolean
 }
 
 export interface ZenAppInfo {
@@ -88,6 +136,46 @@ export interface ZenBridge {
   checkForAppUpdatesWithUi(): Promise<void>
   downloadAppUpdate(): Promise<AppUpdateState>
   installAppUpdate(): Promise<void>
+  getCloudAccountStatus(): Promise<CloudAccountStatus>
+  connectCloudAccount(baseUrl?: string): Promise<CloudAccountConnectResult>
+  logoutCloudAccount(): Promise<CloudAccountStatus>
+  onCloudAccountChange(cb: (status: CloudAccountStatus) => void): () => void
+  getCloudServiceAccount(): Promise<CloudServiceAccount>
+  listCloudPublishedNotes(): Promise<CloudPublishedNote[]>
+  publishCloudNote(input: CloudPublishNoteInput): Promise<CloudPublishedNoteResult>
+  updateCloudPublishedNote(
+    shareId: number,
+    input: CloudPublishNoteInput
+  ): Promise<CloudPublishedNoteResult>
+  unpublishCloudNote(shareId: number): Promise<void>
+  listCloudVaults(): Promise<CloudSyncVault[]>
+  getCloudVaultLink(): Promise<CloudVaultLink | null>
+  linkCloudVault(vaultId: string): Promise<CloudVaultLink>
+  createAndLinkCloudVault(name: string): Promise<CloudVaultLink>
+  unlinkCloudVault(): Promise<void>
+  deleteCloudVault(): Promise<void>
+  syncCloudVault(): Promise<CloudSyncRunSummary>
+  getCloudBootstrapConflict(
+    conflict: CloudSyncBootstrapConflict
+  ): Promise<CloudSyncBootstrapConflictDetails>
+  resolveCloudBootstrapConflict(resolution: CloudSyncBootstrapConflictResolution): Promise<void>
+  getCloudConflict(conflictId: string): Promise<CloudSyncPendingConflictDetails>
+  saveCloudConflictDraft(conflictId: string, draftText: string | null): Promise<void>
+  resolveCloudConflict(resolution: CloudSyncPendingConflictResolution): Promise<void>
+  getCloudSettingsConflict(): Promise<CloudSyncSettingsConflict | null>
+  resolveCloudSettingsConflict(choice: CloudSyncSettingsChoice): Promise<void>
+  listCloudBackups(): Promise<CloudBackupSnapshot[]>
+  getCloudBackupSchedule(): Promise<CloudBackupSchedule>
+  updateCloudBackupSchedule(enabled: boolean): Promise<CloudBackupSchedule>
+  listCloudBackupItems(backupId: string): Promise<CloudBackupSnapshotItem[]>
+  createCloudBackup(label?: string): Promise<CloudBackupSnapshot>
+  downloadCloudBackup(backupId: string): Promise<void>
+  deleteCloudBackup(backupId: string): Promise<void>
+  restoreCloudBackup(backupId: string): Promise<CloudBackupRestoreResult>
+  restoreCloudBackupNote(
+    backupId: string,
+    snapshotItemId: number
+  ): Promise<CloudBackupNoteRestoreResult>
   getServerCapabilities(): Promise<ServerCapabilities | null>
   getServerSession(): Promise<ServerSessionStatus>
   loginServerSession(token: string): Promise<ServerSessionStatus>
@@ -98,6 +186,10 @@ export interface ZenBridge {
     authToken?: string | null
   ): Promise<{ vault: VaultInfo | null; capabilities: ServerCapabilities }>
   disconnectRemoteWorkspace(): Promise<VaultInfo | null>
+  /** Re-attempt the workspace configured on disk (used by the reconnect
+   *  screen when the server was unreachable at boot). Resolves with the
+   *  vault on success, null when the workspace still cannot be loaded. */
+  retryWorkspaceBoot(): Promise<VaultInfo | null>
   listRemoteWorkspaceProfiles(): Promise<RemoteWorkspaceProfile[]>
   saveRemoteWorkspaceProfile(input: RemoteWorkspaceProfileInput): Promise<RemoteWorkspaceProfile>
   deleteRemoteWorkspaceProfile(id: string): Promise<void>
@@ -130,6 +222,46 @@ export interface ZenBridge {
   hasAssetsDir(): Promise<boolean>
   generateDemoTour(): Promise<VaultDemoTourResult>
   removeDemoTour(): Promise<VaultDemoTourResult>
+  /**
+   * Raw contents of every `.zennotes/workflows/*.md` file, newest name order.
+   * Parsing lives in `@shared/workflows/parse` so the format has one home, the
+   * same split the templates API uses. Returns [] where the host cannot reach
+   * workflow storage (older web servers and remote desktop workspaces).
+   */
+  listWorkflows(): Promise<WorkflowFile[]>
+  /** Create or overwrite a workflow file; returns the saved file. */
+  writeWorkflow(input: WriteWorkflowInput): Promise<WorkflowFile>
+  deleteWorkflow(sourcePath: string): Promise<void>
+  /**
+   * Save a copy of a workflow file anywhere on disk, through a native save
+   * dialog. Resolves with the chosen path, or null when the dialog is
+   * cancelled.
+   *
+   * Optional because it needs a filesystem: web and remote workspaces have
+   * none, and the view hides the affordance rather than offering one that
+   * fails. Sharing there is the clipboard, which needs no bridge at all.
+   */
+  exportWorkflow?(input: ExportWorkflowInput): Promise<string | null>
+  /**
+   * Read a workflow file the user picks in a native open dialog. Resolves with
+   * null when the dialog is cancelled.
+   *
+   * Reading is ALL this does. The file is untrusted text until the renderer has
+   * parsed, validated and shown it (`@shared/workflows/share`), and nothing
+   * reaches `.zennotes/workflows` except through `writeWorkflow` afterwards.
+   */
+  importWorkflowFile?(): Promise<ImportedWorkflowFile | null>
+  /**
+   * Execute a plan's ops. The ONLY place in the product that writes on a
+   * workflow's behalf, so every guarantee (journal, atomicity, whole-run
+   * rollback) lives behind this one call.
+   */
+  applyWorkflow(input: ApplyWorkflowInput): Promise<WorkflowRunReceipt>
+  undoWorkflowRun(runId: string): Promise<WorkflowUndoResult>
+  listWorkflowRuns(): Promise<WorkflowRunSummary[]>
+  /** Remove every run ledger a workflow left behind; resolves to how many.
+   *  Exists for the guided tutorial's leave-no-trace cleanup. */
+  deleteWorkflowRuns(workflowId: string): Promise<number>
   listTemplates(): Promise<CustomTemplateFile[]>
   readTemplate(sourcePath: string): Promise<string>
   writeTemplate(input: WriteTemplateInput): Promise<CustomTemplateFile>
@@ -173,6 +305,9 @@ export interface ZenBridge {
   unarchiveNote(relPath: string): Promise<NoteMeta>
   duplicateNote(relPath: string): Promise<NoteMeta>
   exportNotePdf(relPath: string): Promise<string | null>
+  /** Export as a Word document with real Word styles; resolves to the saved
+   *  path, or null when the dialog was cancelled. Desktop, local vaults. */
+  exportNoteDocx(relPath: string): Promise<string | null>
   revealNote(relPath: string): Promise<void>
   /** Reveal the original target of a symlinked note in the OS file manager. */
   revealNoteTarget(relPath: string): Promise<void>
@@ -186,6 +321,14 @@ export interface ZenBridge {
    */
   openExternalFile(href: string): Promise<{ ok: boolean; error?: string }>
   /**
+   * Open a VAULT asset (vault-relative path) with the OS default app. Unlike
+   * `openExternalFile` this resolves against the vault the host actually has:
+   * a local vault opens the file in place, a remote workspace downloads the
+   * asset to a temp file first — the server's absolute path does not exist on
+   * this machine. Returns `{ ok: false, error }` on the web or on failure.
+   */
+  openAssetExternally(relPath: string): Promise<{ ok: boolean; error?: string }>
+  /**
    * Fetch open-graph metadata for a URL to render a bookmark card. Desktop
    * fetches and parses the page in the main process; the web build returns a
    * minimal record. Never throws — `ok: false` on failure.
@@ -194,6 +337,8 @@ export interface ZenBridge {
   moveNote(relPath: string, targetFolder: NoteFolder, targetSubpath: string): Promise<NoteMeta>
   importFilesToNote(notePath: string, sourcePaths: string[]): Promise<ImportedAsset[]>
   importPastedImage(input: PastedImageInput): Promise<ImportedAsset>
+  /** Read an asset from the active vault without exposing a host filesystem path. */
+  readVaultAssetBase64(assetPath: string): Promise<string>
   renameAsset(relPath: string, nextName: string): Promise<AssetMeta>
   moveAsset(relPath: string, targetDir: string): Promise<AssetMeta>
   duplicateAsset(relPath: string): Promise<AssetMeta>
@@ -220,6 +365,11 @@ export interface ZenBridge {
   onVaultChange(cb: (ev: VaultChangeEvent) => void): () => void
   onOpenSettings(cb: () => void): () => void
   onOpenNoteRequested(cb: (relPath: string) => void): () => void
+  /** Escape was pressed while a subframe (an embedded video player) owned the
+   *  keyboard. Keys inside a cross-origin frame never reach the page, so the
+   *  desktop main process relays this one; the app hands focus back to the
+   *  note. Desktop-only, the web build has no hook below the page. */
+  onFrameEscape?(cb: () => void): () => void
   notifyRendererReady(): void
   onAppUpdateState(cb: (state: AppUpdateState) => void): () => void
 
@@ -238,6 +388,15 @@ export interface ZenBridge {
   /** Move the current standalone editor window's file into the active vault. */
   moveExternalFileToVault(): Promise<MoveExternalFileResult>
   /**
+   * Follow a link from the current standalone editor window's file. The host
+   * resolves it against the file's directory (a relative href, or a wikilink
+   * by name within that directory's tree) and opens a markdown target the way
+   * Finder would (its vault, else another standalone window) or any other
+   * file with the OS. Resolves `ok: false` with a reason when nothing on disk
+   * matches. Desktop only.
+   */
+  followExternalFileLink(link: ExternalFileLink): Promise<{ ok: boolean; error?: string }>
+  /**
    * Open a markdown file from an absolute OS path — as a note when it lives
    * inside a known vault, otherwise a standalone external-file window. The
    * drag-and-drop counterpart of the Finder "Open in ZenNotes" entry.
@@ -245,6 +404,13 @@ export interface ZenBridge {
    * web bridge is a no-op that resolves to false.
    */
   openMarkdownFile(absPath: string): Promise<boolean>
+  /**
+   * Show a native "Open File…" picker for a markdown file and open the choice
+   * the same vault-aware way as `openMarkdownFile` — the in-app equivalent of
+   * the Finder "Open in ZenNotes" entry (#449). Resolves to true when a file
+   * was opened. Desktop only; the web bridge resolves to false.
+   */
+  openFileDialog(): Promise<boolean>
   toggleQuickCapture(): Promise<void>
   getQuickCaptureHotkey(): Promise<string>
   setQuickCaptureHotkey(hotkey: string): Promise<{ ok: boolean; hotkey: string; error?: string }>
@@ -298,6 +464,12 @@ export interface ZenBridge {
   createCustomTheme(input: { name?: string }): Promise<string | null>
   /** Subscribe to changes in the themes directory (file added/edited/removed). */
   onCustomThemesChange(cb: (next: CustomTheme[]) => void): () => void
+  listCustomCodeLanguages(): Promise<CustomCodeLanguage[]>
+  installCustomCodeLanguage(input: CustomCodeLanguageInstallInput): Promise<CustomCodeLanguage>
+  updateCustomCodeLanguage(input: CustomCodeLanguageUpdateInput): Promise<CustomCodeLanguage>
+  revealCustomCodeLanguagesDir(id?: string): Promise<void>
+  deleteCustomCodeLanguage(id: string): Promise<void>
+  onCustomCodeLanguagesChange(cb: (next: CustomCodeLanguage[]) => void): () => void
   /** CSS overrides from `~/.config/zennotes/overrides/*.css`. Empty on web. */
   listOverrides(): Promise<Override[]>
   /** Reveal the overrides directory — or a specific override file when a name is

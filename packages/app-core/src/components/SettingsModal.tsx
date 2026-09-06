@@ -18,9 +18,13 @@ import {
   DEFAULT_MONTHLY_NOTE_TITLE_PATTERN,
   DEFAULT_MONTHLY_NOTES_DIRECTORY,
 } from "@shared/ipc";
+import type { VimWrappedLineMotionMode } from "@shared/app-config";
+import { HARPER_DIALECTS } from "@shared/harper-settings";
+import { harperSupported } from "../lib/harper-runtime";
 import type {
   AppUpdateState,
   CliInstallStatus,
+  NoteFolder,
   RaycastExtensionStatus,
   RemoteWorkspaceProfile,
   RemoteWorkspaceProfileInput,
@@ -35,7 +39,18 @@ import {
   type McpInstructionsPayload,
   type McpServerRuntime,
 } from "@shared/mcp-clients";
+import { normalizeTasksExcludedFolder } from "@shared/tasks-excluded-folders";
+import {
+  DEFAULT_TYPST_PREAMBLE_FOLDER as TYPST_PREAMBLE_FOLDER,
+  normalizeTypstPreambleFolder,
+  resolveTypstPreambleFolder,
+} from "@shared/typst-preamble-folder";
 import { useStore, refreshCustomThemes, refreshOverrides } from "../store";
+import {
+  WORKFLOW_PRESETS,
+  hiddenPresetsInOrder,
+} from "@shared/workflows/presets";
+import { startWorkflowTutorial } from "../lib/workflow-tutorial-flow";
 import type { LineNumberMode, WhichKeyHintMode } from "../store";
 import type {
   KeymapDefinition,
@@ -45,6 +60,7 @@ import type {
 import {
   findKeymapConflict,
   formatKeymapBinding,
+  getDefaultKeymapBinding,
   getKeymapBinding,
   getKeymapDefinitionsByGroup,
   getKeymapDisplay,
@@ -82,6 +98,11 @@ import {
   getSystemFolderLabel,
 } from "../lib/system-folder-labels";
 import {
+  DEFAULT_FOLDER_PATHS,
+  describeSystemFolderPathIssue,
+  resolveFolderPath,
+} from "@shared/system-folder-paths";
+import {
   normalizeDailyNoteLocale,
   normalizeDailyNotesDirectory,
   normalizeDailyNoteTitlePattern,
@@ -108,6 +129,10 @@ import { promptApp } from "../lib/prompt-requests";
 import { isImeComposing } from "../lib/ime";
 import { RemoteWorkspaceProfileModal } from "./RemoteWorkspaceProfileModal";
 import { Button } from "./ui/Button";
+import { CustomCodeLanguagesSettings } from "./CustomCodeLanguagesSettings";
+import { TextReplacementsSettings } from "./TextReplacementsSettings";
+import { CloudSettings } from "./CloudSettings";
+import { consumeSettingsTarget } from "../lib/settings-navigation";
 
 type SettingsCategoryId =
   | "appearance"
@@ -116,6 +141,7 @@ type SettingsCategoryId =
   | "tasks"
   | "typography"
   | "vault"
+  | "cloud"
   | "templates"
   | "mcp"
   | "cli"
@@ -206,6 +232,12 @@ const SETTINGS_CATEGORY_ICONS: Record<SettingsCategoryId, JSX.Element> = {
       <path d="M3 7l9 4 9-4M12 11v10" />
     </NavIcon>
   ),
+  cloud: (
+    <NavIcon>
+      <path d="M6 18h11a4 4 0 0 0 .7-7.94A6 6 0 0 0 6.3 8.4 4.8 4.8 0 0 0 6 18Z" />
+      <path d="m9.5 14 2.5-2.5 2.5 2.5M12 11.5V18" />
+    </NavIcon>
+  ),
   templates: (
     <NavIcon>
       <rect x="4" y="4" width="16" height="16" rx="2" />
@@ -247,7 +279,7 @@ const SETTINGS_SECTIONS: {
     title: "Editing",
     categoryIds: ["editor", "tasks", "keymaps"],
   },
-  { id: "vault", title: "Vault", categoryIds: ["vault", "templates"] },
+  { id: "vault", title: "Vault", categoryIds: ["vault", "cloud", "templates"] },
   { id: "system", title: "System", categoryIds: ["mcp", "cli", "about"] },
 ];
 
@@ -404,6 +436,7 @@ export function SettingsModal(): JSX.Element {
   const supportsRemoteWorkspace =
     appInfo.runtime === "desktop" &&
     zenBridge.getCapabilities().supportsRemoteWorkspace;
+  const supportsCloudSync = !!zenBridge.getCapabilities().supportsCloudSync;
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
   const openHelpView = useStore((s) => s.openHelpView);
   const vimMode = useStore((s) => s.vimMode);
@@ -412,6 +445,12 @@ export function SettingsModal(): JSX.Element {
   const setVimInsertEscape = useStore((s) => s.setVimInsertEscape);
   const vimYankToClipboard = useStore((s) => s.vimYankToClipboard);
   const setVimYankToClipboard = useStore((s) => s.setVimYankToClipboard);
+  const vimBlockImeInNormalMode = useStore((s) => s.vimBlockImeInNormalMode);
+  const setVimBlockImeInNormalMode = useStore((s) => s.setVimBlockImeInNormalMode);
+  const vimWrappedLineMotions = useStore((s) => s.vimWrappedLineMotions);
+  const setVimWrappedLineMotions = useStore(
+    (s) => s.setVimWrappedLineMotions,
+  );
   const keymapOverrides = useStore((s) => s.keymapOverrides);
   const setKeymapBinding = useStore((s) => s.setKeymapBinding);
   const resetAllKeymaps = useStore((s) => s.resetAllKeymaps);
@@ -439,18 +478,58 @@ export function SettingsModal(): JSX.Element {
   );
   const completedTaskStyle = useStore((s) => s.completedTaskStyle);
   const setCompletedTaskStyle = useStore((s) => s.setCompletedTaskStyle);
+  const showArchivedTasks = useStore((s) => s.showArchivedTasks);
+  const setShowArchivedTasks = useStore((s) => s.setShowArchivedTasks);
   const mathRenderer = useStore((s) => s.mathRenderer);
+  const mathFontScale = useStore((s) => s.mathFontScale);
+  const setMathFontScale = useStore((s) => s.setMathFontScale);
+  const typstTagPreambles = useStore((s) => s.typstTagPreambles);
+  const setTypstTagPreambles = useStore((s) => s.setTypstTagPreambles);
+  const harperEnabled = useStore((s) => s.harperEnabled);
+  const setHarperEnabled = useStore((s) => s.setHarperEnabled);
+  const harperDialect = useStore((s) => s.harperDialect);
+  const setHarperDialect = useStore((s) => s.setHarperDialect);
   const setMathRenderer = useStore((s) => s.setMathRenderer);
   const looseMathDelimiters = useStore((s) => s.looseMathDelimiters);
   const setLooseMathDelimiters = useStore((s) => s.setLooseMathDelimiters);
   const keepViewModeAcrossNotes = useStore((s) => s.keepViewModeAcrossNotes);
+  const defaultPaneMode = useStore((s) => s.defaultPaneMode);
+  const setDefaultPaneMode = useStore((s) => s.setDefaultPaneMode);
   const setKeepViewModeAcrossNotes = useStore(
     (s) => s.setKeepViewModeAcrossNotes,
   );
+  const syncTitleHeadingOnRename = useStore((s) => s.syncTitleHeadingOnRename);
+  const setSyncTitleHeadingOnRename = useStore(
+    (s) => s.setSyncTitleHeadingOnRename,
+  );
   const markdownSnippets = useStore((s) => s.markdownSnippets);
   const setMarkdownSnippets = useStore((s) => s.setMarkdownSnippets);
+  const showHeadingLevelLabels = useStore((s) => s.showHeadingLevelLabels);
+  const listIndentGuides = useStore((s) => s.listIndentGuides);
+  const setShowHeadingLevelLabels = useStore(
+    (s) => s.setShowHeadingLevelLabels,
+  );
+  const editorTabSize = useStore((s) => s.editorTabSize);
+  const setEditorTabSize = useStore((s) => s.setEditorTabSize);
+  const setListIndentGuides = useStore((s) => s.setListIndentGuides);
+  const textReplacementsEnabled = useStore((s) => s.textReplacementsEnabled);
+  const setTextReplacementsEnabled = useStore(
+    (s) => s.setTextReplacementsEnabled,
+  );
+  const textReplacements = useStore((s) => s.textReplacements);
+  const setTextReplacements = useStore((s) => s.setTextReplacements);
+  const autoPairs = useStore((s) => s.autoPairs);
+  const setAutoPairs = useStore((s) => s.setAutoPairs);
+  const autoPairQuotesInProse = useStore((s) => s.autoPairQuotesInProse);
+  const setAutoPairQuotesInProse = useStore((s) => s.setAutoPairQuotesInProse);
   const tabsEnabled = useStore((s) => s.tabsEnabled);
   const setTabsEnabled = useStore((s) => s.setTabsEnabled);
+  const workflowsEnabled = useStore((s) => s.workflowsEnabled);
+  const setWorkflowsEnabled = useStore((s) => s.setWorkflowsEnabled);
+  const atlasEnabled = useStore((s) => s.atlasEnabled);
+  const setAtlasEnabled = useStore((s) => s.setAtlasEnabled);
+  const hiddenWorkflowPresets = useStore((s) => s.hiddenWorkflowPresets);
+  const setHiddenWorkflowPresets = useStore((s) => s.setHiddenWorkflowPresets);
   const wrapTabs = useStore((s) => s.wrapTabs);
   const setWrapTabs = useStore((s) => s.setWrapTabs);
   const quickNoteDateTitle = useStore((s) => s.quickNoteDateTitle);
@@ -518,6 +597,8 @@ export function SettingsModal(): JSX.Element {
   const supportsCustomTemplates =
     zenBridge.getCapabilities().supportsCustomTemplates &&
     workspaceMode !== "remote";
+  const supportsCustomCodeLanguages =
+    !!zenBridge.getCapabilities().supportsCustomCodeLanguages;
   const [templateEditor, setTemplateEditor] = useState<{
     initialRaw?: string;
     sourcePath?: string;
@@ -631,6 +712,11 @@ export function SettingsModal(): JSX.Element {
   // Lazy-load the system font list on mount. Retried on every mount
   // when the list comes back empty (IPC failure / no fonts yet).
   const [systemFonts, setSystemFonts] = useState<string[]>([]);
+  // Why a folder-path edit was refused, per folder. Cleared as soon as the same
+  // row accepts a value (#533).
+  const [folderPathIssues, setFolderPathIssues] = useState<
+    Partial<Record<NoteFolder, string | null>>
+  >({});
   const [vaultTextSearchCapabilities, setVaultTextSearchCapabilities] =
     useState<VaultTextSearchCapabilities | null>(null);
   const searchToolPaths = useMemo<VaultTextSearchToolPaths>(
@@ -677,7 +763,9 @@ export function SettingsModal(): JSX.Element {
       (state) => {
         if (state.phase === "available") {
           window.alert(
-            `ZenNotes ${state.availableVersion ?? ""} is available. Use “Download Update” to fetch it.`,
+            state.installable
+              ? `ZenNotes ${state.availableVersion ?? ""} is available. Use “Download Update” to fetch it.`
+              : state.message,
           );
           return;
         }
@@ -1084,8 +1172,9 @@ export function SettingsModal(): JSX.Element {
 
   const ref = useRef<HTMLDivElement | null>(null);
   const settingsSearchHighlightTimerRef = useRef<number | null>(null);
-  const [activeCategory, setActiveCategory] =
-    useState<SettingsCategoryId>("appearance");
+  const [activeCategory, setActiveCategory] = useState<SettingsCategoryId>(
+    () => consumeSettingsTarget() ?? "appearance",
+  );
   // Per-category active sub-tab (dense categories split their content into sub-tabs).
   const [activeSubTabByCategory, setActiveSubTabByCategory] = useState<
     Partial<Record<SettingsCategoryId, string>>
@@ -1188,6 +1277,9 @@ export function SettingsModal(): JSX.Element {
   }, []);
 
   const leaderKeyHintsTargetId = vimMode ? "leader-key-hints" : "vim-mode";
+  const wrappedLineMotionsTargetId = vimMode
+    ? "wrapped-line-motions"
+    : "vim-mode";
   const leaderHintBehaviorTargetId =
     vimMode && whichKeyHints ? "leader-hint-behavior" : leaderKeyHintsTargetId;
   const leaderHintDurationTargetId =
@@ -1699,6 +1791,11 @@ export function SettingsModal(): JSX.Element {
         "shortcut",
         "task",
         "tasks",
+        "workflow",
+        "workflows",
+        "rename",
+        "title",
+        "heading",
       ],
       searchItems: [
         {
@@ -1706,6 +1803,14 @@ export function SettingsModal(): JSX.Element {
           title: "Vim mode",
           description: "First-class Vim motions in the markdown editor.",
           keywords: ["vim", "motions"],
+        },
+        {
+          id: "wrapped-line-motions",
+          title: "Wrapped line motions",
+          description:
+            "Choose whether $, I, A, and dependent operators follow a visible display row or the complete logical line.",
+          keywords: ["vim", "word wrap", "display row", "logical line", "$", "I", "A"],
+          targetId: wrappedLineMotionsTargetId,
         },
         {
           id: "vim-insert-escape",
@@ -1785,6 +1890,13 @@ export function SettingsModal(): JSX.Element {
           ],
         },
         {
+          id: "math-font-scale",
+          title: "Math size",
+          description:
+            "Scale inline and block math relative to the surrounding text.",
+          keywords: ["math", "size", "scale", "font", "katex", "typst", "latex", "formula", "equation"],
+        },
+        {
           id: "math-renderer",
           title: "Math renderer",
           description:
@@ -1798,6 +1910,63 @@ export function SettingsModal(): JSX.Element {
             "formula",
             "renderer",
             "typesetter",
+          ],
+        },
+        ...(harperSupported()
+          ? [
+              {
+                id: "harper-enabled",
+                title: "Grammar and spelling with Harper",
+                description:
+                  "Underline grammar and spelling problems as you write, checked on this device by Harper. Off by default.",
+                keywords: [
+                  "harper",
+                  "grammar",
+                  "spelling",
+                  "spell",
+                  "check",
+                  "lint",
+                  "proofread",
+                ],
+              },
+              {
+                id: "harper-dialect",
+                title: "Harper dialect",
+                description:
+                  "The English Harper checks against: American, British, Australian, Canadian, or Indian.",
+                keywords: ["harper", "dialect", "english", "british", "american"],
+              },
+            ]
+          : []),
+        {
+          id: "typst-tag-preambles",
+          title: "Typst definitions from tags",
+          description:
+            "Let a note's tags decide which Typst definitions its formulas compile against. Preambles are ordinary notes in the preamble folder.",
+          keywords: [
+            "typst",
+            "preamble",
+            "math",
+            "definitions",
+            "tags",
+            "vec",
+            "notation",
+          ],
+        },
+        {
+          id: "typst-preamble-folder",
+          title: "Typst preamble folder",
+          description:
+            "Which folder holds Typst preamble notes. Its notes are left out of the tag list, so rename it if you keep ordinary tagged notes in a folder called typst.",
+          keywords: [
+            "typst",
+            "preamble",
+            "folder",
+            "tags",
+            "tag list",
+            "let",
+            "variables",
+            "rename",
           ],
         },
         {
@@ -1818,8 +1987,23 @@ export function SettingsModal(): JSX.Element {
           ],
         },
         {
+          id: "sync-title-heading-on-rename",
+          title: "Sync title heading on rename",
+          description:
+            "Renaming a note rewrites its leading # heading to the new name.",
+          keywords: [
+            "rename",
+            "title",
+            "heading",
+            "h1",
+            "sync",
+            "filename",
+            "first line",
+          ],
+        },
+        {
           id: "markdown-overrides",
-          title: "Markdown snippets",
+          title: "Auto-close Markdown",
           description:
             "Auto-close markdown delimiters as you type (** then Space, ``` then Enter).",
           keywords: [
@@ -1831,6 +2015,60 @@ export function SettingsModal(): JSX.Element {
             "markdown",
             "completion",
           ],
+        },
+        {
+          id: "heading-level-labels",
+          title: "Heading level labels",
+          description:
+            "Show H1, H2, H3, and other level labels beside headings.",
+          keywords: ["heading", "header", "h1", "h2", "outline", "level"],
+        },
+        {
+          id: "editor-tab-size",
+          title: "Tab size",
+          description: "Choose how many spaces a tab occupies in the editor.",
+          keywords: ["tab", "indent", "spaces", "width"],
+        },
+        {
+          id: "list-indent-guides",
+          title: "Indent guides",
+          description: "Vertical guide lines at each nested list level.",
+          keywords: ["indent", "guides", "list", "nested", "outline", "lines"],
+        },
+        {
+          id: "text-replacements-enabled",
+          title: "Text replacements",
+          description: "Replace typed snippets such as -> with →.",
+          keywords: [
+            "snippet",
+            "replacement",
+            "arrow",
+            "autocorrect",
+            "expand",
+          ],
+        },
+        {
+          id: "auto-pairs",
+          title: "Auto-pair brackets and delimiters",
+          description:
+            "Insert matching [] () and {} as you type; quotes pair in Markdown code.",
+          keywords: [
+            "auto pair",
+            "autopair",
+            "parentheses",
+            "braces",
+            "brackets",
+            "quotes",
+            "code blocks",
+            "completion",
+            "vim",
+          ],
+        },
+        {
+          id: "auto-pair-quotes-in-prose",
+          title: "Auto-pair quotes in prose",
+          description: "Also insert matching quotes outside Markdown code.",
+          keywords: ["auto pair", "autopair", "quotes", "prose", "code blocks"],
         },
         {
           id: "note-tabs",
@@ -1916,6 +2154,43 @@ export function SettingsModal(): JSX.Element {
             "System-wide shortcut to open the floating capture window.",
           keywords: ["quick capture", "hotkey", "shortcut"],
         },
+        {
+          id: "custom-code-languages",
+          title: "Custom code languages",
+          description:
+            "Import TextMate grammars for custom fenced code-block highlighting.",
+          keywords: [
+            "syntax",
+            "highlight",
+            "textmate",
+            "grammar",
+            "code fence",
+            "language",
+          ],
+        },
+        {
+          id: "atlas-enabled",
+          title: "Atlas",
+          description:
+            "The Atlas map: the whole vault as notes and links, in 2D or 3D.",
+          keywords: ["atlas", "map", "graph", "visualize", "links", "network", "sky", "3d"],
+        },
+        {
+          id: "workflows-enabled",
+          title: "Workflows",
+          description:
+            "The Workflows canvas for running repeatable, file-changing steps over the vault.",
+          keywords: [
+            "workflow",
+            "workflows",
+            "automation",
+            "canvas",
+            "pipeline",
+            "graph",
+            "nodes",
+            "run",
+          ],
+        },
       ],
       subTabs: [
         {
@@ -1923,6 +2198,7 @@ export function SettingsModal(): JSX.Element {
           title: "Vim",
           searchIds: [
             "vim-mode",
+            "wrapped-line-motions",
             "vim-insert-escape",
             "leader-key-hints",
             "leader-hint-behavior",
@@ -1944,6 +2220,21 @@ export function SettingsModal(): JSX.Element {
                 />
                 {vimMode ? (
                   <>
+                    <SegmentedRow
+                      label="Wrapped line motions"
+                      description="Display row keeps $, I, A, v$, y$, d$, and c$ on the visible wrapped row. Logical line restores traditional Vim behavior; g0, g^, and g$ still target the display row."
+                      value={vimWrappedLineMotions}
+                      settingId="wrapped-line-motions"
+                      options={[
+                        { value: "display", label: "Display row" },
+                        { value: "logical", label: "Logical line" },
+                      ]}
+                      onChange={(next) =>
+                        setVimWrappedLineMotions(
+                          next as VimWrappedLineMotionMode,
+                        )
+                      }
+                    />
                     <TextInputRow
                       label="Exit insert mode with"
                       description="Type this key sequence in insert mode to act as Escape, e.g. jk or jj. Leave empty to disable."
@@ -1958,6 +2249,13 @@ export function SettingsModal(): JSX.Element {
                       value={vimYankToClipboard}
                       settingId="vim-yank-to-clipboard"
                       onChange={setVimYankToClipboard}
+                    />
+                    <ToggleRow
+                      label="Keep the input method out of normal mode"
+                      description="With a Korean, Chinese, or Japanese input method active, normal-mode keys were composed into syllables instead of running as motions. On, the editor takes no text input outside insert mode, so h j k l stay motions and i / a start a clean composition. Skipped on touch devices."
+                      value={vimBlockImeInNormalMode}
+                      settingId="vim-block-ime-in-normal-mode"
+                      onChange={setVimBlockImeInNormalMode}
                     />
                     <SliderRow
                       label="Scroll offset"
@@ -2089,7 +2387,15 @@ export function SettingsModal(): JSX.Element {
           searchIds: [
             "live-preview",
             "render-tables",
+            "harper-enabled",
+            "harper-dialect",
+            "sync-title-heading-on-rename",
             "markdown-overrides",
+            "heading-level-labels",
+            "editor-tab-size",
+            "list-indent-guides",
+            "auto-pairs",
+            "auto-pair-quotes-in-prose",
             "note-tabs",
             "wrap-note-tabs",
             "word-wrap",
@@ -2144,12 +2450,69 @@ export function SettingsModal(): JSX.Element {
                   ]}
                   onChange={(next) => setMathRenderer(next)}
                 />
+                <SliderRow
+                  label="Math size"
+                  description="Scale inline $…$ and block $$…$$ math relative to the surrounding text, in both the editor and the reading view."
+                  value={mathFontScale}
+                  min={50}
+                  max={200}
+                  step={5}
+                  unit="%"
+                  settingId="math-font-scale"
+                  onChange={setMathFontScale}
+                />
+                {mathRenderer === "typst" && (
+                  <ToggleRow
+                    label="Typst definitions from tags"
+                    description="Prepend shared Typst definitions to a note's formulas based on its tags, so the same notation can mean different things per subject. Write a preamble as an ordinary note in the preamble folder (`typst` by default), titled with the tag path in dots: `typst/physics.md` applies to #physics, `typst/physics.mechanics.md` to #physics/mechanics, layered general to specific. Preamble notes sync and are editable like any other note, but they never contribute #tags, because their `#let` definitions are Typst variables."
+                    value={typstTagPreambles}
+                    settingId="typst-tag-preambles"
+                    onChange={setTypstTagPreambles}
+                  />
+                )}
+                {mathRenderer === "typst" && typstTagPreambles && (
+                  <TypstPreambleFolderRow settingId="typst-preamble-folder" />
+                )}
+                {harperSupported() && (
+                <ToggleRow
+                  label="Grammar and spelling with Harper"
+                  description="Underline grammar and spelling problems as you write. Harper (writewithharper.com) runs on this device; no text leaves the app. Hover a mark or press z= in Vim mode for the fixes, ]s and [s jump between them, zg adds a word to this vault's dictionary. Off by default."
+                  value={harperEnabled}
+                  settingId="harper-enabled"
+                  onChange={setHarperEnabled}
+                />
+                )}
+                {harperSupported() && harperEnabled && (
+                  <SegmentedRow
+                    label="Harper dialect"
+                    description="The English Harper checks against."
+                    value={harperDialect}
+                    settingId="harper-dialect"
+                    options={HARPER_DIALECTS.map((dialect) => ({
+                      value: dialect.value,
+                      label: dialect.label,
+                    }))}
+                    onChange={setHarperDialect}
+                  />
+                )}
                 <ToggleRow
                   label="Relaxed $$ math delimiters"
                   description="Render a $$…$$ display block even when text sits before the opening $$ (`Note: $$…$$`) or after the closing $$ (`$$…$$ done`), like LaTeX. Off by default; the surrounding text moves to its own line in the reading view, while the editor keeps showing the raw source. Leave off if you write literal $$ in prose."
                   value={looseMathDelimiters}
                   settingId="loose-math-delimiters"
                   onChange={setLooseMathDelimiters}
+                />
+                <SegmentedRow
+                  label="Default view mode"
+                  description="The mode a note opens in before you have picked one for it: Edit to write, Preview to read, Split for both. Each note still remembers the mode you last used on it."
+                  value={defaultPaneMode}
+                  settingId="default-view-mode"
+                  options={[
+                    { value: "edit", label: "Edit" },
+                    { value: "split", label: "Split" },
+                    { value: "preview", label: "Preview" },
+                  ]}
+                  onChange={(next) => setDefaultPaneMode(next)}
                 />
                 <ToggleRow
                   label="Keep view mode when switching notes"
@@ -2159,12 +2522,62 @@ export function SettingsModal(): JSX.Element {
                   onChange={setKeepViewModeAcrossNotes}
                 />
                 <ToggleRow
-                  label="Markdown snippets"
-                  description="Auto-close markdown as you type: ** / __ / ~~ / ` / == / [[ / %% then Space wrap the cursor, and ``` / ~~~ / $$ then Enter expand a fenced block. In Vim mode this only applies in insert mode."
+                  label="Sync title heading on rename"
+                  description="Renaming a note also rewrites its leading `# heading` to the new name, so the title line stops drifting from the filename. Only an existing top-level heading is rewritten — a note that opens with prose, a list, or a deeper heading is left alone, so deleting the `#` line opts that note out for good."
+                  value={syncTitleHeadingOnRename}
+                  settingId="sync-title-heading-on-rename"
+                  onChange={setSyncTitleHeadingOnRename}
+                />
+                <ToggleRow
+                  label="Auto-close Markdown"
+                  description="Auto-close markdown as you type: ** / __ / ~~ / ` / == / [[ / %% then Space wrap the cursor, and ``` / ~~~ / $$ then Enter expand a fenced block. Never fires inside a code block or inline code, so a == comparison in code stays code. In Vim mode this only applies in insert mode."
                   value={markdownSnippets}
                   settingId="markdown-overrides"
                   onChange={setMarkdownSnippets}
                 />
+                <ToggleRow
+                  label="Heading level labels"
+                  description="Show H1, H2, H3, and other level labels before headings. Heading fold arrows remain available either way."
+                  value={showHeadingLevelLabels}
+                  settingId="heading-level-labels"
+                  onChange={setShowHeadingLevelLabels}
+                />
+                <SliderRow
+                  label="Tab size"
+                  description="How many spaces a tab occupies in the editor and when indenting. Nested list levels also render this many columns deep, whatever the note's source spacing."
+                  value={editorTabSize}
+                  min={1}
+                  max={8}
+                  step={1}
+                  unit=" spaces"
+                  settingId="editor-tab-size"
+                  onChange={setEditorTabSize}
+                />
+                <ToggleRow
+                  label="Indent guides"
+                  description="Draw a vertical guide line at each nested list level in the editor. Guides sit at the Tab size columns."
+                  value={listIndentGuides}
+                  settingId="list-indent-guides"
+                  onChange={setListIndentGuides}
+                />
+                <ToggleRow
+                  label="Auto-pair brackets and delimiters"
+                  description="Insert matching [] () and {} as you type, wrap selected text, and skip over a closing delimiter that is already present. Quotes pair inside inline code and fenced code blocks. In Vim mode this only applies in insert mode."
+                  value={autoPairs}
+                  settingId="auto-pairs"
+                  onChange={setAutoPairs}
+                />
+                {autoPairs && (
+                  <ToggleRow
+                    label="Auto-pair quotes in prose"
+                    description={
+                      "Also insert matching \"\" and '' outside inline code and fenced code blocks."
+                    }
+                    value={autoPairQuotesInProse}
+                    settingId="auto-pair-quotes-in-prose"
+                    onChange={setAutoPairQuotesInProse}
+                  />
+                )}
                 <ToggleRow
                   label="Note tabs"
                   description="Open notes in tabs and allow split-friendly tab workflows. Turn off to keep the simpler single-note behavior."
@@ -2242,6 +2655,47 @@ export function SettingsModal(): JSX.Element {
           ),
         },
         {
+          id: "text-replacements",
+          title: "Text replacements",
+          description:
+            "Expand short triggers into symbols, words, or phrases as you type.",
+          searchIds: ["text-replacements-enabled"],
+          content: (
+            <div className="space-y-6">
+              <Section
+                title="Text replacements"
+                description="Create snippets that expand immediately in the note editor."
+              >
+                <ToggleRow
+                  label="Enable text replacements"
+                  description="Replace matching text as you type. The default rule turns -> into →. In Vim mode, replacements run only in insert mode."
+                  value={textReplacementsEnabled}
+                  settingId="text-replacements-enabled"
+                  onChange={setTextReplacementsEnabled}
+                />
+                <TextReplacementsSettings
+                  replacements={textReplacements}
+                  onChange={setTextReplacements}
+                />
+              </Section>
+            </div>
+          ),
+        },
+        {
+          id: "languages",
+          title: "Languages",
+          searchIds: ["custom-code-languages"],
+          content: supportsCustomCodeLanguages ? (
+            <div {...settingsSearchTargetProps("custom-code-languages")}>
+              <CustomCodeLanguagesSettings />
+            </div>
+          ) : (
+            <InlineNote>
+              Custom code languages are available in the desktop app.
+            </InlineNote>
+          ),
+        },
+        {
           id: "quick-capture",
           title: "Quick capture",
           searchIds: [
@@ -2256,6 +2710,127 @@ export function SettingsModal(): JSX.Element {
                 description="Floating capture window for thoughts you want in the vault without leaving whatever you're doing."
               >
                 <QuickCaptureHotkeyRow settingId="quick-capture-hotkey" />
+              </Section>
+            </div>
+          ),
+        },
+        {
+          id: "atlas",
+          title: "Atlas",
+          description:
+            "The Atlas map of the vault, and whether it appears in the app at all.",
+          searchIds: ["atlas-enabled"],
+          content: (
+            <div className="space-y-6">
+              <Section
+                title="Atlas"
+                description="The whole vault drawn as a map: every note a point, every wikilink a line, regions from your top-level folders. On by default."
+              >
+                <ToggleRow
+                  label="Atlas"
+                  description="Show the Atlas view: the sidebar row, the Open Atlas command, and the Space g leader binding in Vim mode. Custom themes can restyle it through the --z-atlas-region-1 to --z-atlas-region-8 and --z-atlas-bg CSS variables."
+                  value={atlasEnabled}
+                  settingId="atlas-enabled"
+                  onChange={setAtlasEnabled}
+                />
+              </Section>
+            </div>
+          ),
+        },
+        {
+          id: "workflows",
+          title: "Workflows",
+          description:
+            "The Workflows canvas, and whether it appears in the app at all.",
+          searchIds: [
+            "workflows-enabled",
+            "workflow-hidden-recipes",
+            "workflow-tutorial",
+          ],
+          content: (
+            <div className="space-y-6">
+              <Section
+                title="Workflows"
+                description="Repeatable steps you write once and run over the vault, edited on a canvas in their own view."
+              >
+                <ToggleRow
+                  label="Workflows"
+                  description="Run saved, repeatable steps over your notes from a canvas view. Off by default; turning it on adds the Workflows view with its sidebar row, command, and Leader shortcut. Turning it off hides all of that again and closes the view if it is open."
+                  value={workflowsEnabled}
+                  settingId="workflows-enabled"
+                  onChange={setWorkflowsEnabled}
+                />
+                <div
+                  className="flex items-center justify-between gap-5 px-5 py-4"
+                  {...settingsSearchTargetProps("workflow-tutorial")}
+                >
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium text-ink-900">
+                      Guided tutorial
+                    </div>
+                    <div className="mt-1 text-xs leading-5 text-ink-500">
+                      A hands-on walkthrough of the whole loop: canvas, text,
+                      editing, activating, the dry run, apply, and undo. It
+                      seeds a small practice folder to learn on and removes
+                      everything it created when you finish.
+                    </div>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    className="shrink-0"
+                    onClick={() => void startWorkflowTutorial()}
+                  >
+                    Start tutorial
+                  </Button>
+                </div>
+                {(() => {
+                  const total = WORKFLOW_PRESETS.length;
+                  const hidden = hiddenPresetsInOrder(
+                    hiddenWorkflowPresets,
+                  ).length;
+                  const copy =
+                    hidden === 0
+                      ? `All ${total} shipped recipes appear in the recipe gallery, behind New workflow in the Workflows view.`
+                      : hidden === total
+                        ? "Every shipped recipe is hidden; the recipe gallery (New workflow) starts from Blank."
+                        : `${hidden} of ${total} recipes are hidden from the recipe gallery, behind New workflow (press x on a recipe there to hide one at a time).`;
+                  return (
+                    <div
+                      className="flex items-center justify-between gap-5 px-5 py-4"
+                      {...settingsSearchTargetProps("workflow-hidden-recipes")}
+                    >
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium text-ink-900">
+                          Built-in recipes
+                        </div>
+                        <div className="mt-1 text-xs leading-5 text-ink-500">
+                          {copy}
+                        </div>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-2">
+                        <Button
+                          size="sm"
+                          disabled={hidden === total}
+                          onClick={() =>
+                            setHiddenWorkflowPresets(
+                              WORKFLOW_PRESETS.map((preset) => preset.id),
+                            )
+                          }
+                        >
+                          Hide all
+                        </Button>
+                        <Button
+                          size="sm"
+                          disabled={hidden === 0}
+                          onClick={() => setHiddenWorkflowPresets([])}
+                        >
+                          Restore all
+                        </Button>
+                      </div>
+                    </div>
+                  );
+                })()}
               </Section>
             </div>
           ),
@@ -2329,6 +2904,37 @@ export function SettingsModal(): JSX.Element {
             "workflow",
           ],
         },
+        {
+          id: "show-archived-tasks",
+          title: "Show tasks from archived notes",
+          description:
+            "Keep archived notes' tasks in the Tasks list, boards, and calendars instead of retiring them with the note.",
+          keywords: [
+            "archive",
+            "archived",
+            "retire",
+            "hide",
+            "done",
+            "history",
+            "old",
+          ],
+        },
+        {
+          id: "tasks-excluded-folders",
+          title: "Folders excluded from Tasks",
+          description:
+            "Keep checkbox-heavy folders (reading lists, media backlogs) out of the Tasks list, boards, and calendars. Stored in the vault, honored by every runtime.",
+          keywords: [
+            "exclude",
+            "excluded",
+            "checklist",
+            "reading list",
+            "backlog",
+            "folder",
+            "hide",
+            "checkbox",
+          ],
+        },
       ],
       content: (
         <div className="space-y-6">
@@ -2337,6 +2943,24 @@ export function SettingsModal(): JSX.Element {
             description="Set up the columns for the Tasks Kanban Custom status board. Other @field boards (sprint, area, …) appear automatically as you tag tasks — no setup needed."
           >
             <KanbanStatusesRow settingId="kanban-statuses" />
+          </Section>
+          <Section
+            title="Archived notes"
+            description="What happens to a note's tasks when the note moves to the Archive."
+          >
+            <ToggleRow
+              label="Show tasks from archived notes"
+              description="Keep archived notes' tasks in the Tasks list, boards, and calendars. Off by default: archiving a note retires its tasks with it (the markdown is untouched, and un-archiving brings them back). Archiving a note that still has open tasks always asks first."
+              value={showArchivedTasks}
+              settingId="show-archived-tasks"
+              onChange={setShowArchivedTasks}
+            />
+          </Section>
+          <Section
+            title="Checklists"
+            description="Not every checkbox is a task. Exclude whole folders here, or opt out a single note with tasks: false in its frontmatter (tasks: note keeps a #task note on the board while silencing its checklist)."
+          >
+            <TasksExcludedFoldersRow settingId="tasks-excluded-folders" />
           </Section>
           <button
             type="button"
@@ -2549,6 +3173,58 @@ export function SettingsModal(): JSX.Element {
         </div>
       ),
     },
+    ...(supportsCloudSync
+      ? [
+          {
+            id: "cloud" as const,
+            title: "Cloud",
+            description:
+              "Connect your account, review plan access, and sync this vault.",
+            keywords: [
+              "cloud",
+              "account",
+              "sync",
+              "backup",
+              "publish",
+              "subscription",
+            ],
+            searchItems: [
+              {
+                id: "cloud-account",
+                title: "ZenNotes Cloud account",
+                description:
+                  "Connect or disconnect this app from ZenNotes Cloud.",
+                keywords: ["login", "sign in", "account", "device"],
+              },
+              {
+                id: "cloud-plan",
+                title: "Cloud plan access",
+                description:
+                  "See whether sync, backup, and publishing are included.",
+                keywords: ["subscription", "entitlement", "features"],
+              },
+              {
+                id: "cloud-vault",
+                title: "Cloud vault link",
+                description: "Link this local vault and run a manual sync.",
+                keywords: ["sync", "link", "create", "conflict"],
+              },
+            ],
+            content: (
+              <div {...settingsSearchTargetProps("cloud-account")}>
+                <CloudSettings
+                  localVaultAvailable={
+                    workspaceMode === "local" &&
+                    !!vault &&
+                    vault.temporary !== true
+                  }
+                  localVaultName={vault?.name ?? "My notes"}
+                />
+              </div>
+            ),
+          },
+        ]
+      : []),
     {
       id: "vault",
       title: "Vault",
@@ -3100,7 +3776,10 @@ export function SettingsModal(): JSX.Element {
                   onChange={(mode) =>
                     void persistVaultSettings({
                       ...vaultSettings,
-                      drawingsLocation: { ...vaultSettings.drawingsLocation, mode },
+                      drawingsLocation: {
+                        ...vaultSettings.drawingsLocation,
+                        mode,
+                      },
                     })
                   }
                 />
@@ -3115,7 +3794,10 @@ export function SettingsModal(): JSX.Element {
                     onChange={(next) =>
                       void persistVaultSettings({
                         ...vaultSettings,
-                        drawingsLocation: { mode: "folder", folder: next ?? "" },
+                        drawingsLocation: {
+                          mode: "folder",
+                          folder: next ?? "",
+                        },
                       })
                     }
                   />
@@ -3133,7 +3815,10 @@ export function SettingsModal(): JSX.Element {
                   onChange={(mode) =>
                     void persistVaultSettings({
                       ...vaultSettings,
-                      databasesLocation: { ...vaultSettings.databasesLocation, mode },
+                      databasesLocation: {
+                        ...vaultSettings.databasesLocation,
+                        mode,
+                      },
                     })
                   }
                 />
@@ -3148,7 +3833,10 @@ export function SettingsModal(): JSX.Element {
                     onChange={(next) =>
                       void persistVaultSettings({
                         ...vaultSettings,
-                        databasesLocation: { mode: "folder", folder: next ?? "" },
+                        databasesLocation: {
+                          mode: "folder",
+                          folder: next ?? "",
+                        },
                       })
                     }
                   />
@@ -3779,6 +4467,10 @@ export function SettingsModal(): JSX.Element {
             "archive-label",
             "trash-label",
             "tasks-label",
+            "inbox-path",
+            "quick-notes-path",
+            "archive-path",
+            "trash-path",
           ],
           content: (
             <div className="space-y-6">
@@ -3834,6 +4526,82 @@ export function SettingsModal(): JSX.Element {
                   {getSystemFolderLabel("trash", systemFolderLabels)}, and{" "}
                   {getSystemFolderLabel("tasks", systemFolderLabels)}.
                 </InlineNote>
+              </Section>
+              <Section
+                title="Folder Paths"
+                description="Point each system folder at a directory in your vault: one folder name at the top level, not a nested path. Leave empty for the default. Changing a path does not move existing notes."
+              >
+                <div className="space-y-6">
+                  {(
+                    [
+                      {
+                        key: "inbox" as const,
+                        label: "Inbox path",
+                        desc: "Main notes area.",
+                      },
+                      {
+                        key: "quick" as const,
+                        label: "Quick Notes path",
+                        desc: "Quick-capture folder.",
+                      },
+                      {
+                        key: "archive" as const,
+                        label: "Archive path",
+                        desc: "Cold-storage notes.",
+                      },
+                      {
+                        key: "trash" as const,
+                        label: "Trash path",
+                        desc: "Deleted-note recovery.",
+                      },
+                    ] as const
+                  ).map(({ key, label, desc }) => (
+                    <TextInputRow
+                      key={key}
+                      label={label}
+                      description={desc}
+                      value={vaultSettings.systemFolderPaths?.[key] ?? ""}
+                      placeholder={DEFAULT_FOLDER_PATHS[key]}
+                      settingId={`${key}-path`}
+                      commitOnBlur
+                      issue={folderPathIssues[key] ?? null}
+                      onChange={(next) => {
+                        const trimmed = (next ?? "").trim();
+                        // Say why, rather than saving nothing and letting the
+                        // field snap back to its old value. The normalizer on
+                        // the way in drops what it does not like, which is
+                        // right for a hand-edited file and silent for a person
+                        // typing (#533).
+                        const problem = describeSystemFolderPathIssue(
+                          key,
+                          trimmed,
+                          vaultSettings.systemFolderPaths,
+                        );
+                        setFolderPathIssues((current) => ({
+                          ...current,
+                          [key]: problem,
+                        }));
+                        if (problem) return;
+                        void persistVaultSettings({
+                          ...vaultSettings,
+                          systemFolderPaths: {
+                            ...vaultSettings.systemFolderPaths,
+                            [key]: trimmed || undefined,
+                          },
+                        });
+                      }}
+                    />
+                  ))}
+                  <InlineNote>
+                    Resolved paths:{" "}
+                    {(["inbox", "quick", "archive", "trash"] as const)
+                      .map((f) =>
+                        resolveFolderPath(f, vaultSettings.systemFolderPaths),
+                      )
+                      .join(", ")}
+                    .
+                  </InlineNote>
+                </div>
               </Section>
             </div>
           ),
@@ -4175,7 +4943,8 @@ export function SettingsModal(): JSX.Element {
                       </div>
                     </div>
                     <div className="flex flex-wrap items-center justify-end gap-2">
-                      {appUpdateState?.phase === "available" ? (
+                      {appUpdateState?.phase === "available" &&
+                      appUpdateState.installable ? (
                         <button
                           onClick={triggerUpdateDownload}
                           className="rounded-xl border border-accent/30 bg-accent/10 px-3.5 py-2 text-xs font-medium text-accent transition-colors hover:bg-accent/15"
@@ -4783,7 +5552,9 @@ function KeymapSettings({
           onSave={(binding) => {
             onSetBinding(
               recording.id,
-              binding === recording.defaultBinding ? null : binding,
+              binding === getDefaultKeymapBinding(recording.id)
+                ? null
+                : binding,
             );
             setRecording(null);
           }}
@@ -4909,7 +5680,10 @@ function KeymapRecorderModal({
           </div>
           <div className="mt-1 text-xs text-ink-500">
             Default:{" "}
-            {formatKeymapBinding(definition.defaultBinding, definition.kind)}
+            {formatKeymapBinding(
+              getDefaultKeymapBinding(definition.id),
+              definition.kind,
+            )}
           </div>
         </div>
         <div className="flex items-center justify-between gap-3 border-t border-paper-300/60 px-5 py-3">
@@ -5410,6 +6184,7 @@ function TextInputRow({
   placeholder,
   settingId,
   commitOnBlur = false,
+  issue,
   onChange,
 }: {
   label: string;
@@ -5418,6 +6193,9 @@ function TextInputRow({
   placeholder?: string;
   settingId?: string;
   commitOnBlur?: boolean;
+  /** Why the last value was refused. Shown under the description, in place of
+   *  the field quietly reverting and leaving the user to guess. */
+  issue?: string | null;
   onChange: (next: string | null) => void;
 }): JSX.Element {
   const [draft, setDraft] = useState(value);
@@ -5443,6 +6221,14 @@ function TextInputRow({
         {description && (
           <div className="mt-1 text-xs leading-5 text-ink-500">
             {description}
+          </div>
+        )}
+        {issue && (
+          <div
+            className="mt-1 text-xs leading-5 text-[color:rgb(var(--z-red))]"
+            role="alert"
+          >
+            {issue}
           </div>
         )}
       </div>
@@ -6164,17 +6950,19 @@ function KanbanStatusesRow({ settingId }: { settingId?: string }): JSX.Element {
 
   return (
     <div className="px-5 py-4" {...settingsSearchTargetProps(settingId)}>
-      <div className="text-sm font-medium text-ink-900">Custom Kanban statuses</div>
+      <div className="text-sm font-medium text-ink-900">
+        Custom Kanban statuses
+      </div>
       <div className="mt-1 text-xs leading-5 text-ink-500">
-        The columns for the Tasks Kanban “Custom status” board, in order. Saved to
-        your config file. Move a task by dragging its card, or focus it and press
-        Shift+H / Shift+L; you never have to type the tokens by hand.
+        The columns for the Tasks Kanban “Custom status” board, in order. Saved
+        to your config file. Move a task by dragging its card, or focus it and
+        press Shift+H / Shift+L; you never have to type the tokens by hand.
       </div>
       <div className="mt-3 space-y-2">
         {rows.length === 0 && (
           <div className="rounded-md border border-dashed border-paper-300 px-3 py-2 text-xs text-ink-500">
-            No statuses yet. Add your first column below (for example Backlog, In
-            progress, Review, Done).
+            No statuses yet. Add your first column below (for example Backlog,
+            In progress, Review, Done).
           </div>
         )}
         {rows.map((id, i) => (
@@ -6247,6 +7035,170 @@ function KanbanStatusesRow({ settingId }: { settingId?: string }): JSX.Element {
         >
           Add status
         </button>
+      </div>
+    </div>
+  );
+}
+
+const NO_EXCLUDED_FOLDERS: string[] = [];
+
+/** Settings editor for the vault's `tasks.excludedFolders` list (#458). The
+ *  sidebar folder context menu ("Exclude from Tasks") is the primary way in;
+ *  this list is where entries are reviewed, removed, or typed by hand. Saved
+ *  to vault.json, so it travels with the vault and applies to every runtime. */
+function TasksExcludedFoldersRow({
+  settingId,
+}: {
+  settingId?: string;
+}): JSX.Element {
+  const excluded = useStore(
+    (s) => s.vaultSettings.tasks?.excludedFolders ?? NO_EXCLUDED_FOLDERS,
+  );
+  const toggleTasksExcludedFolder = useStore(
+    (s) => s.toggleTasksExcludedFolder,
+  );
+  const [draft, setDraft] = useState("");
+
+  const addDraft = (): void => {
+    const cleaned = normalizeTasksExcludedFolder(draft);
+    if (!cleaned || excluded.includes(cleaned)) return;
+    setDraft("");
+    void toggleTasksExcludedFolder(cleaned);
+  };
+
+  return (
+    <div className="px-5 py-4" {...settingsSearchTargetProps(settingId)}>
+      <div className="text-sm font-medium text-ink-900">
+        Folders excluded from Tasks
+      </div>
+      <div className="mt-1 text-xs leading-5 text-ink-500">
+        Notes in these folders never feed the Tasks list, boards, or calendars
+        (their checkboxes stay plain checkboxes). Right-click a folder in the
+        sidebar and choose “Exclude from Tasks”, or add its vault path here.
+        Saved in the vault itself, so the CLI, MCP, and the self-hosted server
+        respect it too.
+      </div>
+      <div className="mt-3 space-y-2">
+        {excluded.length === 0 && (
+          <div className="rounded-md border border-dashed border-paper-300 px-3 py-2 text-xs text-ink-500">
+            No folders excluded. Reading lists and media backlogs are the usual
+            candidates.
+          </div>
+        )}
+        {excluded.map((relDir) => (
+          <div key={relDir} className="flex items-center gap-2">
+            <div className="min-w-0 flex-1 truncate rounded-md border border-paper-300 bg-paper-100 px-2.5 py-1.5 font-mono text-xs text-ink-900">
+              {relDir}
+            </div>
+            <button
+              type="button"
+              onClick={() => void toggleTasksExcludedFolder(relDir)}
+              aria-label={`Include ${relDir} in Tasks again`}
+              className="rounded-md px-2 py-1 text-xs text-ink-500 hover:bg-rose-500/15 hover:text-rose-400"
+            >
+              Remove
+            </button>
+          </div>
+        ))}
+      </div>
+      <div className="mt-3 flex items-center gap-2">
+        <input
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              addDraft();
+            }
+          }}
+          placeholder="Folder path, e.g. inbox/Books"
+          aria-label="Folder path to exclude from Tasks"
+          className="min-w-0 flex-1 rounded-md border border-paper-300 bg-paper-100 px-2.5 py-1.5 text-sm text-ink-900 outline-none focus:border-accent/60"
+        />
+        <button
+          type="button"
+          onClick={addDraft}
+          className="shrink-0 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:opacity-90"
+        >
+          Exclude folder
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Settings editor for the vault's `typstPreambles.folder` name (#562).
+ *  The folder does double duty: its notes are the Typst preambles, and they
+ *  are the notes every tag scanner skips, because `#let vec(x) = …` is a Typst
+ *  variable rather than a tag. Renaming it therefore moves both at once, which
+ *  is the way out for a vault that keeps ordinary tagged notes in a folder it
+ *  happens to have called `typst`. Saved to vault.json, so it travels with the
+ *  vault and applies on every runtime. */
+function TypstPreambleFolderRow({
+  settingId,
+}: {
+  settingId?: string;
+}): JSX.Element {
+  const stored = useStore((s) => s.vaultSettings.typstPreambles?.folder);
+  const setTypstPreambleFolder = useStore((s) => s.setTypstPreambleFolder);
+  const effective = resolveTypstPreambleFolder(stored);
+  const [draft, setDraft] = useState(effective);
+  // Someone else (another window, a hand edit of vault.json) can move the
+  // folder while this row is mounted; follow it rather than showing a stale
+  // name the user never typed.
+  useEffect(() => {
+    setDraft(effective);
+  }, [effective]);
+
+  const commit = (): void => {
+    const cleaned = normalizeTypstPreambleFolder(draft);
+    if (!cleaned) {
+      setDraft(effective);
+      return;
+    }
+    void setTypstPreambleFolder(cleaned);
+  };
+
+  return (
+    <div className="px-5 py-4" {...settingsSearchTargetProps(settingId)}>
+      <div className="text-sm font-medium text-ink-900">
+        Typst preamble folder
+      </div>
+      <div className="mt-1 text-xs leading-5 text-ink-500">
+        Notes in this folder are preambles, and their #tags are left out of the
+        tag list: a preamble is Typst source, where `#let` and `#var` are
+        variables rather than tags. Rename it if you keep ordinary tagged notes
+        in a folder called typst. Saved in the vault itself, so the CLI, MCP,
+        and the self-hosted server agree.
+      </div>
+      <div className="mt-3 flex items-center gap-2">
+        <input
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              commit();
+            }
+            if (e.key === "Escape") {
+              e.preventDefault();
+              setDraft(effective);
+            }
+          }}
+          onBlur={commit}
+          placeholder={TYPST_PREAMBLE_FOLDER}
+          aria-label="Typst preamble folder name"
+          className="min-w-0 flex-1 rounded-md border border-paper-300 bg-paper-100 px-2.5 py-1.5 font-mono text-sm text-ink-900 outline-none focus:border-accent/60"
+        />
+        {effective !== TYPST_PREAMBLE_FOLDER && (
+          <button
+            type="button"
+            onClick={() => void setTypstPreambleFolder(TYPST_PREAMBLE_FOLDER)}
+            className="shrink-0 rounded-md px-2 py-1 text-xs text-ink-500 hover:bg-paper-200"
+          >
+            Reset
+          </button>
+        )}
       </div>
     </div>
   );
@@ -6766,6 +7718,36 @@ function McpSettings(): JSX.Element {
   const serverStatusTone =
     runtime == null ? "off" : entryMissing ? "warn" : "ok";
   const serverStatusClass = statusChipClass(serverStatusTone);
+
+  // The web client has no MCP runtime to describe and nothing to install
+  // into; say so instead of rendering controls that cannot work (#672).
+  if (runtime?.unavailableReason) {
+    return (
+      <div className="space-y-6">
+        <Section
+          title="Server"
+          description="MCP integrations are set up from the ZenNotes desktop app."
+          settingId="mcp-server"
+        >
+          <div className="px-5 py-4">
+            <div className="flex items-center gap-2">
+              <span
+                className={[
+                  "rounded-full border px-2 py-0.5 text-2xs font-medium uppercase tracking-[0.14em]",
+                  statusChipClass("off"),
+                ].join(" ")}
+              >
+                Desktop only
+              </span>
+            </div>
+            <p className="mt-3 text-xs leading-5 text-ink-600">
+              {runtime.unavailableReason}
+            </p>
+          </div>
+        </Section>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">

@@ -131,6 +131,7 @@ export function openTableContextMenu(req: TableMenuRequest): void {
     alignItem('Align left', 'left', col, model, apply, row),
     alignItem('Align center', 'center', col, model, apply, row),
     alignItem('Align right', 'right', col, model, apply, row),
+    alignItem('Align default', 'none', col, model, apply, row),
     { kind: 'sep' },
     {
       kind: 'item',
@@ -337,6 +338,18 @@ export function openTableContextMenu(req: TableMenuRequest): void {
   }
 }
 
+/**
+ * One entry of the alignment radio group, ticked when the column already has
+ * it. Choosing an alignment sets it — including "Align default", which is how a
+ * column goes back to none.
+ *
+ * Picking the active alignment used to clear it, an invisible toggle: a column
+ * with no alignment renders identically to a left-aligned one, so choosing
+ * "Align left" twice looked like "nothing happened, then nothing happened",
+ * and choosing it once on a fresh column looked like the first pick was
+ * ignored. A ticked group with an explicit default says what the state is and
+ * only ever moves it where you point. (#485)
+ */
 function alignItem(
   label: string,
   align: ColumnAlign,
@@ -345,11 +358,10 @@ function alignItem(
   apply: TableMenuRequest['apply'],
   row: number
 ): MenuItem {
-  const active = model.aligns[col] === align
+  const current = model.aligns[col] ?? 'none'
   return {
     kind: 'item',
-    label: active ? `${label} ✓` : label,
-    run: () =>
-      apply(setColumnAlign(model, col, active ? 'none' : align), { row, col })
+    label: current === align ? `${label} ✓` : label,
+    run: () => apply(setColumnAlign(model, col, align), { row, col })
   }
 }

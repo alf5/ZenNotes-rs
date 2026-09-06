@@ -54,6 +54,79 @@ describe('livePreviewPlugin', () => {
     view.destroy()
   })
 
+  it('keeps a half-typed link readable while the target is written (#471)', () => {
+    // `[Example](` parses as `Link[0,9]`: the node stops at `]` because the
+    // target is unclosed, so the brackets used to be hidden and the label
+    // rendered as `Example(`. Nothing collapses until the `)` lands.
+    const steps = ['[Example](', '[Example](h', '[Example](https://example.com']
+    for (const doc of steps) {
+      const view = mountEditor(doc, doc.length)
+      expect(view.dom.textContent).toBe(doc)
+      view.destroy()
+    }
+
+    // The closing paren completes the link: now it renders as the label alone.
+    const done = mountEditor('[Example](https://example.com)\n\nfar', 32)
+    expect(done.dom.textContent).toContain('Example')
+    expect(done.dom.textContent).not.toContain('https://example.com')
+    done.destroy()
+  })
+
+  it('keeps a pasted URL visible in a half-typed link even off the caret line (#471)', () => {
+    // The URL parses as a GFM autolink hanging off the paragraph, not as the
+    // link destination. It follows a `(`, which used to be enough to hide it,
+    // so the pasted URL disappeared outright.
+    const doc = 'see [Example](https://example.com\n\nfar away'
+    const view = mountEditor(doc, doc.length)
+
+    expect(view.dom.textContent).toContain('see [Example](https://example.com')
+
+    view.destroy()
+  })
+
+  it('treats a half-typed image target the same way (#471)', () => {
+    const doc = '![alt](https://example.com'
+    const view = mountEditor(doc, doc.length)
+
+    expect(view.dom.textContent).toBe(doc)
+
+    view.destroy()
+  })
+
+  it('counts nested parens when deciding a link target is closed (#471)', () => {
+    // CommonMark destinations may contain balanced parens, so the first `)`
+    // is not necessarily the end of the target.
+    const open = '[wiki](https://en.wikipedia.org/wiki/Foo_(bar'
+    const half = mountEditor(`${open}\n\nfar`, open.length + 5)
+    expect(half.dom.textContent).toContain(open)
+    half.destroy()
+
+    const closed = mountEditor(`${open}))\n\nfar`, open.length + 7)
+    expect(closed.dom.textContent).toContain('wiki')
+    expect(closed.dom.textContent).not.toContain('en.wikipedia.org')
+    closed.destroy()
+  })
+
+  it('keeps a parenthesised bare URL visible (#471)', () => {
+    // `(https://…)` is an autolink wrapped in prose parens, not a link target.
+    const doc = 'a (https://parens.example) b\n\nfar away'
+    const view = mountEditor(doc, doc.length)
+
+    expect(view.dom.textContent).toContain('a (https://parens.example) b')
+
+    view.destroy()
+  })
+
+  it('keeps hiding the destination of a completed link (#471 regression guard)', () => {
+    const doc = '[label](https://a.com) tail\n\nfar away'
+    const view = mountEditor(doc, doc.length)
+
+    expect(view.dom.textContent).toContain('label tail')
+    expect(view.dom.textContent).not.toContain('https://a.com')
+
+    view.destroy()
+  })
+
   it('keeps the colon visible in a reference-link definition (#188)', () => {
     // The `:` parses as a LinkMark; live preview must not hide it, or the
     // definition reads as a broken `[label] url`.
@@ -90,6 +163,19 @@ describe('livePreviewPlugin', () => {
 
     expect(view.dom.textContent).toContain('Code blocks')
     expect(view.dom.textContent).not.toContain('# Code blocks')
+
+    view.destroy()
+  })
+
+  it('hides a standalone block id off-cursor and reveals it on its line (#601)', () => {
+    const doc = 'Named paragraph.\n\n^standalone\n\nAfter.'
+    const view = mountEditor(doc, doc.indexOf('After'))
+
+    expect(view.dom.textContent).toContain('Named paragraph.')
+    expect(view.dom.textContent).not.toContain('^standalone')
+
+    view.dispatch({ selection: { anchor: doc.indexOf('^standalone') + 2 } })
+    expect(view.dom.textContent).toContain('^standalone')
 
     view.destroy()
   })
@@ -233,6 +319,33 @@ describe('livePreviewPlugin', () => {
       .join(' ')
     expect(marked).toContain('finished item')
     expect(marked).not.toContain('pending item')
+
+    view.destroy()
+  })
+
+  it('renders a `- [/]` in-progress marker without striking the text (#512)', () => {
+    // `[/]` parses as a broken link, not a TaskMarker, so the plugin replaces
+    // the node itself. Cursor on the intro line keeps the task line inactive.
+    const doc = ['intro', '- [/] started item', '- [ ] pending item'].join('\n')
+    const view = mountEditor(doc, 0)
+
+    expect(view.dom.querySelectorAll('.cm-task-in-progress-marker')).toHaveLength(1)
+    // The raw `[/]` is replaced, and the text after it is untouched: no strike
+    // mark (that belongs to done/cancelled), and the content still reads.
+    expect(view.dom.textContent).toContain('started item')
+    expect(view.dom.textContent).not.toContain('[/]')
+    expect(view.dom.querySelectorAll('.cm-task-done')).toHaveLength(0)
+    expect(view.dom.querySelectorAll('.cm-task-cancelled')).toHaveLength(0)
+
+    view.destroy()
+  })
+
+  it('reveals the raw `[/]` while the cursor is on the line', () => {
+    const doc = ['intro', '- [/] started item'].join('\n')
+    const view = mountEditor(doc, doc.indexOf('started'))
+
+    expect(view.dom.textContent).toContain('[/]')
+    expect(view.dom.querySelectorAll('.cm-task-in-progress-marker')).toHaveLength(0)
 
     view.destroy()
   })

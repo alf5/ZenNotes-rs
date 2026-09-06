@@ -5,8 +5,11 @@ import { forceParsing } from '@codemirror/language'
 import { history } from '@codemirror/commands'
 import { EditorState } from '@codemirror/state'
 import { EditorView } from '@codemirror/view'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { Text } from '@codemirror/state'
 import {
+  renderInlineCell,
+  tableBlockAt,
   tablePlugin,
   nextWordStart,
   prevWordStart,
@@ -15,7 +18,19 @@ import {
   findChar
 } from './cm-table'
 import { closeTableContextMenu } from './cm-table-menu'
+import { isMacPlatform } from './keymaps'
 import { useStore } from '../store'
+import { Vim } from '@replit/codemirror-vim'
+
+/** The Vim plugin's unnamed register — the interop point that #706 wires the
+ *  table's y/d/p through, shared with the main editor. */
+function unnamedRegister(): { toString(): string; setText(text: string, linewise?: boolean): void } {
+  return (
+    Vim.getRegisterController() as unknown as {
+      unnamedRegister: { toString(): string; setText(text: string, linewise?: boolean): void }
+    }
+  ).unnamedRegister
+}
 
 const TABLE_DOC = `Intro text.
 
@@ -42,6 +57,16 @@ function mount(doc: string): EditorView {
   view.dispatch({ changes: { from: 0, to: 1 } })
   return view
 }
+
+function selectCellText(cell: HTMLElement): void {
+  const range = document.createRange()
+  range.selectNodeContents(cell)
+  const selection = window.getSelection()
+  selection?.removeAllRanges()
+  selection?.addRange(range)
+}
+
+const modKey = isMacPlatform() ? { metaKey: true } : { ctrlKey: true }
 
 describe('tablePlugin', () => {
   it('renders a GFM table as an editable table widget without throwing', () => {
@@ -141,6 +166,67 @@ describe('tablePlugin', () => {
     view.destroy()
   })
 
+  it('toggles bold Markdown around selected text in an editable cell (#664)', () => {
+    const view = mount(TABLE_DOC)
+    const cell = view.dom.querySelector<HTMLElement>(
+      '.cm-table-widget [data-row="0"][data-col="0"]'
+    )!
+    cell.focus()
+    cell.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'i', bubbles: true, cancelable: true })
+    )
+    selectCellText(cell)
+
+    const bold = (): KeyboardEvent =>
+      new KeyboardEvent('keydown', {
+        key: 'b',
+        code: 'KeyB',
+        ...modKey,
+        bubbles: true,
+        cancelable: true
+      })
+    const apply = bold()
+    cell.dispatchEvent(apply)
+    expect(apply.defaultPrevented).toBe(true)
+    expect(cell.dataset.raw).toBe('**Alice**')
+    expect(window.getSelection()?.toString()).toBe('Alice')
+
+    const remove = bold()
+    cell.dispatchEvent(remove)
+    expect(remove.defaultPrevented).toBe(true)
+    expect(cell.dataset.raw).toBe('Alice')
+    expect(window.getSelection()?.toString()).toBe('Alice')
+    view.destroy()
+  })
+
+  it('wraps selected text in italic Markdown in an editable cell (#664)', () => {
+    const view = mount(TABLE_DOC)
+    const cell = view.dom.querySelector<HTMLElement>(
+      '.cm-table-widget [data-row="1"][data-col="0"]'
+    )!
+    cell.focus()
+    cell.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'i', bubbles: true, cancelable: true })
+    )
+    selectCellText(cell)
+
+    const italic = new KeyboardEvent('keydown', {
+      key: 'i',
+      code: 'KeyI',
+      ...modKey,
+      bubbles: true,
+      cancelable: true
+    })
+    cell.dispatchEvent(italic)
+    expect(italic.defaultPrevented).toBe(true)
+    expect(cell.dataset.raw).toBe('*Bob*')
+    expect(window.getSelection()?.toString()).toBe('Bob')
+
+    view.focus()
+    expect(view.state.doc.toString()).toMatch(/\| \*Bob\* \| 25\s+\|/)
+    view.destroy()
+  })
+
   it('opens the keyboard-navigable action menu on `m`', () => {
     const view = mount(TABLE_DOC)
     const cell = view.dom.querySelector<HTMLElement>(
@@ -183,6 +269,87 @@ describe('tablePlugin', () => {
     cell.dispatchEvent(new KeyboardEvent('keydown', { key: 'l', bubbles: true, cancelable: true }))
     cell.dispatchEvent(new KeyboardEvent('keydown', { key: 'd', bubbles: true, cancelable: true }))
     expect(cell.dataset.raw).toBe('ice')
+    view.destroy()
+  })
+
+  it('keeps char-wise visual mode when `l` crosses into the next cell (#665)', () => {
+    const view = mount(TABLE_DOC)
+    const name = view.dom.querySelector<HTMLElement>(
+      '.cm-table-widget [data-row="0"][data-col="0"]'
+    )!
+    const age = view.dom.querySelector<HTMLElement>(
+      '.cm-table-widget [data-row="0"][data-col="1"]'
+    )!
+    name.focus()
+
+    for (const key of ['v', '$', 'l']) {
+      ;(document.activeElement as HTMLElement).dispatchEvent(
+        new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })
+      )
+    }
+
+    expect(document.activeElement).toBe(age)
+    expect(name.classList.contains('is-vim-visual')).toBe(true)
+    expect(age.classList.contains('is-vim-visual')).toBe(true)
+
+    age.dispatchEvent(new KeyboardEvent('keydown', { key: 'd', bubbles: true, cancelable: true }))
+    expect(name.dataset.raw).toBe('')
+    expect(age.dataset.raw).toBe('0')
+    view.destroy()
+  })
+
+  it('extends char-wise visual mode through intervening cells with `j` (#665)', () => {
+    const view = mount(TABLE_DOC)
+    const alice = view.dom.querySelector<HTMLElement>(
+      '.cm-table-widget [data-row="0"][data-col="0"]'
+    )!
+    const bob = view.dom.querySelector<HTMLElement>(
+      '.cm-table-widget [data-row="1"][data-col="0"]'
+    )!
+    alice.focus()
+    alice.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', bubbles: true, cancelable: true }))
+    alice.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', bubbles: true, cancelable: true }))
+
+    expect(document.activeElement).toBe(bob)
+    expect(view.dom.querySelectorAll('.cm-table-cell.is-vim-visual')).toHaveLength(3)
+    view.destroy()
+  })
+
+  it('continues visual `w` at the start of the next cell (#665)', () => {
+    const view = mount(TABLE_DOC)
+    const alice = view.dom.querySelector<HTMLElement>(
+      '.cm-table-widget [data-row="0"][data-col="0"]'
+    )!
+    const age = view.dom.querySelector<HTMLElement>(
+      '.cm-table-widget [data-row="0"][data-col="1"]'
+    )!
+    alice.focus()
+    alice.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', bubbles: true, cancelable: true }))
+    alice.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', bubbles: true, cancelable: true }))
+
+    expect(document.activeElement).toBe(age)
+    expect(view.dom.querySelectorAll('.cm-table-cell.is-vim-visual')).toHaveLength(2)
+    view.destroy()
+  })
+
+  it('uses `V` to select complete table rows (#665)', () => {
+    const view = mount(TABLE_DOC)
+    const age = view.dom.querySelector<HTMLElement>(
+      '.cm-table-widget [data-row="0"][data-col="1"]'
+    )!
+    const lastCell = view.dom.querySelector<HTMLElement>(
+      '.cm-table-widget [data-row="1"][data-col="1"]'
+    )!
+    age.focus()
+    age.dispatchEvent(new KeyboardEvent('keydown', { key: 'V', bubbles: true, cancelable: true }))
+    age.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', bubbles: true, cancelable: true }))
+
+    expect(document.activeElement).toBe(lastCell)
+    const selected = Array.from(
+      view.dom.querySelectorAll<HTMLElement>('.cm-table-cell.is-vim-visual')
+    )
+    expect(selected).toHaveLength(4)
+    expect(selected.map((cell) => cell.dataset.raw)).toEqual(['Alice', '30', 'Bob', '25'])
     view.destroy()
   })
 
@@ -235,6 +402,130 @@ describe('tablePlugin', () => {
     cell.dispatchEvent(new KeyboardEvent('keydown', { key: 'd', bubbles: true, cancelable: true }))
     cell.dispatchEvent(new KeyboardEvent('keydown', { key: 'd', bubbles: true, cancelable: true }))
     expect(cell.dataset.raw).toBe('')
+    view.destroy()
+  })
+
+  // #706: yank and paste inside table cells, through the shared Vim register.
+  const press = (cell: HTMLElement, ...keys: string[]): void => {
+    for (const key of keys) {
+      cell.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
+    }
+  }
+
+  it('yy yanks the whole cell into the unnamed register (#706)', () => {
+    const view = mount(TABLE_DOC)
+    unnamedRegister().setText('')
+    const cell = view.dom.querySelector<HTMLElement>(
+      '.cm-table-widget [data-row="0"][data-col="0"]'
+    )!
+    press(cell, 'y', 'y')
+    expect(unnamedRegister().toString()).toBe('Alice')
+    // Yank leaves the cell untouched.
+    expect(cell.dataset.raw).toBe('Alice')
+    view.destroy()
+  })
+
+  it('y$ and yiw yank ranges; Y yanks the cell (#706)', () => {
+    const view = mount(TABLE_DOC)
+    const cell = view.dom.querySelector<HTMLElement>(
+      '.cm-table-widget [data-row="0"][data-col="0"]'
+    )!
+    unnamedRegister().setText('')
+    press(cell, 'y', '$')
+    expect(unnamedRegister().toString()).toBe('Alice')
+    unnamedRegister().setText('')
+    press(cell, 'y', 'i', 'w')
+    expect(unnamedRegister().toString()).toBe('Alice')
+    unnamedRegister().setText('')
+    press(cell, 'Y')
+    expect(unnamedRegister().toString()).toBe('Alice')
+    expect(cell.dataset.raw).toBe('Alice')
+    view.destroy()
+  })
+
+  it('p pastes the register after the cursor char, P before it (#706)', () => {
+    const view = mount(TABLE_DOC)
+    const cell = view.dom.querySelector<HTMLElement>(
+      '.cm-table-widget [data-row="0"][data-col="1"]'
+    )!
+    expect(cell.dataset.raw).toBe('30')
+    unnamedRegister().setText('X')
+    press(cell, 'p') // cursor on "3" → paste after it
+    expect(cell.dataset.raw).toBe('3X0')
+    unnamedRegister().setText('Y')
+    // After p the cursor sits on the pasted "X" (offset 1); P inserts before it.
+    press(cell, 'P')
+    expect(cell.dataset.raw).toBe('3YX0')
+    view.destroy()
+  })
+
+  it('yanks in one cell and pastes into another (#706)', () => {
+    const view = mount(TABLE_DOC)
+    const alice = view.dom.querySelector<HTMLElement>(
+      '.cm-table-widget [data-row="0"][data-col="0"]'
+    )!
+    const bob = view.dom.querySelector<HTMLElement>(
+      '.cm-table-widget [data-row="1"][data-col="0"]'
+    )!
+    press(alice, 'y', 'y')
+    press(bob, 'P')
+    expect(bob.dataset.raw).toBe('AliceBob')
+    view.destroy()
+  })
+
+  it('x and dd save the deleted text so it can be pasted back (#706)', () => {
+    const view = mount(TABLE_DOC)
+    const cell = view.dom.querySelector<HTMLElement>(
+      '.cm-table-widget [data-row="0"][data-col="0"]'
+    )!
+    press(cell, 'x')
+    expect(cell.dataset.raw).toBe('lice')
+    expect(unnamedRegister().toString()).toBe('A')
+    press(cell, 'P')
+    expect(cell.dataset.raw).toBe('Alice')
+    press(cell, 'd', 'd')
+    expect(cell.dataset.raw).toBe('')
+    expect(unnamedRegister().toString()).toBe('Alice')
+    press(cell, 'p')
+    expect(cell.dataset.raw).toBe('Alice')
+    view.destroy()
+  })
+
+  it('visual y yanks the selection into the register (#706)', () => {
+    const view = mount(TABLE_DOC)
+    unnamedRegister().setText('')
+    const cell = view.dom.querySelector<HTMLElement>(
+      '.cm-table-widget [data-row="0"][data-col="0"]'
+    )!
+    press(cell, 'v', 'l', 'y')
+    expect(unnamedRegister().toString()).toBe('Al')
+    expect(cell.dataset.raw).toBe('Alice')
+    view.destroy()
+  })
+
+  it('visual p replaces the selection and swaps it into the register (#706)', () => {
+    const view = mount(TABLE_DOC)
+    const cell = view.dom.querySelector<HTMLElement>(
+      '.cm-table-widget [data-row="0"][data-col="0"]'
+    )!
+    unnamedRegister().setText('Zed')
+    press(cell, 'v', 'l', 'p')
+    expect(cell.dataset.raw).toBe('Zedice')
+    // Vim swap: the replaced text is now in the unnamed register.
+    expect(unnamedRegister().toString()).toBe('Al')
+    view.destroy()
+  })
+
+  it('flattens a multi-line register to a single cell line on paste (#706)', () => {
+    const view = mount(TABLE_DOC)
+    const cell = view.dom.querySelector<HTMLElement>(
+      '.cm-table-widget [data-row="0"][data-col="0"]'
+    )!
+    // A linewise editor yank: interior break becomes a space, the trailing
+    // newline is shed, and the row's markdown stays intact.
+    unnamedRegister().setText('one\ntwo\n', true)
+    press(cell, 'P')
+    expect(cell.dataset.raw).toBe('one twoAlice')
     view.destroy()
   })
 })
@@ -366,5 +657,144 @@ describe('tablePlugin — column widths (#294)', () => {
     const markers = view.state.doc.toString().match(/zen:cols/g) ?? []
     expect(markers.length).toBe(1)
     view.destroy()
+  })
+})
+
+describe('table cell link following (#445)', () => {
+  const saved = {
+    notes: useStore.getState().notes,
+    selectNote: useStore.getState().selectNote,
+    selectedPath: useStore.getState().selectedPath,
+    vimMode: useStore.getState().vimMode
+  }
+  afterEach(() => {
+    useStore.setState(saved)
+    vi.restoreAllMocks()
+  })
+
+  function setup(vimMode: boolean): ReturnType<typeof vi.fn> {
+    const selectNote = vi.fn(async () => {})
+    useStore.setState({
+      vimMode,
+      selectedPath: 'Doc.md',
+      // Minimal note refs the resolvers need (title + folder + path).
+      notes: [{ path: 'Target-Note.md', title: 'Target-Note', folder: 'inbox' }],
+      selectNote
+    } as never)
+    return selectNote
+  }
+
+  const WIKILINK_DOC = '| A | B |\n| --- | --- |\n| x | [[Target-Note]] |'
+  const MDLINK_DOC = '| A | B |\n| --- | --- |\n| x | [go](Target-Note.md) |'
+
+  it('follows a [[wikilink]] in a cell on plain click instead of revealing raw source', () => {
+    const selectNote = setup(false)
+    const view = mount(WIKILINK_DOC)
+    const anchor = view.dom.querySelector<HTMLAnchorElement>('.cm-table-cell a.wikilink')
+    expect(anchor).toBeTruthy()
+    expect(anchor?.dataset.wikilink).toBe('Target-Note')
+    anchor?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }))
+    expect(selectNote).toHaveBeenCalledWith('Target-Note.md')
+    view.destroy()
+  })
+
+  it('follows a [text](Note.md) link in a cell on Cmd/Ctrl-click', () => {
+    const selectNote = setup(false)
+    const view = mount(MDLINK_DOC)
+    const anchor = view.dom.querySelector<HTMLAnchorElement>('.cm-table-cell a[href="Target-Note.md"]')
+    expect(anchor).toBeTruthy()
+    anchor?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, metaKey: true }))
+    expect(selectNote).toHaveBeenCalledWith('Target-Note.md')
+    view.destroy()
+  })
+
+  it('follows the link under the cursor on `gd` in a cell (Vim)', () => {
+    const selectNote = setup(true)
+    const view = mount(WIKILINK_DOC)
+    const cell = [...view.dom.querySelectorAll<HTMLElement>('.cm-table-cell')].find(
+      (c) => c.dataset.raw === '[[Target-Note]]'
+    )
+    expect(cell).toBeTruthy()
+    cell?.focus() // Vim: enter NORMAL mode in the cell (cursor at offset 0)
+    cell?.dispatchEvent(new KeyboardEvent('keydown', { key: 'g', bubbles: true }))
+    cell?.dispatchEvent(new KeyboardEvent('keydown', { key: 'd', bubbles: true }))
+    expect(selectNote).toHaveBeenCalledWith('Target-Note.md')
+    view.destroy()
+  })
+})
+
+describe('tableBlockAt — the fallback when the parse has not caught up (#485)', () => {
+  const doc = (text: string) => Text.of(text.split('\n'))
+
+  it('finds the table around a position, header row to last row', () => {
+    const text = 'intro\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\nafter'
+    const t = doc(text)
+    const inside = text.indexOf('| 1 | 2 |') + 2
+    const range = tableBlockAt(t, inside)
+    expect(range).not.toBeNull()
+    expect(text.slice(range!.from, range!.to)).toBe('| A | B |\n| --- | --- |\n| 1 | 2 |')
+  })
+
+  it('takes the trailing zen:cols marker with it, like the tree path does', () => {
+    const text = '| A | B |\n| --- | --- |\n| 1 | 2 |\n<!-- zen:cols=273,227 -->\ntail'
+    const t = doc(text)
+    const range = tableBlockAt(t, 3)
+    expect(text.slice(range!.from, range!.to)).toContain('zen:cols=273,227')
+  })
+
+  it('refuses a lone pipe line — that is prose, not a table', () => {
+    const t = doc('a | b is not a table\n| stray |\nplain')
+    expect(tableBlockAt(t, t.line(2).from + 2)).toBeNull()
+  })
+
+  it('returns null off the table', () => {
+    const t = doc('prose here\n\n| A |\n| --- |')
+    expect(tableBlockAt(t, 2)).toBeNull()
+  })
+
+  it('handles a table at the very start and end of the document', () => {
+    const text = '| A | B |\n| --- | --- |'
+    const t = doc(text)
+    const range = tableBlockAt(t, 0)
+    expect(range).toEqual({ from: 0, to: text.length })
+  })
+})
+
+describe('renderInlineCell', () => {
+  // A cell is inline content, so a leading block marker is just a character.
+  // These all rendered as empty blocks before, losing the text outright. (#559)
+  it('keeps a cell that is only a list marker visible', () => {
+    expect(renderInlineCell('-')).toBe('-')
+    expect(renderInlineCell('+')).toBe('+')
+    expect(renderInlineCell('*')).toBe('*')
+  })
+
+  it('keeps the other block markers literal too', () => {
+    expect(renderInlineCell('#')).toBe('#')
+    expect(renderInlineCell('1.')).toBe('1.')
+    expect(renderInlineCell('---')).toBe('---')
+    expect(renderInlineCell('# H')).toBe('# H')
+    expect(renderInlineCell('- x')).toBe('- x')
+    expect(renderInlineCell('> q')).toBe('&gt; q')
+  })
+
+  it('still renders inline markup', () => {
+    expect(renderInlineCell('**b**')).toBe('<strong>b</strong>')
+    expect(renderInlineCell('`c`')).toBe('<code>c</code>')
+    expect(renderInlineCell('[[note]]')).toContain('class="wikilink"')
+    expect(renderInlineCell('#tag')).toContain('class="hashtag"')
+  })
+
+  it('renders a literal pipe rather than splitting the synthetic row', () => {
+    expect(renderInlineCell('a | b')).toBe('a | b')
+  })
+
+  it('renders nothing for an empty cell', () => {
+    expect(renderInlineCell('')).toBe('')
+    expect(renderInlineCell('   ')).toBe('')
+  })
+
+  it('flattens a pasted newline instead of breaking out of the cell', () => {
+    expect(renderInlineCell('a\nb')).toBe('a b')
   })
 })

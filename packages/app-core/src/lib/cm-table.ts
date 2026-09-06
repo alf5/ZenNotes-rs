@@ -28,6 +28,7 @@ import {
   WidgetType
 } from '@codemirror/view'
 import {
+  escapeCell,
   insertColumn,
   insertRow,
   moveColumn,
@@ -42,10 +43,20 @@ import {
 const MIN_COL_WIDTH = 48
 import { openTableContextMenu } from './cm-table-menu'
 import { renderMarkdown } from './markdown'
-import { getCM } from '@replit/codemirror-vim'
+import { getCM, Vim } from '@replit/codemirror-vim'
 import { undo, redo } from '@codemirror/commands'
 import { useStore } from '../store'
-import { matchesSequenceToken } from './keymaps'
+import { matchesSequenceToken, matchesShortcutBinding } from './keymaps'
+import { followLinkTarget } from './follow-link'
+import { extractLinkAtCursor } from './internal-links'
+
+/** The follow target for a rendered link anchor inside a table cell: a
+ *  wikilink's name (`data-wikilink`) or a plain link's href. Returns null for
+ *  anchors that carry neither. */
+function linkTargetFromAnchor(anchor: HTMLAnchorElement): string | null {
+  if (anchor.classList.contains('wikilink')) return anchor.dataset.wikilink?.trim() || null
+  return anchor.getAttribute('href')?.trim() || null
+}
 
 /** True when the editor is in Vim mode — gates the table's modal (normal /
  *  insert) keyboard navigation. With Vim off, cells stay plain contenteditable
@@ -54,20 +65,86 @@ function vimEnabled(): boolean {
   return useStore.getState().vimMode
 }
 
+/** The Vim plugin's register controller, the same one the main editor's y/d/p
+ *  go through. Sharing it is what lets text move between a table cell and the
+ *  note body in either direction (#706). `pushText` is patched once by
+ *  cm-vim-clipboard, so a table yank also mirrors to the system clipboard
+ *  whenever the yank-to-clipboard setting is on, exactly like an editor yank. */
+interface VimRegisterController {
+  pushText: (
+    registerName: string,
+    operator: string,
+    text: string,
+    linewise?: boolean,
+    blockwise?: boolean
+  ) => void
+  unnamedRegister?: {
+    toString(): string
+    setText?: (text: string, linewise?: boolean, blockwise?: boolean) => void
+  }
+}
+
+function vimRegisters(): VimRegisterController | null {
+  try {
+    const controller = Vim.getRegisterController() as unknown as VimRegisterController | null
+    return controller && typeof controller.pushText === 'function' ? controller : null
+  } catch {
+    return null
+  }
+}
+
+/** Store yanked/deleted cell text in the unnamed register. Cell content is a
+ *  single line, so everything is charwise. */
+function saveVimRegister(operator: 'yank' | 'delete' | 'change', text: string): void {
+  if (!text) return
+  vimRegisters()?.pushText('"', operator, text, false, false)
+}
+
+/** The unnamed register's content flattened to fit a single-line cell: a
+ *  linewise yank sheds its trailing newline, and interior line/cell breaks
+ *  (a multi-line yank from the editor, a multi-cell table yank) become
+ *  spaces rather than breaking the row's markdown. */
+function registerPasteText(): string {
+  const raw = vimRegisters()?.unnamedRegister?.toString() ?? ''
+  return raw.replace(/\r?\n$/, '').replace(/[\t\r\n]+/g, ' ')
+}
+
 /** How long (ms) the pieces of a custom insert-escape sequence (e.g. jk) may be
  *  spread apart and still count as the escape rather than typed text. Mirrors
  *  Vim's default `timeoutlen`. (#341) */
 const INSERT_ESCAPE_TIMEOUT_MS = 1000
 
-/** Render a cell's markdown source to inline HTML (sanitized by the markdown
- *  pipeline). Strips the wrapping `<p>` so the content sits inline in the cell.
- *  Empty cells render nothing. */
-function renderInlineCell(text: string): string {
+/**
+ * Render a cell's markdown source to inline HTML (sanitized by the markdown
+ * pipeline). Empty cells render nothing.
+ *
+ * The text goes through the parser AS A TABLE CELL, because that is the only
+ * thing it is: GFM gives cells inline content, never blocks. Handing the bare
+ * text to the block pipeline meant a cell holding just `-` or `+` parsed as a
+ * bullet-list marker and rendered an empty `<li>`, so the character vanished
+ * from the widget while Preview, which parses the real table, showed it fine.
+ * `#`, `1.`, `---` and `> q` were lost or mangled the same way. (#559)
+ *
+ * Round-tripping through a one-cell table keeps the widget on the exact same
+ * parser as the reading view rather than adding an inline-only copy to keep in
+ * sync, and `escapeCell` is the serializer's own escaping, so what the cell
+ * shows is what its row will contain on disk.
+ */
+export function renderInlineCell(text: string): string {
   const trimmed = text.trim()
   if (!trimmed) return ''
-  const html = renderMarkdown(trimmed).trim()
-  const match = html.match(/^<p[^>]*>([\s\S]*?)<\/p>\s*$/)
-  return match ? match[1] : html
+  // A newline would close the synthetic row; cells are single-line by
+  // construction, but contenteditable can hand one back after a paste.
+  const source = escapeCell(trimmed.replace(/\s*\n\s*/g, ' '))
+  const parsed = document.createElement('template')
+  parsed.innerHTML = renderMarkdown(`| ${source} |\n| --- |`)
+  const cell = parsed.content.querySelector('th, td')
+  // Never swallow the text: if the pipeline returns something unexpected (its
+  // error fallback, say), show the source rather than an empty cell.
+  if (cell) return cell.innerHTML
+  const plain = document.createElement('span')
+  plain.textContent = trimmed
+  return plain.innerHTML
 }
 
 /** If a `<!-- zen:cols=… -->` width marker sits on the line right after the
@@ -85,6 +162,32 @@ function colWidthsAfter(
   return widths ? { widths, to: next.to } : null
 }
 
+/**
+ * The table block containing `pos`, found by reading the document rather than
+ * the syntax tree: the run of `|` rows around that line, plus a trailing
+ * `zen:cols` marker.
+ *
+ * Backs up `tableRangeAt`. Markdown parsing is incremental, so a table that was
+ * just created or restructured can still be outside the parsed tree when the
+ * next action commits — and a commit that can't find its range throws the
+ * user's edit away without a word. Reported as an alignment that only takes
+ * effect the second time you choose it. (#485)
+ */
+export function tableBlockAt(doc: Text, pos: number): { from: number; to: number } | null {
+  const isRow = (text: string): boolean => text.trimStart().startsWith('|')
+  const line = doc.lineAt(Math.max(0, Math.min(pos, doc.length)))
+  if (!isRow(line.text)) return null
+  let first = line.number
+  while (first > 1 && isRow(doc.line(first - 1).text)) first--
+  let last = line.number
+  while (last < doc.lines && isRow(doc.line(last + 1).text)) last++
+  // A table is at least a header and its delimiter row; one `|` line on its own
+  // is prose, and rewriting it as a table would be a worse failure than none.
+  if (last - first < 1) return null
+  const ext = colWidthsAfter(doc, doc.line(last).to)
+  return { from: doc.line(first).from, to: ext ? ext.to : doc.line(last).to }
+}
+
 /** Find the enclosing `Table` node range for a doc position, or null. The range
  *  is extended over a trailing `zen:cols` width marker so re-serialization
  *  replaces both (no duplicate markers, no leaked raw comment). */
@@ -98,23 +201,46 @@ function tableRangeAt(view: EditorView, pos: number): { from: number; to: number
     if (!node.parent) break
     node = node.parent
   }
-  return null
+  return tableBlockAt(view.state.doc, pos)
 }
 
 /**
  * Re-serialize `table` and write it over whichever Table node currently sits
  * under the widget's DOM. Resolving the range live (via posAtDOM) keeps the
  * write correct even when edits elsewhere have shifted the document.
+ *
+ * `anchor` is the table's document position captured when the caller still
+ * had a live widget (the context menu records it at open). Any doc change
+ * while the menu is up (most commonly the dirty-cell commit that opening
+ * the menu itself triggers via focusout) rebuilds the decorations and
+ * detaches this widget's DOM, so posAtDOM can no longer answer. The anchor
+ * re-resolves the table from the CURRENT document instead (its start does
+ * not move: those mid-menu edits land inside or after the block), so the
+ * user's action still lands. Third and hopefully final act of #485.
  */
-function commitTable(view: EditorView, dom: HTMLElement, table: MarkdownTable): void {
-  let pos: number
-  try {
-    pos = view.posAtDOM(dom)
-  } catch {
+function commitTable(
+  view: EditorView,
+  dom: HTMLElement | null,
+  table: MarkdownTable,
+  anchor?: number
+): void {
+  let range: { from: number; to: number } | null = null
+  if (dom && dom.isConnected) {
+    try {
+      range = tableRangeAt(view, view.posAtDOM(dom))
+    } catch {
+      range = null
+    }
+  }
+  if (!range && anchor != null) {
+    range = tableBlockAt(view.state.doc, anchor)
+  }
+  if (!range) {
+    // Never silently discard a user's edit again: every earlier act of #485
+    // hid behind a bare return on this path.
+    console.warn('[zen:table] commit dropped: could not locate the table block')
     return
   }
-  const range = tableRangeAt(view, pos)
-  if (!range) return
   const next = serializeTable(table)
   if (next === view.state.sliceDoc(range.from, range.to)) return
   view.dispatch({
@@ -123,6 +249,13 @@ function commitTable(view: EditorView, dom: HTMLElement, table: MarkdownTable): 
 }
 
 type CellAddress = { row: number; col: number }
+type VisualPosition = CellAddress & { offset: number }
+type VisualCellRange = CellAddress & {
+  cell: HTMLElement
+  from: number
+  to: number
+  fullCell: boolean
+}
 
 class TableWidget extends WidgetType {
   /** Working copy edited in place by the cells; committed on focus-out. */
@@ -139,12 +272,16 @@ class TableWidget extends WidgetType {
   /** Where to land the block cursor on the next cell focus: a char index, or
    *  'end' (last char). Lets h/l carry the cursor across cell boundaries. */
   private pendingOffset: number | 'end' | null = null
-  /** A pending operator (`d`/`c`) waiting for its motion key (dw, cc, d$, …). */
-  private pendingOp: 'd' | 'c' | null = null
-  /** Char-wise visual mode: true after `v`; `visualAnchor` is the fixed end of
-   *  the selection, `cursorOffset` is the moving end. */
-  private visualMode = false
-  private visualAnchor = 0
+  /** A pending operator (`d`/`c`/`y`) waiting for its motion key (dw, cc, y$, …). */
+  private pendingOp: 'd' | 'c' | 'y' | null = null
+  /** Table-aware visual mode. Anchor and head retain cell coordinates so the
+   *  selection survives focus moving across cell and row boundaries. */
+  private visualMode: 'char' | 'line' | null = null
+  private visualAnchor: VisualPosition | null = null
+  private visualHead: VisualPosition | null = null
+  /** A programmatic focus move made by a visual motion must not reset the
+   *  visual state in the target cell's focus handler. */
+  private preserveVisualOnFocus = false
   /** Pending text-object scope after `i`/`a` — in visual mode (`viw`) and in
    *  operator-pending (`diw`, `ca"`). */
   private visualScope: 'i' | 'a' | null = null
@@ -157,6 +294,8 @@ class TableWidget extends WidgetType {
   private pendingFind: 'f' | 'F' | 't' | 'T' | null = null
   /** Armed after `r`, waiting for the replacement character (#435). */
   private pendingReplace = false
+  /** Armed after `g`, waiting for the second key (`gd` follows a link) (#445). */
+  private pendingG = false
   /** Last `f`/`t` find, so `;`/`,` can repeat it. */
   private lastFind: { cmd: 'f' | 'F' | 't' | 'T'; ch: string } | null = null
   /** Set in toDOM — CodeMirror hands the live view there. Block widgets are
@@ -181,12 +320,12 @@ class TableWidget extends WidgetType {
    *  The dispatch rebuilds the decorations (a fresh widget), so we refocus the
    *  requested cell on the next frame. Used by the context menu, which has
    *  already computed `next` from the current model. */
-  private applyModel(next: MarkdownTable, focus?: CellAddress): void {
+  private applyModel(next: MarkdownTable, focus?: CellAddress, anchor?: number): void {
     // Capture the live range BEFORE the dispatch detaches our DOM.
-    const dom = this.dom as HTMLElement
+    const dom = this.dom
     this.model = next
     this.dirty = false
-    commitTable(this.view, dom, next)
+    commitTable(this.view, dom, next, anchor)
     if (focus) {
       requestAnimationFrame(() => this.focusCellAt(focus))
     }
@@ -195,9 +334,11 @@ class TableWidget extends WidgetType {
   /** Apply a context-menu action, then keep keyboard focus usable. Actions with
    *  a target cell (insert/move/duplicate/align) focus it via `applyModel`;
    *  actions without one (delete row/column, sort) would otherwise drop focus to
-   *  the body, so return it to the editor once the widget has re-rendered. (#437) */
-  private applyMenuAction(next: MarkdownTable, focus?: CellAddress): void {
-    this.applyModel(next, focus)
+   *  the body, so return it to the editor once the widget has re-rendered. (#437)
+   *  `anchor` (captured at menu open) lets the commit land even when this
+   *  widget instance was rebuilt while the menu was up (#485). */
+  private applyMenuAction(next: MarkdownTable, focus?: CellAddress, anchor?: number): void {
+    this.applyModel(next, focus, anchor)
     if (!focus) {
       requestAnimationFrame(() => this.view.focus())
     }
@@ -212,6 +353,20 @@ class TableWidget extends WidgetType {
   ): void {
     this.syncFromDom()
     this.applyModel(fn(this.model), focus)
+  }
+
+  /** The table's current document position, captured while this widget is
+   *  still live. A context menu outlives the widget instance that opened it:
+   *  the focus moving into the menu commits any dirty cell, that dispatch
+   *  rebuilds the decorations and detaches this DOM, and a later menu action
+   *  would then have nothing to resolve its commit against. The anchor lets
+   *  commitTable re-find the table in the current document instead (#485). */
+  private captureTableAnchor(): number | undefined {
+    try {
+      return this.dom && this.dom.isConnected ? this.view.posAtDOM(this.dom) : undefined
+    } catch {
+      return undefined
+    }
   }
 
   private focusCellAt(addr: CellAddress): void {
@@ -329,6 +484,7 @@ class TableWidget extends WidgetType {
     root.addEventListener('focusout', (event) => {
       const next = event.relatedTarget as Node | null
       if (next && root.contains(next)) return
+      if (this.visualMode) this.exitVisual()
       this.commitIfDirty()
     })
 
@@ -439,8 +595,14 @@ class TableWidget extends WidgetType {
         this.cellMode = 'normal'
         this.pendingOp = null
         this.pendingScope = null
-        this.visualMode = false
-        this.visualScope = null
+        this.pendingG = false
+        if (!this.preserveVisualOnFocus) {
+          this.clearVisualCells()
+          this.visualMode = null
+          this.visualAnchor = null
+          this.visualHead = null
+          this.visualScope = null
+        }
         const len = (editable.dataset.raw ?? '').length
         this.cursorOffset =
           this.pendingOffset === 'end'
@@ -455,6 +617,22 @@ class TableWidget extends WidgetType {
         editable.dataset.rendered = 'false'
         placeCaretEnd(editable)
       }
+    })
+    // Follow a rendered link (wikilink or Markdown link) inside the cell instead
+    // of dropping the caret into the raw source. Mirrors the main editor, where a
+    // rendered link follows on plain click and Cmd/Ctrl-click always follows —
+    // caught on mousedown (before focus reveals the source), so it works in both
+    // Vim and non-Vim mode. Only fires while the cell shows its anchors. (#445)
+    editable.addEventListener('mousedown', (event) => {
+      if (event.button !== 0) return
+      if (editable.dataset.rendered !== 'true') return
+      const anchor = (event.target as HTMLElement | null)?.closest<HTMLAnchorElement>('a')
+      if (!anchor || !editable.contains(anchor)) return
+      const target = linkTargetFromAnchor(anchor)
+      if (!target) return
+      event.preventDefault()
+      event.stopPropagation()
+      followLinkTarget(target)
     })
     editable.addEventListener('input', () => {
       this.dirty = true
@@ -479,13 +657,14 @@ class TableWidget extends WidgetType {
       // Pull pending edits into the model (no dispatch) so the menu acts on
       // the current contents; the chosen action commits in one write.
       this.syncFromDom()
+      const anchor = this.captureTableAnchor()
       openTableContextMenu({
         x: event.clientX,
         y: event.clientY,
         row,
         col,
         model: this.model,
-        apply: (next, focus) => this.applyMenuAction(next, focus)
+        apply: (next, focus) => this.applyMenuAction(next, focus, anchor)
       })
     })
     cell.append(editable)
@@ -626,6 +805,19 @@ class TableWidget extends WidgetType {
     const cols = this.model.headers.length
     const rowsCount = this.model.rows.length
 
+    if (editable.getAttribute('contenteditable') === 'true') {
+      const marker = matchesShortcutBinding(event, 'Mod+B')
+        ? '**'
+        : matchesShortcutBinding(event, 'Mod+I')
+          ? '*'
+          : null
+      if (marker && this.toggleCellFormatting(editable, marker)) {
+        event.preventDefault()
+        event.stopPropagation()
+        return
+      }
+    }
+
     if (vimEnabled()) {
       if (this.cellMode === 'insert') {
         // INSERT: Escape (or the configurable insert-escape sequence, e.g. jk)
@@ -668,7 +860,7 @@ class TableWidget extends WidgetType {
         const cellText = editable.dataset.raw ?? ''
         if (this.visualMode) {
           event.preventDefault()
-          this.handleVisualKey(editable, event.key, cellText)
+          this.handleVisualKey(editable, row, col, event.key, cellText)
           return
         }
         if (this.pendingOp) {
@@ -681,8 +873,15 @@ class TableWidget extends WidgetType {
             this.pendingScope = null
             const r = textObjectRange(cellText, this.cursorOffset, scope, event.key)
             if (r) {
-              this.deleteRange(editable, r.from, r.to)
-              if (op === 'c') this.enterInsertMode(editable, r.from)
+              if (op === 'y') {
+                // yiw / ya" — yank the object, cursor to its start (Vim).
+                saveVimRegister('yank', cellText.slice(r.from, r.to))
+                this.cursorOffset = Math.min(r.from, Math.max(0, cellText.length - 1))
+                this.renderCellCursor(editable)
+              } else {
+                this.deleteRange(editable, r.from, r.to, op === 'c' ? 'change' : 'delete')
+                if (op === 'c') this.enterInsertMode(editable, r.from)
+              }
             }
             return
           }
@@ -715,6 +914,18 @@ class TableWidget extends WidgetType {
           if (event.key.length === 1 && !event.metaKey && !event.ctrlKey && !event.altKey) {
             this.lastFind = { cmd, ch: event.key }
             this.applyFind(editable, cmd, event.key, cellText, false)
+          }
+          return
+        }
+        if (this.pendingG) {
+          // Second key of `g`: `gd` follows the link under the cursor, matching
+          // the editor's go-to-definition motion. Anything else cancels (there's
+          // no `gg` in a single-line cell). (#445)
+          event.preventDefault()
+          this.pendingG = false
+          if (event.key === 'd') {
+            const target = extractLinkAtCursor(cellText, this.cursorOffset)
+            if (target) followLinkTarget(target)
           }
           return
         }
@@ -822,10 +1033,15 @@ class TableWidget extends WidgetType {
           case 'C': {
             event.preventDefault()
             const at = this.cursorOffset
-            this.deleteRange(editable, at, cellText.length)
+            this.deleteRange(editable, at, cellText.length, 'change')
             this.enterInsertMode(editable, at)
             return
           }
+          case 'g':
+            // Arm `g`; the next key completes it (`gd` follows a link) (#445).
+            event.preventDefault()
+            this.pendingG = true
+            return
           case 'd':
             event.preventDefault()
             this.pendingOp = 'd'
@@ -834,11 +1050,33 @@ class TableWidget extends WidgetType {
             event.preventDefault()
             this.pendingOp = 'c'
             return
+          case 'y':
+            event.preventDefault()
+            this.pendingOp = 'y'
+            return
+          case 'Y':
+            // Vim's Y is yy: yank the whole (single-line) cell. (#706)
+            event.preventDefault()
+            saveVimRegister('yank', cellText)
+            return
+          case 'p':
+          case 'P':
+            event.preventDefault()
+            this.pasteIntoCell(editable, event.key === 'P')
+            return
           case 'v':
             event.preventDefault()
-            this.visualMode = true
-            this.visualAnchor = this.cursorOffset
-            this.renderCellSelection(editable)
+            this.visualMode = 'char'
+            this.visualAnchor = { row, col, offset: this.cursorOffset }
+            this.visualHead = { ...this.visualAnchor }
+            this.renderVisualSelection()
+            return
+          case 'V':
+            event.preventDefault()
+            this.visualMode = 'line'
+            this.visualAnchor = { row, col, offset: this.cursorOffset }
+            this.visualHead = { ...this.visualAnchor }
+            this.renderVisualSelection()
             return
           case 'u':
             // Undo: flush pending cell edits as one history step, then undo it
@@ -1075,7 +1313,9 @@ class TableWidget extends WidgetType {
     this.pendingScope = null
     this.pendingFind = null
     this.pendingReplace = false
-    this.visualMode = false
+    this.visualMode = null
+    this.visualAnchor = null
+    this.visualHead = null
     this.visualScope = null
     this.clearCellCursor(cell)
     cell.classList.remove('is-vim-normal')
@@ -1085,6 +1325,26 @@ class TableWidget extends WidgetType {
       cell.dataset.rendered = 'false'
     }
     placeCaretAt(cell, caretOffset)
+  }
+
+  /** Apply or remove a Markdown marker around the native selection in an
+   *  editable cell. Cell edits do not pass through CodeMirror's keymap, so the
+   *  widget mirrors the editor's bold and italic toggle locally. */
+  private toggleCellFormatting(cell: HTMLElement, marker: string): boolean {
+    const selection = cellSelectionOffsets(cell)
+    if (!selection) return false
+    const change = toggleCellTextWrap(
+      cell.textContent ?? '',
+      selection.from,
+      selection.to,
+      marker
+    )
+    cell.textContent = change.text
+    cell.dataset.raw = change.text
+    cell.dataset.rendered = 'false'
+    this.dirty = true
+    placeCellSelection(cell, change.from, change.to)
+    return true
   }
 
   /** Commit the focused cell and drop from INSERT back to NORMAL. Optionally
@@ -1108,12 +1368,20 @@ class TableWidget extends WidgetType {
   }
 
   /** Delete `[from, to)` from the focused cell's source in place (no dispatch —
-   *  committed on blur, like typing). Re-renders the NORMAL block cursor. */
-  private deleteRange(cell: HTMLElement, from: number, to: number): void {
+   *  committed on blur, like typing). Re-renders the NORMAL block cursor.
+   *  The removed text lands in the unnamed register like any Vim delete, so
+   *  `dd` in one cell followed by `p` in another moves the text (#706). */
+  private deleteRange(
+    cell: HTMLElement,
+    from: number,
+    to: number,
+    register: 'delete' | 'change' = 'delete'
+  ): void {
     const text = cell.dataset.raw ?? ''
     const a = Math.max(0, Math.min(from, text.length))
     const b = Math.max(a, Math.min(to, text.length))
     if (b === a) return
+    saveVimRegister(register, text.slice(a, b))
     const next = text.slice(0, a) + text.slice(b)
     cell.dataset.raw = next
     this.dirty = true
@@ -1142,6 +1410,45 @@ class TableWidget extends WidgetType {
     this.renderCellCursor(cell)
   }
 
+  /** Resolve what `p`/`P` should paste. Normally the unnamed register; with
+   *  yank-to-clipboard on, the system clipboard is loaded into the register
+   *  first, mirroring `vimClipboardPasteExtension` so the table and the editor
+   *  paste the same thing (#706). The continuation may run async. */
+  private resolvePasteText(then: (text: string) => void): void {
+    const clipboard = navigator.clipboard
+    if (!useStore.getState().vimYankToClipboard || !clipboard?.readText) {
+      then(registerPasteText())
+      return
+    }
+    void clipboard
+      .readText()
+      .then((text) => {
+        if (text) vimRegisters()?.unnamedRegister?.setText?.(text, /\n$/.test(text))
+        then(registerPasteText())
+      })
+      .catch(() => then(registerPasteText()))
+  }
+
+  /** Vim `p` (after the cursor char) / `P` (before it): insert the unnamed
+   *  register into the cell, cursor landing on the last pasted char. (#706) */
+  private pasteIntoCell(cell: HTMLElement, before: boolean): void {
+    this.resolvePasteText((pasted) => {
+      if (!pasted) return
+      // Re-read the cell: the clipboard read may have resolved a tick later.
+      const text = cell.dataset.raw ?? ''
+      const at = before
+        ? Math.min(this.cursorOffset, text.length)
+        : Math.min(text.length, this.cursorOffset + (text.length > 0 ? 1 : 0))
+      const next = text.slice(0, at) + pasted + text.slice(at)
+      cell.dataset.raw = next
+      this.dirty = true
+      cell.textContent = next
+      cell.dataset.rendered = 'false'
+      this.cursorOffset = Math.max(0, at + pasted.length - 1)
+      this.renderCellCursor(cell)
+    })
+  }
+
   /** `r<char>`: replace the character under the block cursor. (#435) */
   private replaceChar(cell: HTMLElement, ch: string): void {
     const text = cell.dataset.raw ?? ''
@@ -1154,11 +1461,12 @@ class TableWidget extends WidgetType {
     this.renderCellCursor(cell)
   }
 
-  /** Apply a pending operator (`d`/`c`) over the motion in `key`: dd/cc clear
-   *  the cell; dw/cw, d$/c$, d0/c0, dl, db act over that range. `c` then edits. */
+  /** Apply a pending operator (`d`/`c`/`y`) over the motion in `key`: dd/cc/yy
+   *  act on the whole cell; dw/cw/yw, d$/c$/y$, d0, dl, db act over that range.
+   *  `c` then edits; `y` stores the range without touching the text (#706). */
   private applyOperator(
     cell: HTMLElement,
-    op: 'd' | 'c',
+    op: 'd' | 'c' | 'y',
     key: string,
     text: string
   ): void {
@@ -1166,7 +1474,7 @@ class TableWidget extends WidgetType {
     let from = off
     let to = off
     if (key === op) {
-      // dd / cc → the whole cell
+      // dd / cc / yy → the whole cell
       from = 0
       to = text.length
     } else {
@@ -1198,124 +1506,413 @@ class TableWidget extends WidgetType {
       }
     }
     const wholeCell = from === 0 && to === text.length
+    if (op === 'y') {
+      if (to > from) {
+        saveVimRegister('yank', text.slice(from, to))
+        // Vim: a charwise yank parks the cursor at the start of the yanked
+        // range; yy (linewise) stays put.
+        if (key !== op) {
+          this.cursorOffset = Math.min(from, Math.max(0, text.length - 1))
+          this.renderCellCursor(cell)
+        }
+      }
+      return
+    }
     if (to > from || wholeCell) {
-      this.deleteRange(cell, from, to)
+      this.deleteRange(cell, from, to, op === 'c' ? 'change' : 'delete')
       if (op === 'c') this.enterInsertMode(cell, from)
     }
   }
 
-  /** Render the char-wise visual selection [anchor..head] as a themed overlay
-   *  measured over the range — NOT a native DOM selection, which CodeMirror
-   *  would mirror into a multi-cell editor selection (and which falls back to
-   *  the washed-out OS color). */
-  private renderCellSelection(cell: HTMLElement): void {
-    this.clearCellCursor(cell)
-    const text = cell.dataset.raw ?? ''
-    const node = cell.firstChild
-    if (!node || node.nodeType !== Node.TEXT_NODE || text.length === 0) return
-    const from = Math.max(0, Math.min(this.visualAnchor, this.cursorOffset))
-    const to = Math.min(text.length, Math.max(this.visualAnchor, this.cursorOffset) + 1)
-    const range = document.createRange()
-    range.setStart(node, from)
-    range.setEnd(node, to)
-    if (typeof range.getBoundingClientRect !== 'function') return
-    const rect = range.getBoundingClientRect()
-    const cellRect = cell.getBoundingClientRect()
-    const overlay = document.createElement('span')
-    overlay.className = 'cm-table-cell-sel'
-    overlay.style.left = `${rect.left - cellRect.left}px`
-    overlay.style.top = `${rect.top - cellRect.top}px`
-    overlay.style.width = `${Math.max(rect.width, 2)}px`
-    overlay.style.height = `${rect.height || 18}px`
-    cell.appendChild(overlay)
+  private cellOrder(): CellAddress[] {
+    const order: CellAddress[] = []
+    for (let col = 0; col < this.model.headers.length; col++) {
+      order.push({ row: -1, col })
+    }
+    for (let row = 0; row < this.model.rows.length; row++) {
+      for (let col = 0; col < this.model.headers.length; col++) {
+        order.push({ row, col })
+      }
+    }
+    return order
+  }
+
+  private adjacentCell(row: number, col: number, delta: -1 | 1): CellAddress | null {
+    const order = this.cellOrder()
+    const index = order.findIndex((addr) => addr.row === row && addr.col === col)
+    return order[index + delta] ?? null
+  }
+
+  /** Move the visual head to another cell without letting its focus handler
+   *  reset the selection. */
+  private moveVisualTo(row: number, col: number, offset: number | 'end'): void {
+    const cell = this.cellEl(row, col)
+    if (!cell) return
+    const length = (cell.dataset.raw ?? '').length
+    const nextOffset =
+      offset === 'end'
+        ? Math.max(0, length - 1)
+        : Math.max(0, Math.min(offset, Math.max(0, length - 1)))
+    if (document.activeElement !== cell) {
+      this.pendingOffset = nextOffset
+      this.preserveVisualOnFocus = true
+      try {
+        cell.focus()
+      } finally {
+        this.preserveVisualOnFocus = false
+        this.pendingOffset = null
+      }
+    }
+    this.cursorOffset = nextOffset
+    this.visualHead = { row, col, offset: nextOffset }
+    this.renderVisualSelection()
+  }
+
+  private visualSelectionRanges(): VisualCellRange[] {
+    if (!this.visualMode || !this.visualAnchor || !this.visualHead) return []
+    const order = this.cellOrder()
+    if (this.visualMode === 'line') {
+      const firstRow = Math.min(this.visualAnchor.row, this.visualHead.row)
+      const lastRow = Math.max(this.visualAnchor.row, this.visualHead.row)
+      return order.flatMap(({ row, col }) => {
+        if (row < firstRow || row > lastRow) return []
+        const cell = this.cellEl(row, col)
+        if (!cell) return []
+        return [
+          { cell, row, col, from: 0, to: (cell.dataset.raw ?? '').length, fullCell: true }
+        ]
+      })
+    }
+
+    const anchorIndex = order.findIndex(
+      (addr) => addr.row === this.visualAnchor?.row && addr.col === this.visualAnchor?.col
+    )
+    const headIndex = order.findIndex(
+      (addr) => addr.row === this.visualHead?.row && addr.col === this.visualHead?.col
+    )
+    if (anchorIndex < 0 || headIndex < 0) return []
+    const anchorFirst =
+      anchorIndex < headIndex ||
+      (anchorIndex === headIndex && this.visualAnchor.offset <= this.visualHead.offset)
+    const firstIndex = anchorFirst ? anchorIndex : headIndex
+    const lastIndex = anchorFirst ? headIndex : anchorIndex
+    const firstOffset = anchorFirst ? this.visualAnchor.offset : this.visualHead.offset
+    const lastOffset = anchorFirst ? this.visualHead.offset : this.visualAnchor.offset
+    const ranges: VisualCellRange[] = []
+    for (let index = firstIndex; index <= lastIndex; index++) {
+      const addr = order[index]
+      const cell = this.cellEl(addr.row, addr.col)
+      if (!cell) continue
+      const length = (cell.dataset.raw ?? '').length
+      const from = index === firstIndex ? Math.min(firstOffset, length) : 0
+      const to = index === lastIndex ? Math.min(lastOffset + 1, length) : length
+      ranges.push({ cell, ...addr, from, to, fullCell: false })
+    }
+    return ranges
+  }
+
+  /** Render every selected table fragment with themed overlays. Selected cells
+   *  expose their raw source while visual mode is active so character offsets
+   *  stay exact even when Markdown would normally render as nested elements. */
+  private renderVisualSelection(): void {
+    const ranges = this.visualSelectionRanges()
+    const selected = new Set(ranges.map((range) => range.cell))
+    const active = this.dom?.ownerDocument.activeElement
+    this.dom?.querySelectorAll<HTMLElement>('.cm-table-cell.is-vim-visual').forEach((cell) => {
+      cell.querySelectorAll('.cm-table-cell-sel').forEach((overlay) => overlay.remove())
+      cell.classList.remove('is-vim-visual')
+      if (!selected.has(cell) && cell !== active && cell.dataset.rendered === 'false') {
+        cell.innerHTML = renderInlineCell(cell.dataset.raw ?? '')
+        cell.dataset.rendered = 'true'
+      }
+    })
+
+    for (const { cell, from, to, fullCell } of ranges) {
+      this.clearCellCursor(cell)
+      cell.classList.add('is-vim-visual')
+      if (cell.dataset.rendered === 'true') {
+        cell.textContent = cell.dataset.raw ?? ''
+        cell.dataset.rendered = 'false'
+      }
+      const overlay = cell.ownerDocument.createElement('span')
+      overlay.className = 'cm-table-cell-sel'
+      const text = cell.dataset.raw ?? ''
+      if (fullCell || text.length === 0) {
+        overlay.classList.add('is-full')
+        cell.appendChild(overlay)
+        continue
+      }
+      const node = cell.firstChild
+      const range = cell.ownerDocument.createRange()
+      if (
+        !node ||
+        node.nodeType !== Node.TEXT_NODE ||
+        typeof range.getBoundingClientRect !== 'function'
+      ) {
+        continue
+      }
+      range.setStart(node, Math.max(0, Math.min(from, text.length)))
+      range.setEnd(node, Math.max(from, Math.min(to, text.length)))
+      const rect = range.getBoundingClientRect()
+      const cellRect = cell.getBoundingClientRect()
+      overlay.style.left = `${rect.left - cellRect.left}px`
+      overlay.style.top = `${rect.top - cellRect.top}px`
+      overlay.style.width = `${Math.max(rect.width, 2)}px`
+      overlay.style.height = `${rect.height || 18}px`
+      cell.appendChild(overlay)
+    }
+  }
+
+  private clearVisualCells(): void {
+    const active = this.dom?.ownerDocument.activeElement
+    this.dom?.querySelectorAll<HTMLElement>('.cm-table-cell.is-vim-visual').forEach((cell) => {
+      cell.querySelectorAll('.cm-table-cell-sel').forEach((overlay) => overlay.remove())
+      cell.classList.remove('is-vim-visual')
+      if (cell !== active && cell.dataset.rendered === 'false') {
+        cell.innerHTML = renderInlineCell(cell.dataset.raw ?? '')
+        cell.dataset.rendered = 'true'
+      }
+    })
   }
 
   private exitVisual(): void {
-    this.visualMode = false
+    this.visualMode = null
+    this.visualAnchor = null
+    this.visualHead = null
     this.visualScope = null
+    this.clearVisualCells()
     window.getSelection()?.removeAllRanges()
   }
 
-  /** Keys while in char-wise visual mode: motions extend the selection; d/x
-   *  delete it, c/s change it, y yanks it, Esc cancels. */
-  private handleVisualKey(cell: HTMLElement, key: string, text: string): void {
-    const selFrom = (): number => Math.max(0, Math.min(this.visualAnchor, this.cursorOffset))
-    const selTo = (): number =>
-      Math.min(text.length, Math.max(this.visualAnchor, this.cursorOffset) + 1)
+  private finishVisualAtStart(first: VisualCellRange, insert: boolean): void {
+    const target = first.cell
+    const nextLength = (target.dataset.raw ?? '').length
+    const offset = Math.max(0, Math.min(first.from, Math.max(0, nextLength - 1)))
+    this.exitVisual()
+    if (document.activeElement === target) {
+      this.cursorOffset = offset
+      this.enterNormalCell(target)
+    } else {
+      this.focusCellAtOffset(first.row, first.col, offset)
+    }
+    if (insert) this.enterInsertMode(target, first.from)
+  }
+
+  /** The visual selection's text, cells joined with tabs within a row and
+   *  newlines across rows — the same shape a spreadsheet copy produces. */
+  private visualSelectionText(ranges: VisualCellRange[]): string {
+    let previousRow: number | null = null
+    let selected = ''
+    for (const { cell, row, from, to } of ranges) {
+      if (previousRow !== null) selected += row === previousRow ? '\t' : '\n'
+      selected += (cell.dataset.raw ?? '').slice(from, to)
+      previousRow = row
+    }
+    return selected
+  }
+
+  private deleteVisualSelection(insert: boolean): void {
+    const ranges = this.visualSelectionRanges()
+    const first = ranges[0]
+    if (!first) return
+    saveVimRegister(insert ? 'change' : 'delete', this.visualSelectionText(ranges))
+    let changed = false
+    for (const { cell, from, to } of ranges) {
+      const text = cell.dataset.raw ?? ''
+      if (to > from) changed = true
+      const next = text.slice(0, from) + text.slice(to)
+      cell.dataset.raw = next
+      cell.textContent = next
+      cell.dataset.rendered = 'false'
+    }
+    if (changed) this.dirty = true
+    this.finishVisualAtStart(first, insert)
+  }
+
+  private yankVisualSelection(): void {
+    const ranges = this.visualSelectionRanges()
+    const first = ranges[0]
+    if (!first) return
+    // Through the shared Vim register, like the main editor's visual yank, so
+    // the text can be pasted anywhere with `p` — another cell or the note body.
+    // The system clipboard now follows the yank-to-clipboard setting (the
+    // register patch mirrors it) instead of being written unconditionally.
+    saveVimRegister('yank', this.visualSelectionText(ranges))
+    this.finishVisualAtStart(first, false)
+  }
+
+  /** Visual `p`/`P`: the register replaces the selection; the replaced text
+   *  swaps into the unnamed register, per Vim. (#706) */
+  private pasteVisualSelection(): void {
+    this.resolvePasteText((pasted) => {
+      if (!pasted) return
+      const ranges = this.visualSelectionRanges()
+      const first = ranges[0]
+      if (!first) return
+      const replaced = this.visualSelectionText(ranges)
+      for (const { cell, from, to } of ranges) {
+        const text = cell.dataset.raw ?? ''
+        const next =
+          cell === first.cell
+            ? text.slice(0, from) + pasted + text.slice(to)
+            : text.slice(0, from) + text.slice(to)
+        cell.dataset.raw = next
+        cell.textContent = next
+        cell.dataset.rendered = 'false'
+      }
+      this.dirty = true
+      saveVimRegister('delete', replaced)
+      const offset = Math.max(0, first.from + pasted.length - 1)
+      this.exitVisual()
+      if (document.activeElement === first.cell) {
+        this.cursorOffset = offset
+        this.enterNormalCell(first.cell)
+      } else {
+        this.focusCellAtOffset(first.row, first.col, offset)
+      }
+    })
+  }
+
+  /** Keys while in table visual mode. Motions update a coordinate-aware head;
+   *  edit and yank commands consume the same multi-cell range. */
+  private handleVisualKey(
+    cell: HTMLElement,
+    row: number,
+    col: number,
+    key: string,
+    text: string
+  ): void {
+    if (!this.visualHead) this.visualHead = { row, col, offset: this.cursorOffset }
     if (this.visualScope) {
-      // `vi{obj}` / `va{obj}`: select the text object.
       const scope = this.visualScope
       this.visualScope = null
-      const r = textObjectRange(text, this.cursorOffset, scope, key)
-      if (r) {
-        this.visualAnchor = r.from
-        this.cursorOffset = Math.max(r.from, r.to - 1)
-        this.renderCellSelection(cell)
+      const range = textObjectRange(text, this.cursorOffset, scope, key)
+      if (range) {
+        this.visualMode = 'char'
+        this.visualAnchor = { row, col, offset: range.from }
+        this.cursorOffset = Math.max(range.from, range.to - 1)
+        this.visualHead = { row, col, offset: this.cursorOffset }
+        this.renderVisualSelection()
       }
       return
     }
-    if (key === 'i' || key === 'a') {
+    if (this.visualMode === 'char' && (key === 'i' || key === 'a')) {
       this.visualScope = key
       return
     }
+
+    if (key === 'Escape') {
+      this.exitVisual()
+      this.renderCellCursor(cell)
+      return
+    }
+    if (key === 'd' || key === 'x') {
+      this.deleteVisualSelection(false)
+      return
+    }
+    if (key === 'c' || key === 's') {
+      this.deleteVisualSelection(true)
+      return
+    }
+    if (key === 'y') {
+      this.yankVisualSelection()
+      return
+    }
+    if (key === 'p' || key === 'P') {
+      this.pasteVisualSelection()
+      return
+    }
+    if (key === 'v') {
+      if (this.visualMode === 'char') {
+        this.exitVisual()
+        this.renderCellCursor(cell)
+      } else {
+        this.visualMode = 'char'
+        this.renderVisualSelection()
+      }
+      return
+    }
+    if (key === 'V') {
+      if (this.visualMode === 'line') {
+        this.exitVisual()
+        this.renderCellCursor(cell)
+      } else {
+        this.visualMode = 'line'
+        this.renderVisualSelection()
+      }
+      return
+    }
+
+    const moveVertical = (delta: -1 | 1): void => {
+      const targetRow = row + delta
+      if (targetRow < -1 || targetRow >= this.model.rows.length) return
+      this.moveVisualTo(targetRow, col, this.cursorOffset)
+    }
+    if (this.visualMode === 'line') {
+      if (key === 'j') moveVertical(1)
+      if (key === 'k') moveVertical(-1)
+      return
+    }
+
+    const updateOffset = (offset: number): void => this.moveVisualTo(row, col, offset)
     switch (key) {
-      case 'h':
-        this.cursorOffset = Math.max(0, this.cursorOffset - 1)
-        this.renderCellSelection(cell)
+      case 'h': {
+        if (this.cursorOffset > 0) updateOffset(this.cursorOffset - 1)
+        else {
+          const previous = this.adjacentCell(row, col, -1)
+          if (previous) this.moveVisualTo(previous.row, previous.col, 'end')
+        }
         return
-      case 'l':
-        this.cursorOffset = Math.min(Math.max(0, text.length - 1), this.cursorOffset + 1)
-        this.renderCellSelection(cell)
+      }
+      case 'l': {
+        if (this.cursorOffset < text.length - 1) updateOffset(this.cursorOffset + 1)
+        else {
+          const next = this.adjacentCell(row, col, 1)
+          if (next) this.moveVisualTo(next.row, next.col, 0)
+        }
         return
-      case 'w':
-        this.cursorOffset = nextWordStart(text, this.cursorOffset)
-        this.renderCellSelection(cell)
+      }
+      case 'j':
+        moveVertical(1)
         return
-      case 'e':
-        this.cursorOffset = nextWordEnd(text, this.cursorOffset)
-        this.renderCellSelection(cell)
+      case 'k':
+        moveVertical(-1)
         return
-      case 'b':
-        this.cursorOffset = prevWordStart(text, this.cursorOffset)
-        this.renderCellSelection(cell)
+      case 'w': {
+        const nextOffset = nextWordStartWithinCell(text, this.cursorOffset)
+        if (nextOffset !== null) updateOffset(nextOffset)
+        else {
+          const next = this.adjacentCell(row, col, 1)
+          if (next) this.moveVisualTo(next.row, next.col, 0)
+        }
         return
+      }
+      case 'e': {
+        const nextOffset = nextWordEnd(text, this.cursorOffset)
+        if (nextOffset > this.cursorOffset) updateOffset(nextOffset)
+        else {
+          const next = this.adjacentCell(row, col, 1)
+          if (next) {
+            const nextText = this.cellEl(next.row, next.col)?.dataset.raw ?? ''
+            this.moveVisualTo(next.row, next.col, nextWordEnd(nextText, -1))
+          }
+        }
+        return
+      }
+      case 'b': {
+        const previousOffset = prevWordStart(text, this.cursorOffset)
+        if (previousOffset < this.cursorOffset) updateOffset(previousOffset)
+        else {
+          const previous = this.adjacentCell(row, col, -1)
+          if (previous) this.moveVisualTo(previous.row, previous.col, 'end')
+        }
+        return
+      }
       case '0':
-        this.cursorOffset = 0
-        this.renderCellSelection(cell)
+        updateOffset(0)
         return
       case '$':
-        this.cursorOffset = Math.max(0, text.length - 1)
-        this.renderCellSelection(cell)
-        return
-      case 'd':
-      case 'x': {
-        const from = selFrom()
-        const to = selTo()
-        this.exitVisual()
-        this.deleteRange(cell, from, to)
-        return
-      }
-      case 'c':
-      case 's': {
-        const from = selFrom()
-        const to = selTo()
-        this.exitVisual()
-        this.deleteRange(cell, from, to)
-        this.enterInsertMode(cell, from)
-        return
-      }
-      case 'y': {
-        const from = selFrom()
-        const to = selTo()
-        void navigator.clipboard?.writeText(text.slice(from, to))
-        this.cursorOffset = from
-        this.exitVisual()
-        this.renderCellCursor(cell)
-        return
-      }
-      case 'Escape':
-        this.exitVisual()
-        this.renderCellCursor(cell)
+        updateOffset(Math.max(0, text.length - 1))
         return
       default:
         return
@@ -1325,12 +1922,11 @@ class TableWidget extends WidgetType {
   /** Leave the table, returning the caret to the document just before/after the
    *  table block. The atomic range keeps it from sliding back in. */
   private exitToEditor(side: 'before' | 'after'): void {
+    if (this.visualMode) this.exitVisual()
     this.commitIfDirty()
     this.cellMode = 'normal'
     this.pendingOp = null
     this.pendingScope = null
-    this.visualMode = false
-    this.visualScope = null
     const dom = this.dom
     if (!dom) {
       this.view.focus()
@@ -1356,6 +1952,7 @@ class TableWidget extends WidgetType {
    *  anchored at the cell. The menu itself is keyboard-navigable. */
   private openCellMenu(editable: HTMLElement, row: number, col: number): void {
     this.syncFromDom()
+    const anchor = this.captureTableAnchor()
     const rect = editable.getBoundingClientRect()
     openTableContextMenu({
       x: rect.left,
@@ -1363,7 +1960,7 @@ class TableWidget extends WidgetType {
       row,
       col,
       model: this.model,
-      apply: (next, focus) => this.applyMenuAction(next, focus)
+      apply: (next, focus) => this.applyMenuAction(next, focus, anchor)
     })
   }
 
@@ -1399,11 +1996,19 @@ function charClass(ch: string): 0 | 1 | 2 {
 export function nextWordStart(text: string, off: number): number {
   const n = text.length
   if (n === 0) return 0
+  return nextWordStartWithinCell(text, off) ?? n - 1
+}
+
+/** Next word start inside this cell, or null when the motion must continue in
+ *  the next cell. */
+function nextWordStartWithinCell(text: string, off: number): number | null {
+  const n = text.length
+  if (n === 0) return null
   let i = off
   const cls = charClass(text[i] ?? ' ')
   if (cls !== 0) while (i < n && charClass(text[i]) === cls) i++
   while (i < n && charClass(text[i]) === 0) i++
-  return Math.min(i, n - 1)
+  return i < n ? i : null
 }
 
 /** Vim `b`: index of the start of the current/previous word. */
@@ -1562,6 +2167,109 @@ function placeCaretAt(el: HTMLElement, offset: number): void {
   const sel = window.getSelection()
   sel?.removeAllRanges()
   sel?.addRange(range)
+}
+
+/** Native selection offsets measured against an editable cell's plain text. */
+function cellSelectionOffsets(el: HTMLElement): { from: number; to: number } | null {
+  const selection = el.ownerDocument.getSelection()
+  if (
+    !selection?.anchorNode ||
+    !selection.focusNode ||
+    !el.contains(selection.anchorNode) ||
+    !el.contains(selection.focusNode)
+  ) {
+    return null
+  }
+  const offsetOf = (node: Node, offset: number): number => {
+    const range = el.ownerDocument.createRange()
+    range.setStart(el, 0)
+    range.setEnd(node, offset)
+    return range.toString().length
+  }
+  const anchor = offsetOf(selection.anchorNode, selection.anchorOffset)
+  const head = offsetOf(selection.focusNode, selection.focusOffset)
+  return { from: Math.min(anchor, head), to: Math.max(anchor, head) }
+}
+
+type CellTextWrap = { text: string; from: number; to: number }
+
+/** Toggle a symmetric Markdown marker around one cell selection. */
+function toggleCellTextWrap(
+  text: string,
+  from: number,
+  to: number,
+  marker: string
+): CellTextWrap {
+  const markerLength = marker.length
+  if (from === to) {
+    const before = text.slice(Math.max(0, from - markerLength), from)
+    const after = text.slice(from, from + markerLength)
+    const insideLongerPair =
+      marker === '*' && text.slice(from - 2, from) === '**' && text.slice(from, from + 2) === '**'
+    if (before === marker && after === marker && !insideLongerPair) {
+      return {
+        text: text.slice(0, from - markerLength) + text.slice(from + markerLength),
+        from: from - markerLength,
+        to: from - markerLength
+      }
+    }
+    return {
+      text: text.slice(0, from) + marker + marker + text.slice(from),
+      from: from + markerLength,
+      to: from + markerLength
+    }
+  }
+
+  const before = text.slice(Math.max(0, from - markerLength), from)
+  const after = text.slice(to, to + markerLength)
+  if (before === marker && after === marker) {
+    return {
+      text: text.slice(0, from - markerLength) + text.slice(from, to) + text.slice(to + markerLength),
+      from: from - markerLength,
+      to: to - markerLength
+    }
+  }
+
+  const selected = text.slice(from, to)
+  if (
+    selected.length >= markerLength * 2 &&
+    selected.startsWith(marker) &&
+    selected.endsWith(marker)
+  ) {
+    return {
+      text:
+        text.slice(0, from) +
+        selected.slice(markerLength, selected.length - markerLength) +
+        text.slice(to),
+      from,
+      to: to - markerLength * 2
+    }
+  }
+
+  return {
+    text: text.slice(0, from) + marker + selected + marker + text.slice(to),
+    from: from + markerLength,
+    to: to + markerLength
+  }
+}
+
+/** Restore a native selection after replacing a cell's textContent. */
+function placeCellSelection(el: HTMLElement, from: number, to: number): void {
+  const text = el.textContent ?? ''
+  const start = Math.max(0, Math.min(from, text.length))
+  const end = Math.max(start, Math.min(to, text.length))
+  const node = el.firstChild
+  const range = el.ownerDocument.createRange()
+  if (node?.nodeType === Node.TEXT_NODE) {
+    range.setStart(node, start)
+    range.setEnd(node, end)
+  } else {
+    range.setStart(el, 0)
+    range.setEnd(el, 0)
+  }
+  const selection = el.ownerDocument.getSelection()
+  selection?.removeAllRanges()
+  selection?.addRange(range)
 }
 
 function buildDecorations(state: EditorState): DecorationSet {

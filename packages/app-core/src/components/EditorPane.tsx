@@ -50,15 +50,25 @@ import {
 } from '@codemirror/commands'
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
 import { isImeComposing } from '../lib/ime'
+import { displayRowBoundaryKeymap } from '../lib/cm-display-row'
 import { resolveCodeLanguage } from '../lib/cm-code-languages'
-import { markdownListIndentPlugin } from '../lib/cm-markdown-list-indent'
+import { customCodeFenceHighlightExtension } from '../lib/cm-custom-code-languages'
+import {
+  listIndentGuides as listIndentGuidesExt,
+  listIndentWidth,
+  markdownListIndentPlugin
+} from '../lib/cm-markdown-list-indent'
 import { forwardOnCheckboxArrow } from '../lib/cm-forward-task'
-import { completionKeymapForEditor, completionNavKeymap } from '../lib/cm-completion-nav'
-import { vimAwareDefaultKeymap, vimAwareMarkdownKeymap } from '../lib/cm-vim-default-keymap'
+import { markerHopCommands } from '../lib/cm-marker-hop'
+import { isInMarkdownCode } from '../lib/cm-auto-pairs'
+import { toggleCheckbox } from '../lib/cm-toggle-checkbox'
+import { completionKeymapExtension, completionNavKeymap } from '../lib/cm-completion-nav'
+import { vimAwareDefaultKeymap, vimAwareMarkdownKeymap, vimAwareSearchKeymap } from '../lib/cm-vim-default-keymap'
+import { isVimAwaitingArgument } from '../lib/vim-nav'
 import { toCodeMirrorKey, vimHalfPageKeymap } from '../lib/vim-half-page-keymap'
 import { scrollOff } from '../lib/cm-scrolloff'
-import { offerCreateNoteFromLink } from '../lib/create-note-from-link'
-import { externalFileLink, openExternalFileLink } from '../lib/external-file-link'
+import { followLinkTarget } from '../lib/follow-link'
+import { pointerOverRange } from '../lib/cm-pointer-range'
 import { setHoveredLink } from '../lib/hovered-link'
 import {
   setYankToClipboardEnabled,
@@ -66,16 +76,24 @@ import {
   vimClipboardPasteExtension,
 } from '../lib/cm-vim-clipboard'
 import { wireYankHighlight, yankHighlightExtension } from '../lib/cm-yank-highlight'
-import { frontmatterStyle } from '../lib/cm-frontmatter'
+import { vimVisualHighlightExtension } from '../lib/cm-vim-visual-highlight'
+import { frontmatterStyle, frontmatterTagExtension } from '../lib/cm-frontmatter'
 import { codeBlockFontPlugin } from '../lib/cm-code-block-font'
 import {
   orderedListRenumber,
   skipOrderedListRenumber
 } from '../lib/cm-ordered-list-renumber'
-import { syntaxHighlighting, HighlightStyle, defaultHighlightStyle } from '@codemirror/language'
-import { headingFolding } from '../lib/cm-heading-fold'
+import {
+  syntaxHighlighting,
+  HighlightStyle,
+  defaultHighlightStyle
+} from '@codemirror/language'
+import {
+  foldHeadingAtCursor,
+  headingFolding,
+  unfoldHeadingAtCursor
+} from '../lib/cm-heading-fold'
 import { tags as t } from '@lezer/highlight'
-import { searchKeymap } from '@codemirror/search'
 import { autocompletion } from '@codemirror/autocomplete'
 import { useStore } from '../store'
 import type { LineNumberMode } from '../store'
@@ -86,35 +104,51 @@ import { codeBlockFlairPlugin } from '../lib/cm-code-block-flair'
 import { tablePlugin, tableVimEntry } from '../lib/cm-table'
 import { wysiwygBlocksPlugin } from '../lib/cm-wysiwyg-blocks'
 import { hashtagExtension } from '../lib/cm-hashtags'
+import { taskMetadataExtension } from '../lib/cm-task-metadata'
+import { taskRollupExtension } from '../lib/cm-task-rollup'
 import { hashtagSource } from '../lib/cm-hashtag-complete'
+import { frontmatterTagSource } from '../lib/cm-frontmatter-tag-complete'
 import { applyHighlight, HIGHLIGHT_COLORS, highlightExtension } from '../lib/cm-highlight'
 import { wikilinkRenderExtension } from '../lib/cm-wikilink-render'
 import { mathRenderExtension } from '../lib/cm-math-render'
+import { mermaidRenderExtension } from '../lib/cm-mermaid-render'
+import {
+  documentDiagramTheme,
+  useDiagramTheme,
+  type DiagramTheme
+} from '../lib/use-diagram-theme-mode'
 import { embedRenderExtension } from '../lib/cm-embed-render'
 import { urlPasteMenuExtension } from '../lib/cm-url-paste-menu'
+import { harperExtensions, harperRefresh } from '../lib/cm-harper'
+import { harperEditorConfig, harperSeenVaultState, harperSupported } from '../lib/harper-runtime'
 import { mathBlockArrowKeymap } from '../lib/cm-math-nav'
 import { slashCommandSource, slashCommandRender } from '../lib/cm-slash-commands'
 import { calloutTypeSource } from '../lib/cm-callouts'
 import { dateShortcutSource } from '../lib/cm-date-shortcuts'
-import { wikilinkSource, wikilinkHeadingSource, atNoteSource } from '../lib/cm-wikilinks'
-import { resolveWikilinkTarget, wikilinkHeadingAnchor } from '../lib/wikilinks'
-import { openDatabaseFromWikilink, openWikilinkHeading } from '../lib/wikilink-navigation'
+import { latexCommandSource } from '../lib/cm-latex-completions'
+import { typstCommandSource } from '../lib/cm-typst-completions'
 import {
-  externalLinkUrl,
-  extractLinkAtCursor,
-  markdownLinkAt,
-  resolveInternalNoteHref
-} from '../lib/internal-links'
+  wikilinkSource,
+  wikilinkHeadingSource,
+  wikilinkBlockSource,
+  atNoteSource
+} from '../lib/cm-wikilinks'
+import { linkRangeAtCursor, markdownLinkAt } from '../lib/internal-links'
+import { copyableLink, copyableLinkAt, linkMenuItems, type CopyableLink } from '../lib/link-copy'
 import { setBlockType, toggleWrap, wrapLink } from '../lib/cm-format'
+import { shouldShowSelectionToolbar } from '../lib/cm-selection-toolbar'
+import { editorCursorPosition } from '../lib/editor-cursor-position'
 import { EditorSelectionToolbar } from './EditorSelectionToolbar'
 import { appMarkdownSnippetExtension } from '../lib/markdown-snippets-config'
 import { LazyDiagramTabView, LazyPreview as Preview } from './LazyPreview'
 import { ConnectionsPanel } from './ConnectionsPanel'
 import { OutlinePanel } from './OutlinePanel'
 import { CalendarPanel } from './CalendarPanel'
+import { selectTypstPreambleFor } from '../lib/typst-preamble-select'
 import { CommentsPanel, type CommentDraft } from './CommentsPanel'
 import { ContextMenu, type ContextMenuItem } from './ContextMenu'
 import { promptApp } from '../lib/prompt-requests'
+import { PublishedNoteButton } from './PublishedNoteButton'
 import { TasksView } from './TasksView'
 import { DatabaseView } from './DatabaseView'
 import { LazyExcalidrawView } from './LazyExcalidrawView'
@@ -133,6 +167,10 @@ import { AssetsView } from './AssetsView'
 import { QuickNotesView } from './QuickNotesView'
 import type { MathRenderer } from '@shared/app-config'
 import { isTasksTabPath } from '@shared/tasks'
+import { isWorkflowsTabPath } from '@shared/workflows-view'
+import { isAtlasTabPath } from '@shared/atlas-view'
+import { LazyWorkflowsView } from './LazyWorkflowsView'
+import { LazyAtlasView } from './LazyAtlasView'
 import { isDatabaseTabPath, databaseTitleFromTab, databaseTabPath, isDatabaseCsvPath } from '@shared/databases'
 import { isTagsTabPath } from '@shared/tags'
 import { isHelpTabPath } from '@shared/help'
@@ -165,7 +203,7 @@ import {
   recallTabScroll,
   type TabScrollPosition
 } from '../lib/tab-scroll-memory'
-import { parseOutline } from '../lib/outline'
+import { activeOutlineLineForCursor, parseOutline } from '../lib/outline'
 import {
   findRenderedHeadingForOutlineLine,
   nextOutlinePreviewSyncLockUntil,
@@ -194,9 +232,12 @@ import {
   PinIcon,
   TagIcon,
   TrashIcon,
+  WorkflowIcon,
   ZapIcon
 } from './icons'
 import { focusEditorNormalMode } from '../lib/editor-focus'
+import { reflowParagraph } from '../lib/cm-reflow'
+import { isTouchPrimaryDevice, vimImeGuard } from '../lib/cm-vim-ime-guard'
 import {
   getSystemFolderLabel,
   resolveSystemFolderLabels
@@ -226,6 +267,13 @@ import {
 } from '../lib/pane-mode'
 import { resolveCommentAnchor, selectionToCommentAnchor } from '../lib/comments'
 import { ZEN_OPEN_EDITOR_CONTEXT_MENU_EVENT } from '../lib/keyboard-context-menu'
+import { armMiddleClickPasteGuard } from '../lib/middle-click-paste-guard'
+import {
+  CALENDAR_PANEL_CLOSED,
+  calendarPanelOnNote,
+  calendarPanelOnToggle,
+  type CalendarPanelState
+} from '../lib/calendar-panel-auto'
 import {
   assetPathFromTab,
   assetTitleFromPath,
@@ -245,6 +293,7 @@ import {
   type KeymapOverrides
 } from '../lib/keymaps'
 import { isTabStripOverflowing } from '../lib/tab-strip-overflow'
+import { editorTabSize } from '../lib/editor-tab-size'
 
 const MODE_OPTIONS: Array<{
   mode: PaneMode
@@ -270,8 +319,20 @@ const LARGE_DOC_EDITOR_HYDRATE_DELAY_MS = 180
 // chords are stripped from `defaultKeymap` so Vim's `<C-d>` & co. work (see
 // cm-vim-default-keymap). Built behind a compartment and reconfigured on Vim
 // toggle or keymap-override changes.
+// Straight quotes join the hop's markers exactly where they auto-pair: with the
+// prose setting on, or inside code, where auto-pair always closes them (#685).
+const markerHop = markerHopCommands({
+  quotesAreMarkers: (state, pos) =>
+    useStore.getState().autoPairQuotesInProse || isInMarkdownCode(state, pos)
+})
+
 function buildEditorKeymap(vimMode: boolean, overrides: KeymapOverrides): Extension {
   return keymap.of([
+    // Home/End on the display row the user can see. Listed before
+    // defaultKeymap, whose versions hit-test an x coordinate at the editor's
+    // edge and misland on wrapped lines under fractional display scaling
+    // (#591, the same resolution #575 removed from `$`).
+    ...displayRowBoundaryKeymap,
     {
       key: 'Mod-f',
       run: () => {
@@ -291,6 +352,36 @@ function buildEditorKeymap(vimMode: boolean, overrides: KeymapOverrides): Extens
     {
       key: toCodeMirrorKey(getKeymapBinding(overrides, 'editor.moveLineDown')),
       run: moveLineDown
+    },
+    // Obsidian-style checkbox toggle: line -> `- [ ]` -> `[x]` and back.
+    // Mode-agnostic like the line moves.
+    {
+      key: toCodeMirrorKey(getKeymapBinding(overrides, 'editor.toggleCheckbox')),
+      run: toggleCheckbox
+    },
+    // Join a hard-wrapped paragraph back into one line so the pane wraps it
+    // (#676). Mode-agnostic like the line moves; Vim mode also has `gq`.
+    {
+      key: toCodeMirrorKey(getKeymapBinding(overrides, 'editor.reflowParagraph')),
+      run: reflowParagraph
+    },
+    // Step across inline markers, so a formatted word can be finished without
+    // reaching for the arrow keys. Mode-agnostic like the line moves. (#490)
+    {
+      key: toCodeMirrorKey(getKeymapBinding(overrides, 'editor.hopMarkerForward')),
+      run: markerHop.forward
+    },
+    {
+      key: toCodeMirrorKey(getKeymapBinding(overrides, 'editor.hopMarkerBackward')),
+      run: markerHop.backward
+    },
+    {
+      key: toCodeMirrorKey(getKeymapBinding(overrides, 'editor.foldHeading')),
+      run: foldHeadingAtCursor
+    },
+    {
+      key: toCodeMirrorKey(getKeymapBinding(overrides, 'editor.unfoldHeading')),
+      run: unfoldHeadingAtCursor
     },
     // Inline-format shortcuts (bold/italic/code/strike/highlight/math/link). In
     // Vim mode VimNav owns these (its window handler also resolves the Ctrl+I
@@ -315,20 +406,20 @@ function buildEditorKeymap(vimMode: boolean, overrides: KeymapOverrides): Extens
     indentWithTab,
     ...vimAwareDefaultKeymap(vimMode),
     ...historyKeymap,
-    ...searchKeymap,
-    ...completionKeymapForEditor
+    ...vimAwareSearchKeymap(vimMode)
   ])
 }
 
-function markdownEditingExtensions(): Extension[] {
+function markdownEditingExtensions(showHeadingLevelLabels = false): Extension[] {
   return [
     markdown({ base: markdownLanguage, codeLanguages: resolveCodeLanguage, addKeymap: false }),
+    customCodeFenceHighlightExtension,
     vimAwareMarkdownKeymap,
     markdownListIndentPlugin,
-    frontmatterStyle,
+    frontmatterTagExtension,
     orderedListRenumber,
     forwardOnCheckboxArrow,
-    headingFolding(),
+    headingFolding({ showLevelLabels: showHeadingLevelLabels }),
     codeBlockFontPlugin
   ]
 }
@@ -351,27 +442,46 @@ function markdownSyntaxHighlightExtensions(): Extension[] {
  * frontmatter-properties panel is intentionally excluded — it depends on
  * the PR's breaking database restructure.
  */
-function wysiwygExtensions(renderTables: boolean, mathRenderer: MathRenderer): Extension[] {
+function wysiwygExtensions(
+  renderTables: boolean,
+  mathRenderer: MathRenderer,
+  typstPreamble: string,
+  diagramTheme: DiagramTheme
+): Extension[] {
   return [
     livePreviewPlugin,
+    // Frontmatter renders as compact properties only while Live Preview is
+    // on; with it off the block reads as plain --- markdown. (#616)
+    frontmatterStyle,
     codeBlockFlairPlugin,
     // Table widgets are gated on a setting — off keeps tables as plain editable
     // markdown for full keyboard/Vim editing (#232).
     ...(renderTables ? [tablePlugin, tableVimEntry] : []),
     wysiwygBlocksPlugin,
     ...hashtagExtension,
+    ...taskMetadataExtension,
+    ...taskRollupExtension,
     ...highlightExtension,
     ...wikilinkRenderExtension,
-    mathRenderExtension(mathRenderer),
+    mathRenderExtension(mathRenderer, typstPreamble),
+    // Diagrams bake their colours in, so the palette rides along and a theme
+    // switch redraws them (#530).
+    mermaidRenderExtension(diagramTheme.mode, diagramTheme.key),
     embedRenderExtension,
     urlPasteMenuExtension
   ]
 }
 
-/** Current live-preview extension set, pulling both gating prefs from the store. */
-function currentWysiwygExtensions(): Extension[] {
+/** Current live-preview extension set, pulling the gating prefs from the store.
+ *  `notePath` selects that note's tag-driven Typst preamble (#486). */
+function currentWysiwygExtensions(notePath: string | null): Extension[] {
   const s = useStore.getState()
-  return wysiwygExtensions(s.renderTablesInLivePreview, s.mathRenderer)
+  return wysiwygExtensions(
+    s.renderTablesInLivePreview,
+    s.mathRenderer,
+    selectTypstPreambleFor(s, notePath),
+    documentDiagramTheme()
+  )
 }
 
 const paperHighlight = HighlightStyle.define([
@@ -636,6 +746,7 @@ function selectionEdgeCoords(view: EditorView): {
 }
 
 function getSelectionCommentAction(view: EditorView): SelectionCommentAction {
+  if (!shouldShowSelectionToolbar(view, useStore.getState().vimMode)) return null
   const sel = view.state.selection.main
   const active = document.activeElement
   // Keep the toolbar up while the editor holds the selection OR while the user
@@ -682,45 +793,6 @@ function getEditorContextMenuPosition(view: EditorView): { x: number; y: number 
  * navigates, scrolling to its `#heading` when present. Returns false when the
  * target resolves to nothing (so the click falls through to normal behavior). (#201)
  */
-function followEditorLink(target: string): boolean {
-  const external = externalLinkUrl(target)
-  if (external) {
-    window.open(external, '_blank')
-    return true
-  }
-  const state = useStore.getState()
-  const focusSoon = (): void => {
-    state.setFocusedPanel('editor')
-    requestAnimationFrame(() => useStore.getState().editorViewRef?.focus())
-  }
-  const internal = resolveInternalNoteHref(state.selectedPath, target, state.notes)
-  if (internal) {
-    if (internal.heading) void openWikilinkHeading(internal.path, internal.heading).then(focusSoon)
-    else void state.selectNote(internal.path).then(focusSoon)
-    return true
-  }
-  const wikilink = resolveWikilinkTarget(state.notes, target)
-  if (wikilink) {
-    const heading = wikilinkHeadingAnchor(target)
-    if (heading) void openWikilinkHeading(wikilink.path, heading).then(focusSoon)
-    else void state.selectNote(wikilink.path).then(focusSoon)
-    return true
-  }
-  if (openDatabaseFromWikilink(target)) {
-    focusSoon()
-    return true
-  }
-  // A link to a file outside the vault (`~/…`, `file://…`, an absolute path):
-  // open it with the OS default app instead of treating it as a note. (#424)
-  if (externalFileLink(target)) {
-    void openExternalFileLink(target)
-    return true
-  }
-  // Dead link — don't leave it a silent dead end. Offer to create the note (with
-  // a confirmation), matching the `gd` follow-link path. (Discord: dead links)
-  void offerCreateNoteFromLink(target)
-  return true
-}
 
 const EMPTY_PANE_MODES: PaneModesByPath = {}
 
@@ -758,6 +830,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
   const updateNoteBody = useStore((s) => s.updateNoteBody)
   const persistNote = useStore((s) => s.persistNote)
   const trashActive = useStore((s) => s.trashActive)
+  const deleteActivePermanently = useStore((s) => s.deleteActivePermanently)
   const archiveActive = useStore((s) => s.archiveActive)
   const restoreActive = useStore((s) => s.restoreActive)
   const unarchiveActive = useStore((s) => s.unarchiveActive)
@@ -767,6 +840,9 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
   const setActiveCommentId = useStore((s) => s.setActiveCommentId)
 
   const setEditorViewRef = useStore((s) => s.setEditorViewRef)
+  const activeEditorCursorPosition = useStore((s) =>
+    isActive ? s.editorCursorPosition : null
+  )
   const sidebarOpen = useStore((s) => s.sidebarOpen)
   const zenMode = useStore((s) => s.zenMode)
   const toggleSidebar = useStore((s) => s.toggleSidebar)
@@ -780,10 +856,20 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
   const vimMode = useStore((s) => s.vimMode)
   const vimYankToClipboard = useStore((s) => s.vimYankToClipboard)
   const livePreview = useStore((s) => s.livePreview)
+  const harperEnabled = useStore((s) => s.harperEnabled)
+  const harperDialect = useStore((s) => s.harperDialect)
+  const harperLintConfig = useStore((s) => s.harperLintConfig)
+  const harperVaultState = useStore((s) => s.vaultSettings.harper)
+  const showHeadingLevelLabels = useStore((s) => s.showHeadingLevelLabels)
   const renderTablesInLivePreview = useStore((s) => s.renderTablesInLivePreview)
+  // Diagrams carry their palette inside the SVG, so a theme switch has to
+  // reconfigure this pane and redraw them (#530).
+  const diagramTheme = useDiagramTheme()
   const mathRenderer = useStore((s) => s.mathRenderer)
   const editorFontSize = useStore((s) => s.editorFontSize)
   const editorLineHeight = useStore((s) => s.editorLineHeight)
+  const editorTabSizeValue = useStore((s) => s.editorTabSize)
+  const listIndentGuidesOn = useStore((s) => s.listIndentGuides)
   const editorScrollOff = useStore((s) => s.editorScrollOff)
   const lineNumberMode = useStore((s) => s.lineNumberMode)
   const textFont = useStore((s) => s.textFont)
@@ -801,23 +887,30 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
   const folderLabels = resolveSystemFolderLabels(systemFolderLabels)
   const vaultSettings = useStore((s) => s.vaultSettings)
   const autoCalendarPanel = useStore((s) => s.autoCalendarPanel)
+  const supportsCloudPublishing = window.zen.getCapabilities().supportsCloudSync === true
+  // Tag-driven Typst definitions for this pane's note (#486); '' unless the
+  // setting is on, Typst is the renderer, and the note's tags match a preamble.
+  const typstPreamble = useStore((s) => selectTypstPreambleFor(s, content?.path ?? null))
 
   const modesByPath = useStore((s) => s.paneModes[paneId]) ?? EMPTY_PANE_MODES
   const setPaneModeForPath = useStore((s) => s.setPaneModeForPath)
   const keepViewModeAcrossNotes = useStore((s) => s.keepViewModeAcrossNotes)
+  const defaultPaneMode = useStore((s) => s.defaultPaneMode)
   const paneStickyMode = useStore((s) => s.paneStickyModes[paneId])
   // With "keep view mode across notes" on, every note in this pane follows the
   // pane's current mode instead of its own remembered one (falls back to the
-  // per-note mode until a mode has been picked in this pane).
+  // per-note mode until a mode has been picked in this pane). A note with no
+  // remembered mode opens in the Default view mode preference. (#543)
   const mode =
     keepViewModeAcrossNotes && paneStickyMode
       ? paneStickyMode
-      : paneModeForPath(modesByPath, activeTab)
+      : paneModeForPath(modesByPath, activeTab, defaultPaneMode)
   const [connectionsOpen, setConnectionsOpen] = useState(false)
   const [outlineOpen, setOutlineOpen] = useState(false)
   const [activeOutlineLine, setActiveOutlineLine] = useState<number | null>(null)
   const [commentsOpen, setCommentsOpen] = useState(false)
-  const [calendarOpen, setCalendarOpen] = useState(false)
+  const [calendarPanel, setCalendarPanel] = useState<CalendarPanelState>(CALENDAR_PANEL_CLOSED)
+  const calendarOpen = calendarPanel.open
   // The calendar panel is a date navigator. It auto-opens while the pane shows
   // a daily/weekly note, but stays available (Obsidian-style) on any note as
   // long as the daily or weekly feature is enabled.
@@ -851,6 +944,9 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     // selection can't be trusted when an item (e.g. Highlight) runs. (#416)
     selFrom: number
     selTo: number
+    /** The outside link under the pointer (or the caret, when opened from the
+     *  keyboard), so the menu can offer to open or copy it. */
+    link: CopyableLink | null
   } | null>(null)
   const [editorHydration, setEditorHydration] = useState<EditorHydrationState | null>(null)
   const [assetDropActive, setAssetDropActive] = useState(false)
@@ -872,6 +968,10 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
   // lets us tell our own restore scroll apart from a user scroll, so we never
   // yank a reader who scrolled during the render window.
   const previewRestoreTargetRef = useRef<{ path: string; top: number } | null>(null)
+  // Set when the user switches Edit/Split → Preview: the reading view opens on
+  // the line the cursor was on, instead of the top of the note. Applied (and
+  // cleared) once the preview has rendered blocks to anchor against. (#543)
+  const pendingPreviewCursorLineRef = useRef<{ path: string; line: number } | null>(null)
   const lastProgrammaticPreviewTopRef = useRef<number | null>(null)
   const lastRestoredPathRef = useRef<string | null>(null)
   const vimCompartmentRef = useRef<Compartment | null>(null)
@@ -879,10 +979,12 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
   const markdownCompartmentRef = useRef<Compartment | null>(null)
   const markdownSyntaxCompartmentRef = useRef<Compartment | null>(null)
   const livePreviewCompartmentRef = useRef<Compartment | null>(null)
+  const harperCompartmentRef = useRef<Compartment | null>(null)
   const lineNumbersCompartmentRef = useRef<Compartment | null>(null)
   const wordWrapCompartmentRef = useRef<Compartment | null>(null)
   const scrolloffCompartmentRef = useRef<Compartment | null>(null)
   const drawSelectionCompartmentRef = useRef<Compartment | null>(null)
+  const tabSizeCompartmentRef = useRef<Compartment | null>(null)
   // history() lives in a compartment so we can reset undo history on a note
   // switch — otherwise Cmd+Z crosses notes and overwrites the current one (#247).
   const historyCompartmentRef = useRef<Compartment | null>(null)
@@ -937,7 +1039,8 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
       y: pos.y,
       hasSelection: !sel.empty,
       selFrom: sel.from,
-      selTo: sel.to
+      selTo: sel.to,
+      link: copyableLinkAt(view, sel.head)
     })
     view.focus()
     return true
@@ -1003,11 +1106,27 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
   }, [])
 
   const toggleCalendarPanel = useCallback(() => {
-    setCalendarOpen((open) => !open)
+    setCalendarPanel(calendarPanelOnToggle)
   }, [])
 
 
   const applyPaneMode = useCallback((nextMode: PaneMode) => {
+    // Capture the cursor's line NOW, while the editor is still mounted:
+    // preview-only mode tears the editor down, and "continue reading where I
+    // was editing" needs this anchor to land the preview there. (#543)
+    const view = viewRef.current
+    if (
+      nextMode === 'preview' &&
+      modeRef.current !== 'preview' &&
+      activeTab &&
+      view &&
+      viewPathRef.current === activeTab
+    ) {
+      pendingPreviewCursorLineRef.current = {
+        path: activeTab,
+        line: view.state.doc.lineAt(view.state.selection.main.head).number
+      }
+    }
     setPaneModeForPath(paneId, activeTab, nextMode)
     setActivePane(paneId)
     setFocusedPanel('editor')
@@ -1059,7 +1178,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
       setConnectionsOpen(false)
       setOutlineOpen(false)
       setCommentsOpen(false)
-      setCalendarOpen(false)
+      setCalendarPanel(CALENDAR_PANEL_CLOSED)
       setConnectionPreview(null)
       const panel = useStore.getState().focusedPanel
       if (panel === 'connections' || panel === 'comments' || panel === 'hoverpreview') {
@@ -1070,17 +1189,21 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     return () => window.removeEventListener('zen:close-right-panel', handler)
   }, [isActive, setConnectionPreview, setFocusedPanel])
 
-  // Auto-show the calendar when this pane lands on a daily/weekly note. On other
-  // notes we leave it as-is (Obsidian-style persistence) so it stays open while
-  // you browse, and only force it closed when the feature is turned off entirely.
-  // Keyed on the note identity (not every render) so a manual `leader c` / icon
-  // close sticks until the note changes.
+  // Auto-show the calendar when this pane lands on a daily/weekly note. A
+  // panel the USER opened keeps Obsidian-style persistence and stays open
+  // while they browse; a panel THIS effect opened is scoped to the periodic
+  // notes and closes on the way out, so a visit to a daily note can no longer
+  // overwrite a close the user made elsewhere (#502). The transitions live in
+  // `calendar-panel-auto`; keyed on the note identity (not every render) so a
+  // manual `leader c` / icon close sticks until the note changes.
   useEffect(() => {
-    if (!calendarAvailable) {
-      setCalendarOpen(false)
-      return
-    }
-    if (isDateNote && autoCalendarPanel) setCalendarOpen(true)
+    setCalendarPanel((state) =>
+      calendarPanelOnNote(state, {
+        isDateNote,
+        autoEnabled: autoCalendarPanel,
+        available: calendarAvailable
+      })
+    )
   }, [content?.path, isDateNote, autoCalendarPanel, calendarAvailable])
 
   useEffect(() => {
@@ -1219,6 +1342,31 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     })
   }, [lockOutlinePreviewSync, mode, scrollPreviewToOutlineLine])
 
+  // Scroll the preview so the rendered block for `line` sits near the top:
+  // the nearest data-source-line block at or above the line, like the split
+  // sync's anchor walk, but from a bare line number (no live editor needed).
+  const scrollPreviewToSourceLine = useCallback((line: number): boolean => {
+    const previewEl = previewScrollRef.current
+    if (!previewEl) return false
+    const blocks = previewEl.querySelectorAll<HTMLElement>('[data-source-line]')
+    if (blocks.length === 0) return false
+    let anchor: HTMLElement | null = null
+    for (const el of blocks) {
+      const ln = Number(el.dataset.sourceLine)
+      if (Number.isFinite(ln) && ln <= line) {
+        anchor = el
+      } else if (ln > line) {
+        break
+      }
+    }
+    const nextTop = anchor
+      ? scrollTopForElementRelativeTop(previewEl, anchor, OUTLINE_JUMP_TOP_MARGIN)
+      : 0
+    previewEl.scrollTop = nextTop
+    lastProgrammaticPreviewTopRef.current = previewEl.scrollTop
+    return true
+  }, [])
+
   const handlePreviewRendered = useCallback((): void => {
     if (previewIsStaleRef.current) return
     const pendingLine = pendingPreviewOutlineJumpLineRef.current
@@ -1227,6 +1375,17 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
         pendingPreviewOutlineJumpLineRef.current = null
       }
       return
+    }
+    // A mode switch out of editing carries the cursor's line into the
+    // reading view; the live editing position outranks a remembered
+    // preview offset from an earlier visit. (#543)
+    const cursorTarget = pendingPreviewCursorLineRef.current
+    if (cursorTarget && cursorTarget.path === content?.path) {
+      if (scrollPreviewToSourceLine(cursorTarget.line)) {
+        pendingPreviewCursorLineRef.current = null
+        previewRestoreTargetRef.current = null
+        return
+      }
     }
     // Re-apply a remembered scroll now that the preview has reached full
     // height — async diagrams grow the page after first paint, which would
@@ -1250,7 +1409,8 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     content?.path,
     mode,
     syncPreviewToEditorScroll,
-    scrollPreviewToOutlineLine
+    scrollPreviewToOutlineLine,
+    scrollPreviewToSourceLine
   ])
 
   useEffect(() => {
@@ -1475,23 +1635,8 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
       setActiveOutlineLineSafely(null)
       return
     }
-    // Probe ~25% down the viewport (capped) so a heading is considered
-    // active once it scrolls into the upper portion of the visible area
-    // — not only after it has scrolled past the very top edge.
-    const rect = view.scrollDOM.getBoundingClientRect()
-    const probeY = rect.top + Math.min(140, rect.height * 0.25)
-    const pos = view.posAtCoords({ x: rect.left + 8, y: probeY })
-    if (pos == null) {
-      setActiveOutlineLineSafely(null)
-      return
-    }
-    const probeLine = view.state.doc.lineAt(pos).number
-    let activeLine: number | null = null
-    for (const item of outlineItems) {
-      if (item.line <= probeLine) activeLine = item.line
-      else break
-    }
-    setActiveOutlineLineSafely(activeLine)
+    const cursorLine = view.state.doc.lineAt(view.state.selection.main.head).number
+    setActiveOutlineLineSafely(activeOutlineLineForCursor(outlineItems, cursorLine))
   }, [outlineItems, setActiveOutlineLineSafely])
 
   const computeActiveFromPreview = useCallback(() => {
@@ -1572,12 +1717,15 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
       const markdownCompartment = new Compartment()
       const markdownSyntaxCompartment = new Compartment()
       const livePreviewCompartment = new Compartment()
+      const harperCompartment = new Compartment()
       const lineNumbersCompartment = new Compartment()
       const wordWrapCompartment = new Compartment()
       const scrolloffCompartment = new Compartment()
       const drawSelectionCompartment = new Compartment()
+      const tabSizeCompartment = new Compartment()
       const historyCompartment = new Compartment()
       vimCompartmentRef.current = vimCompartment
+      harperCompartmentRef.current = harperCompartment
       editorKeymapCompartmentRef.current = editorKeymapCompartment
       markdownCompartmentRef.current = markdownCompartment
       markdownSyntaxCompartmentRef.current = markdownSyntaxCompartment
@@ -1586,6 +1734,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
       wordWrapCompartmentRef.current = wordWrapCompartment
       scrolloffCompartmentRef.current = scrolloffCompartment
       drawSelectionCompartmentRef.current = drawSelectionCompartment
+      tabSizeCompartmentRef.current = tabSizeCompartment
       historyCompartmentRef.current = historyCompartment
       const s0 = useStore.getState()
       const initialPath = findLeaf(s0.paneLayout, paneId)?.activeTab ?? null
@@ -1600,42 +1749,69 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
         extensions: [
           appMarkdownSnippetExtension(),
           vimCompartment.of(s0.vimMode ? vim() : []),
+          // No text input outside Vim insert mode, so a CJK input method
+          // cannot compose over motions (#84, #464). Reads the pref live.
+          vimImeGuard(
+            () => useStore.getState().vimBlockImeInNormalMode && !isTouchPrimaryDevice()
+          ),
           historyCompartment.of(history()),
           drawSelectionCompartment.of(
             drawSelection({ cursorBlinkRate: s0.cursorBlink ? 1200 : 0 })
           ),
+          tabSizeCompartment.of([
+            editorTabSize(s0.editorTabSize),
+            listIndentWidth(s0.editorTabSize),
+            listIndentGuidesExt(s0.listIndentGuides)
+          ]),
           highlightActiveLine(),
           taskJumpHighlightField,
           yankHighlightExtension,
+          vimVisualHighlightExtension,
           vimClipboardPasteExtension,
           commentDecorationField,
           wordWrapCompartment.of(s0.wordWrap ? EditorView.lineWrapping : []),
           scrolloffCompartment.of(scrollOff(s0.editorScrollOff)),
-          markdownCompartment.of(deferInitialRichMarkdown ? [] : markdownEditingExtensions()),
+          markdownCompartment.of(
+            deferInitialRichMarkdown
+              ? []
+              : markdownEditingExtensions(s0.showHeadingLevelLabels)
+          ),
           markdownSyntaxCompartment.of(
             deferInitialRichMarkdown ? [] : markdownSyntaxHighlightExtensions()
           ),
           livePreviewCompartment.of(
             s0.livePreview && !deferInitialRichMarkdown
-              ? wysiwygExtensions(s0.renderTablesInLivePreview, s0.mathRenderer)
+              ? wysiwygExtensions(
+                  s0.renderTablesInLivePreview,
+                  s0.mathRenderer,
+                  selectTypstPreambleFor(s0, initialPath),
+                  documentDiagramTheme()
+                )
               : []
           ),
           lineNumbersCompartment.of(lineNumberExtension(s0.lineNumberMode)),
+          harperCompartment.of(
+            s0.harperEnabled && harperSupported() ? harperExtensions(harperEditorConfig()) : []
+          ),
           tooltips({ parent: document.body }),
           autocompletion({
             // Don't install @codemirror/autocomplete's stock keymap — it binds
             // mac-only `Alt-`` / `Alt-i` to completion and swallows the char
             // those combos type on AltGr-style layouts (#429). Our filtered
-            // `completionKeymapForEditor` (in buildEditorKeymap) covers the rest.
+            // `completionKeymapExtension` (mounted below) covers the rest.
             defaultKeymap: false,
             override: [
               slashCommandSource,
               calloutTypeSource,
               dateShortcutSource,
+              latexCommandSource,
+              typstCommandSource,
               atNoteSource,
+              frontmatterTagSource,
               hashtagSource,
               wikilinkSource,
-              wikilinkHeadingSource
+              wikilinkHeadingSource,
+              wikilinkBlockSource
             ],
             addToOptions: [{ render: slashCommandRender.render, position: 0 }],
             icons: false,
@@ -1647,6 +1823,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
             }
           }),
           completionNavKeymap,
+          completionKeymapExtension,
           editorKeymapCompartment.of(buildEditorKeymap(s0.vimMode, s0.keymapOverrides)),
           EditorView.domEventHandlers({
             mousedown: (event, view) => {
@@ -1662,17 +1839,25 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
                 if (pos != null) {
                   const doc = view.state.doc.toString()
                   if (event.metaKey || event.ctrlKey) {
-                    const linkTarget = extractLinkAtCursor(doc, pos)
-                    if (linkTarget && followEditorLink(linkTarget)) {
+                    const link = linkRangeAtCursor(doc, pos)
+                    if (
+                      link &&
+                      pointerOverRange(view, link.from, link.to, event.clientX, event.clientY) &&
+                      followLinkTarget(link.target)
+                    ) {
                       event.preventDefault()
                       return true
                     }
                   } else {
                     const link = markdownLinkAt(doc, pos)
-                    if (link) {
+                    if (
+                      link &&
+                      useStore.getState().livePreview &&
+                      pointerOverRange(view, link.from, link.to, event.clientX, event.clientY)
+                    ) {
                       const sel = view.state.selection.main
                       const rendered = sel.to < link.from || sel.from > link.to
-                      if (rendered && followEditorLink(link.href)) {
+                      if (rendered && followLinkTarget(link.href)) {
                         event.preventDefault()
                         return true
                       }
@@ -1703,7 +1888,19 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
                 return false
               }
               const line = view.state.doc.lineAt(pos)
-              setHoveredLink(extractLinkAtCursor(line.text, pos - line.from))
+              const link = linkRangeAtCursor(line.text, pos - line.from)
+              setHoveredLink(
+                link &&
+                  pointerOverRange(
+                    view,
+                    line.from + link.from,
+                    line.from + link.to,
+                    event.clientX,
+                    event.clientY
+                  )
+                  ? link.target
+                  : null
+              )
               return false
             },
             mouseleave: () => {
@@ -1746,7 +1943,9 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
                 const cm = getCM(view)
                 const insertMode = !!cm?.state.vim?.insertMode
                 const sel = view.state.selection.main
-                if (!insertMode && !sel.empty) {
+                // A pending sequence owns the next key: `v f m` jumps to the
+                // next `m`, it does not open the menu (#568).
+                if (!insertMode && !sel.empty && !isVimAwaitingArgument(view)) {
                   event.preventDefault()
                   event.stopPropagation()
                   openEditorContextMenu()
@@ -1769,6 +1968,12 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
             }
             if (upd.viewportChanged || upd.geometryChanged) {
               schedulePreviewSyncFromEditorViewport()
+            }
+            if (
+              (upd.selectionSet || upd.docChanged) &&
+              useStore.getState().editorViewRef === upd.view
+            ) {
+              useStore.getState().setEditorCursorPosition(editorCursorPosition(upd.state))
             }
             if (!upd.docChanged) return
             if (upd.transactions.some((tr: Transaction) => tr.annotation(programmatic))) return
@@ -1800,11 +2005,15 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
           if (viewPathRef.current !== initialPath) return
           richMarkdownDeferredRef.current = false
           const restoreEffects = [
-            markdownCompartment.reconfigure(markdownEditingExtensions()),
+            markdownCompartment.reconfigure(
+              markdownEditingExtensions(useStore.getState().showHeadingLevelLabels)
+            ),
             markdownSyntaxCompartment.reconfigure(markdownSyntaxHighlightExtensions())
           ]
           if (useStore.getState().livePreview) {
-            restoreEffects.push(livePreviewCompartment.reconfigure(currentWysiwygExtensions()))
+            restoreEffects.push(
+              livePreviewCompartment.reconfigure(currentWysiwygExtensions(initialPath))
+            )
           }
           view.dispatch({ effects: restoreEffects })
         }, LARGE_DOC_LIVE_PREVIEW_DEFER_MS)
@@ -1893,11 +2102,13 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     ) {
       richMarkdownDeferredRef.current = false
       effects.push(
-        markdownCompartment.reconfigure(markdownEditingExtensions()),
+        markdownCompartment.reconfigure(
+          markdownEditingExtensions(useStore.getState().showHeadingLevelLabels)
+        ),
         markdownSyntaxCompartment.reconfigure(markdownSyntaxHighlightExtensions())
       )
       if (livePreviewEnabled && livePreviewCompartment) {
-        effects.push(livePreviewCompartment.reconfigure(currentWysiwygExtensions()))
+        effects.push(livePreviewCompartment.reconfigure(currentWysiwygExtensions(nextPath)))
       }
     }
     const dispatchStartedAt = performance.now()
@@ -1957,11 +2168,15 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
         if (viewPathRef.current !== nextPath) return
         richMarkdownDeferredRef.current = false
         const restoreEffects = [
-          markdownCompartment.reconfigure(markdownEditingExtensions()),
+          markdownCompartment.reconfigure(
+            markdownEditingExtensions(useStore.getState().showHeadingLevelLabels)
+          ),
           markdownSyntaxCompartment.reconfigure(markdownSyntaxHighlightExtensions())
         ]
         if (useStore.getState().livePreview && livePreviewCompartment) {
-          restoreEffects.push(livePreviewCompartment.reconfigure(currentWysiwygExtensions()))
+          restoreEffects.push(
+            livePreviewCompartment.reconfigure(currentWysiwygExtensions(viewPathRef.current))
+          )
         }
         view.dispatch({
           effects: restoreEffects
@@ -1998,6 +2213,29 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
   }, [vimMode, tabNavOverrides])
   useEffect(() => {
     const view = viewRef.current
+    const comp = harperCompartmentRef.current
+    if (!view || !comp) return
+    // Off is an empty compartment, so a disabled Harper costs the editor
+    // nothing. A dialect or rule change rebuilds the extension, which runs the
+    // linter again against the reconfigured session.
+    view.dispatch({
+      effects: comp.reconfigure(
+        harperEnabled && harperSupported() ? harperExtensions(harperEditorConfig()) : []
+      )
+    })
+  }, [harperEnabled, harperDialect, harperLintConfig])
+  useEffect(() => {
+    const view = viewRef.current
+    if (!view || !harperEnabled) return
+    // A dictionary or ignore change that arrived from outside this device
+    // (Cloud sync, a vault switch) must show up without waiting for an edit.
+    // The echo of this device's own `zg` is already in the session.
+    const json = JSON.stringify(harperVaultState ?? { words: [], ignoredLints: [] })
+    if (json === harperSeenVaultState()) return
+    view.dispatch({ effects: harperRefresh.of() })
+  }, [harperEnabled, harperVaultState])
+  useEffect(() => {
+    const view = viewRef.current
     const comp = livePreviewCompartmentRef.current
     if (!view || !comp) return
     if (deferredLivePreviewTimerRef.current != null) {
@@ -2009,20 +2247,39 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
         const markdownCompartment = markdownCompartmentRef.current
         const markdownSyntaxCompartment = markdownSyntaxCompartmentRef.current
         if (markdownCompartment) {
-          effects.push(markdownCompartment.reconfigure(markdownEditingExtensions()))
+          effects.push(
+            markdownCompartment.reconfigure(
+              markdownEditingExtensions(useStore.getState().showHeadingLevelLabels)
+            )
+          )
         }
         if (markdownSyntaxCompartment) {
           effects.push(
             markdownSyntaxCompartment.reconfigure(markdownSyntaxHighlightExtensions())
           )
         }
-        effects.push(comp.reconfigure(currentWysiwygExtensions()))
+        effects.push(comp.reconfigure(currentWysiwygExtensions(viewPathRef.current)))
         view.dispatch({ effects })
       }
       return
     }
-    view.dispatch({ effects: comp.reconfigure(livePreview ? currentWysiwygExtensions() : []) })
-  }, [livePreview, renderTablesInLivePreview, mathRenderer])
+    view.dispatch({
+      effects: comp.reconfigure(
+        livePreview ? currentWysiwygExtensions(viewPathRef.current) : []
+      )
+    })
+    // `typstPreamble` is in the deps so retagging a note — or editing the
+    // preamble note it points at — reconfigures this pane and repaints its
+    // formulas with the new definitions. (#486)
+  }, [livePreview, renderTablesInLivePreview, mathRenderer, typstPreamble, diagramTheme.key])
+  useEffect(() => {
+    const view = viewRef.current
+    const comp = markdownCompartmentRef.current
+    if (!view || !comp || richMarkdownDeferredRef.current) return
+    view.dispatch({
+      effects: comp.reconfigure(markdownEditingExtensions(showHeadingLevelLabels))
+    })
+  }, [showHeadingLevelLabels])
   useEffect(() => {
     const view = viewRef.current
     const comp = lineNumbersCompartmentRef.current
@@ -2055,6 +2312,18 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
       )
     })
   }, [cursorBlink])
+  useEffect(() => {
+    const view = viewRef.current
+    const comp = tabSizeCompartmentRef.current
+    if (!view || !comp) return
+    view.dispatch({
+      effects: comp.reconfigure([
+        editorTabSize(editorTabSizeValue),
+        listIndentWidth(editorTabSizeValue),
+        listIndentGuidesExt(listIndentGuidesOn)
+      ])
+    })
+  }, [editorTabSizeValue, listIndentGuidesOn])
 
   // Re-measure CM on prefs that change line geometry.
   useEffect(() => {
@@ -2522,6 +2791,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
           preview: path === previewTab,
           isQuick: false,
           isTasks: false,
+          isWorkflows: false,
           isTag: false,
           isHelp: false,
           isArchive: false,
@@ -2530,6 +2800,20 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
           isAsset: false,
           isDiagram: false,
           isDatabase: false
+        }
+        if (isWorkflowsTabPath(path)) {
+          return {
+            ...base,
+            title: 'Workflows',
+            isWorkflows: true
+          }
+        }
+        if (isAtlasTabPath(path)) {
+          return {
+            ...base,
+            title: 'Atlas',
+            isWorkflows: true
+          }
         }
         if (isTasksTabPath(path)) {
           return {
@@ -2672,6 +2956,8 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     // close, close relatives, or split them into another pane.
     if (
       isQuickNotesTabPath(path) ||
+      isWorkflowsTabPath(path) ||
+      isAtlasTabPath(path) ||
       isTagsTabPath(path) ||
       isHelpTabPath(path) ||
       isArchiveTabPath(path) ||
@@ -2778,6 +3064,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
       preview: boolean
       isQuick: boolean
       isTasks: boolean
+      isWorkflows: boolean
       isTag: boolean
       isHelp: boolean
       isArchive: boolean
@@ -2790,6 +3077,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
       const isVirtual =
         tab.isQuick ||
         tab.isTasks ||
+        tab.isWorkflows ||
         tab.isTag ||
         tab.isHelp ||
         tab.isArchive ||
@@ -2866,9 +3154,20 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
               e.preventDefault()
             }
           }}
+          onMouseUp={(e) => {
+            // Some Chromium paths run the Linux primary-selection paste as the
+            // mouseup default action, before auxclick can refuse it. (#498)
+            if (e.button === 1) {
+              e.preventDefault()
+            }
+          }}
           onAuxClick={(e) => {
             if (e.button === 1) {
               e.preventDefault()
+              // Under Wayland the paste can be delivered to the FOCUSED editor
+              // rather than to this tab, so cancelling events here is not
+              // enough on its own; the guard catches the paste itself. (#498)
+              armMiddleClickPasteGuard()
               void closeTabInPane(paneId, tab.path)
             }
           }}
@@ -2915,7 +3214,17 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
               </button>
             )}
             <button
-              onClick={() => void focusTabInPane(paneId, tab.path)}
+              onClick={(e) => {
+                // A mouse click parks DOM focus on this button, so the next
+                // keystrokes went to the tab (and drew its focus ring) instead
+                // of the note (#679). Land in the editor the way a hint or a
+                // palette pick does; a panel tab just lets go of the button.
+                const button = e.currentTarget
+                void focusTabInPane(paneId, tab.path).then(() => {
+                  if (isVirtual) button.blur()
+                  else focusEditorNormalMode({ attempts: 10, delayMs: 24 })
+                })
+              }}
               onDoubleClick={() => {
                 if (tab.preview) promoteTabInPane(paneId, tab.path)
               }}
@@ -2924,6 +3233,9 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
             >
               {tab.isTasks && (
                 <CheckSquareIcon width={13} height={13} className="shrink-0 text-accent" />
+              )}
+              {tab.isWorkflows && (
+                <WorkflowIcon width={13} height={13} className="shrink-0 text-accent" />
               )}
               {tab.isQuick && (
                 <ZapIcon width={13} height={13} className="shrink-0 text-accent" />
@@ -3061,9 +3373,17 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
             <ArchiveIcon />
           </IconBtn>
         )}
-        <IconBtn title={`Move to ${folderLabels.trash.toLowerCase()}`} onClick={() => void trashActive()}>
-          <TrashIcon />
-        </IconBtn>
+        {folder === 'trash' ? (
+          // A trashed note cannot be trashed again; here the bin icon means the
+          // only thing left that it can mean (#712).
+          <IconBtn title="Delete permanently" onClick={() => void deleteActivePermanently()}>
+            <TrashIcon />
+          </IconBtn>
+        ) : (
+          <IconBtn title={`Move to ${folderLabels.trash.toLowerCase()}`} onClick={() => void trashActive()}>
+            <TrashIcon />
+          </IconBtn>
+        )}
       </div>
     )
   }, [
@@ -3081,6 +3401,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     calendarOpen,
     toggleCalendarPanel,
     trashActive,
+    deleteActivePermanently,
     archiveActive,
     restoreActive,
     unarchiveActive,
@@ -3182,10 +3503,8 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     focusEditorNormalMode()
   }, [applyPaneMode, mode])
 
-  // Track the topmost-visible heading and surface it as the active
-  // outline item. We listen on whichever surface is the user's scroll
-  // target for the current mode — split mode follows the editor since
-  // that's where typing happens.
+  // Editing follows the cursor so keyboard motion updates the Outline even
+  // when the viewport barely moves. Preview mode remains scroll-driven.
   useEffect(() => {
     if (!outlineOpen) {
       setActiveOutlineLineSafely(null)
@@ -3206,6 +3525,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
       }
     }
   }, [
+    activeEditorCursorPosition?.line,
     computeActiveFromEditor,
     content?.path,
     mode,
@@ -3374,8 +3694,21 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
         setActivePane(paneId)
         setFocusedPanel('editor')
       }}
-      onFocusCapture={() => {
+      onFocusCapture={(e) => {
         setActivePane(paneId)
+        // The right-side panels live inside this pane, so focusing one of them
+        // bubbles up here. Claiming 'editor' then would undo the panel focus
+        // that pane navigation just set — which is why `<C-w>l` onto the
+        // calendar used to bounce back to the editor, making it a dead end in
+        // the focus cycle. Only the editor's own surfaces claim it. (#477)
+        if (
+          e.target instanceof HTMLElement &&
+          e.target.closest(
+            '[data-connections-panel],[data-comments-panel],[data-outline-panel],[data-calendar-panel]'
+          )
+        ) {
+          return
+        }
         setFocusedPanel('editor')
       }}
     >
@@ -3453,6 +3786,9 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
                 if (next && next !== content.title) void renameActive(next)
               }}
             />
+            {supportsCloudPublishing && content.folder !== 'trash' && (
+              <PublishedNoteButton key={content.path} note={content} />
+            )}
             {isDirty && (
               <span
                 aria-label="Unsaved changes"
@@ -3479,7 +3815,11 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
           {assetDropActive && (
             <div className="pointer-events-none absolute inset-3 z-20 rounded-xl border-2 border-dashed border-accent/55 bg-accent/8" />
           )}
-          {isTasksTabPath(activeTab) ? (
+          {isWorkflowsTabPath(activeTab) ? (
+            <LazyWorkflowsView />
+          ) : isAtlasTabPath(activeTab) ? (
+            <LazyAtlasView />
+          ) : isTasksTabPath(activeTab) ? (
             <TasksView />
           ) : isQuickNotesTabPath(activeTab) ? (
             <QuickNotesView />
@@ -3544,7 +3884,8 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
                     y: e.clientY,
                     hasSelection: !sel.empty,
                     selFrom: sel.from,
-                    selTo: sel.to
+                    selTo: sel.to,
+                    link: copyableLinkAtPointer(view, e.clientX, e.clientY)
                   })
                 }}
                 >
@@ -3681,7 +4022,8 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
             viewRef.current,
             editorMenu.hasSelection,
             captureCommentDraft,
-            { from: editorMenu.selFrom, to: editorMenu.selTo }
+            { from: editorMenu.selFrom, to: editorMenu.selTo },
+            editorMenu.link
           )}
           onClose={() => setEditorMenu(null)}
         />
@@ -3773,13 +4115,25 @@ function HighlightSwatch({ color }: { color: string }): JSX.Element {
   )
 }
 
+/** The outside link whose rendered glyphs sit under the pointer, or null. The
+ *  range check is what tells "on the link" from "clamped to the link" when
+ *  the pointer is in blank space beside a line (#587). */
+function copyableLinkAtPointer(view: EditorView, x: number, y: number): CopyableLink | null {
+  const pos = view.posAtCoords({ x, y })
+  if (pos == null) return null
+  const range = linkRangeAtCursor(view.state.doc.toString(), pos)
+  if (!range || !pointerOverRange(view, range.from, range.to, x, y)) return null
+  return copyableLink(range.target)
+}
+
 function buildEditorContextItems(
   view: EditorView | null,
   hasSelection: boolean,
   onAddComment: () => void,
   // Selection snapshotted when the menu opened, applied by the highlight actions
   // so they don't depend on the live selection surviving the menu. (#416)
-  selRange: { from: number; to: number }
+  selRange: { from: number; to: number },
+  link: CopyableLink | null
 ): ContextMenuItem[] {
   if (!view) return []
 
@@ -3847,6 +4201,9 @@ function buildEditorContextItems(
   }
 
   return [
+    // A right-click on a web link or an email address leads with the link
+    // itself, the way a browser's menu does.
+    ...(link ? linkMenuItems(link) : []),
     {
       label: 'Add comment',
       hint: 'Enter',

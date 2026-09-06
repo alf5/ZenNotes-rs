@@ -27,6 +27,7 @@ produced the Arch Linux packaging — iterating against real builds and tests at
 - **Arch Linux:** a `makepkg`/AUR setup lives in [`packaging/arch/`](packaging/arch/) and builds from source against Arch's own `webkit2gtk-4.1` / `gtk3` packages.
 - **Scope:** desktop app only. The original's web/server/self-hosted modes — and some desktop peripherals (auto-updater, MCP install, Raycast, TikZ) — are not part of this port.
 - **Identity:** application id `com.zennotes-rs.app`, deep-link scheme `zennotes-rs://`.
+- **Upstream parity:** mirrored to ZenNotes **v2.45.0**. See [GAP-ANALYSIS.md](GAP-ANALYSIS.md) for what is and is not carried over.
 
 Licensed **MIT** (see [LICENSE](LICENSE)), the same as the upstream project.
 
@@ -44,27 +45,37 @@ Licensed **MIT** (see [LICENSE](LICENSE)), the same as the upstream project.
   <img src="apps/desktop/build/icon.png" alt="ZenNotes app icon" width="160">
 </p>
 
+> [!NOTE]
+> I build ZenNotes with a lot of help from AI tools like Claude and Codex. They let me move much faster, but I still go through some of the code before I ship it. The architecture, the technical decisions, and the trade-offs are things I still spend a lot of time thinking about. AI helps me write code faster, but it doesn't replace understanding how the system works.
+
 ZenNotes is a keyboard-first Markdown notes app with a shared product core and multiple runtimes:
 
 - a desktop app built with Electron
 - a self-hosted web app backed by a Go server
 - a future hosted deployment mode built on the same web/server stack
 
-ZenNotes keeps your notes as ordinary Markdown files on disk. It adds Vim-friendly editing, split and preview workflows, tasks, tags, archive/trash, diagrams, search, daily notes, and MCP integration on top of the files you already own.
+ZenNotes keeps your notes as ordinary Markdown files on disk. It adds Vim-friendly editing, split and preview workflows, tasks, tags, archive/trash, diagrams, search, daily notes, CSV databases (Notion-style Table + Board views over plain `.csv` files), and MCP integration on top of the files you already own.
 On macOS, the first-party `zen` CLI also powers launcher workflows such as the Raycast extension.
 
 Grab the latest build from [GitHub Releases](https://github.com/ZenNotes/zennotes/releases/latest) — see [Install](#install) below.  
 Website: [zennotes.org](https://zennotes.org)
+Support development: [GitHub Sponsors](https://github.com/sponsors/adibhanna)
 
 Detailed in-repo documentation lives under [docs/README.md](docs/README.md).
 
 ## Install
 
-All desktop installers are attached to each [GitHub Release](https://github.com/ZenNotes/zennotes/releases/latest). The app auto-updates, so you only download once. (Replace `<version>` with the current release, e.g. `2.1.0`.)
+All desktop installers are attached to each [GitHub Release](https://github.com/ZenNotes/zennotes/releases/latest). The app auto-updates, so you only download once. (Replace `<version>` with the current release, e.g. `2.2.0`.)
 
 ### macOS
 
-Download the `.dmg` for your chip, open it, and drag **ZenNotes** to Applications. Builds are signed and notarized.
+**Homebrew (recommended):**
+
+```sh
+brew install --cask zennotes/tap/zennotes
+```
+
+Or download the `.dmg` for your chip, open it, and drag **ZenNotes** to Applications. Builds are signed and notarized.
 
 - Apple Silicon: `ZenNotes-<version>-mac-arm64.dmg`
 - Intel: `ZenNotes-<version>-mac-x64.dmg`
@@ -78,37 +89,29 @@ Download and run `ZenNotes-<version>-win-x64.exe`.
 Pick whatever suits your distro:
 
 - **Arch / CachyOS / Manjaro — AUR (recommended):**
-
   ```sh
   yay -S zennotes-bin     # or: paru -S zennotes-bin
   ```
-
   Installs cleanly without `libfuse2`.
 - **Arch — native package:**
-
   ```sh
   sudo pacman -U ZenNotes-<version>-linux-x86_64.pacman
   ```
-
 - **Debian / Ubuntu:**
-
   ```sh
   sudo apt install ./ZenNotes-<version>-linux-amd64.deb
   ```
-
+- **Nix / NixOS:**
+  Read [packaging/nix/README.md](packaging/nix/README.md) for installation instructions
 - **Any distro — AppImage:**
-
   ```sh
   chmod +x ZenNotes-<version>-linux-x86_64.AppImage
   ./ZenNotes-<version>-linux-x86_64.AppImage
   ```
-
   AppImages need **FUSE 2**. On distros that ship only FUSE 3 (Arch, CachyOS, Fedora), either install it (`sudo pacman -S fuse2`, `sudo dnf install fuse`) or run without FUSE:
-
   ```sh
   ./ZenNotes-<version>-linux-x86_64.AppImage --appimage-extract-and-run
   ```
-
   (Or just use the AUR / `.pacman` / `.deb` package, which sidestep this entirely.)
 
 ### `zen` CLI
@@ -190,14 +193,29 @@ System folders still exist, but the vault model is more flexible now:
 
 The built-in folder labels are also customizable in the UI without changing the underlying internal ids.
 
-### Daily notes
+### Daily and weekly notes
 
-Daily notes are optional and can be enabled from Settings.
+Daily and weekly notes are optional and can be enabled from Settings.
 
-- when enabled, ZenNotes can open or create today's note automatically
-- the title is a simple ISO date like `2026-04-21`
-- daily notes live in a dedicated directory under your primary notes area
-- the default directory is `Daily Notes`
+- when enabled, ZenNotes can open or create today's daily note and this week's weekly note automatically
+- the default daily title is a simple ISO date like `2026-04-21`
+- the default weekly title is an ISO week title like `2026-W24`
+- date notes live in dedicated directories under your primary notes area
+- the default directories are `Daily Notes` and `Weekly Notes`
+- the directory and title can use date patterns such as `yyyy/MM-MMM` and `yyyy-MM-dd-EEE`
+- weekly title patterns can use ISO week tokens such as `yyyy-'W'ww`
+- localized month and weekday names can follow `system`, `en-US`, `pt-BR`, or another BCP 47 locale
+
+Supported date note pattern tokens:
+
+- `yyyy` / `yy` for `2026` / `26`
+- `M` / `MM` / `MMM` / `MMMM` for `6` / `06` / `Jun` / `June`
+- `d` / `dd` for `9` / `09`
+- `EEE` / `EEEE` for `Tue` / `Tuesday`
+- `w` / `ww` for ISO week numbers like `24`
+- single-quoted literals, such as `'Daily Notes'/yyyy/MM-MMM`
+
+Weekly notes render date tokens from the ISO week's Monday, and `yyyy` is the ISO week-year for weekly patterns.
 
 ### Editor and preview
 
@@ -209,6 +227,7 @@ The editor stack is CodeMirror 6 with a Markdown-oriented workflow:
 - configurable line numbers
 - configurable line-height and typography controls
 - syntax highlighting for fenced code blocks
+- desktop-installed TextMate grammars for custom fenced-code languages
 - wiki links, callouts, tables, footnotes, and local embeds
 - Vim block cursor and keyboard navigation
 

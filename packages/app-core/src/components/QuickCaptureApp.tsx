@@ -41,25 +41,30 @@ import {
 } from '@codemirror/view'
 import { Vim, vim } from '@replit/codemirror-vim'
 import { history, historyKeymap, indentWithTab } from '@codemirror/commands'
-import { vimAwareDefaultKeymap, vimAwareMarkdownKeymap } from '../lib/cm-vim-default-keymap'
+import { vimAwareDefaultKeymap, vimAwareMarkdownKeymap, vimAwareSearchKeymap } from '../lib/cm-vim-default-keymap'
+import { vimVisualHighlightExtension } from '../lib/cm-vim-visual-highlight'
 import { registerDisplayLineMotion } from '../lib/cm-vim-display-line'
+import { registerHeadingMotion } from '../lib/cm-vim-heading-motion'
+import { registerReflowOperator } from '../lib/cm-vim-reflow'
+import { isTouchPrimaryDevice, vimImeGuard } from '../lib/cm-vim-ime-guard'
 import { toggleWrap, wrapLink } from '../lib/cm-format'
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
 import { resolveCodeLanguage } from '../lib/cm-code-languages'
+import { customCodeFenceHighlightExtension } from '../lib/cm-custom-code-languages'
 import { markdownListIndentPlugin } from '../lib/cm-markdown-list-indent'
 import { appMarkdownSnippetExtension } from '../lib/markdown-snippets-config'
 import { syntaxHighlighting, HighlightStyle, defaultHighlightStyle } from '@codemirror/language'
 import { tags as t } from '@lezer/highlight'
-import { searchKeymap } from '@codemirror/search'
 import {
   autocompletion,
   closeCompletion,
   completionStatus
 } from '@codemirror/autocomplete'
-import { completionKeymapForEditor, completionNavKeymap } from '../lib/cm-completion-nav'
+import { completionKeymapExtension, completionNavKeymap } from '../lib/cm-completion-nav'
 import { slashCommandRender, templateSlashCommandSource } from '../lib/cm-slash-commands'
 import { calloutTypeSource } from '../lib/cm-callouts'
 import type { NoteMeta } from '@shared/ipc'
+import type { VimWrappedLineMotionMode } from '@shared/app-config'
 import {
   DEFAULT_THEME_ID,
   THEMES,
@@ -76,17 +81,23 @@ import { applyVimInsertEscape } from '../lib/vim-insert-escape'
 import { isPaletteNextKey, isPalettePreviousKey } from '../lib/palette-nav'
 import { isImeComposing } from '../lib/ime'
 import { PinIcon } from './icons'
+import { headingFolding } from '../lib/cm-heading-fold'
+import { editorTabSize, normalizeEditorTabSize } from '../lib/editor-tab-size'
 
 const PREFS_KEY = 'zen:prefs:v2'
 
 interface QuickCapturePrefs {
   vimMode: boolean
   vimInsertEscape: string
+  vimWrappedLineMotions: VimWrappedLineMotionMode
+  vimBlockImeInNormalMode: boolean
   themeId: string
   themeFamily: ThemeFamily
   themeMode: ThemeMode
   editorFontSize: number
   editorLineHeight: number
+  editorTabSize: number
+  showHeadingLevelLabels: boolean
   interfaceFont: string | null
   textFont: string | null
   monoFont: string | null
@@ -96,11 +107,15 @@ function loadPrefs(): QuickCapturePrefs {
   const fallback: QuickCapturePrefs = {
     vimMode: true,
     vimInsertEscape: '',
+    vimWrappedLineMotions: 'display',
+    vimBlockImeInNormalMode: true,
     themeId: DEFAULT_THEME_ID,
     themeFamily: 'gruvbox',
     themeMode: 'dark',
     editorFontSize: 15,
     editorLineHeight: 1.6,
+    editorTabSize: 4,
+    showHeadingLevelLabels: false,
     interfaceFont: null,
     textFont: null,
     monoFont: null
@@ -112,8 +127,12 @@ function loadPrefs(): QuickCapturePrefs {
     return {
       ...fallback,
       ...parsed,
+      vimWrappedLineMotions:
+        parsed.vimWrappedLineMotions === 'logical' ? 'logical' : 'display',
+      vimBlockImeInNormalMode: parsed.vimBlockImeInNormalMode !== false,
       themeFamily: (parsed.themeFamily as ThemeFamily) ?? fallback.themeFamily,
-      themeMode: (parsed.themeMode as ThemeMode) ?? fallback.themeMode
+      themeMode: (parsed.themeMode as ThemeMode) ?? fallback.themeMode,
+      editorTabSize: normalizeEditorTabSize(parsed.editorTabSize)
     }
   } catch {
     return fallback
@@ -193,13 +212,17 @@ let vimRegistered = false
  *  `windowClose` synchronously inside the ex callback occasionally
  *  surfaces as "Object has been destroyed" / dropped saves — exactly
  *  the same hazard documented on the floating-note window. */
-function registerCaptureVimCommands(): void {
+function registerCaptureVimCommands(
+  getWrappedLineMotionMode: () => VimWrappedLineMotionMode
+): void {
+  registerDisplayLineMotion(getWrappedLineMotionMode)
   if (vimRegistered) return
   vimRegistered = true
 
   // #312: this window is a separate Electron renderer with its own Vim, so it
   // needs its own registration to get the main editor's j/k display-line motion.
-  registerDisplayLineMotion()
+  registerHeadingMotion()
+  registerReflowOperator()
 
   Vim.defineEx('write', 'w', () => {
     setTimeout(() => {
@@ -430,6 +453,8 @@ export function QuickCaptureApp(): JSX.Element {
         extensions: [
           appMarkdownSnippetExtension(),
           new Compartment().of(prefs.vimMode ? vim() : []),
+          vimImeGuard(() => prefs.vimBlockImeInNormalMode && !isTouchPrimaryDevice()),
+          vimVisualHighlightExtension,
           // #312: inline-format shortcuts (bold/italic/code/strike/highlight/
           // math/link) — the same markers the main editor's VimNav binds — so
           // the Quick Note window formats identically instead of falling through
@@ -448,11 +473,14 @@ export function QuickCaptureApp(): JSX.Element {
           ),
           history(),
           drawSelection(),
+          editorTabSize(prefs.editorTabSize),
           highlightActiveLine(),
           EditorView.lineWrapping,
           markdown({ base: markdownLanguage, codeLanguages: resolveCodeLanguage, addKeymap: false }),
+          customCodeFenceHighlightExtension,
           vimAwareMarkdownKeymap,
           markdownListIndentPlugin,
+          headingFolding({ showLevelLabels: prefs.showHeadingLevelLabels }),
           syntaxHighlighting(captureHighlight),
           syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
           placeholder('Start writing…'),
@@ -471,6 +499,7 @@ export function QuickCaptureApp(): JSX.Element {
                 : 'slash-cmd-option'
           }),
           completionNavKeymap,
+          completionKeymapExtension,
           // Esc closes an open slash menu instead of bubbling to the window-level
           // Esc that saves + hides the capture window. Runs before everything,
           // and only when a completion is actually open.
@@ -488,10 +517,9 @@ export function QuickCaptureApp(): JSX.Element {
           ),
           keymap.of([
             indentWithTab,
-            ...completionKeymapForEditor,
             ...vimAwareDefaultKeymap(prefs.vimMode),
             ...historyKeymap,
-            ...searchKeymap
+            ...vimAwareSearchKeymap(prefs.vimMode)
           ]),
           EditorView.updateListener.of((upd) => {
             if (!upd.docChanged) return
@@ -517,9 +545,9 @@ export function QuickCaptureApp(): JSX.Element {
     vimHandlers.close = () => window.zen.windowClose()
     vimHandlers.newNote = resetToNew
     vimHandlers.openPicker = () => setOverlay('search')
-    registerCaptureVimCommands()
+    registerCaptureVimCommands(() => prefs.vimWrappedLineMotions)
     applyVimInsertEscape(prefs.vimInsertEscape)
-  }, [resetToNew, save, submitAndClose, prefs.vimInsertEscape])
+  }, [resetToNew, save, submitAndClose, prefs.vimInsertEscape, prefs.vimWrappedLineMotions])
 
   // Window-level chord handlers. We attach the listener exactly once
   // and read state through refs so the handler is never operating on a

@@ -27,6 +27,7 @@
 // Bundled offline: Vite emits these as asset URLs. On web / the desktop dev
 // server they are fetched over http; the packaged desktop app (file://) routes
 // them through the `zen-typst://` protocol (see `bundledAssetUrl`).
+import { bundledAssetUrl } from './bundled-asset-url'
 import compilerWasmUrl from '@myriaddreamin/typst-ts-web-compiler/wasm?url'
 import rendererWasmUrl from '@myriaddreamin/typst-ts-renderer/wasm?url'
 // The New Computer Modern family (matching KaTeX's Computer Modern look). Bundled
@@ -69,22 +70,6 @@ interface TypstModule {
 
 let typstPromise: Promise<TypstSnippetLike> | null = null
 
-/**
- * The URL to `fetch()` for a bundled asset (wasm or font). On the packaged
- * desktop app the renderer loads over `file://`, whose opaque origin makes the
- * strict CSP reject a `file://` fetch, so we route through the app's privileged
- * `zen-typst://` scheme (see the protocol handler in the main process). On web
- * and the desktop dev server the asset is a same-origin http URL that
- * `connect-src 'self'` already allows, so it is used verbatim.
- */
-function bundledAssetUrl(url: string): string {
-  if (url.startsWith('file:')) {
-    const filename = url.split('/').pop()?.split('?')[0] ?? ''
-    return `zen-typst://asset/${filename}`
-  }
-  return url
-}
-
 async function loadTypst(): Promise<TypstSnippetLike> {
   if (!typstPromise) {
     typstPromise = (async () => {
@@ -100,13 +85,13 @@ async function loadTypst(): Promise<TypstSnippetLike> {
       // supplies our bundled New Computer Modern family instead, so math renders
       // with no network access.
       $typst.setCompilerInitOptions({
-        getModule: () => bundledAssetUrl(compilerWasmUrl),
+        getModule: () => bundledAssetUrl(compilerWasmUrl, 'zen-typst'),
         beforeBuild: [
           mod.initOptions.disableDefaultFontAssets(),
-          mod.initOptions.loadFonts(FONT_URLS.map(bundledAssetUrl))
+          mod.initOptions.loadFonts(FONT_URLS.map((url) => bundledAssetUrl(url, 'zen-typst')))
         ]
       })
-      $typst.setRendererInitOptions({ getModule: () => bundledAssetUrl(rendererWasmUrl) })
+      $typst.setRendererInitOptions({ getModule: () => bundledAssetUrl(rendererWasmUrl, 'zen-typst') })
       return $typst
     })()
   }
@@ -119,7 +104,7 @@ async function loadTypst(): Promise<TypstSnippetLike> {
  * inline omits them. The body is the raw Typst markup the user typed between
  * the dollar signs.
  */
-function buildDocument(source: string, display: boolean): string {
+function buildDocument(source: string, display: boolean, preamble: string): string {
   const body = source.trim()
   const equation = display ? `$ ${body} $` : `$${body}$`
   return [
@@ -127,6 +112,9 @@ function buildDocument(source: string, display: boolean): string {
     // Pin the family to the one we bundle (also the closest match to KaTeX's
     // Computer Modern), so math resolves to New Computer Modern Math.
     `#set text(size: ${BASE_TEXT_PT}pt, font: "New Computer Modern")`,
+    // Tag-driven definitions for the note this formula belongs to, ahead of the
+    // formula so they can redefine anything it uses. Empty for most notes. (#486)
+    ...(preamble ? [preamble] : []),
     equation
   ].join('\n')
 }
@@ -170,8 +158,25 @@ function styleSvg(rawSvg: string, display: boolean): string {
 const svgCache = new Map<string, TypstRenderResult>()
 const SVG_CACHE_LIMIT = 400
 
-function cacheKey(source: string, display: boolean): string {
-  return `${display ? 'D' : 'I'}\n${source}`
+/** Cheap, stable hash so a preamble of any size costs a short cache key. */
+function hashPreamble(preamble: string): string {
+  if (!preamble) return ''
+  let h = 0x811c9dc5
+  for (let i = 0; i < preamble.length; i++) {
+    h ^= preamble.charCodeAt(i)
+    h = Math.imul(h, 0x01000193)
+  }
+  return (h >>> 0).toString(36)
+}
+
+/**
+ * The preamble is part of the key, not just the input: the cache is shared by
+ * the editor and the preview, so without it `$vec(x)$` in a physics note and in
+ * a maths note would collide and one would render with the other's definitions
+ * (#486).
+ */
+function cacheKey(source: string, display: boolean, preamble: string): string {
+  return `${display ? 'D' : 'I'}\n${hashPreamble(preamble)}\n${source}`
 }
 
 /**
@@ -181,9 +186,10 @@ function cacheKey(source: string, display: boolean): string {
  */
 export function peekTypstMathSvg(
   source: string,
-  display: boolean
+  display: boolean,
+  preamble = ''
 ): TypstRenderResult | null {
-  return svgCache.get(cacheKey(source, display)) ?? null
+  return svgCache.get(cacheKey(source, display, preamble)) ?? null
 }
 
 function rememberSvg(key: string, result: TypstRenderResult): TypstRenderResult {
@@ -207,9 +213,10 @@ let renderQueue: Promise<unknown> = Promise.resolve()
  */
 export function renderTypstMathToSvg(
   source: string,
-  display: boolean
+  display: boolean,
+  preamble = ''
 ): Promise<TypstRenderResult> {
-  const key = cacheKey(source, display)
+  const key = cacheKey(source, display, preamble)
   const cached = svgCache.get(key)
   if (cached) return Promise.resolve(cached)
 
@@ -218,7 +225,9 @@ export function renderTypstMathToSvg(
     if (existing) return existing
     try {
       const $typst = await loadTypst()
-      const rawSvg = await $typst.svg({ mainContent: buildDocument(source, display) })
+      const rawSvg = await $typst.svg({
+        mainContent: buildDocument(source, display, preamble)
+      })
       return rememberSvg(key, { ok: true, svg: styleSvg(rawSvg, display) })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
@@ -237,7 +246,7 @@ export function renderTypstMathToSvg(
  * `data-typst-display`; a `data-zen-typst-rendered` stamp makes re-runs on
  * unchanged content a no-op.
  */
-export async function renderTypstMath(root: HTMLElement): Promise<void> {
+export async function renderTypstMath(root: HTMLElement, preamble = ''): Promise<void> {
   const placeholders = Array.from(
     root.querySelectorAll<HTMLElement>('.zen-typst-math')
   )
@@ -246,13 +255,15 @@ export async function renderTypstMath(root: HTMLElement): Promise<void> {
   for (const el of placeholders) {
     const source = el.getAttribute('data-typst-source') ?? el.textContent ?? ''
     const display = el.getAttribute('data-typst-display') === 'true'
-    const stamp = `${display ? 'D' : 'I'}|${source}`
+    // The preamble is part of the stamp: editing a note's tags (or the preamble
+    // note itself) must re-render formulas that already painted. (#486)
+    const stamp = `${display ? 'D' : 'I'}|${hashPreamble(preamble)}|${source}`
     if (el.getAttribute('data-zen-typst-rendered') === stamp) continue
     el.setAttribute('data-zen-typst-rendered', stamp)
     if (!source.trim()) continue
 
     tasks.push(
-      renderTypstMathToSvg(source, display).then((result) => {
+      renderTypstMathToSvg(source, display, preamble).then((result) => {
         if (el.getAttribute('data-zen-typst-rendered') !== stamp) return
         if (result.ok) {
           el.innerHTML = result.svg

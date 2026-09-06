@@ -228,12 +228,14 @@ function buildDecorations(view: EditorView): DecorationSet {
           const text = state.doc.sliceString(node.from, node.to)
           // Only unordered bullets become a •; ordered markers (`1.`) stay.
           if (!/^[-*+]$/.test(text)) return
-          // Task-list items render a checkbox (from the live-preview plugin) in
-          // place of the marker, so HIDE the `-`/`*`/`+` (and its trailing
-          // space) rather than bulleting it — the line reads "☐ task" like
-          // Obsidian, not "- ☐ task" or "• ☐ task".
+          // Task-list items render a marker (checkbox for `[ ]`/`[x]`, an arrow
+          // for `[>]` forwarded, a ✕ for `[-]` cancelled, a half-filled box for
+          // `[/]` in progress — all from the live-preview plugin) in place of
+          // the list marker, so HIDE the `-`/`*`/`+` (and its trailing space)
+          // rather than bulleting it — the line reads "☐ task" like Obsidian,
+          // not "- ☐ task" or "• ☐ task". (#450, #512)
           const afterMark = state.doc.sliceString(node.to, state.doc.lineAt(node.from).to)
-          if (/^\s*\[[ xX]\]/.test(afterMark)) {
+          if (/^\s*\[[ xX>/-]\]/.test(afterMark)) {
             let to = node.to
             if (state.doc.sliceString(to, to + 1) === ' ') to += 1
             pending.push({ from: node.from, to, deco: hideInline, line: false })

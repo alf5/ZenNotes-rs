@@ -1,25 +1,28 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { isTasksViewActive, useStore, type TasksViewMode } from '../store'
-import { inferDailyTaskDueDates, type VaultTask } from '@shared/tasks'
+import { filterTasksForDisplay, inferDailyTaskDueDates, type VaultTask } from '@shared/tasks'
 import { buildDailyNoteDateByPath } from '../lib/vault-layout'
-import { computeTasksRender, isOverdue } from '../lib/tasks-filter'
+import { computeTasksRender, filterTasks, isOverdue } from '../lib/tasks-filter'
 import { forwardTaskWithPicker } from '../lib/forward-task'
 import { TasksRow } from './TasksRow'
 import { TasksCalendar } from './TasksCalendar'
 import { TasksKanban } from './TasksKanban'
 import { CalendarIcon, CheckSquareIcon, KanbanIcon, ListIcon } from './icons'
 import { advanceSequence, getKeymapBinding, matchesSequenceToken } from '../lib/keymaps'
+import { ContextMenu, type ContextMenuItem } from './ContextMenu'
+import { buildTaskMenuItems } from '../lib/task-context-menu'
 import { isImeComposing } from '../lib/ime'
 import { isAppOverlayOpen } from '../lib/overlay-open'
 
-type GroupKey = 'today' | 'upcoming' | 'waiting' | 'forwarded' | 'done'
+type GroupKey = 'today' | 'upcoming' | 'waiting' | 'forwarded' | 'done' | 'cancelled'
 
 const GROUP_LABELS: Record<GroupKey, string> = {
   today: 'Today',
   upcoming: 'Upcoming',
   waiting: 'Waiting',
   forwarded: 'Forwarded',
-  done: 'Done'
+  done: 'Done',
+  cancelled: 'Cancelled'
 }
 
 const VIEW_BUTTONS: Array<{
@@ -49,12 +52,15 @@ export function TasksView(): JSX.Element {
   const refreshTasks = useStore((s) => s.refreshTasks)
   const openTaskAt = useStore((s) => s.openTaskAt)
   const toggleTaskFromList = useStore((s) => s.toggleTaskFromList)
+  const cancelTaskFromList = useStore((s) => s.cancelTaskFromList)
+  const startTaskFromList = useStore((s) => s.startTaskFromList)
   const applyTaskMutation = useStore((s) => s.applyTaskMutation)
   const moveTaskToDate = useStore((s) => s.moveTaskToDate)
   const addTaskForDate = useStore((s) => s.addTaskForDate)
   const closeTasksView = useStore((s) => s.closeTasksView)
   const reorderTaskInNote = useStore((s) => s.reorderTaskInNote)
   const newTaskFile = useStore((s) => s.newTaskFile)
+  const setFocusedPanel = useStore((s) => s.setFocusedPanel)
 
   // Tasks written inside a daily note inherit that note's date as an implicit
   // due date (a clean line, no `due:` token) so they appear on the calendar.
@@ -64,7 +70,16 @@ export function TasksView(): JSX.Element {
     () => buildDailyNoteDateByPath(notes, vaultSettings),
     [notes, vaultSettings]
   )
-  const tasks = useMemo(() => inferDailyTaskDueDates(rawTasks, dueByPath), [rawTasks, dueByPath])
+  const showArchivedTasks = useStore((s) => s.showArchivedTasks)
+  const tasks = useMemo(
+    () => inferDailyTaskDueDates(filterTasksForDisplay(rawTasks, showArchivedTasks), dueByPath),
+    [rawTasks, showArchivedTasks, dueByPath]
+  )
+  // One filter, three sub-views: the list applies it inside computeTasksRender,
+  // the calendar takes this pre-filtered list, and the Kanban receives the raw
+  // query so it can narrow cards without losing the full board (its group-by
+  // options and card-order persistence must keep seeing every task).
+  const filteredTasks = useMemo(() => filterTasks(tasks, filter), [tasks, filter])
   const keymapOverrides = useStore((s) => s.keymapOverrides)
   const vimMode = useStore((s) => s.vimMode)
   const viewMode = useStore((s) => s.tasksViewMode)
@@ -81,7 +96,8 @@ export function TasksView(): JSX.Element {
     upcoming: false,
     waiting: false,
     forwarded: true,
-    done: true
+    done: true,
+    cancelled: true
   })
 
   // Keep a just-toggled task in its pre-toggle group for TASK_LINGER_MS so it
@@ -104,6 +120,7 @@ export function TasksView(): JSX.Element {
   // of ex commands.
   const [exOpen, setExOpen] = useState(false)
   const [exValue, setExValue] = useState('')
+  const [menu, setMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null)
 
   // "Today" is computed once per render from the clock — stable enough for a
   // single view session. If the user leaves the view past midnight and comes
@@ -145,6 +162,32 @@ export function TasksView(): JSX.Element {
     currentRowIdx >= 0 && render.rows[currentRowIdx]?.kind === 'task'
       ? render.rows[currentRowIdx].task
       : undefined
+
+  // The hint chip on the cursor row must name a key that actually works here.
+  // `Space` reaches this view only when it is not the Vim leader, and it is the
+  // leader by default, so Space opens leader hints and the row's promise of
+  // "Space check" never fires. Name the toggle binding instead (`x`), and with
+  // Vim mode off name nothing: single-key list shortcuts are disabled there, so
+  // only Enter/arrows remain.
+  const toggleKeyLabel = useMemo(() => {
+    if (!vimMode) return null
+    const leader = getKeymapBinding(keymapOverrides, 'vim.leaderPrefix')
+    const toggle = getKeymapBinding(keymapOverrides, 'nav.toggleTask')
+    return leader.trim().toLowerCase() === 'space' ? toggle : 'Space'
+  }, [vimMode, keymapOverrides])
+
+  const openTaskMenu = useCallback(
+    (e: React.MouseEvent, task: VaultTask): void => {
+      e.preventDefault()
+      e.stopPropagation()
+      setMenu({
+        x: e.clientX,
+        y: e.clientY,
+        items: buildTaskMenuItems(task, { today, showKeyHints: vimMode })
+      })
+    },
+    [today, vimMode]
+  )
 
   // On first mount, pull fresh if we have nothing yet.
   useEffect(() => {
@@ -262,8 +305,18 @@ export function TasksView(): JSX.Element {
 
   const runExCommand = useCallback(
     (raw: string): void => {
-      const cmd = raw.trim().replace(/^:/, '').toLowerCase()
-      if (!cmd) return
+      const input = raw.trim().replace(/^:/, '')
+      if (!input) return
+      // `:filter <text>` sets the shared filter (all three sub-views);
+      // bare `:filter` (or `:f`) clears it. Parsed off the un-lowercased
+      // input so the query lands in the box as typed.
+      const spaceIdx = input.indexOf(' ')
+      const head = (spaceIdx === -1 ? input : input.slice(0, spaceIdx)).toLowerCase()
+      if (head === 'filter' || head === 'f') {
+        setFilter(spaceIdx === -1 ? '' : input.slice(spaceIdx + 1).trim())
+        return
+      }
+      const cmd = input.toLowerCase()
       const store = useStore.getState()
       const path = store.selectedPath
       switch (cmd) {
@@ -331,7 +384,7 @@ export function TasksView(): JSX.Element {
           return
       }
     },
-    [closeTasksView, refreshTasks, setViewMode]
+    [closeTasksView, refreshTasks, setFilter, setViewMode]
   )
 
   // Window-level handler with two responsibilities:
@@ -495,6 +548,19 @@ export function TasksView(): JSX.Element {
         void forwardTaskWithPicker(currentTask)
         return
       }
+      // Cancel / un-cancel the selected task (#450). Vim-gated single key.
+      if (vimMode && key === 'c' && currentTask) {
+        consume()
+        void cancelTaskFromList(currentTask)
+        return
+      }
+      // Start / un-start the selected task (#512). Vim-gated single key. The
+      // task stays in Today, so the row keeps its place and the cursor with it.
+      if (vimMode && key === 'i' && currentTask) {
+        consume()
+        void startTaskFromList(currentTask)
+        return
+      }
     }
     window.addEventListener('keydown', handler, true)
     return () => window.removeEventListener('keydown', handler, true)
@@ -510,6 +576,8 @@ export function TasksView(): JSX.Element {
     vimMode,
     openTaskAt,
     lingerToggle,
+    cancelTaskFromList,
+    startTaskFromList,
     closeTasksView,
     setFilter,
     viewMode,
@@ -521,12 +589,21 @@ export function TasksView(): JSX.Element {
     <div
       ref={rootRef}
       className="flex min-h-0 flex-1 flex-col bg-paper-100 text-ink-900"
+      // The pane's capture handlers claim focusedPanel 'editor' for any click
+      // or focus inside the pane (#477), which disconnects this view's window
+      // keydown handler (gated on 'tasks', #412): after focusing the filter
+      // box, 1/2/3, `/`, `:` and the list keys all fell through to VimNav,
+      // which walked the SIDEBAR cursor instead. This view is a panel, not an
+      // editor surface, so re-claim 'tasks'. Outer capture handlers run before
+      // inner ones, so this always lands after the pane's claim and wins.
+      onMouseDownCapture={() => setFocusedPanel('tasks')}
+      onFocusCapture={() => setFocusedPanel('tasks')}
     >
       <div className="flex items-center gap-2 border-b border-paper-300/45 px-4 py-3">
         <CheckSquareIcon width={18} height={18} />
         <h1 className="text-sm font-semibold">Tasks</h1>
         <span className="ml-2 rounded bg-paper-300/60 px-1.5 py-0.5 text-xs text-current/60">
-          {tasks.length} total
+          {filter.trim() ? `${filteredTasks.length} of ${tasks.length}` : `${tasks.length} total`}
         </span>
         {loading && <span className="text-xs text-current/50">scanning…</span>}
 
@@ -554,28 +631,29 @@ export function TasksView(): JSX.Element {
         </div>
 
         <div className="ml-auto flex items-center gap-2">
-          {viewMode === 'list' && (
-            <input
-              ref={filterRef}
-              type="text"
-              placeholder="Filter…  /  to focus"
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-              onKeyDown={(e) => {
-                // While composing (IME), let the input own Enter/Arrows. (#183)
-                if (isImeComposing(e)) return
-                if (e.key === 'Escape') {
-                  e.stopPropagation()
-                  if (filter) setFilter('')
-                  else e.currentTarget.blur()
-                }
-                if (e.key === 'Enter') {
-                  e.currentTarget.blur()
-                }
-              }}
-              className="w-56 rounded-md border border-paper-300/60 bg-paper-200/60 px-2 py-1 text-xs outline-none focus:border-paper-400/70"
-            />
-          )}
+          {/* Mounted in every sub-view: the same query narrows the list, the
+              calendar, and the Kanban board, so switching views keeps the
+              focus you typed. (#583) */}
+          <input
+            ref={filterRef}
+            type="text"
+            placeholder="Filter…  /  to focus"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            onKeyDown={(e) => {
+              // While composing (IME), let the input own Enter/Arrows. (#183)
+              if (isImeComposing(e)) return
+              if (e.key === 'Escape') {
+                e.stopPropagation()
+                if (filter) setFilter('')
+                else e.currentTarget.blur()
+              }
+              if (e.key === 'Enter') {
+                e.currentTarget.blur()
+              }
+            }}
+            className="w-56 rounded-md border border-paper-300/60 bg-paper-200/60 px-2 py-1 text-xs outline-none focus:border-paper-400/70"
+          />
           <button
             type="button"
             onClick={() => void newTaskFile()}
@@ -648,6 +726,8 @@ export function TasksView(): JSX.Element {
                   if (ti >= 0) setCursorIndex(ti)
                 }}
                 onReorder={reorderTaskByDrag}
+                onContextMenu={openTaskMenu}
+                toggleKeyLabel={toggleKeyLabel}
               />
             )
           })}
@@ -656,7 +736,7 @@ export function TasksView(): JSX.Element {
 
       {viewMode === 'calendar' && (
         <TasksCalendar
-          tasks={tasks}
+          tasks={filteredTasks}
           today={today}
           onOpenTask={(task) => void openTaskAt(task)}
           onToggleTask={(task) => void toggleTaskFromList(task)}
@@ -672,6 +752,7 @@ export function TasksView(): JSX.Element {
       {viewMode === 'kanban' && (
         <TasksKanban
           tasks={tasks}
+          filter={filter}
           today={today}
           onOpenTask={(task) => void openTaskAt(task)}
           onToggleTask={(task) => void toggleTaskFromList(task)}
@@ -712,13 +793,33 @@ export function TasksView(): JSX.Element {
           />
         </form>
       ) : (
+        /* Each line names only keys that fire in the current mode. The list's
+           single keys are Vim-gated (arrows, Enter and the Shift+J/K chord
+           are the universal ones); the board and the calendar predate that
+           gating and keep single-key navigation with Vim off, so their lines
+           lose only i / c / :q, which are gated on every surface. */
         <div className="border-t border-paper-300/45 px-4 py-1.5 text-xs text-current/40">
           {viewMode === 'list'
-            ? 'j/k move · J/K reorder · drag to reorder · Enter/o open · Space/x toggle · / filter · :q close'
+            ? vimMode
+              ? 'j/k move · J/K reorder · Enter/o open · x toggle · i start · c cancel · right-click actions · :q close'
+              : '↑/↓ move · Shift+J/K reorder · Enter open · right-click actions'
             : viewMode === 'calendar'
-              ? 'h/j/k/l day · [ ] month · gt today · Tab pick · < > reschedule · drag to move · Enter open · :q'
-              : 'h/l column · j/k card · Space toggle · Enter open · 1/2/3 view · : command · :q close'}
+              ? vimMode
+                ? 'h/j/k/l day · [ ] month · Tab pick · x toggle · i start · c cancel · drag to move · right-click actions · :q'
+                : 'h/j/k/l day · [ ] month · Tab pick · x toggle · drag to move · right-click actions'
+              : vimMode
+                ? 'h/l column · j/k card · x toggle · i start · c cancel · Enter open · right-click actions · :q close'
+                : 'h/l column · j/k card · x toggle · Enter open · right-click actions'}
         </div>
+      )}
+
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={menu.items}
+          onClose={() => setMenu(null)}
+        />
       )}
     </div>
   )

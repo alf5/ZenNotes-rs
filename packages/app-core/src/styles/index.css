@@ -4,6 +4,15 @@
    looks the same in the editor and the preview on every theme. (#390-adjacent) */
 @import "katex/dist/katex.min.css";
 
+/* Math size (#623): one user-set factor scales inline and block math in both
+ * the editor and the reading view, for KaTeX and Typst alike. zoom keeps the
+ * surrounding layout honest where transform: scale would overlap lines. */
+:is(.prose-zen, .cm-editor) .katex,
+:is(.prose-zen, .cm-editor) .zen-typst-math,
+:is(.prose-zen, .cm-editor) :is(.cm-math-inline, .cm-math-block) > svg {
+  zoom: var(--z-math-scale, 1);
+}
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -1450,6 +1459,23 @@ textarea,
   border: 2px solid transparent;
 }
 
+/* The sidebar is one scroll region for all its sections (Quick access, Notes,
+   Tags, System). With many tags/notes it scrolls, but the global thumb — a dark
+   shadow colour at 18% — is nearly invisible on a dark sidebar, so the scroll
+   affordance reads as "the list is just cut off". Tint this scroller's thumb
+   with the sidebar's own foreground (currentColor adapts to light/dark themes
+   and the dark-sidebar option) at a higher opacity so it's discoverable. (#451) */
+.zn-sidebar-scroll::-webkit-scrollbar-thumb {
+  background: currentColor;
+  background-clip: padding-box;
+  opacity: 0.3;
+}
+.zn-sidebar-scroll::-webkit-scrollbar-thumb:hover {
+  background: currentColor;
+  background-clip: padding-box;
+  opacity: 0.5;
+}
+
 /* Keep the horizontal tab-strip scrollbar slim (6px) so it doesn't eat into the
    tab height and clip titles in Compact density (#421). NOTE: do not set the
    standard `scrollbar-color`/`scrollbar-width` here — in Chromium those opt the
@@ -1531,9 +1557,16 @@ textarea,
   padding: 0;
   line-height: var(--z-editor-line-height, 1.7);
 }
+/* Nested lists: the hanging indent aligns wrapped lines under their text, and
+ * the pad widens shallow source indents so every level steps the configured
+ * width (#491). The pad shifts the whole first line right while the negative
+ * text-indent still pulls the literal markup back, so the caret and columns
+ * stay honest. Guide lines are per-line background layers set inline by
+ * cm-markdown-list-indent; only their color lives here, per theme. */
 .cm-editor .cm-line.cm-markdown-list-line {
-  padding-left: var(--z-list-hanging-indent, 0);
+  padding-left: calc(var(--z-list-hanging-indent, 0) + var(--z-list-indent-pad, 0ch));
   text-indent: calc(var(--z-list-hanging-indent, 0) * -1);
+  --z-list-guide-color: rgb(var(--z-grey-0) / 0.16);
 }
 .cm-editor .cm-cursor,
 .cm-editor .cm-dropCursor {
@@ -1542,6 +1575,22 @@ textarea,
 .cm-editor .cm-selectionBackground,
 .cm-editor ::selection {
   background: rgb(var(--z-accent) / 0.22) !important;
+}
+
+/* --- Vim visual-mode selection (#581) --------------------------------- */
+/* In visual mode the browser-style selection layer (which fills every row
+ * but the last to the content column's right edge) is hidden and
+ * cm-vim-visual-highlight paints the selected text itself, like Vim. The
+ * native ::selection is silenced with it: the rule above re-tints it, and
+ * double-painting under the marks would darken the glyphs. */
+.cm-editor.zen-vim-visual-active .cm-selectionLayer {
+  display: none;
+}
+.cm-editor.zen-vim-visual-active ::selection {
+  background: transparent !important;
+}
+.cm-editor .cm-vim-visual-selection {
+  background: rgb(var(--z-accent) / 0.22);
 }
 
 /* --- Vim block cursor (normal mode) ---------------------------------- */
@@ -1781,9 +1830,17 @@ textarea,
   margin-right: 0.15em;
 }
 
-/* Forwarded task marker `- [>]` (#316) — an arrow, sized to sit like the
-   checkbox. Uses the accent so a forwarded task reads as "sent onward". */
-.cm-editor .cm-task-forwarded {
+/* Forwarded (`- [>]`, #316), cancelled (`- [-]`, #450) and in-progress
+   (`- [/]`, #512) task markers: an inline-flex box sized and centred exactly
+   like `.cm-task-checkbox` (the list bullet is hidden for these lines). The
+   glyph is a mask-clipped solid box — NOT a font character — because the
+   `→`/`✕` glyphs in many monospace fonts carry heavy side-bearings that paint
+   the character well left of its advance box (~15px off from the checkbox
+   column). An SVG mask is geometric, so it centres perfectly in the column no
+   matter which editor font the user picks. */
+.cm-editor .cm-task-forwarded,
+.cm-editor .cm-task-cancelled-marker,
+.cm-editor .cm-task-in-progress-marker {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1791,10 +1848,58 @@ textarea,
   width: 1.05em;
   height: 1.05em;
   margin-right: 0.15em;
-  font-weight: 700;
-  line-height: 1;
-  color: var(--z-accent-fg, var(--z-accent, currentColor));
-  opacity: 0.85;
+}
+.cm-editor .cm-task-forwarded::before,
+.cm-editor .cm-task-cancelled-marker::before,
+.cm-editor .cm-task-in-progress-marker::before {
+  content: "";
+  width: 0.9em;
+  height: 0.9em;
+  background-color: currentColor;
+  -webkit-mask: center / contain no-repeat;
+  mask: center / contain no-repeat;
+}
+
+/* Forwarded: an accent arrow, "sent onward". */
+.cm-editor .cm-task-forwarded {
+  color: rgb(var(--z-accent));
+}
+.cm-editor .cm-task-forwarded::before {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 12h15M13 6l7 6-7 6'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 12h15M13 6l7 6-7 6'/%3E%3C/svg%3E");
+}
+
+/* Cancelled: a muted ✕, matching the struck-through text. */
+.cm-editor .cm-task-cancelled-marker {
+  color: rgb(var(--z-grey-0, 128 128 128));
+}
+.cm-editor .cm-task-cancelled-marker::before {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='M6 6l12 12M18 6L6 18'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='M6 6l12 12M18 6L6 18'/%3E%3C/svg%3E");
+}
+.cm-editor .cm-task-cancelled {
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+  text-decoration-color: rgb(var(--z-grey-0, 128 128 128));
+  color: rgb(var(--z-grey-0, 128 128 128));
+}
+/* Gray the token spans CodeMirror nests inside the cancelled text too. */
+.cm-editor .cm-task-cancelled * {
+  color: rgb(var(--z-grey-0, 128 128 128)) !important;
+}
+
+/* In progress: the checkbox square with its left half filled in, in the accent
+   so started work reads as live at a glance. Deliberately the same silhouette
+   as `.cm-task-checkbox` (a rounded square, not a new symbol) — it is the same
+   box part-way to done, and the text is NOT struck, unlike cancelled. Clickable
+   (checks the task off, #599), unlike the forwarded/cancelled record markers. */
+.cm-editor .cm-task-in-progress-marker {
+  color: rgb(var(--z-accent));
+  cursor: pointer;
+}
+.cm-editor .cm-task-in-progress-marker::before {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5'%3E%3Crect x='3.5' y='3.5' width='17' height='17' rx='3.5'/%3E%3Cpath d='M12 5.5H7.5A2 2 0 0 0 5.5 7.5v9a2 2 0 0 0 2 2H12z' fill='black' stroke='none'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5'%3E%3Crect x='3.5' y='3.5' width='17' height='17' rx='3.5'/%3E%3Cpath d='M12 5.5H7.5A2 2 0 0 0 5.5 7.5v9a2 2 0 0 0 2 2H12z' fill='black' stroke='none'/%3E%3C/svg%3E");
 }
 
 .cm-editor .cm-task-checkbox-input {
@@ -2146,9 +2251,11 @@ html[data-completed-task-style="gray-strikethrough"] .cm-editor .cm-task-done * 
 .cm-editor .tok-heading4 {
   font-size: 1.15em;
 }
+/* No text-transform: a heading is the author's text, so `##### Fifth heading`
+ * must read "Fifth heading" and not "FIFTH HEADING". H5 already separates from
+ * H4 above and H6 below by size, and from body text by weight. (#478) */
 .cm-editor .tok-heading5 {
   font-size: 1em;
-  text-transform: uppercase;
   letter-spacing: 0;
 }
 .cm-editor .tok-heading6 {
@@ -2352,6 +2459,16 @@ html[data-completed-task-style="gray-strikethrough"] .cm-editor .cm-task-done * 
 .cm-editor .tok-invalid {
   color: rgb(var(--z-red));
   text-decoration: underline wavy rgb(var(--z-red) / 0.6);
+}
+
+/* Harper grammar and spelling marks. A wavy underline in the theme's yellow so
+   it reads apart from syntax-error red and themes for free. @codemirror/lint
+   paints its own orange SVG wave for warnings; this replaces it. */
+.cm-editor .cm-lintRange.cm-harper-lint {
+  background-image: none;
+  text-decoration: underline wavy rgb(var(--z-yellow) / 0.8);
+  text-decoration-skip-ink: none;
+  text-underline-offset: 2px;
 }
 
 /* --- Math diagrams (TikZ / JSXGraph / function-plot) ------------------ */
@@ -2638,11 +2755,12 @@ html[data-completed-task-style="gray-strikethrough"] .cm-editor .cm-task-done * 
   margin-top: var(--z-prose-section-gap);
   margin-bottom: var(--z-prose-heading-gap);
 }
+/* Same as the editor's `.tok-heading5`: no text-transform, so the rendered
+ * heading keeps the case the author typed. (#478) */
 .prose-zen h5 {
   font-size: 1em;
   margin-top: var(--z-prose-section-gap);
   margin-bottom: var(--z-prose-heading-gap);
-  text-transform: uppercase;
   letter-spacing: 0;
 }
 .prose-zen h6 {
@@ -2696,6 +2814,55 @@ html[data-completed-task-style="gray-strikethrough"] .cm-editor .cm-task-done * 
 }
 .prose-zen li.task-list-item > p:not(:first-child) {
   margin: var(--z-prose-block-gap) 0 0;
+}
+
+/* Reading-view markers for the three states GFM has no checkbox for: in
+   progress (`[/]`), cancelled (`[-]`) and forwarded (`[>]`). Same geometry as
+   the checkbox above (absolutely placed in the gutter the item's padding
+   reserves) and the same mask-clipped glyphs the editor draws, so a task looks
+   the same whichever view it is read in. (#512) */
+.prose-zen .zen-task-state {
+  position: absolute;
+  left: 0;
+  top: 0.3em;
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  background-color: currentColor;
+  /* Longhands, NOT the `mask` shorthand: the shorthand resets mask-image, and
+     this rule would then wipe out the per-state glyph below, leaving a solid
+     filled square in the gutter. */
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+}
+.prose-zen .zen-task-state-in-progress {
+  color: rgb(var(--z-accent));
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5'%3E%3Crect x='3.5' y='3.5' width='17' height='17' rx='3.5'/%3E%3Cpath d='M12 5.5H7.5A2 2 0 0 0 5.5 7.5v9a2 2 0 0 0 2 2H12z' fill='black' stroke='none'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5'%3E%3Crect x='3.5' y='3.5' width='17' height='17' rx='3.5'/%3E%3Cpath d='M12 5.5H7.5A2 2 0 0 0 5.5 7.5v9a2 2 0 0 0 2 2H12z' fill='black' stroke='none'/%3E%3C/svg%3E");
+}
+.prose-zen .zen-task-state-cancelled {
+  color: rgb(var(--z-grey-0, 128 128 128));
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='M6 6l12 12M18 6L6 18'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='M6 6l12 12M18 6L6 18'/%3E%3C/svg%3E");
+}
+.prose-zen .zen-task-state-forwarded {
+  color: rgb(var(--z-accent));
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 12h15M13 6l7 6-7 6'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 12h15M13 6l7 6-7 6'/%3E%3C/svg%3E");
+}
+/* Cancelled reads as struck through in the reading view too, always: it is the
+   state's meaning, not the completed-task preference. Scoped to the item's own
+   body (the wrapper Preview.tsx adds) so a cancelled parent never strikes a
+   live sub-task, the same rule `task-self-done` follows. */
+.prose-zen li.task-list-item.zen-task-cancelled > .task-item-body,
+.prose-zen li.task-list-item.zen-task-cancelled > p {
+  text-decoration: line-through;
+  text-decoration-color: rgb(var(--z-grey-0));
+  color: rgb(var(--z-grey-0));
 }
 .prose-zen li.task-list-item > ul,
 .prose-zen li.task-list-item > ol {
@@ -3133,6 +3300,78 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
   font-size: 1rem;
 }
 
+/* Resize handle (#684, editor only). The sizer hugs the picture so the handle
+   rides on the picture's right edge whatever the frame's width; dragging it
+   writes the `|width` hint into the note. */
+.cm-editor .local-image-embed-sizer {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: top;
+}
+
+.cm-editor .local-image-embed-resize {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  width: 8px;
+  height: 44px;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 0.92);
+  box-shadow:
+    0 0 0 1px rgb(0 0 0 / 0.35),
+    0 2px 8px rgb(0 0 0 / 0.35);
+  transform: translateY(-50%);
+  cursor: ew-resize;
+  touch-action: none;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.cm-editor .local-image-embed:hover .local-image-embed-resize,
+.cm-editor .local-image-embed.is-resizing .local-image-embed-resize {
+  opacity: 1;
+}
+
+.cm-editor .local-image-embed-size {
+  position: absolute;
+  right: 22px;
+  bottom: 10px;
+  padding: 3px 8px;
+  border-radius: 8px;
+  background: rgb(20 19 18 / 0.82);
+  color: rgb(255 255 255 / 0.94);
+  font-family: var(
+    --z-mono-font,
+    "SF Mono",
+    "SFMono-Regular",
+    ui-monospace,
+    "JetBrains Mono",
+    Menlo,
+    Consolas,
+    monospace
+  );
+  font-size: 0.78rem;
+  font-weight: 700;
+  line-height: 1.2;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.cm-editor .local-image-embed.is-resizing {
+  cursor: ew-resize;
+  user-select: none;
+}
+
+.cm-editor .local-image-embed.is-resizing .local-image-embed-size {
+  opacity: 1;
+}
+
+.cm-editor .local-image-embed.is-resizing .local-image-embed-controls {
+  opacity: 0;
+}
+
 :is(.prose-zen, .cm-editor) .local-image-embed-caption {
   margin-top: 0.55rem;
   text-align: center;
@@ -3395,6 +3634,65 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
   margin: 0.85rem;
 }
 
+/* #463 — attachment chip: denotes a non-previewable file (`.tldraw`, `.zip`, …)
+   embedded with image syntax `![](file.ext)`. Shared by the reading preview and
+   the editor's live-preview widget so they look identical. */
+:is(.prose-zen, .cm-editor) .local-file-attachment {
+  margin: 0.75rem 0;
+}
+
+:is(.prose-zen, .cm-editor) .local-file-attachment-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  max-width: 100%;
+  border-radius: 10px;
+  border: 1px solid theme("colors.paper.300");
+  background: color-mix(in srgb, theme("colors.paper.100") 90%, transparent);
+  padding: 0.45rem 0.7rem;
+  color: theme("colors.ink.700");
+  font-size: 0.9rem;
+  font-weight: 500;
+  /* The editor collapses the host line to `line-height: 0` (see
+     `cm-image-embed-line`); restore a normal line-height so the filename
+     isn't zeroed out, the same way the image caption does. */
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+
+:is(.prose-zen, .cm-editor) .local-file-attachment-button:hover {
+  border-color: rgb(var(--z-accent) / 0.5);
+  background: color-mix(in srgb, theme("colors.paper.200") 90%, transparent);
+}
+
+:is(.prose-zen, .cm-editor) .local-file-attachment-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: rgb(var(--z-accent));
+}
+
+:is(.prose-zen, .cm-editor) .local-file-attachment-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:is(.prose-zen, .cm-editor) .local-file-attachment-open {
+  flex-shrink: 0;
+  opacity: 0.55;
+  font-size: 0.85rem;
+}
+
+:is(.prose-zen, .cm-editor) .local-file-attachment-inline {
+  color: rgb(var(--z-accent));
+  text-decoration: underline;
+  text-decoration-color: rgb(var(--z-accent) / 0.4);
+  cursor: pointer;
+}
+
 /* Wiki links — Obsidian-style internal links: accent text with a soft underline,
    matching the editor's live-preview wikilink so they read as links rather than
    filled inline-code chips. (Julie: the old boxed style looked like inline code.) */
@@ -3513,11 +3811,22 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
   background: theme("colors.paper.50");
 }
 .prose-zen .callout-title {
-  display: flex;
-  align-items: center;
-  gap: 0.5em;
+  /* Normal inline flow, not flex: the title carries real inline markup
+     (links, math, emphasis) since #549, and flex would gap-separate every
+     node and break natural wrapping. */
   font-weight: 600;
   margin-bottom: 0.35em;
+}
+/* A link in the title line keeps the callout color, like the editor's
+   colored head line; the underline stays as the link affordance. */
+.prose-zen .callout-title a {
+  color: inherit;
+  border-bottom-color: currentColor;
+}
+/* Body lines sit close under the title, like the editor's compact card.
+   Paragraph-sized gaps inside the box read as broken rendering. (#549) */
+.prose-zen .callout > p {
+  margin: 0.35em 0 0;
 }
 /* Callout color groups — the `data-callout` lists mirror the alias→group table
    in `lib/callout-types.ts` (kept in sync by hand; CSS can't import it). */
@@ -3636,6 +3945,75 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
   width: 100%;
   height: 100%;
   border: 0;
+}
+/* Click-to-play facade: poster, play badge, and provider name stand in for the
+   player until the user asks for it (no iframe exists before that, so nothing
+   can take the keyboard away from the note). The button fills the aspect box. */
+.zen-embed-frame .zen-embed-poster {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: #000;
+  color: #fff;
+  cursor: pointer;
+}
+.zen-embed-frame .zen-embed-poster-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0.85;
+  transition: opacity 120ms ease;
+}
+.zen-embed-frame .zen-embed-poster:hover .zen-embed-poster-image,
+.zen-embed-frame .zen-embed-poster:focus-visible .zen-embed-poster-image {
+  opacity: 1;
+}
+.zen-embed-frame .zen-embed-play {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 68px;
+  height: 48px;
+  border-radius: 14px;
+  background: rgb(var(--z-accent));
+  color: rgb(var(--z-bg));
+  box-shadow: 0 4px 18px rgb(0 0 0 / 0.45);
+  transform: translate(-50%, -50%);
+  transition:
+    transform 120ms ease,
+    filter 120ms ease;
+}
+.zen-embed-frame .zen-embed-play svg {
+  margin-left: 3px;
+}
+.zen-embed-frame .zen-embed-poster:hover .zen-embed-play,
+.zen-embed-frame .zen-embed-poster:focus-visible .zen-embed-play {
+  transform: translate(-50%, -50%) scale(1.06);
+  filter: brightness(1.08);
+}
+.zen-embed-frame .zen-embed-poster:focus-visible {
+  outline: 2px solid rgb(var(--z-accent));
+  outline-offset: -2px;
+}
+.zen-embed-frame .zen-embed-provider {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  padding: 3px 8px;
+  border-radius: 8px;
+  background: rgb(0 0 0 / 0.6);
+  color: #fff;
+  font-size: 0.72em;
+  font-weight: 600;
+  letter-spacing: 0.02em;
 }
 :is(.prose-zen, .cm-embed-block) .zen-embed-unsupported {
   padding: 10px 14px;
@@ -3831,6 +4209,114 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
 .cm-url-paste-menu .cm-url-paste-sub {
   font-size: 0.75em;
   color: rgb(var(--z-fg-2));
+}
+
+/* Harper's card: the fixes for one problem, opened by `z=` or by hovering the
+   underline. One surface for keyboard and mouse, in the paste menu's shell. */
+.cm-tooltip.cm-harper-popup {
+  display: flex;
+  flex-direction: column;
+  margin-top: 6px;
+  padding: 6px;
+  min-width: 260px;
+  max-width: 440px;
+  border: 1px solid rgb(var(--z-bg-3) / 0.7);
+  border-radius: 12px;
+  background: rgb(var(--z-bg-1));
+  box-shadow: var(--shadow-panel, 0 10px 32px rgb(0 0 0 / 0.3));
+  overflow: hidden;
+  font-family: var(--z-font-ui, inherit);
+}
+.cm-harper-popup .cm-harper-popup-message {
+  padding: 6px 10px 8px;
+  font-size: 0.82em;
+  line-height: 1.4;
+  color: rgb(var(--z-fg-1));
+}
+.cm-harper-popup .cm-harper-popup-code {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: rgb(var(--z-bg-2));
+  font-family: var(--z-font-mono, ui-monospace, monospace);
+  font-size: 0.92em;
+}
+.cm-harper-popup .cm-harper-popup-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  color: rgb(var(--z-fg-1));
+  font: inherit;
+  font-size: 0.86em;
+}
+/* Muted rows and keycaps track the primary foreground at reduced opacity
+   rather than the palette's dimmest token, which in One dark and Tokyo Night
+   sinks too close to the pill behind it. */
+.cm-harper-popup .cm-harper-popup-item.cm-harper-popup-secondary {
+  color: rgb(var(--z-fg-1) / 0.72);
+}
+.cm-harper-popup .cm-harper-popup-item.cm-harper-popup-active {
+  background: rgb(var(--z-accent) / 0.16);
+  color: rgb(var(--z-fg-1));
+}
+.cm-harper-popup .cm-harper-popup-hint {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.9em;
+  height: 1.6em;
+  padding: 0 0.35em;
+  border-radius: 5px;
+  background: rgb(var(--z-bg-2));
+  box-shadow: inset 0 -1px 0 rgb(var(--z-bg-3) / 0.8);
+  font-family: var(--z-font-mono, ui-monospace, monospace);
+  font-size: 0.78em;
+  color: rgb(var(--z-fg-1) / 0.8);
+}
+.cm-harper-popup .cm-harper-popup-item.cm-harper-popup-active .cm-harper-popup-hint {
+  background: rgb(var(--z-accent) / 0.22);
+  color: rgb(var(--z-fg-1));
+}
+.cm-harper-popup .cm-harper-popup-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cm-harper-popup .cm-harper-popup-empty {
+  padding: 2px 10px 6px;
+  font-size: 0.8em;
+  color: rgb(var(--z-fg-2));
+}
+.cm-harper-popup .cm-harper-popup-divider {
+  height: 1px;
+  margin: 4px 6px;
+  background: rgb(var(--z-bg-3) / 0.6);
+}
+.cm-harper-popup .cm-harper-popup-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px 4px;
+  font-size: 0.72em;
+  color: rgb(var(--z-fg-2));
+}
+.cm-harper-popup .cm-harper-popup-brand {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.cm-harper-popup .cm-harper-popup-kind {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgb(var(--z-yellow) / 0.16);
+  color: rgb(var(--z-fg-1));
 }
 .zen-diagram-modal-host .zen-tikz,
 .zen-diagram-modal-host .zen-jsxgraph,
@@ -4087,7 +4573,7 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
 }
 
 .cm-tooltip-autocomplete:has(.wikilink-cmd-option)::after {
-  content: "Type | to change display text  ·  Use /path/to/note for exact links";
+  content: "↑/↓ or Ctrl+J/K to move  ·  Enter inserts  ·  Type | to change display text  ·  /path/to/note for exact links";
   display: block;
   padding: 10px 12px 8px;
   border-top: 1px solid rgb(var(--z-bg-3) / 0.7);
@@ -4394,6 +4880,40 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
   color: rgb(var(--z-accent));
 }
 
+/* The chip gutter must fit inside .cm-content's own box. The fold arrow
+ * (≤28px + ≤10px gap) was sized to live inside the default 32px padding;
+ * the chip needs another 30px beyond it, which only exists as centered-
+ * column margin on panes wider than the column cap — on anything narrower
+ * the chip renders under the sidebar. When level labels are enabled the
+ * editor carries this class (see headingFolding) and the content box
+ * reserves the full gutter instead of borrowing margin that may be 0. */
+.cm-editor.zen-heading-level-labels .cm-content {
+  padding-left: 76px;
+}
+.cm-heading-level-label {
+  position: absolute;
+  left: calc(
+    -1 * (
+      var(--z-heading-fold-arrow-size) + var(--z-heading-fold-arrow-gap) + 30px
+    )
+  );
+  top: calc((var(--z-heading-fold-first-line) - 18px) / 2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 18px;
+  border-radius: 4px;
+  color: theme("colors.ink.400");
+  background: rgb(var(--z-bg-2) / 0.72);
+  font-family: var(--z-font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  user-select: none;
+}
+
 /* --- Preview heading fold arrow ------------------------------------ */
 /* Counterpart to the CM live-preview fold arrow: sits in the left
  * margin of every rendered h1–h6 in the preview/prose surface and
@@ -4649,9 +5169,9 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
   border-radius: 1px;
   pointer-events: none;
 }
-/* Vim visual-mode selection inside a cell uses the native selection; match the
-   editor's own selection tint (theme accent at the same strength) so it reads
-   consistently instead of the washed-out OS default. */
+/* Native selection is still used while editing a cell; match the editor's own
+   selection tint instead of the washed-out OS default. Vim visual mode uses
+   the coordinate-aware overlays below. */
 .cm-table-widget .cm-table-cell::selection,
 .cm-table-widget .cm-table-cell ::selection {
   background: rgb(var(--z-accent) / 0.22);
@@ -4663,6 +5183,12 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
   background: rgb(var(--z-accent) / 0.28);
   border-radius: 2px;
   pointer-events: none;
+}
+.cm-table-widget .cm-table-cell.is-vim-visual {
+  position: relative;
+}
+.cm-table-widget .cm-table-cell-sel.is-full {
+  inset: 3px 5px;
 }
 /* While a table cell is focused, the "real" cursor lives in the cell, so hide
    the editor's own cursor layer — otherwise its Vim block cursor lingers at the
@@ -5047,6 +5573,38 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
 .cm-wysiwyg .cm-editor .cm-math-block .katex-display {
   margin: 0;
 }
+/* Mermaid live-preview widget (#530). Same rules as the math block for the same
+   reason: padding rather than margin, because CodeMirror measures block widgets
+   with getBoundingClientRect and a margin here makes the height map drift, so
+   clicks land further off the deeper you scroll. */
+.cm-wysiwyg .cm-editor .cm-mermaid-block {
+  display: block;
+  text-align: center;
+  margin: 0;
+  padding: 0.5em 0;
+  cursor: text;
+}
+.cm-wysiwyg .cm-editor .cm-mermaid-block svg {
+  max-width: 100%;
+  height: auto;
+  /* Let the click through to CodeMirror so it can place the cursor in the block
+     and reveal the source, rather than the SVG swallowing it. */
+  pointer-events: none;
+}
+/* Nothing drawn yet. Holds a line of height so a note does not jump as diagrams
+   arrive one after another. */
+.cm-wysiwyg .cm-editor .cm-mermaid-pending {
+  min-height: 1.5em;
+}
+.cm-wysiwyg .cm-editor .cm-mermaid-error {
+  font-family: var(--z-font-mono, ui-monospace, monospace);
+  font-size: 0.85em;
+  text-align: left;
+  color: rgb(var(--z-red));
+  opacity: 0.85;
+  white-space: pre-wrap;
+}
+
 .cm-wysiwyg .cm-editor .cm-math-error {
   font-family: var(--z-font-mono, ui-monospace, monospace);
   opacity: 0.75;
@@ -5088,4 +5646,88 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
 }
 .cm-wysiwyg .cm-editor .cm-hashtag:hover {
   background-color: rgb(var(--z-accent) / 0.2);
+}
+
+/* Frontmatter `tags:` values are also clickable chips, styled a little smaller
+   than inline hashtags so they sit comfortably in the compact metadata block. */
+.cm-wysiwyg .cm-editor .cm-frontmatter-tag {
+  color: rgb(var(--z-accent));
+  cursor: pointer;
+  border-radius: 0.35em;
+  padding: 0.05em 0.35em;
+  background-color: rgb(var(--z-accent) / 0.08);
+}
+.cm-wysiwyg .cm-editor .cm-frontmatter-tag:hover {
+  background-color: rgb(var(--z-accent) / 0.15);
+}
+
+/* Task metadata on task lines (#454): priorities, due dates, and @fields get
+   the same at-a-glance cues as the Tasks view, so they stand out from the task
+   text. All three are chips — a tinted background plus the coloured text — and
+   the editor (`cm-task-*`, from CodeMirror decorations) and the reading preview
+   (`zen-task-*`, from the remark plugin) share one set of rules so a task line
+   looks identical either side of a split. (#479)
+
+   Priority started as coloured text alone, which quietly failed on the palettes
+   where those hues sit near the foreground: on the default Gruvbox dark the
+   `!med` amber lands within ΔE ~20 of the body text, so the marker read as
+   plain bold text and the three levels were hard to tell apart. The tint
+   carries the distinction even when the hue can't. */
+.cm-wysiwyg .cm-editor .cm-task-prio,
+.prose-zen .zen-task-prio {
+  font-weight: 600;
+  border-radius: 0.35em;
+  padding: 0 0.3em;
+  font-style: normal;
+}
+.cm-wysiwyg .cm-editor .cm-task-prio-high,
+.prose-zen .zen-task-prio-high {
+  color: rgb(var(--z-red));
+  background-color: rgb(var(--z-red) / 0.16);
+}
+.cm-wysiwyg .cm-editor .cm-task-prio-med,
+.prose-zen .zen-task-prio-med {
+  color: rgb(var(--z-yellow));
+  background-color: rgb(var(--z-yellow) / 0.16);
+}
+.cm-wysiwyg .cm-editor .cm-task-prio-low,
+.prose-zen .zen-task-prio-low {
+  color: rgb(var(--z-blue));
+  background-color: rgb(var(--z-blue) / 0.16);
+}
+.cm-wysiwyg .cm-editor .cm-task-meta,
+.prose-zen .zen-task-meta {
+  border-radius: 0.35em;
+  padding: 0 0.3em;
+  font-size: 0.92em;
+  font-style: normal;
+}
+.cm-wysiwyg .cm-editor .cm-task-due,
+.prose-zen .zen-task-due {
+  color: rgb(var(--z-blue));
+  background-color: rgb(var(--z-blue) / 0.12);
+}
+.cm-wysiwyg .cm-editor .cm-task-due-overdue,
+.prose-zen .zen-task-due-overdue {
+  color: rgb(var(--z-red));
+  background-color: rgb(var(--z-red) / 0.14);
+}
+.cm-wysiwyg .cm-editor .cm-task-field,
+.prose-zen .zen-task-field {
+  color: rgb(var(--z-purple));
+  background-color: rgb(var(--z-purple) / 0.12);
+}
+/* #512: derived subtask progress on a parent task line. Neutral until every
+   child is done, then it borrows the green the done state already owns. */
+.cm-wysiwyg .cm-editor .cm-task-rollup,
+.prose-zen .zen-task-rollup {
+  margin-left: 0.45em;
+  color: rgb(var(--z-fg-2));
+  background-color: rgb(var(--z-fg-2) / 0.1);
+  font-variant-numeric: tabular-nums;
+}
+.cm-wysiwyg .cm-editor .cm-task-rollup-complete,
+.prose-zen .zen-task-rollup-complete {
+  color: rgb(var(--z-green));
+  background-color: rgb(var(--z-green) / 0.12);
 }

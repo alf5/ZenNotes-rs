@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   externalLinkUrl,
   extractLinkAtCursor,
+  linkRangeAtCursor,
   markdownLinkAt,
   resolveInternalNoteHref
 } from './internal-links'
@@ -20,7 +21,7 @@ describe('resolveInternalNoteHref', () => {
   it('resolves a same-folder relative link', () => {
     expect(resolveInternalNoteHref(from, 'Another Note.md', NOTES)).toEqual({
       path: 'Work/Documentation/Another Note.md',
-      heading: null
+      anchor: null
     })
   })
 
@@ -43,7 +44,14 @@ describe('resolveInternalNoteHref', () => {
   it('carries a #heading anchor', () => {
     expect(resolveInternalNoteHref(from, 'Another%20Note.md#My%20Heading', NOTES)).toEqual({
       path: 'Work/Documentation/Another Note.md',
-      heading: 'My Heading'
+      anchor: 'My Heading'
+    })
+  })
+
+  it('carries an Obsidian #^block fragment raw, for the dispatcher to type (#601 review)', () => {
+    expect(resolveInternalNoteHref(from, 'Another%20Note.md#^note-two', NOTES)).toEqual({
+      path: 'Work/Documentation/Another Note.md',
+      anchor: '^note-two'
     })
   })
 
@@ -105,6 +113,41 @@ describe('extractLinkAtCursor', () => {
   })
 })
 
+describe('linkRangeAtCursor', () => {
+  it('returns the target and source range of a Markdown link', () => {
+    const doc = 'see [the plan](Work/Projects/plan.md) here'
+    expect(linkRangeAtCursor(doc, doc.indexOf('plan.md'))).toEqual({
+      target: 'Work/Projects/plan.md',
+      from: 4,
+      to: 4 + '[the plan](Work/Projects/plan.md)'.length
+    })
+  })
+
+  it('returns doc offsets for a link on a later line', () => {
+    const doc = 'first line\n2. courses on [[Another Note]] end'
+    const at = linkRangeAtCursor(doc, doc.indexOf('Another'))
+    expect(at).toEqual({
+      target: 'Another Note',
+      from: doc.indexOf('[[Another'),
+      to: doc.indexOf(']]') + 2
+    })
+  })
+
+  it('covers a bare url up to its last character, exclusive of line end', () => {
+    const doc = 'ends with https://x.test/a'
+    expect(linkRangeAtCursor(doc, doc.indexOf('https'))).toEqual({
+      target: 'https://x.test/a',
+      from: doc.indexOf('https'),
+      to: doc.length
+    })
+    expect(linkRangeAtCursor(doc, doc.length)).toBeNull()
+  })
+
+  it('returns null when the offset is outside any link', () => {
+    expect(linkRangeAtCursor('just text', 3)).toBeNull()
+  })
+})
+
 describe('externalLinkUrl', () => {
   it('keeps explicit web/scheme URLs as-is', () => {
     expect(externalLinkUrl('https://google.com')).toBe('https://google.com')
@@ -141,5 +184,14 @@ describe('markdownLinkAt', () => {
 
   it('returns null when the cursor is outside any link', () => {
     expect(markdownLinkAt('a [test](google.com) b', 0)).toBeNull()
+  })
+})
+
+// #199: a markdown title after the destination is not part of the path.
+describe('markdownLinkAt with a title', () => {
+  it('drops the title from the href', () => {
+    const doc = 'see ![chart](assets/chart.png "chart.png") here'
+    expect(markdownLinkAt(doc, 8)?.href).toBe('assets/chart.png')
+    expect(markdownLinkAt('[x](<a b.pdf> "t")', 2)?.href).toBe('a b.pdf')
   })
 })

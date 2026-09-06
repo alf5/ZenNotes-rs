@@ -7,6 +7,7 @@
 
 mod app_config;
 mod asset_protocol;
+mod code_languages;
 mod custom_css;
 mod deep_links;
 mod ipc;
@@ -15,6 +16,7 @@ mod os;
 mod remote;
 mod search;
 mod secrets;
+mod standalone_links;
 mod state;
 mod vault;
 mod watcher;
@@ -91,6 +93,15 @@ pub fn run() {
                     )));
                 }
                 Err(err) => eprintln!("custom-css watchers failed to start: {err}"),
+            }
+            // Watch the installed code-languages dir for edits.
+            match code_languages::spawn_watcher(app.handle().clone()) {
+                Ok(debouncers) => {
+                    app.manage(code_languages::CodeLanguageWatchers(std::sync::Mutex::new(
+                        debouncers,
+                    )));
+                }
+                Err(err) => eprintln!("code-languages watcher failed to start: {err}"),
             }
             // Register the persisted quick-capture global shortcut.
             if let Ok(dir) = app.path().app_config_dir() {
@@ -225,6 +236,27 @@ pub fn run() {
             workspace_cmds::workspace_connect_remote,
             workspace_cmds::workspace_connect_remote_profile,
             workspace_cmds::workspace_browse_server_directories,
+            // v2.45 mirror
+            vault_cmds::vault_list_workflows,
+            vault_cmds::vault_write_workflow,
+            vault_cmds::vault_delete_workflow,
+            vault_cmds::vault_export_workflow,
+            vault_cmds::vault_import_workflow_file,
+            vault_cmds::db_list_dir,
+            vault_cmds::db_file_size,
+            vault_cmds::db_append_text,
+            vault_cmds::db_delete_file,
+            vault_cmds::db_write_through_links,
+            vault_cmds::db_remove_through_links,
+            vault_cmds::vault_read_asset_base64,
+            vault_cmds::vault_open_asset_externally,
+            window_cmds::app_open_file_dialog,
+            window_cmds::external_file_follow_link,
+            code_languages::code_languages_scan,
+            code_languages::code_languages_write,
+            code_languages::code_languages_write_manifest,
+            code_languages::code_languages_delete,
+            code_languages::code_languages_reveal,
         ])
         .build(tauri::generate_context!())
         .expect("error while building ZenNotes-rs")

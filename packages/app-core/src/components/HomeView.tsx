@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import type { NoteMeta } from '@shared/ipc'
-import type { VaultTask } from '@shared/tasks'
+import { filterTasksForDisplay, type VaultTask } from '@shared/tasks'
 import { useStore } from '../store'
 import { computeTasksRender } from '../lib/tasks-filter'
 import { InlineMarkdown } from '../lib/inline-markdown'
@@ -24,7 +24,8 @@ const NO_COLLAPSE = {
   upcoming: false,
   waiting: false,
   forwarded: false,
-  done: false
+  done: false,
+  cancelled: false
 }
 
 function greetingFor(date: Date): string {
@@ -59,6 +60,7 @@ export function HomeView({
 }): JSX.Element {
   const notes = useStore((s) => s.notes)
   const vaultTasks = useStore((s) => s.vaultTasks)
+  const showArchivedTasks = useStore((s) => s.showArchivedTasks)
   const tasksLoading = useStore((s) => s.tasksLoading)
   const vimMode = useStore((s) => s.vimMode)
   const selectNote = useStore((s) => s.selectNote)
@@ -70,6 +72,7 @@ export function HomeView({
   const createAndOpen = useStore((s) => s.createAndOpen)
   const newDatabase = useStore((s) => s.newDatabase)
   const newDrawing = useStore((s) => s.newDrawing)
+  const setTemplatePaletteOpen = useStore((s) => s.setTemplatePaletteOpen)
   const openTodayDailyNote = useStore((s) => s.openTodayDailyNote)
   const openWeeklyNoteForDate = useStore((s) => s.openWeeklyNoteForDate)
 
@@ -143,9 +146,14 @@ export function HomeView({
   )
 
   const { today, overdueCount } = useMemo(() => {
-    const render = computeTasksRender(vaultTasks, '', new Date(now), NO_COLLAPSE)
+    const render = computeTasksRender(
+      filterTasksForDisplay(vaultTasks, showArchivedTasks),
+      '',
+      new Date(now),
+      NO_COLLAPSE
+    )
     return { today: render.groups.today, overdueCount: render.groups.overdueCount }
-  }, [vaultTasks, now])
+  }, [vaultTasks, showArchivedTasks, now])
 
   const visibleTasks = today.slice(0, MAX_TASKS)
   const hiddenTaskCount = today.length - visibleTasks.length
@@ -254,7 +262,41 @@ export function HomeView({
               ))}
             </ul>
           ) : (
-            <EmptyHint text="No notes yet — create one to start writing." />
+            <div className="mt-1.5 flex flex-col gap-2">
+              {(
+                [
+                  {
+                    label: 'New note',
+                    icon: NotePlusIcon,
+                    run: () => void createAndOpen('inbox', '')
+                  },
+                  {
+                    label: 'New from template',
+                    icon: DocumentTextIcon,
+                    run: () => setTemplatePaletteOpen(true)
+                  },
+                  {
+                    label: 'New database',
+                    icon: DatabaseIcon,
+                    run: () => void newDatabase()
+                  }
+                ] as const
+              ).map(({ label, icon: EmptyIcon, run }) => (
+                <button
+                  key={label}
+                  type="button"
+                  onClick={run}
+                  className="group flex items-center gap-3 rounded-lg border border-paper-300/70 bg-paper-100/60 px-3 py-2.5 text-left text-sm text-ink-800 transition-colors hover:bg-paper-200/60 focus:bg-paper-200/70 focus:outline-none"
+                >
+                  <EmptyIcon
+                    width={15}
+                    height={15}
+                    className="shrink-0 text-ink-400 group-hover:text-ink-600"
+                  />
+                  {label}
+                </button>
+              ))}
+            </div>
           )}
         </section>
 

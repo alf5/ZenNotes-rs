@@ -1,8 +1,8 @@
 /**
- * Extract `#tags` from a markdown body. Mirrors the extraction the
- * main process runs in `vault.ts` so the sidebar can update tag
- * counts *live* as the user types, instead of waiting for the save +
- * chokidar round-trip.
+ * Extract a note's tags from a markdown body: its frontmatter `tags` field
+ * plus every inline `#tag`. Mirrors the extraction the main process runs in
+ * `vault.ts` so the sidebar can update tag counts *live* as the user types,
+ * instead of waiting for the save + chokidar round-trip.
  *
  * Rules:
  *  - The hash must be preceded by start-of-line or whitespace (so
@@ -12,11 +12,19 @@
  *  - Fenced code blocks and inline code spans are stripped first.
  *  - Heading markers (`#`, `##`, …) are not a hashtag because the
  *    character after the hash is a space, not a letter.
+ *  - The frontmatter block is read for `tags` and then excluded from the
+ *    inline scan, so a `#` in some other field is never a tag (#444).
  */
+import { FRONTMATTER_BLOCK_RE, frontmatterTags } from '@shared/frontmatter'
+import { isTypstPreamblePath } from '@shared/typst-preamble-folder'
+
 export function extractTags(body: string): string[] {
-  const stripped = stripCodeContent(body)
-  const regex = /(?:^|\s)#(\p{L}[\p{L}\d_/-]*)/gu
   const seen = new Set<string>()
+  for (const tag of frontmatterTags(body)) seen.add(tag)
+
+  const markdownBody = body.replace(FRONTMATTER_BLOCK_RE, '')
+  const stripped = stripCodeContent(markdownBody)
+  const regex = /(?:^|\s)#(\p{L}[\p{L}\d_/-]*)/gu
   let m: RegExpExecArray | null
   while ((m = regex.exec(stripped)) !== null) {
     seen.add(m[1])
@@ -80,6 +88,27 @@ export function matchesSelectedTags(
   const want = selectedTags.map((t) => t.toLowerCase())
   return mode === 'any' ? want.some((t) => have.has(t)) : want.every((t) => have.has(t))
 }
+
+/**
+ * The tags a note contributes to the vault's tag surfaces: the live buffer for
+ * the note being edited (so a freshly typed `#tag` counts before the index
+ * catches up), the indexed list for everything else.
+ *
+ * Typst preamble notes contribute nothing. Their bodies are Typst source, so
+ * `#let vec(x) = …` and the `#var` references in formulas are variables rather
+ * than tags (#562). The indexers already drop them, and this keeps the live
+ * path from putting them back the moment the user opens one.
+ */
+export function noteTagsForCount(
+  note: { path: string; tags: readonly string[] },
+  active: { path: string; body: string } | null | undefined,
+  preambleFolder: string
+): readonly string[] {
+  if (isTypstPreamblePath(note.path, preambleFolder)) return EMPTY_TAGS
+  return active && active.path === note.path ? extractTags(active.body) : note.tags
+}
+
+const EMPTY_TAGS: readonly string[] = []
 
 /** A node in the hierarchical (`/`-separated) tag tree. (#439) */
 export interface TagTreeNode {

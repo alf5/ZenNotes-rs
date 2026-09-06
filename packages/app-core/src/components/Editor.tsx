@@ -7,96 +7,128 @@
  * app-level keyboard shortcuts) live here. Per-pane concerns (CM view,
  * tabs, toolbar, drag-drop zones) live in `EditorPane.tsx`.
  */
-import { useCallback, useEffect, useMemo, useRef } from 'react'
-import type { EditorView } from '@codemirror/view'
-import { Vim, getCM } from '@replit/codemirror-vim'
-import { registerDisplayLineMotion } from '../lib/cm-vim-display-line'
-import { moveLineDown, moveLineUp } from '@codemirror/commands'
-import { foldAll, unfoldAll, foldCode, unfoldCode } from '@codemirror/language'
-import { isTagsViewActive, isTasksViewActive, useStore } from '../store'
-import { buildCommands, type Command } from '../lib/commands'
-import { rankItems } from '../lib/fuzzy-score'
-import { BUILTIN_TEMPLATES } from '@shared/builtin-templates'
-import { mergeTemplates } from '@shared/template-files'
-import type { PaneLayout, PaneSplit } from '../lib/pane-layout'
+import { useCallback, useEffect, useMemo, useRef } from "react";
+import type { EditorView } from "@codemirror/view";
+import { Vim, getCM } from "@replit/codemirror-vim";
+import { registerDisplayLineMotion } from "../lib/cm-vim-display-line";
+import { registerHeadingMotion } from "../lib/cm-vim-heading-motion";
+import { registerReflowOperator } from "../lib/cm-vim-reflow";
 import {
-  parseCreateNotePath,
-  resolveWikilinkTarget,
-  wikilinkHeadingAnchor
-} from '../lib/wikilinks'
-import { openDatabaseFromWikilink, openWikilinkHeading } from '../lib/wikilink-navigation'
-import { classifyLocalAssetHref, hrefFragment, resolveAssetVaultRelativePath } from '../lib/local-assets'
-import { externalLinkUrl, extractLinkAtCursor, resolveInternalNoteHref } from '../lib/internal-links'
+  harperAddWordAtCursor,
+  harperIgnoreAtCursor,
+  harperNextSuggestion,
+  harperOpenSuggestions,
+  harperPreviousSuggestion,
+} from "../lib/cm-harper";
+import { harperEditorConfig } from "../lib/harper-runtime";
+import { moveLineDown, moveLineUp } from "@codemirror/commands";
+import { foldAll, unfoldAll, foldCode, unfoldCode } from "@codemirror/language";
+import { isTagsViewActive, isTasksViewActive, useStore } from "../store";
+import { buildCommands, type Command } from "../lib/commands";
+import { rankItems } from "../lib/fuzzy-score";
+import { BUILTIN_TEMPLATES } from "@shared/builtin-templates";
+import { mergeTemplates } from "@shared/template-files";
+import type { PaneLayout, PaneSplit } from "../lib/pane-layout";
+import { parseCreateNotePath, resolveWikilinkPath } from "../lib/wikilinks";
+import {
+  openDatabaseFromWikilink,
+  openWikilinkTarget,
+} from "../lib/wikilink-navigation";
+import {
+  classifyLocalAssetHref,
+  hrefFragment,
+  resolveAssetVaultRelativePath,
+} from "../lib/local-assets";
+import {
+  externalLinkUrl,
+  extractLinkAtCursor,
+  resolveInternalNoteHref,
+} from "../lib/internal-links";
 import {
   buildMoveNotePrompt,
   parseMoveNoteTarget,
   parseTemplateDestination,
-  validateMoveNoteTarget
-} from '../lib/move-note'
-import { promptApp } from '../lib/prompt-requests'
-import { offerCreateNoteFromLink } from '../lib/create-note-from-link'
-import { externalFileLink, openExternalFileLink } from '../lib/external-file-link'
-import { StatusBar } from './StatusBar'
-import { EditorPane } from './EditorPane'
-import { focusPaneInDirection, focusPaneOrEdgePanel } from '../lib/pane-nav'
-import { requestPaneMode } from '../lib/pane-mode'
+  validateMoveNoteTarget,
+} from "../lib/move-note";
+import { promptApp } from "../lib/prompt-requests";
+import { offerCreateNoteFromLink } from "../lib/create-note-from-link";
+import {
+  externalFileLink,
+  openExternalFileLink,
+} from "../lib/external-file-link";
+import { StatusBar } from "./StatusBar";
+import { useCloudSyncStatusStore } from "../lib/cloud-auto-sync";
+import { EditorPane } from "./EditorPane";
+import { focusPaneInDirection, focusPaneOrEdgePanel } from "../lib/pane-nav";
+import { requestPaneMode } from "../lib/pane-mode";
 import {
   getKeymapBinding,
   getSequenceTokens,
   type KeymapId,
-  type KeymapOverrides
-} from '../lib/keymaps'
-import { navigateActiveBuffer } from '../lib/buffer-navigation'
-import { applyVimInsertEscape } from '../lib/vim-insert-escape'
-import { listContinuationPrefix } from '../lib/list-continuation'
-import { focusEditorNormalMode } from '../lib/editor-focus'
-import { toVimSequence } from '../lib/vim-key-sequence'
+  type KeymapOverrides,
+} from "../lib/keymaps";
+import {
+  navigateActiveBuffer,
+  selectActiveBuffer,
+} from "../lib/buffer-navigation";
+import { applyVimInsertEscape } from "../lib/vim-insert-escape";
+import { listContinuationPrefix } from "../lib/list-continuation";
+import { focusEditorNormalMode } from "../lib/editor-focus";
+import { toVimSequence } from "../lib/vim-key-sequence";
+import { registerNoteMoveExCommands } from "../lib/vim-ex-commands";
+import { promptImageWidth, setImageWidthFromInput } from "../lib/image-resize";
+import { copyLinkAtCursor } from "../lib/link-copy";
 
-let vimCommandsRegistered = false
-let syncedVimBindings: Partial<Record<KeymapId, string[]>> = {}
+let vimCommandsRegistered = false;
+let syncedVimBindings: Partial<Record<KeymapId, string[]>> = {};
 
 const DEFAULT_VIM_MAPPINGS_TO_CLEAR = [
-  'gd',
-  '<C-w>h',
-  '<C-w>j',
-  '<C-w>k',
-  '<C-w>l',
-  '<C-w><C-h>',
-  '<C-w><C-j>',
-  '<C-w><C-k>',
-  '<C-w><C-l>',
-  'zc',
-  'zo',
-  'zM',
-  'zR'
-]
+  "gd",
+  "<C-w>h",
+  "<C-w>j",
+  "<C-w>k",
+  "<C-w>l",
+  "<C-w><C-h>",
+  "<C-w><C-j>",
+  "<C-w><C-k>",
+  "<C-w><C-l>",
+  "zc",
+  "zo",
+  "zM",
+  "zR",
+];
 
 function clearKnownVimMappings(): void {
   for (const binding of DEFAULT_VIM_MAPPINGS_TO_CLEAR) {
     try {
-      Vim.unmap(binding, 'normal')
+      Vim.unmap(binding, "normal");
     } catch {
       /* ignore */
     }
   }
 }
 
-function paneMapBindings(overrides: KeymapOverrides, actionId: KeymapId): string[] {
-  const prefixBinding = toVimSequence(getKeymapBinding(overrides, 'vim.panePrefix'))
-  const actionBinding = toVimSequence(getKeymapBinding(overrides, actionId))
-  if (!prefixBinding || !actionBinding) return []
-  const bindings = [`${prefixBinding}${actionBinding}`]
-  const prefixTokens = getSequenceTokens(overrides, 'vim.panePrefix')
-  const actionTokens = getSequenceTokens(overrides, actionId)
+function paneMapBindings(
+  overrides: KeymapOverrides,
+  actionId: KeymapId,
+): string[] {
+  const prefixBinding = toVimSequence(
+    getKeymapBinding(overrides, "vim.panePrefix"),
+  );
+  const actionBinding = toVimSequence(getKeymapBinding(overrides, actionId));
+  if (!prefixBinding || !actionBinding) return [];
+  const bindings = [`${prefixBinding}${actionBinding}`];
+  const prefixTokens = getSequenceTokens(overrides, "vim.panePrefix");
+  const actionTokens = getSequenceTokens(overrides, actionId);
   if (
     prefixTokens.length === 1 &&
-    prefixTokens[0] === 'Ctrl+W' &&
+    prefixTokens[0] === "Ctrl+W" &&
     actionTokens.length === 1 &&
     /^[hjkl]$/i.test(actionTokens[0])
   ) {
-    bindings.push(`${prefixBinding}<C-${actionTokens[0].toLowerCase()}>`)
+    bindings.push(`${prefixBinding}<C-${actionTokens[0].toLowerCase()}>`);
   }
-  return [...new Set(bindings)]
+  return [...new Set(bindings)];
 }
 
 /**
@@ -111,136 +143,191 @@ function paneMapBindings(overrides: KeymapOverrides, actionId: KeymapId): string
  * wrap. Mirrors the clamped preview scroll (`scrollPreviewBy`) in VimNav.
  */
 function editorHalfPage(view: EditorView | undefined, forward: boolean): void {
-  if (!view) return
-  const scroller = view.scrollDOM
-  const half = Math.max(1, Math.round(scroller.clientHeight / 2))
-  const lineHeight = view.defaultLineHeight || 18
-  const steps = Math.max(1, Math.round(half / lineHeight))
-  let range = view.state.selection.main
+  if (!view) return;
+  const scroller = view.scrollDOM;
+  const half = Math.max(1, Math.round(scroller.clientHeight / 2));
+  const lineHeight = view.defaultLineHeight || 18;
+  const steps = Math.max(1, Math.round(half / lineHeight));
+  let range = view.state.selection.main;
   for (let i = 0; i < steps; i++) {
-    const next = view.moveVertically(range, forward)
-    if (next.head === range.head) break // reached the first/last line — stop, never wrap
-    range = next
+    const next = view.moveVertically(range, forward);
+    if (next.head === range.head) break; // reached the first/last line — stop, never wrap
+    range = next;
   }
-  const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight)
-  const nextTop = Math.max(0, Math.min(maxTop, scroller.scrollTop + (forward ? half : -half)))
-  view.dispatch({ selection: { anchor: range.head } })
-  scroller.scrollTop = nextTop
+  const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+  const nextTop = Math.max(
+    0,
+    Math.min(maxTop, scroller.scrollTop + (forward ? half : -half)),
+  );
+  view.dispatch({ selection: { anchor: range.head } });
+  scroller.scrollTop = nextTop;
 }
 
 function syncVimKeymaps(overrides: KeymapOverrides): void {
-  const mappings: Array<{ id: KeymapId; action: string; bindings: string[] }> = [
-    {
-      id: 'vim.goToDefinition',
-      action: 'goToDefinition',
-      bindings: [toVimSequence(getKeymapBinding(overrides, 'vim.goToDefinition'))].filter(
-        (binding): binding is string => !!binding
-      )
-    },
-    {
-      id: 'vim.paneFocusLeft',
-      action: 'focusPaneLeft',
-      bindings: paneMapBindings(overrides, 'vim.paneFocusLeft')
-    },
-    {
-      id: 'vim.paneFocusDown',
-      action: 'focusPaneDown',
-      bindings: paneMapBindings(overrides, 'vim.paneFocusDown')
-    },
-    {
-      id: 'vim.paneFocusUp',
-      action: 'focusPaneUp',
-      bindings: paneMapBindings(overrides, 'vim.paneFocusUp')
-    },
-    {
-      id: 'vim.paneFocusRight',
-      action: 'focusPaneRight',
-      bindings: paneMapBindings(overrides, 'vim.paneFocusRight')
-    },
-    {
-      id: 'vim.bufferPrevious',
-      action: 'previousBuffer',
-      bindings: [toVimSequence(getKeymapBinding(overrides, 'vim.bufferPrevious'))].filter(
-        (binding): binding is string => !!binding
-      )
-    },
-    {
-      id: 'vim.bufferNext',
-      action: 'nextBuffer',
-      bindings: [toVimSequence(getKeymapBinding(overrides, 'vim.bufferNext'))].filter(
-        (binding): binding is string => !!binding
-      )
-    },
-    {
-      id: 'vim.tabPrevious',
-      action: 'previousBuffer',
-      bindings: [toVimSequence(getKeymapBinding(overrides, 'vim.tabPrevious'))].filter(
-        (binding): binding is string => !!binding
-      )
-    },
-    {
-      id: 'vim.tabNext',
-      action: 'nextBuffer',
-      bindings: [toVimSequence(getKeymapBinding(overrides, 'vim.tabNext'))].filter(
-        (binding): binding is string => !!binding
-      )
-    },
-    {
-      id: 'vim.foldCurrent',
-      action: 'foldHeadingAtCursor',
-      bindings: [toVimSequence(getKeymapBinding(overrides, 'vim.foldCurrent'))].filter(
-        (binding): binding is string => !!binding
-      )
-    },
-    {
-      id: 'vim.unfoldCurrent',
-      action: 'unfoldHeadingAtCursor',
-      bindings: [toVimSequence(getKeymapBinding(overrides, 'vim.unfoldCurrent'))].filter(
-        (binding): binding is string => !!binding
-      )
-    },
-    {
-      id: 'vim.foldAll',
-      action: 'foldAllHeadings',
-      bindings: [toVimSequence(getKeymapBinding(overrides, 'vim.foldAll'))].filter(
-        (binding): binding is string => !!binding
-      )
-    },
-    {
-      id: 'vim.unfoldAll',
-      action: 'unfoldAllHeadings',
-      bindings: [toVimSequence(getKeymapBinding(overrides, 'vim.unfoldAll'))].filter(
-        (binding): binding is string => !!binding
-      )
-    },
-    {
-      id: 'nav.halfPageDown',
-      action: 'zenHalfPageDown',
-      bindings: [toVimSequence(getKeymapBinding(overrides, 'nav.halfPageDown'))].filter(
-        (binding): binding is string => !!binding
-      )
-    },
-    {
-      id: 'nav.halfPageUp',
-      action: 'zenHalfPageUp',
-      bindings: [toVimSequence(getKeymapBinding(overrides, 'nav.halfPageUp'))].filter(
-        (binding): binding is string => !!binding
-      )
-    }
-  ]
+  const mappings: Array<{
+    id: KeymapId;
+    action: string;
+    bindings: string[];
+    // VimNav's global fallback stands down while the editor has focus (#578),
+    // so anything that used to reach it from a standing selection has to be
+    // mapped in visual context here as well.
+    contexts?: Array<"normal" | "visual">;
+  }> = [
+      {
+        id: "vim.harperNext",
+        action: "zenHarperNext",
+        bindings: [
+          toVimSequence(getKeymapBinding(overrides, "vim.harperNext")),
+        ].filter((binding): binding is string => !!binding),
+      },
+      {
+        id: "vim.harperPrevious",
+        action: "zenHarperPrevious",
+        bindings: [
+          toVimSequence(getKeymapBinding(overrides, "vim.harperPrevious")),
+        ].filter((binding): binding is string => !!binding),
+      },
+      {
+        id: "vim.harperSuggest",
+        action: "zenHarperSuggest",
+        bindings: [
+          toVimSequence(getKeymapBinding(overrides, "vim.harperSuggest")),
+        ].filter((binding): binding is string => !!binding),
+      },
+      {
+        id: "vim.harperAddWord",
+        action: "zenHarperAddWord",
+        bindings: [
+          toVimSequence(getKeymapBinding(overrides, "vim.harperAddWord")),
+        ].filter((binding): binding is string => !!binding),
+      },
+      {
+        id: "vim.harperIgnore",
+        action: "zenHarperIgnore",
+        bindings: [
+          toVimSequence(getKeymapBinding(overrides, "vim.harperIgnore")),
+        ].filter((binding): binding is string => !!binding),
+      },
+      {
+        id: "vim.goToDefinition",
+        action: "goToDefinition",
+        bindings: [
+          toVimSequence(getKeymapBinding(overrides, "vim.goToDefinition")),
+        ].filter((binding): binding is string => !!binding),
+      },
+      {
+        id: "vim.paneFocusLeft",
+        action: "focusPaneLeft",
+        bindings: paneMapBindings(overrides, "vim.paneFocusLeft"),
+      },
+      {
+        id: "vim.paneFocusDown",
+        action: "focusPaneDown",
+        bindings: paneMapBindings(overrides, "vim.paneFocusDown"),
+      },
+      {
+        id: "vim.paneFocusUp",
+        action: "focusPaneUp",
+        bindings: paneMapBindings(overrides, "vim.paneFocusUp"),
+      },
+      {
+        id: "vim.paneFocusRight",
+        action: "focusPaneRight",
+        bindings: paneMapBindings(overrides, "vim.paneFocusRight"),
+      },
+      {
+        id: "vim.bufferPrevious",
+        contexts: ["normal", "visual"],
+        action: "previousBuffer",
+        bindings: [
+          toVimSequence(getKeymapBinding(overrides, "vim.bufferPrevious")),
+        ].filter((binding): binding is string => !!binding),
+      },
+      {
+        id: "vim.bufferNext",
+        contexts: ["normal", "visual"],
+        action: "nextBufferRelative",
+        bindings: [
+          toVimSequence(getKeymapBinding(overrides, "vim.bufferNext")),
+        ].filter((binding): binding is string => !!binding),
+      },
+      {
+        id: "vim.tabPrevious",
+        contexts: ["normal", "visual"],
+        action: "previousBuffer",
+        bindings: [
+          toVimSequence(getKeymapBinding(overrides, "vim.tabPrevious")),
+        ].filter((binding): binding is string => !!binding),
+      },
+      {
+        id: "vim.tabNext",
+        contexts: ["normal", "visual"],
+        action: "nextBuffer",
+        bindings: [
+          toVimSequence(getKeymapBinding(overrides, "vim.tabNext")),
+        ].filter((binding): binding is string => !!binding),
+      },
+      {
+        id: "vim.foldCurrent",
+        action: "foldHeadingAtCursor",
+        bindings: [
+          toVimSequence(getKeymapBinding(overrides, "vim.foldCurrent")),
+        ].filter((binding): binding is string => !!binding),
+      },
+      {
+        id: "vim.unfoldCurrent",
+        action: "unfoldHeadingAtCursor",
+        bindings: [
+          toVimSequence(getKeymapBinding(overrides, "vim.unfoldCurrent")),
+        ].filter((binding): binding is string => !!binding),
+      },
+      {
+        id: "vim.foldAll",
+        action: "foldAllHeadings",
+        bindings: [
+          toVimSequence(getKeymapBinding(overrides, "vim.foldAll")),
+        ].filter((binding): binding is string => !!binding),
+      },
+      {
+        id: "vim.unfoldAll",
+        action: "unfoldAllHeadings",
+        bindings: [
+          toVimSequence(getKeymapBinding(overrides, "vim.unfoldAll")),
+        ].filter((binding): binding is string => !!binding),
+      },
+      {
+        id: "nav.halfPageDown",
+        action: "zenHalfPageDown",
+        bindings: [
+          toVimSequence(getKeymapBinding(overrides, "nav.halfPageDown")),
+        ].filter((binding): binding is string => !!binding),
+      },
+      {
+        id: "nav.halfPageUp",
+        action: "zenHalfPageUp",
+        bindings: [
+          toVimSequence(getKeymapBinding(overrides, "nav.halfPageUp")),
+        ].filter((binding): binding is string => !!binding),
+      },
+    ];
 
   for (const mapping of mappings) {
+    const contexts = mapping.contexts ?? ["normal"];
     for (const binding of syncedVimBindings[mapping.id] ?? []) {
-      try {
-        Vim.unmap(binding, 'normal')
-      } catch {
-        /* ignore */
+      for (const context of contexts) {
+        try {
+          Vim.unmap(binding, context);
+        } catch {
+          /* ignore */
+        }
       }
     }
     for (const binding of mapping.bindings) {
-      Vim.mapCommand(binding, 'action', mapping.action, {}, { context: 'normal' })
+      for (const context of contexts) {
+        Vim.mapCommand(binding, "action", mapping.action, {}, { context });
+      }
     }
-    syncedVimBindings[mapping.id] = mapping.bindings
+    syncedVimBindings[mapping.id] = mapping.bindings;
   }
 }
 
@@ -256,24 +343,27 @@ function syncVimKeymaps(overrides: KeymapOverrides): void {
  * unavailable. (#173)
  */
 function alertEditorError(message: string): void {
-  const view = useStore.getState().editorViewRef
-  const cm = view ? getCM(view) : null
+  const view = useStore.getState().editorViewRef;
+  const cm = view ? getCM(view) : null;
   const openNotification = (
     cm as unknown as {
-      openNotification?: (node: Node, opts: { bottom?: boolean; duration?: number }) => void
+      openNotification?: (
+        node: Node,
+        opts: { bottom?: boolean; duration?: number },
+      ) => void;
     } | null
-  )?.openNotification
-  if (cm && typeof openNotification === 'function') {
-    const el = document.createElement('div')
-    el.className = 'cm-vim-message'
-    el.style.color = 'red'
-    el.style.whiteSpace = 'pre'
-    el.textContent = message
-    openNotification.call(cm, el, { bottom: true, duration: 4000 })
-    return
+  )?.openNotification;
+  if (cm && typeof openNotification === "function") {
+    const el = document.createElement("div");
+    el.className = "cm-vim-message";
+    el.style.color = "red";
+    el.style.whiteSpace = "pre";
+    el.textContent = message;
+    openNotification.call(cm, el, { bottom: true, duration: 4000 });
+    return;
   }
-  window.alert(message)
-  focusEditorNormalMode()
+  window.alert(message);
+  focusEditorNormalMode();
 }
 
 // Minimal shape of the CodeMirror-Vim adapter + state the display-line motion
@@ -282,34 +372,79 @@ function alertEditorError(message: string): void {
 // shared with the Quick Note window so both editors behave identically (#312).
 
 function registerVimCommands(): void {
-  if (vimCommandsRegistered) return
-  vimCommandsRegistered = true
+  if (vimCommandsRegistered) return;
+  vimCommandsRegistered = true;
 
   // HMR can leave old custom mappings alive in CodeMirror-Vim's global
   // map table. Explicitly remove the temporary `x` close-note binding
   // so normal-mode `x` keeps its default delete-char behavior.
   try {
-    Vim.unmap('x', 'normal')
+    Vim.unmap("x", "normal");
   } catch {
     /* ignore */
   }
-  clearKnownVimMappings()
+  clearKnownVimMappings();
 
   // Visual-line reorder: select line(s) with Shift+V, then Shift+J / Shift+K
   // move the selection down / up — the well-known Vim "move selected lines"
   // mapping. Overrides J/K in *visual* mode only; normal-mode join (J) and
   // keyword-lookup (K) are left untouched. moveLineDown/Up act on every line
   // the selection spans and keep it selected.
-  Vim.defineAction('zenMoveSelectionDown', (cm: ReturnType<typeof getCM>) => {
-    const view = (cm as unknown as { cm6?: EditorView }).cm6
-    if (view) moveLineDown(view)
-  })
-  Vim.defineAction('zenMoveSelectionUp', (cm: ReturnType<typeof getCM>) => {
-    const view = (cm as unknown as { cm6?: EditorView }).cm6
-    if (view) moveLineUp(view)
-  })
-  Vim.mapCommand('J', 'action', 'zenMoveSelectionDown', {}, { context: 'visual' })
-  Vim.mapCommand('K', 'action', 'zenMoveSelectionUp', {}, { context: 'visual' })
+  Vim.defineAction("zenMoveSelectionDown", (cm: ReturnType<typeof getCM>) => {
+    const view = (cm as unknown as { cm6?: EditorView }).cm6;
+    if (view) moveLineDown(view);
+  });
+  Vim.defineAction("zenMoveSelectionUp", (cm: ReturnType<typeof getCM>) => {
+    const view = (cm as unknown as { cm6?: EditorView }).cm6;
+    if (view) moveLineUp(view);
+  });
+  Vim.mapCommand(
+    "J",
+    "action",
+    "zenMoveSelectionDown",
+    {},
+    { context: "visual" },
+  );
+  // `gy` copies the link under the cursor (a web URL, or the address behind
+  // a mailto:), the keyboard twin of the right-click "Copy link".
+  Vim.defineAction("zenCopyLink", (cm: ReturnType<typeof getCM>) => {
+    const view = (cm as unknown as { cm6?: EditorView }).cm6;
+    if (view) copyLinkAtCursor(view);
+  });
+  Vim.mapCommand("gy", "action", "zenCopyLink", {}, { context: "normal" });
+  // Harper, Vim's spelling keys: `]s` / `[s` walk the problems, `z=` lists the
+  // fixes, `zg` teaches the dictionary a word and `zG`, its temporary sibling
+  // in Vim, ignores this one suggestion without teaching anything. All five
+  // are silent while Harper is off (the extension is not installed).
+  const harperView = (cm: ReturnType<typeof getCM>): EditorView | null =>
+    (cm as unknown as { cm6?: EditorView }).cm6 ?? null;
+  Vim.defineAction("zenHarperNext", (cm: ReturnType<typeof getCM>) => {
+    const view = harperView(cm);
+    if (view) harperNextSuggestion(view);
+  });
+  Vim.defineAction("zenHarperPrevious", (cm: ReturnType<typeof getCM>) => {
+    const view = harperView(cm);
+    if (view) harperPreviousSuggestion(view);
+  });
+  Vim.defineAction("zenHarperSuggest", (cm: ReturnType<typeof getCM>) => {
+    const view = harperView(cm);
+    if (view) harperOpenSuggestions(view);
+  });
+  Vim.defineAction("zenHarperAddWord", (cm: ReturnType<typeof getCM>) => {
+    const view = harperView(cm);
+    if (view) harperAddWordAtCursor(view, harperEditorConfig());
+  });
+  Vim.defineAction("zenHarperIgnore", (cm: ReturnType<typeof getCM>) => {
+    const view = harperView(cm);
+    if (view) harperIgnoreAtCursor(view, harperEditorConfig());
+  });
+  Vim.mapCommand(
+    "K",
+    "action",
+    "zenMoveSelectionUp",
+    {},
+    { context: "visual" },
+  );
 
   // #320: opening a line with o/O on a list item carries the marker forward —
   // like pressing Enter — so bullets repeat, ordered numbers advance (the
@@ -318,102 +453,143 @@ function registerVimCommands(): void {
   // fall back to Vim's built-in open-line. The handler runs as `actions[name]`,
   // so `this` is Vim's action table — reuse its open-line + insert-mode entry.
   type VimActionTable = {
-    newLineAndEnterInsertMode: (cm: unknown, args: unknown, vim: unknown) => void
-    enterInsertMode: (cm: unknown, args: unknown, vim: unknown) => void
-  }
-  Vim.defineAction(
-    'zenOpenLineContinuingList',
-    function (
-      this: VimActionTable,
-      cm: ReturnType<typeof getCM>,
-      actionArgs: { after?: boolean; repeat?: number },
-      vim: { insertMode?: boolean }
-    ) {
-      const view = (cm as unknown as { cm6?: EditorView }).cm6
-      const prefix = view
-        ? listContinuationPrefix(view.state.doc.lineAt(view.state.selection.main.head).text)
-        : null
-      if (!view || prefix == null) {
-        this.newLineAndEnterInsertMode(cm, actionArgs, vim)
-        return
-      }
-      const line = view.state.doc.lineAt(view.state.selection.main.head)
-      vim.insertMode = true
-      if (actionArgs.after) {
-        view.dispatch({
-          changes: { from: line.to, insert: `\n${prefix}` },
-          selection: { anchor: line.to + 1 + prefix.length }
-        })
-      } else {
-        view.dispatch({
-          changes: { from: line.from, insert: `${prefix}\n` },
-          selection: { anchor: line.from + prefix.length }
-        })
-      }
-      this.enterInsertMode(cm, { repeat: actionArgs.repeat }, vim)
-    } as unknown as Parameters<typeof Vim.defineAction>[1]
-  )
+    newLineAndEnterInsertMode: (
+      cm: unknown,
+      args: unknown,
+      vim: unknown,
+    ) => void;
+    enterInsertMode: (cm: unknown, args: unknown, vim: unknown) => void;
+  };
+  Vim.defineAction("zenOpenLineContinuingList", function (
+    this: VimActionTable,
+    cm: ReturnType<typeof getCM>,
+    actionArgs: { after?: boolean; repeat?: number },
+    vim: { insertMode?: boolean },
+  ) {
+    const view = (cm as unknown as { cm6?: EditorView }).cm6;
+    const prefix = view
+      ? listContinuationPrefix(
+          view.state.doc.lineAt(view.state.selection.main.head).text,
+        )
+      : null;
+    if (!view || prefix == null) {
+      this.newLineAndEnterInsertMode(cm, actionArgs, vim);
+      return;
+    }
+    const line = view.state.doc.lineAt(view.state.selection.main.head);
+    vim.insertMode = true;
+    if (actionArgs.after) {
+      view.dispatch({
+        changes: { from: line.to, insert: `\n${prefix}` },
+        selection: { anchor: line.to + 1 + prefix.length },
+      });
+    } else {
+      view.dispatch({
+        changes: { from: line.from, insert: `${prefix}\n` },
+        selection: { anchor: line.from + prefix.length },
+      });
+    }
+    this.enterInsertMode(cm, { repeat: actionArgs.repeat }, vim);
+  } as unknown as Parameters<typeof Vim.defineAction>[1]);
   Vim.mapCommand(
-    'o',
-    'action',
-    'zenOpenLineContinuingList',
+    "o",
+    "action",
+    "zenOpenLineContinuingList",
     { after: true },
-    { context: 'normal', isEdit: true, interlaceInsertRepeat: true }
-  )
+    { context: "normal", isEdit: true, interlaceInsertRepeat: true },
+  );
   Vim.mapCommand(
-    'O',
-    'action',
-    'zenOpenLineContinuingList',
+    "O",
+    "action",
+    "zenOpenLineContinuingList",
     { after: false },
-    { context: 'normal', isEdit: true, interlaceInsertRepeat: true }
-  )
+    { context: "normal", isEdit: true, interlaceInsertRepeat: true },
+  );
 
   // #290/#312: make j/k move by display line through soft-wrapped content.
   // Shared with the Quick Note window (QuickCaptureApp) via the same helper.
-  registerDisplayLineMotion()
+  registerDisplayLineMotion(
+    () => useStore.getState().vimWrappedLineMotions,
+  );
+  registerHeadingMotion();
+  registerReflowOperator();
 
-  Vim.defineEx('write', 'w', () => {
-    void useStore.getState().persistActive()
-  })
-  Vim.defineEx('saveas', 'sav', (_cm: unknown, params: { argString?: string } | undefined) => {
-    const newName = (params?.argString ?? '').trim()
-    if (!newName) return
-    void useStore.getState().saveActiveNoteAs(newName)
-  })
-  Vim.defineEx('format', 'format', () => {
-    void useStore.getState().formatActiveNote()
-  })
-  Vim.defineEx('quit', 'q', () => {
-    const state = useStore.getState()
+  Vim.defineEx("write", "w", () => {
+    void useStore.getState().persistActive();
+  });
+  Vim.defineEx(
+    "saveas",
+    "sav",
+    (_cm: unknown, params: { argString?: string } | undefined) => {
+      const newName = (params?.argString ?? "").trim();
+      if (!newName) return;
+      void useStore.getState().saveActiveNoteAs(newName);
+    },
+  );
+  Vim.defineEx("format", "format", () => {
+    void useStore.getState().formatActiveNote();
+  });
+  // `:imgwidth 480` (`:imgw`) writes the `|480` size hint into the image on
+  // the cursor line, the same edit as dragging the widget's handle; `auto`
+  // (or 0) strips it, and no argument opens the Resize Image prompt (#684).
+  Vim.defineEx(
+    "imgwidth",
+    "imgw",
+    (_cm: unknown, params: { argString?: string } | undefined) => {
+      const view = useStore.getState().editorViewRef;
+      if (!view) return;
+      const arg = (params?.argString ?? "").trim();
+      if (!arg) {
+        void promptImageWidth(view);
+        return;
+      }
+      setImageWidthFromInput(view, arg);
+    },
+  );
+  // `:harper on|off` (or bare `:harper` to toggle) is the ex twin of the
+  // Settings toggle "Grammar and spelling with Harper".
+  Vim.defineEx(
+    "harper",
+    "harper",
+    (_cm: unknown, params: { argString?: string } | undefined) => {
+      const state = useStore.getState();
+      const arg = (params?.argString ?? "").trim().toLowerCase();
+      if (arg === "on") state.setHarperEnabled(true);
+      else if (arg === "off") state.setHarperEnabled(false);
+      else state.setHarperEnabled(!state.harperEnabled);
+    },
+  );
+  Vim.defineEx("quit", "q", () => {
+    const state = useStore.getState();
     if (isTasksViewActive(state)) {
-      state.closeTasksView()
-      return
+      state.closeTasksView();
+      return;
     }
     if (isTagsViewActive(state)) {
-      state.closeTagView()
-      return
+      state.closeTagView();
+      return;
     }
-    void state.closeActiveNote()
-  })
-  Vim.defineEx('wq', 'wq', () => {
-    const state = useStore.getState()
+    void state.closeActiveNote();
+  });
+  Vim.defineEx("wq", "wq", () => {
+    const state = useStore.getState();
     if (isTasksViewActive(state)) {
-      state.closeTasksView()
-      return
+      state.closeTasksView();
+      return;
     }
     if (isTagsViewActive(state)) {
-      state.closeTagView()
-      return
+      state.closeTagView();
+      return;
     }
-    void state.closeActiveNote()
-  })
+    void state.closeActiveNote();
+  });
 
   // Vault-wide task view. Opens the full-surface Tasks panel that parses
   // `- [ ]` across every note and groups them by Today/Upcoming/Waiting/Done.
   // `:q` above knows to close the panel instead of closing a note.
-  Vim.defineEx('tasks', 'tasks', () => {
-    void useStore.getState().openTasksView()
-  })
+  Vim.defineEx("tasks", "tasks", () => {
+    void useStore.getState().openTasksView();
+  });
 
   // Quick-add a whole-note task file. `:newtask` (or `:task`) prompts for a
   // title and creates it at the configured tasks location; `:newtask <folder>`
@@ -421,18 +597,20 @@ function registerVimCommands(): void {
   // `:newtask Projects/Website`). Short name `newt` is a prefix of `newtask`.
   const runNewTaskEx = (
     _cm: unknown,
-    params: { argString?: string } | undefined
+    params: { argString?: string } | undefined,
   ): void => {
-    const arg = (params?.argString ?? '').trim()
+    const arg = (params?.argString ?? "").trim();
     if (!arg) {
-      void useStore.getState().newTaskFile()
-      return
+      void useStore.getState().newTaskFile();
+      return;
     }
-    const dest = parseTemplateDestination(arg)
-    void useStore.getState().newTaskFile({ folder: dest.folder, subpath: dest.subpath })
-  }
-  Vim.defineEx('newtask', 'newt', runNewTaskEx)
-  Vim.defineEx('task', 'task', runNewTaskEx)
+    const dest = parseTemplateDestination(arg);
+    void useStore
+      .getState()
+      .newTaskFile({ folder: dest.folder, subpath: dest.subpath });
+  };
+  Vim.defineEx("newtask", "newt", runNewTaskEx);
+  Vim.defineEx("task", "task", runNewTaskEx);
 
   // `:template` / `:tmpl` opens the template picker. `:template <name>` skips
   // the picker and creates directly from the best name/id match. CM-Vim
@@ -440,207 +618,250 @@ function registerVimCommands(): void {
   // prefix of `template`) is registered as its own command sharing the handler.
   const runTemplateEx = (
     _cm: unknown,
-    params: { argString?: string } | undefined
+    params: { argString?: string } | undefined,
   ): void => {
-    const state = useStore.getState()
-    const arg = (params?.argString ?? '').trim()
+    const state = useStore.getState();
+    const arg = (params?.argString ?? "").trim();
     if (!arg) {
-      state.setTemplatePaletteOpen(true)
-      return
+      state.setTemplatePaletteOpen(true);
+      return;
     }
     const all = mergeTemplates(
       state.hideBuiltinTemplates ? [] : BUILTIN_TEMPLATES,
-      state.customTemplates
-    )
-    const lower = arg.toLowerCase()
+      state.customTemplates,
+    );
+    const lower = arg.toLowerCase();
     const match =
       all.find((t) => t.name.toLowerCase() === lower) ??
       all.find((t) => t.id.toLowerCase() === lower) ??
-      all.find((t) => t.name.toLowerCase().includes(lower))
-    if (match) void state.createFromTemplate(match)
-    else state.setTemplatePaletteOpen(true)
-  }
-  Vim.defineEx('template', 'template', runTemplateEx)
-  Vim.defineEx('tmpl', 'tmpl', runTemplateEx)
+      all.find((t) => t.name.toLowerCase().includes(lower));
+    if (match) void state.createFromTemplate(match);
+    else state.setTemplatePaletteOpen(true);
+  };
+  Vim.defineEx("template", "template", runTemplateEx);
+  Vim.defineEx("tmpl", "tmpl", runTemplateEx);
 
-  Vim.defineEx('daily', 'daily', () => {
-    void useStore.getState().openTodayDailyNote()
-  })
+  Vim.defineEx("daily", "daily", () => {
+    void useStore.getState().openTodayDailyNote();
+  });
 
-  Vim.defineEx('weekly', 'weekly', () => {
-    void useStore.getState().openThisWeekWeeklyNote()
-  })
+  Vim.defineEx("weekly", "weekly", () => {
+    void useStore.getState().openThisWeekWeeklyNote();
+  });
 
-  Vim.defineEx('monthly', 'monthly', () => {
-    void useStore.getState().openThisMonthMonthlyNote()
-  })
+  Vim.defineEx("monthly", "monthly", () => {
+    void useStore.getState().openThisMonthMonthlyNote();
+  });
 
   // `:tag foo` starts (or updates) the Tags view with `foo` selected.
   // `:tag foo bar baz` replaces the selection set wholesale. `:tag`
   // alone opens the Tags tab with whatever's currently selected (if
   // nothing is, the view shows a hint to pick tags).
   Vim.defineEx(
-    'tag',
-    'tag',
+    "tag",
+    "tag",
     (_cm: unknown, params: { argString?: string } | undefined) => {
-      const args = (params?.argString ?? '')
+      const args = (params?.argString ?? "")
         .split(/\s+/)
-        .map((t) => t.trim().replace(/^#/, ''))
-        .filter(Boolean)
-      const state = useStore.getState()
+        .map((t) => t.trim().replace(/^#/, ""))
+        .filter(Boolean);
+      const state = useStore.getState();
       if (args.length === 0) {
-        void state.openTagView()
-        return
+        void state.openTagView();
+        return;
       }
-      state.setSelectedTags(args)
-      void state.openTagView()
-    }
-  )
+      state.setSelectedTags(args);
+      void state.openTagView();
+    },
+  );
 
   // Vim-style window splits. `:split` clones the current tab into a
   // new pane below; `:vsplit` clones it into a new pane to the right.
   // Both commands accept their usual abbreviations (`:sp`, `:vs`).
-  Vim.defineEx('split', 'sp', () => {
-    const state = useStore.getState()
-    const path = state.selectedPath
-    if (!path) return
+  Vim.defineEx("split", "sp", () => {
+    const state = useStore.getState();
+    const path = state.selectedPath;
+    if (!path) return;
     void state.splitPaneWithTab({
       targetPaneId: state.activePaneId,
-      edge: 'bottom',
-      path
-    })
-  })
-  Vim.defineEx('vsplit', 'vs', () => {
-    const state = useStore.getState()
-    const path = state.selectedPath
-    if (!path) return
+      edge: "bottom",
+      path,
+    });
+  });
+  Vim.defineEx("vsplit", "vs", () => {
+    const state = useStore.getState();
+    const path = state.selectedPath;
+    if (!path) return;
     void state.splitPaneWithTab({
       targetPaneId: state.activePaneId,
-      edge: 'right',
-      path
-    })
-  })
+      edge: "right",
+      path,
+    });
+  });
 
   // Pane focus ex commands — a keyboard path that doesn't depend on the
   // `Ctrl+W` prefix (which collides with close-tab on Linux/Windows).
   // `:wincmd {h,j,k,l}` mirrors vim; the `:pane_focus_*` names match the
   // command palette wording.
-  const focusDir = (dir: 'h' | 'j' | 'k' | 'l'): void => {
-    focusPaneInDirection(dir)
-  }
-  Vim.defineEx('wincmd', 'winc', (_cm: unknown, params: { argString?: string } | undefined) => {
-    const dir = (params?.argString ?? '').trim().toLowerCase()[0]
-    if (dir === 'h' || dir === 'j' || dir === 'k' || dir === 'l') focusDir(dir)
-  })
-  Vim.defineEx('pane_focus_left', 'pane_focus_left', () => focusDir('h'))
-  Vim.defineEx('pane_focus_down', 'pane_focus_down', () => focusDir('j'))
-  Vim.defineEx('pane_focus_up', 'pane_focus_up', () => focusDir('k'))
-  Vim.defineEx('pane_focus_right', 'pane_focus_right', () => focusDir('l'))
+  const focusDir = (dir: "h" | "j" | "k" | "l"): void => {
+    focusPaneInDirection(dir);
+  };
+  Vim.defineEx(
+    "wincmd",
+    "winc",
+    (_cm: unknown, params: { argString?: string } | undefined) => {
+      const dir = (params?.argString ?? "").trim().toLowerCase()[0];
+      if (dir === "h" || dir === "j" || dir === "k" || dir === "l")
+        focusDir(dir);
+    },
+  );
+  Vim.defineEx("pane_focus_left", "pane_focus_left", () => focusDir("h"));
+  Vim.defineEx("pane_focus_down", "pane_focus_down", () => focusDir("j"));
+  Vim.defineEx("pane_focus_up", "pane_focus_up", () => focusDir("k"));
+  Vim.defineEx("pane_focus_right", "pane_focus_right", () => focusDir("l"));
 
-  Vim.defineAction('goToDefinition', (cm: ReturnType<typeof getCM>) => {
-    const view = (cm as unknown as { cm6?: EditorView }).cm6
-    if (!view) return
-    const pos = view.state.selection.main.head
-    const doc = view.state.doc.toString()
-    const target = extractLinkAtCursor(doc, pos)
-    if (!target) return
+  Vim.defineAction("goToDefinition", (cm: ReturnType<typeof getCM>) => {
+    const view = (cm as unknown as { cm6?: EditorView }).cm6;
+    if (!view) return;
+    const pos = view.state.selection.main.head;
+    const doc = view.state.doc.toString();
+    const target = extractLinkAtCursor(doc, pos);
+    if (!target) return;
 
-    const external = externalLinkUrl(target)
+    const external = externalLinkUrl(target);
     if (external) {
-      window.open(external, '_blank')
-      return
+      window.open(external, "_blank");
+      return;
     }
 
-    const state = useStore.getState()
+    const state = useStore.getState();
 
     // PDF links: pin the asset in the reference pane for this note
     // instead of prompting to create a note.
-    if (classifyLocalAssetHref(target) === 'pdf') {
-      const activePath = state.selectedPath
-      const vaultRoot = state.vault?.root
+    if (classifyLocalAssetHref(target) === "pdf") {
+      const activePath = state.selectedPath;
+      const vaultRoot = state.vault?.root;
       if (activePath && vaultRoot) {
-        const abs = resolveAssetVaultRelativePath(vaultRoot, activePath, target)
+        const abs = resolveAssetVaultRelativePath(
+          vaultRoot,
+          activePath,
+          target,
+        );
         if (abs) {
-          const fragment = hrefFragment(target)
-          state.pinAssetReferenceForNote(activePath, abs, fragment || null)
-          return
+          const fragment = hrefFragment(target);
+          state.pinAssetReferenceForNote(activePath, abs, fragment || null);
+          return;
         }
       }
     }
 
-    const notes = state.notes
-    const resolved = resolveWikilinkTarget(notes, target)
-    if (resolved) {
+    const notes = state.notes;
+    const wikilinkPath = resolveWikilinkPath(notes, target, state.selectedPath);
+    if (wikilinkPath) {
       const focusEditorSoon = (): void => {
-        state.setFocusedPanel('editor')
-        requestAnimationFrame(() => useStore.getState().editorViewRef?.focus())
-      }
-      const headingAnchor = wikilinkHeadingAnchor(target)
-      if (headingAnchor) {
-        void openWikilinkHeading(resolved.path, headingAnchor).then(focusEditorSoon)
-      } else {
-        void state.selectNote(resolved.path).then(focusEditorSoon)
-      }
-      return
+        state.setFocusedPanel("editor");
+        requestAnimationFrame(() => useStore.getState().editorViewRef?.focus());
+      };
+      void openWikilinkTarget(wikilinkPath, target).then(focusEditorSoon);
+      return;
     }
 
     // A standard Markdown link whose href resolves relative to this note —
     // e.g. `[text](../Projects/plan.md)` — that wikilink name matching can't
     // reach. (#201)
-    const internal = resolveInternalNoteHref(state.selectedPath, target, notes)
+    const internal = resolveInternalNoteHref(state.selectedPath, target, notes);
     if (internal) {
       const focusEditorSoon = (): void => {
-        state.setFocusedPanel('editor')
-        requestAnimationFrame(() => useStore.getState().editorViewRef?.focus())
-      }
-      if (internal.heading) {
-        void openWikilinkHeading(internal.path, internal.heading).then(focusEditorSoon)
+        state.setFocusedPanel("editor");
+        requestAnimationFrame(() => useStore.getState().editorViewRef?.focus());
+      };
+      if (internal.anchor) {
+        void openWikilinkTarget(internal.path, `#${internal.anchor}`).then(
+          focusEditorSoon,
+        );
       } else {
-        void state.selectNote(internal.path).then(focusEditorSoon)
+        void state.selectNote(internal.path).then(focusEditorSoon);
       }
-      return
+      return;
     }
 
     // Not a note — maybe a `.base` database link.
     if (openDatabaseFromWikilink(target)) {
-      state.setFocusedPanel('editor')
-      requestAnimationFrame(() => useStore.getState().editorViewRef?.focus())
-      return
+      state.setFocusedPanel("editor");
+      requestAnimationFrame(() => useStore.getState().editorViewRef?.focus());
+      return;
     }
 
     // A link to a file outside the vault: open it with the OS default app. (#424)
     if (externalFileLink(target)) {
-      void openExternalFileLink(target)
-      return
+      void openExternalFileLink(target);
+      return;
     }
 
     // Dead link — confirm, then create the note (shared with the cmd-click path).
-    void offerCreateNoteFromLink(target)
-  })
+    void offerCreateNoteFromLink(target);
+  });
 
   // Vim-style pane navigation actions are registered here, but their
   // actual key bindings are synced from the configurable keymap registry.
-  Vim.defineAction('focusPaneLeft', () => {
-    focusPaneOrEdgePanel('h')
-  })
-  Vim.defineAction('focusPaneDown', () => {
-    focusPaneOrEdgePanel('j')
-  })
-  Vim.defineAction('focusPaneUp', () => {
-    focusPaneOrEdgePanel('k')
-  })
-  Vim.defineAction('focusPaneRight', () => {
-    focusPaneOrEdgePanel('l')
-  })
-  Vim.defineAction('previousBuffer', () => {
-    navigateActiveBuffer(useStore.getState(), -1)
-  })
-  Vim.defineAction('nextBuffer', () => {
-    navigateActiveBuffer(useStore.getState(), 1)
-  })
+  Vim.defineAction("focusPaneLeft", () => {
+    focusPaneOrEdgePanel("h");
+  });
+  Vim.defineAction("focusPaneDown", () => {
+    focusPaneOrEdgePanel("j");
+  });
+  Vim.defineAction("focusPaneUp", () => {
+    focusPaneOrEdgePanel("k");
+  });
+  Vim.defineAction("focusPaneRight", () => {
+    focusPaneOrEdgePanel("l");
+  });
+  // {count}gt goes straight to tab {count}, vim's absolute jump; without a
+  // count it keeps cycling. {count}gT is relative, vim-style: count tabs
+  // back. (#497)
+  Vim.defineAction(
+    "previousBuffer",
+    (
+      _cm: unknown,
+      actionArgs?: { repeat?: number; repeatIsExplicit?: boolean },
+    ) => {
+      const repeat = actionArgs?.repeatIsExplicit
+        ? (actionArgs.repeat ?? 1)
+        : 1;
+      navigateActiveBuffer(useStore.getState(), -repeat);
+    },
+  );
+  Vim.defineAction(
+    "nextBuffer",
+    (
+      _cm: unknown,
+      actionArgs?: { repeat?: number; repeatIsExplicit?: boolean },
+    ) => {
+      if (actionArgs?.repeatIsExplicit && actionArgs.repeat) {
+        selectActiveBuffer(useStore.getState(), actionArgs.repeat);
+        return;
+      }
+      navigateActiveBuffer(useStore.getState(), 1);
+    },
+  );
+  // ]b is RELATIVE with a count ({count}]b walks forward count tabs), unlike
+  // gt whose {count} is vim's absolute tab number. [b shares previousBuffer
+  // with gT and was already relative. (#622)
+  Vim.defineAction(
+    "nextBufferRelative",
+    (
+      _cm: unknown,
+      actionArgs?: { repeat?: number; repeatIsExplicit?: boolean },
+    ) => {
+      const repeat = actionArgs?.repeatIsExplicit
+        ? (actionArgs.repeat ?? 1)
+        : 1;
+      navigateActiveBuffer(useStore.getState(), repeat);
+    },
+  );
 
-  registerVimNoteCommands()
-  registerCommandPaletteEx()
+  registerVimNoteCommands();
+  registerCommandPaletteEx();
 }
 
 /**
@@ -665,323 +886,364 @@ function registerVimCommands(): void {
  * - `:h[elp]`            open the built-in Help manual
  */
 function registerVimNoteCommands(): void {
-  const getActiveLeaf = (): { id: string; tabs: string[]; activeTab: string | null } | null => {
-    const s = useStore.getState()
-    const leaves = allLeavesFlat(s.paneLayout)
-    return leaves.find((l) => l.id === s.activePaneId) ?? null
-  }
+  const getActiveLeaf = (): {
+    id: string;
+    tabs: string[];
+    activeTab: string | null;
+  } | null => {
+    const s = useStore.getState();
+    const leaves = allLeavesFlat(s.paneLayout);
+    return leaves.find((l) => l.id === s.activePaneId) ?? null;
+  };
 
   const openOrCreateByPath = async (raw: string): Promise<void> => {
-    const value = raw.trim()
-    if (!value) return
-    let parsed: ReturnType<typeof parseCreateNotePath>
+    const value = raw.trim();
+    if (!value) return;
+    let parsed: ReturnType<typeof parseCreateNotePath>;
     try {
-      parsed = parseCreateNotePath(value)
+      parsed = parseCreateNotePath(value);
     } catch (err) {
-      alertEditorError((err as Error).message)
-      return
+      alertEditorError((err as Error).message);
+      return;
     }
-    const state = useStore.getState()
+    const state = useStore.getState();
     // If something already resolves to that target (wiki-style + case-
     // insensitive), open it instead of creating a duplicate.
     const existing = state.notes.find(
       (n) =>
-        n.folder !== 'trash' &&
-        n.path.toLowerCase() === parsed.relPath.toLowerCase()
-    )
+        n.folder !== "trash" &&
+        n.path.toLowerCase() === parsed.relPath.toLowerCase(),
+    );
     if (existing) {
-      await state.selectNote(existing.path)
-      state.setFocusedPanel('editor')
-      requestAnimationFrame(() => useStore.getState().editorViewRef?.focus())
-      return
+      await state.selectNote(existing.path);
+      state.setFocusedPanel("editor");
+      requestAnimationFrame(() => useStore.getState().editorViewRef?.focus());
+      return;
     }
     await state.createAndOpen(parsed.folder, parsed.subpath, {
-      title: parsed.title
-    })
-    state.setFocusedPanel('editor')
-    requestAnimationFrame(() => useStore.getState().editorViewRef?.focus())
-  }
+      title: parsed.title,
+    });
+    state.setFocusedPanel("editor");
+    requestAnimationFrame(() => useStore.getState().editorViewRef?.focus());
+  };
 
   Vim.defineEx(
-    'edit',
-    'e',
+    "edit",
+    "e",
     (_cm: unknown, params: { argString?: string } | undefined) => {
-      void openOrCreateByPath(params?.argString ?? '')
-    }
-  )
+      void openOrCreateByPath(params?.argString ?? "");
+    },
+  );
 
   // `:new` shadows vim's "horizontal split empty buffer" — for a notes
   // app, creating a new note at a path is what the user actually wants.
   Vim.defineEx(
-    'new',
-    'new',
+    "new",
+    "new",
     (_cm: unknown, params: { argString?: string } | undefined) => {
-      const arg = (params?.argString ?? '').trim()
+      const arg = (params?.argString ?? "").trim();
       if (!arg) {
-        void useStore.getState().createAndOpen('inbox', '', { focusTitle: true })
-        return
+        void useStore
+          .getState()
+          .createAndOpen("inbox", "", { focusTitle: true });
+        return;
       }
-      void openOrCreateByPath(arg)
-    }
-  )
+      void openOrCreateByPath(arg);
+    },
+  );
 
   const moveActiveNote = async (raw: string): Promise<void> => {
-    const state = useStore.getState()
-    const active = state.activeNote
-    if (!active) return
+    const state = useStore.getState();
+    const active = state.activeNote;
+    if (!active) return;
 
-    const value = raw.trim()
-    let target = value
+    const value = raw.trim();
+    let target = value;
     if (!target) {
-      target = (await promptApp(buildMoveNotePrompt(active, state.folders))) ?? ''
-      if (!target) return
+      target =
+        (await promptApp(buildMoveNotePrompt(active, state.folders))) ?? "";
+      if (!target) return;
     }
 
-    const error = validateMoveNoteTarget(target)
+    const error = validateMoveNoteTarget(target);
     if (error) {
-      alertEditorError(error)
-      return
+      alertEditorError(error);
+      return;
     }
-    const dest = parseMoveNoteTarget(target)
-    await state.moveNote(active.path, dest.folder, dest.subpath)
-  }
+    const dest = parseMoveNoteTarget(target);
+    await state.moveNote(active.path, dest.folder, dest.subpath);
+  };
 
-  const runMoveEx = (_cm: unknown, params: { argString?: string } | undefined): void => {
-    void moveActiveNote(params?.argString ?? '')
-  }
+  const runMoveEx = (
+    _cm: unknown,
+    params: { argString?: string } | undefined,
+  ): void => {
+    void moveActiveNote(params?.argString ?? "");
+  };
 
-  Vim.defineEx('move', 'move', runMoveEx)
-  Vim.defineEx('mv', 'mv', runMoveEx)
+  registerNoteMoveExCommands(
+    runMoveEx as Parameters<typeof registerNoteMoveExCommands>[0],
+  );
 
-  Vim.defineEx('bnext', 'bn', () => navigateActiveBuffer(useStore.getState(), 1))
-  Vim.defineEx('bprev', 'bp', () => navigateActiveBuffer(useStore.getState(), -1))
+  Vim.defineEx("bnext", "bn", () =>
+    navigateActiveBuffer(useStore.getState(), 1),
+  );
+  Vim.defineEx("bprev", "bp", () =>
+    navigateActiveBuffer(useStore.getState(), -1),
+  );
   // Vim tab aliases over the same active-pane tab navigation.
-  Vim.defineEx('tabnext', 'tabn', () => navigateActiveBuffer(useStore.getState(), 1))
-  Vim.defineEx('tabprevious', 'tabp', () => navigateActiveBuffer(useStore.getState(), -1))
+  Vim.defineEx("tabnext", "tabn", () =>
+    navigateActiveBuffer(useStore.getState(), 1),
+  );
+  Vim.defineEx("tabprevious", "tabp", () =>
+    navigateActiveBuffer(useStore.getState(), -1),
+  );
   // Vim aliases: :bNext and :bfirst/:blast — rare, skipped.
 
   const closeActiveTabLikeQuit = (): void => {
-    const state = useStore.getState()
+    const state = useStore.getState();
     if (isTasksViewActive(state)) {
-      state.closeTasksView()
-      return
+      state.closeTasksView();
+      return;
     }
     if (isTagsViewActive(state)) {
-      state.closeTagView()
-      return
+      state.closeTagView();
+      return;
     }
-    void state.closeActiveNote()
-  }
-  Vim.defineEx('bdelete', 'bd', closeActiveTabLikeQuit)
-  Vim.defineEx('bclose', 'bc', closeActiveTabLikeQuit)
+    void state.closeActiveNote();
+  };
+  Vim.defineEx("bdelete", "bd", closeActiveTabLikeQuit);
+  Vim.defineEx("bclose", "bc", closeActiveTabLikeQuit);
   const openBufferSwitcher = (): void => {
     requestAnimationFrame(() => {
-      useStore.getState().setBufferPaletteOpen(true)
-    })
-  }
-  Vim.defineEx('buffers', 'buffers', openBufferSwitcher)
-  Vim.defineEx('ls', 'ls', openBufferSwitcher)
+      useStore.getState().setBufferPaletteOpen(true);
+    });
+  };
+  Vim.defineEx("buffers", "buffers", openBufferSwitcher);
+  Vim.defineEx("ls", "ls", openBufferSwitcher);
   const openOutline = (): void => {
     requestAnimationFrame(() => {
-      useStore.getState().setOutlinePaletteOpen(true)
-    })
-  }
-  Vim.defineEx('outline', 'outline', openOutline)
+      useStore.getState().setOutlinePaletteOpen(true);
+    });
+  };
+  Vim.defineEx("outline", "outline", openOutline);
   // `:closepanel` / `:closep` closes whichever right-hand panel (connections,
   // outline, comments, or calendar) is open in the active pane.
-  Vim.defineEx('closepanel', 'closep', () => {
-    window.dispatchEvent(new Event('zen:close-right-panel'))
-  })
-  const setZenMode = (next: 'toggle' | 'on' | 'off'): void => {
+  Vim.defineEx("closepanel", "closep", () => {
+    window.dispatchEvent(new Event("zen:close-right-panel"));
+  });
+  const setZenMode = (next: "toggle" | "on" | "off"): void => {
     requestAnimationFrame(() => {
-      const state = useStore.getState()
-      if (next === 'on') {
-        state.setFocusMode(true)
-        return
+      const state = useStore.getState();
+      if (next === "on") {
+        state.setFocusMode(true);
+        return;
       }
-      if (next === 'off') {
-        state.setFocusMode(false)
-        return
+      if (next === "off") {
+        state.setFocusMode(false);
+        return;
       }
-      state.setFocusMode(!state.zenMode)
-    })
-  }
-  const setPaneMode = (mode: 'edit' | 'split' | 'preview'): void => {
+      state.setFocusMode(!state.zenMode);
+    });
+  };
+  const setPaneMode = (mode: "edit" | "split" | "preview"): void => {
     requestAnimationFrame(() => {
-      requestPaneMode(mode)
-    })
-  }
-  Vim.defineEx('view', 'view', (_cm: unknown, params: { argString?: string } | undefined) => {
-    const nextMode = (params?.argString ?? '').trim().toLowerCase()
-    if (nextMode === 'edit' || nextMode === 'split' || nextMode === 'preview') {
-      setPaneMode(nextMode)
-    }
-  })
-  Vim.defineEx('zen', 'zen', (_cm: unknown, params: { argString?: string } | undefined) => {
-    const nextMode = (params?.argString ?? '').trim().toLowerCase()
-    if (!nextMode || nextMode === 'toggle') {
-      setZenMode('toggle')
-      return
-    }
-    if (nextMode === 'on' || nextMode === 'off') {
-      setZenMode(nextMode)
-    }
-  })
-  Vim.defineEx('zenmode', 'zenmode', () => setZenMode('toggle'))
-  Vim.defineEx('editmode', 'editmode', () => setPaneMode('edit'))
-  Vim.defineEx('splitmode', 'splitmode', () => setPaneMode('split'))
-  Vim.defineEx('previewmode', 'previewmode', () => setPaneMode('preview'))
+      requestPaneMode(mode);
+    });
+  };
+  Vim.defineEx(
+    "view",
+    "view",
+    (_cm: unknown, params: { argString?: string } | undefined) => {
+      const nextMode = (params?.argString ?? "").trim().toLowerCase();
+      if (
+        nextMode === "edit" ||
+        nextMode === "split" ||
+        nextMode === "preview"
+      ) {
+        setPaneMode(nextMode);
+      }
+    },
+  );
+  Vim.defineEx(
+    "zen",
+    "zen",
+    (_cm: unknown, params: { argString?: string } | undefined) => {
+      const nextMode = (params?.argString ?? "").trim().toLowerCase();
+      if (!nextMode || nextMode === "toggle") {
+        setZenMode("toggle");
+        return;
+      }
+      if (nextMode === "on" || nextMode === "off") {
+        setZenMode(nextMode);
+      }
+    },
+  );
+  Vim.defineEx("zenmode", "zenmode", () => setZenMode("toggle"));
+  Vim.defineEx("editmode", "editmode", () => setPaneMode("edit"));
+  Vim.defineEx("splitmode", "splitmode", () => setPaneMode("split"));
+  Vim.defineEx("previewmode", "previewmode", () => setPaneMode("preview"));
 
-  Vim.defineEx('only', 'only', () => {
-    const leaf = getActiveLeaf()
-    if (!leaf || !leaf.activeTab) return
-    const state = useStore.getState()
+  Vim.defineEx("only", "only", () => {
+    const leaf = getActiveLeaf();
+    if (!leaf || !leaf.activeTab) return;
+    const state = useStore.getState();
     // Snapshot the list — closing tabs mutates leaf.tabs concurrently.
-    const toClose = leaf.tabs.filter((p) => p !== leaf.activeTab)
-    for (const p of toClose) void state.closeTabInPane(leaf.id, p)
-  })
+    const toClose = leaf.tabs.filter((p) => p !== leaf.activeTab);
+    for (const p of toClose) void state.closeTabInPane(leaf.id, p);
+  });
 
   const closeEveryTab = (): void => {
-    const state = useStore.getState()
+    const state = useStore.getState();
     for (const leaf of allLeavesFlat(state.paneLayout)) {
-      const snapshot = [...leaf.tabs]
-      for (const p of snapshot) void state.closeTabInPane(leaf.id, p)
+      const snapshot = [...leaf.tabs];
+      for (const p of snapshot) void state.closeTabInPane(leaf.id, p);
     }
-  }
-  Vim.defineEx('qall', 'qa', closeEveryTab)
-  Vim.defineEx('quitall', 'quitall', closeEveryTab)
-  // :xa / :wa are just aliases for qall in this context (nothing to flush
-  // that autosave doesn't already handle).
-  Vim.defineEx('xall', 'xa', closeEveryTab)
-  Vim.defineEx('wall', 'wa', closeEveryTab)
+  };
+  Vim.defineEx("qall", "qa", closeEveryTab);
+  Vim.defineEx("quitall", "quitall", closeEveryTab);
+  // Quit-and-write variants close everything, like vim's :xa / :wqa. But
+  // :wa is a SAVE, not a quit: it used to alias qall here on the theory
+  // that autosave leaves nothing to flush, and every vim user's muscle
+  // memory (":wa after any change") nuked their tab layout instead (#569).
+  Vim.defineEx("xall", "xa", closeEveryTab);
+  Vim.defineEx("wqall", "wqa", closeEveryTab);
+  Vim.defineEx("wall", "wa", () => {
+    void useStore.getState().flushDirtyNotes();
+  });
 
-  Vim.defineEx('help', 'h', () => {
-    void useStore.getState().openHelpView()
-  })
+  Vim.defineEx("help", "h", () => {
+    void useStore.getState().openHelpView();
+  });
 
-  Vim.defineEx('trash', 'trash', () => {
-    void useStore.getState().openTrashView()
-  })
+  Vim.defineEx("trash", "trash", () => {
+    void useStore.getState().openTrashView();
+  });
 
   // Heading fold helpers — wrap CodeMirror's commands so they work on
   // whichever pane currently owns the editor. `:fold` / `:unfold` act
   // on the current heading; `:foldall` / `:unfoldall` cover the whole
   // note. We map vim's `zc` / `zo` / `zM` / `zR` keys explicitly so the
   // advertised fold chords work regardless of what CM-Vim ships by default.
-  const runFold = (cmd: (view: { state: unknown; dispatch: unknown }) => boolean): void => {
-    const view = useStore.getState().editorViewRef
-    if (!view) return
-    cmd(view as unknown as Parameters<typeof foldCode>[0])
-    view.focus()
-  }
-  Vim.defineAction('foldHeadingAtCursor', () => runFold(foldCode as never))
-  Vim.defineAction('unfoldHeadingAtCursor', () => runFold(unfoldCode as never))
-  Vim.defineAction('foldAllHeadings', () => runFold(foldAll as never))
-  Vim.defineAction('unfoldAllHeadings', () => runFold(unfoldAll as never))
-  Vim.defineAction('zenHalfPageDown', (cm: ReturnType<typeof getCM>) =>
-    editorHalfPage((cm as unknown as { cm6?: EditorView }).cm6, true)
-  )
-  Vim.defineAction('zenHalfPageUp', (cm: ReturnType<typeof getCM>) =>
-    editorHalfPage((cm as unknown as { cm6?: EditorView }).cm6, false)
-  )
-  Vim.defineEx('fold', 'fold', () => runFold(foldCode as never))
-  Vim.defineEx('unfold', 'unfold', () => runFold(unfoldCode as never))
-  Vim.defineEx('foldall', 'foldall', () => runFold(foldAll as never))
-  Vim.defineEx('unfoldall', 'unfoldall', () => runFold(unfoldAll as never))
+  const runFold = (
+    cmd: (view: { state: unknown; dispatch: unknown }) => boolean,
+  ): void => {
+    const view = useStore.getState().editorViewRef;
+    if (!view) return;
+    cmd(view as unknown as Parameters<typeof foldCode>[0]);
+    view.focus();
+  };
+  Vim.defineAction("foldHeadingAtCursor", () => runFold(foldCode as never));
+  Vim.defineAction("unfoldHeadingAtCursor", () => runFold(unfoldCode as never));
+  Vim.defineAction("foldAllHeadings", () => runFold(foldAll as never));
+  Vim.defineAction("unfoldAllHeadings", () => runFold(unfoldAll as never));
+  Vim.defineAction("zenHalfPageDown", (cm: ReturnType<typeof getCM>) =>
+    editorHalfPage((cm as unknown as { cm6?: EditorView }).cm6, true),
+  );
+  Vim.defineAction("zenHalfPageUp", (cm: ReturnType<typeof getCM>) =>
+    editorHalfPage((cm as unknown as { cm6?: EditorView }).cm6, false),
+  );
+  Vim.defineEx("fold", "fold", () => runFold(foldCode as never));
+  Vim.defineEx("unfold", "unfold", () => runFold(unfoldCode as never));
+  Vim.defineEx("foldall", "foldall", () => runFold(foldAll as never));
+  Vim.defineEx("unfoldall", "unfoldall", () => runFold(unfoldAll as never));
 }
 
 /** Flatten the pane tree to a list of leaves, independent of the store's
  *  `allLeaves` helper (which lives in `lib/pane-layout`). Duplicated
  *  locally to avoid a new import chain. */
 function allLeavesFlat(
-  node: PaneLayout
+  node: PaneLayout,
 ): Array<{ id: string; tabs: string[]; activeTab: string | null }> {
-  if (node.kind === 'leaf') {
-    return [{ id: node.id, tabs: node.tabs, activeTab: node.activeTab }]
+  if (node.kind === "leaf") {
+    return [{ id: node.id, tabs: node.tabs, activeTab: node.activeTab }];
   }
-  const out: Array<{ id: string; tabs: string[]; activeTab: string | null }> = []
-  for (const child of node.children) out.push(...allLeavesFlat(child))
-  return out
+  const out: Array<{ id: string; tabs: string[]; activeTab: string | null }> =
+    [];
+  for (const child of node.children) out.push(...allLeavesFlat(child));
+  return out;
 }
 
 // Names we register manually above. Keeping a block-list avoids double-
 // registering when an auto-generated name would collide with a curated
 // vim-style shortcut (`:w`, `:q`, `:tasks`, …).
 const MANUAL_EX_NAMES = new Set([
-  'write',
-  'w',
-  'quit',
-  'q',
-  'wq',
-  'format',
-  'tasks',
-  'tag',
-  'template',
-  'tmpl',
-  'daily',
-  'weekly',
-  'split',
-  'sp',
-  'vsplit',
-  'vs',
+  "write",
+  "w",
+  "quit",
+  "q",
+  "wq",
+  "format",
+  "tasks",
+  "tag",
+  "template",
+  "tmpl",
+  "daily",
+  "weekly",
+  "split",
+  "sp",
+  "vsplit",
+  "vs",
   // Added by `registerVimNoteCommands`
-  'edit',
-  'e',
-  'new',
-  'move',
-  'mv',
-  'bnext',
-  'bn',
-  'bprev',
-  'bp',
-  'tabnext',
-  'tabn',
-  'tabprevious',
-  'tabp',
-  'bdelete',
-  'bd',
-  'bclose',
-  'bc',
-  'buffers',
-  'ls',
-  'outline',
-  'view',
-  'zen',
-  'zenmode',
-  'editmode',
-  'splitmode',
-  'saveas',
-  'sav',
-  'previewmode',
-  'trash',
-  'fold',
-  'unfold',
-  'foldall',
-  'unfoldall',
-  'only',
-  'qall',
-  'qa',
-  'quitall',
-  'xall',
-  'xa',
-  'wall',
-  'wa',
-  'help',
-  'h'
-])
+  "edit",
+  "e",
+  "new",
+  "move",
+  "mv",
+  "bnext",
+  "bn",
+  "bprev",
+  "bp",
+  "tabnext",
+  "tabn",
+  "tabprevious",
+  "tabp",
+  "bdelete",
+  "bd",
+  "bclose",
+  "bc",
+  "buffers",
+  "ls",
+  "outline",
+  "view",
+  "zen",
+  "zenmode",
+  "editmode",
+  "splitmode",
+  "saveas",
+  "sav",
+  "previewmode",
+  "trash",
+  "fold",
+  "unfold",
+  "foldall",
+  "unfoldall",
+  "only",
+  "qall",
+  "qa",
+  "quitall",
+  "xall",
+  "xa",
+  "wqall",
+  "wqa",
+  "wall",
+  "wa",
+  "help",
+  "h",
+]);
 
 function commandIdToExName(id: string): string {
   // CM-Vim's ex parser only reads word characters (`\w+` = `[A-Za-z0-9_]`)
   // for the command name. Any non-word char — dot, dash, etc. — ends the
   // name early. Collapse them all to underscores so `note.copy-wikilink`
   // → `note_copy_wikilink` is recognized as a single token.
-  return id.replace(/[^A-Za-z0-9]+/g, '_')
+  return id.replace(/[^A-Za-z0-9]+/g, "_");
 }
 
 /** Names of every ex command we register. Captured during init so the
  *  tab-completion handler can match against the full set without re-
  *  crawling buildCommands() on every keystroke. */
-const registeredExNames: string[] = []
+const registeredExNames: string[] = [];
 
 /**
  * Bridge every command from the palette registry into the `:` ex line so
@@ -994,17 +1256,17 @@ function registerCommandPaletteEx(): void {
   const runCommand = (cmd: Command): void => {
     // Re-check `when` at invocation time so `:note-save` doesn't silently
     // fire when nothing is selected, for example.
-    if (cmd.when && !cmd.when()) return
-    void cmd.run()
-  }
+    if (cmd.when && !cmd.when()) return;
+    void cmd.run();
+  };
 
-  const names = new Set<string>(MANUAL_EX_NAMES)
+  const names = new Set<string>(MANUAL_EX_NAMES);
   for (const cmd of buildCommands()) {
-    const name = commandIdToExName(cmd.id)
-    if (names.has(name)) continue
-    names.add(name)
+    const name = commandIdToExName(cmd.id);
+    if (names.has(name)) continue;
+    names.add(name);
     try {
-      Vim.defineEx(name, name, () => runCommand(cmd))
+      Vim.defineEx(name, name, () => runCommand(cmd));
     } catch {
       /* ignore duplicate registrations across HMR cycles */
     }
@@ -1013,150 +1275,154 @@ function registerCommandPaletteEx(): void {
   // `:cmd` — fuzzy fallback. With a query, runs the best match directly.
   // Without, opens the command palette so the user can browse.
   Vim.defineEx(
-    'cmd',
-    'cmd',
+    "cmd",
+    "cmd",
     (_cm: unknown, params: { argString?: string } | undefined) => {
-      const query = (params?.argString ?? '').trim()
+      const query = (params?.argString ?? "").trim();
       if (!query) {
-        useStore.getState().setCommandPaletteOpen(true)
-        return
+        useStore.getState().setCommandPaletteOpen(true);
+        return;
       }
-      const commands = buildCommands()
+      const commands = buildCommands();
       const ranked = rankItems(commands, query, [
         { get: (c) => c.title, weight: 1 },
-        { get: (c) => c.keywords ?? '', weight: 0.6 },
-        { get: (c) => c.category, weight: 0.4 }
-      ])
-      const first = ranked.find((c) => !c.when || c.when())
-      if (first) runCommand(first)
-    }
-  )
-  names.add('cmd')
+        { get: (c) => c.keywords ?? "", weight: 0.6 },
+        { get: (c) => c.category, weight: 0.4 },
+      ]);
+      const first = ranked.find((c) => !c.when || c.when());
+      if (first) runCommand(first);
+    },
+  );
+  names.add("cmd");
 
   // `:commands` — alias that always opens the palette (no implicit run).
-  Vim.defineEx('commands', 'commands', () => {
-    useStore.getState().setCommandPaletteOpen(true)
-  })
-  names.add('commands')
+  Vim.defineEx("commands", "commands", () => {
+    useStore.getState().setCommandPaletteOpen(true);
+  });
+  names.add("commands");
 
-  registeredExNames.splice(0, registeredExNames.length, ...names)
-  registeredExNames.sort()
-  installExTabCompletion()
+  registeredExNames.splice(0, registeredExNames.length, ...names);
+  registeredExNames.sort();
+  installExTabCompletion();
 }
 
-let exTabListenerInstalled = false
+let exTabListenerInstalled = false;
 
 // ---------------------------------------------------------------------------
 // Wildmenu popup — shown above the ex prompt while Tab completion is active
 // ---------------------------------------------------------------------------
 
 interface Wildmenu {
-  root: HTMLDivElement
-  list: HTMLDivElement
+  root: HTMLDivElement;
+  list: HTMLDivElement;
   /** Max number of rows to render — keeps the popup from taking over the
    *  screen when the prefix is empty and every command matches. */
-  maxRows: number
+  maxRows: number;
 }
 
-let wildmenu: Wildmenu | null = null
+let wildmenu: Wildmenu | null = null;
 
 function ensureWildmenu(): Wildmenu {
-  if (wildmenu) return wildmenu
-  const root = document.createElement('div')
-  root.className = 'zen-ex-wildmenu'
-  root.setAttribute('role', 'listbox')
+  if (wildmenu) return wildmenu;
+  const root = document.createElement("div");
+  root.className = "zen-ex-wildmenu";
+  root.setAttribute("role", "listbox");
   root.style.cssText = [
-    'position: fixed',
-    'z-index: 60',
-    'display: none',
-    'max-width: min(520px, 90vw)',
-    'max-height: 40vh',
-    'overflow-y: auto',
-    'border-radius: 10px',
-    'padding: 4px',
-    'background: rgb(var(--z-bg-softer) / 0.98)',
-    'border: 1px solid rgb(var(--z-bg-3) / 0.6)',
-    'box-shadow: 0 10px 30px rgba(0,0,0,0.35)',
-    'font: 12px/1.4 var(--z-mono-font, ui-monospace, Menlo, monospace)',
-    'color: rgb(var(--z-fg))',
-    'backdrop-filter: blur(6px)'
-  ].join(';')
+    "position: fixed",
+    "z-index: 60",
+    "display: none",
+    "max-width: min(520px, 90vw)",
+    "max-height: 40vh",
+    "overflow-y: auto",
+    "border-radius: 10px",
+    "padding: 4px",
+    "background: rgb(var(--z-bg-softer) / 0.98)",
+    "border: 1px solid rgb(var(--z-bg-3) / 0.6)",
+    "box-shadow: 0 10px 30px rgba(0,0,0,0.35)",
+    "font: 12px/1.4 var(--z-mono-font, ui-monospace, Menlo, monospace)",
+    "color: rgb(var(--z-fg))",
+    "backdrop-filter: blur(6px)",
+  ].join(";");
 
-  const list = document.createElement('div')
-  list.style.cssText = 'display: flex; flex-direction: column; gap: 1px'
-  root.appendChild(list)
-  document.body.appendChild(root)
+  const list = document.createElement("div");
+  list.style.cssText = "display: flex; flex-direction: column; gap: 1px";
+  root.appendChild(list);
+  document.body.appendChild(root);
 
-  wildmenu = { root, list, maxRows: 200 }
-  return wildmenu
+  wildmenu = { root, list, maxRows: 200 };
+  return wildmenu;
 }
 
 function hideWildmenu(): void {
-  if (wildmenu) wildmenu.root.style.display = 'none'
+  if (wildmenu) wildmenu.root.style.display = "none";
 }
 
 function positionWildmenu(anchor: HTMLElement): void {
-  if (!wildmenu) return
-  const panel = anchor.closest('.cm-vim-panel') as HTMLElement | null
-  const target = panel ?? anchor
-  const rect = target.getBoundingClientRect()
-  wildmenu.root.style.left = `${Math.max(8, Math.round(rect.left))}px`
+  if (!wildmenu) return;
+  const panel = anchor.closest(".cm-vim-panel") as HTMLElement | null;
+  const target = panel ?? anchor;
+  const rect = target.getBoundingClientRect();
+  wildmenu.root.style.left = `${Math.max(8, Math.round(rect.left))}px`;
   // Anchor above the ex panel (vim wildmenu convention). Keep at least 8px
   // from the top edge so it doesn't bump into the title bar.
-  const bottom = Math.max(8, Math.round(window.innerHeight - rect.top) + 6)
-  wildmenu.root.style.bottom = `${bottom}px`
-  wildmenu.root.style.right = ''
-  wildmenu.root.style.top = ''
+  const bottom = Math.max(8, Math.round(window.innerHeight - rect.top) + 6);
+  wildmenu.root.style.bottom = `${bottom}px`;
+  wildmenu.root.style.right = "";
+  wildmenu.root.style.top = "";
 }
 
 interface ExCompletionMatch {
-  label: string
-  apply: string
+  label: string;
+  apply: string;
 }
 
-function renderWildmenu(matches: ExCompletionMatch[], cycleIdx: number, anchor: HTMLElement): void {
-  const menu = ensureWildmenu()
+function renderWildmenu(
+  matches: ExCompletionMatch[],
+  cycleIdx: number,
+  anchor: HTMLElement,
+): void {
+  const menu = ensureWildmenu();
   if (matches.length === 0) {
-    menu.root.style.display = 'none'
-    return
+    menu.root.style.display = "none";
+    return;
   }
   // Defensive cap — `:` + Tab with empty prefix matches every registered
   // command (90+ of them). Rendering them all is fine, but we still cap
   // to avoid a pathological case if the registry balloons later.
-  const slice = matches.slice(0, menu.maxRows)
+  const slice = matches.slice(0, menu.maxRows);
 
-  menu.list.innerHTML = ''
+  menu.list.innerHTML = "";
   slice.forEach((match, i) => {
-    const row = document.createElement('div')
-    row.textContent = match.label
-    row.dataset.idx = String(i)
-    const isActive = i === cycleIdx
+    const row = document.createElement("div");
+    row.textContent = match.label;
+    row.dataset.idx = String(i);
+    const isActive = i === cycleIdx;
     row.style.cssText = [
-      'padding: 3px 8px',
-      'border-radius: 6px',
-      'white-space: nowrap',
+      "padding: 3px 8px",
+      "border-radius: 6px",
+      "white-space: nowrap",
       isActive
-        ? 'background: rgb(var(--z-accent) / 0.85); color: white'
-        : 'color: rgb(var(--z-fg))'
-    ].join(';')
-    menu.list.appendChild(row)
-  })
+        ? "background: rgb(var(--z-accent) / 0.85); color: white"
+        : "color: rgb(var(--z-fg))",
+    ].join(";");
+    menu.list.appendChild(row);
+  });
   // Surface a small footer when we had to truncate — lets the user know
   // they should type more to filter rather than keep tabbing forever.
   if (matches.length > slice.length) {
-    const more = document.createElement('div')
-    more.textContent = `+${matches.length - slice.length} more — type to filter`
+    const more = document.createElement("div");
+    more.textContent = `+${matches.length - slice.length} more — type to filter`;
     more.style.cssText =
-      'padding: 4px 8px 2px; font-size: 10px; opacity: 0.6; color: rgb(var(--z-fg))'
-    menu.list.appendChild(more)
+      "padding: 4px 8px 2px; font-size: 10px; opacity: 0.6; color: rgb(var(--z-fg))";
+    menu.list.appendChild(more);
   }
-  menu.root.style.display = 'block'
-  positionWildmenu(anchor)
+  menu.root.style.display = "block";
+  positionWildmenu(anchor);
 
   const activeRow = menu.list.querySelector<HTMLDivElement>(
-    `[data-idx="${cycleIdx}"]`
-  )
-  if (activeRow) activeRow.scrollIntoView({ block: 'nearest' })
+    `[data-idx="${cycleIdx}"]`,
+  );
+  if (activeRow) activeRow.scrollIntoView({ block: "nearest" });
 }
 
 /**
@@ -1166,47 +1432,47 @@ function renderWildmenu(matches: ExCompletionMatch[], cycleIdx: number, anchor: 
  * takes over (new pane, re-opened prompt).
  */
 interface ExTabCycle {
-  input: HTMLInputElement
+  input: HTMLInputElement;
   /** The user-typed text that seeded the current cycle. `null` signals
    *  "cycle expired, next Tab starts fresh" (so an empty-string base
    *  prefix — valid when the user presses Tab with nothing typed — is
    *  not accidentally treated as expired). */
-  basePrefix: string | null
-  matches: ExCompletionMatch[]
-  cycleIdx: number
+  basePrefix: string | null;
+  matches: ExCompletionMatch[];
+  cycleIdx: number;
 }
 
-let exCycle: ExTabCycle | null = null
+let exCycle: ExTabCycle | null = null;
 
 function completeCommandArgs(
   input: string,
   command: string,
-  options: string[]
+  options: string[],
 ): ExCompletionMatch[] | null {
-  const match = input.match(/^([A-Za-z0-9_]+)(\s+)([^ ]*)$/)
-  if (!match) return null
-  const [, commandName, whitespace, argPrefix] = match
-  if (commandName.toLowerCase() !== command) return null
+  const match = input.match(/^([A-Za-z0-9_]+)(\s+)([^ ]*)$/);
+  if (!match) return null;
+  const [, commandName, whitespace, argPrefix] = match;
+  if (commandName.toLowerCase() !== command) return null;
   const filtered = argPrefix
     ? options.filter((option) => option.startsWith(argPrefix.toLowerCase()))
-    : options
+    : options;
   return filtered.map((option) => ({
     label: option,
-    apply: `${commandName}${whitespace}${option}`
-  }))
+    apply: `${commandName}${whitespace}${option}`,
+  }));
 }
 
 function computeExMatches(prefix: string): ExCompletionMatch[] {
   const argMatches =
-    completeCommandArgs(prefix, 'view', ['edit', 'split', 'preview']) ??
-    completeCommandArgs(prefix, 'zen', ['toggle', 'on', 'off'])
-  if (argMatches) return argMatches
+    completeCommandArgs(prefix, "view", ["edit", "split", "preview"]) ??
+    completeCommandArgs(prefix, "zen", ["toggle", "on", "off"]);
+  if (argMatches) return argMatches;
   if (!prefix) {
-    return registeredExNames.map((name) => ({ label: name, apply: name }))
+    return registeredExNames.map((name) => ({ label: name, apply: name }));
   }
   return registeredExNames
     .filter((n) => n.startsWith(prefix))
-    .map((name) => ({ label: name, apply: name }))
+    .map((name) => ({ label: name, apply: name }));
 }
 
 /**
@@ -1227,50 +1493,56 @@ function computeExMatches(prefix: string): ExCompletionMatch[] {
  * first match, first-Shift-Tab on the last — matches vim's wildmenu.
  */
 function installExTabCompletion(): void {
-  if (exTabListenerInstalled) return
-  exTabListenerInstalled = true
-  if (typeof window === 'undefined') return
+  if (exTabListenerInstalled) return;
+  exTabListenerInstalled = true;
+  if (typeof window === "undefined") return;
 
   window.addEventListener(
-    'keydown',
+    "keydown",
     (e) => {
-      if (e.key !== 'Tab') {
+      if (e.key !== "Tab") {
         // Reset cycle state when the user types anything else — but only
         // if the event target IS the ex prompt input. Keys elsewhere in
         // the app shouldn't clobber our state (modifier keys fire even
         // when the input is focused too, so we ignore those explicitly
         // instead of resetting on them).
-        if (e.key === 'Shift' || e.key === 'Control' || e.key === 'Alt' || e.key === 'Meta') {
-          return
+        if (
+          e.key === "Shift" ||
+          e.key === "Control" ||
+          e.key === "Alt" ||
+          e.key === "Meta"
+        ) {
+          return;
         }
-        const target = e.target as HTMLElement | null
+        const target = e.target as HTMLElement | null;
         if (target && target instanceof HTMLInputElement) {
-          if (target.closest('.cm-vim-panel')) {
+          if (target.closest(".cm-vim-panel")) {
             // Mark the cycle as expired so the next Tab re-seeds from
             // the freshly-typed prefix. `null` means "no cycle in
             // progress" — an empty-string prefix would look identical
             // to the legitimate "Tab with no input" case.
-            if (exCycle && exCycle.input === target) exCycle.basePrefix = null
+            if (exCycle && exCycle.input === target) exCycle.basePrefix = null;
             // Enter / Escape / navigation keys dismiss the popup. Plain
             // character input also hides it — we want a clean slate on
             // the next Tab so the popup reflects the new prefix.
-            hideWildmenu()
+            hideWildmenu();
           }
         }
-        return
+        return;
       }
 
-      const target = e.target as HTMLElement | null
-      if (!target || !(target instanceof HTMLInputElement)) return
-      if (!target.closest('.cm-vim-panel')) return
+      const target = e.target as HTMLElement | null;
+      if (!target || !(target instanceof HTMLInputElement)) return;
+      if (!target.closest(".cm-vim-panel")) return;
 
       // This is our prompt — take over Tab handling entirely.
-      e.preventDefault()
-      e.stopPropagation()
-      e.stopImmediatePropagation()
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
 
-      const step = e.shiftKey ? -1 : 1
-      const fresh = !exCycle || exCycle.input !== target || exCycle.basePrefix === null
+      const step = e.shiftKey ? -1 : 1;
+      const fresh =
+        !exCycle || exCycle.input !== target || exCycle.basePrefix === null;
 
       if (fresh) {
         exCycle = {
@@ -1280,21 +1552,21 @@ function installExTabCompletion(): void {
           // exactly the prefix we want to filter by.
           basePrefix: target.value,
           matches: computeExMatches(target.value),
-          cycleIdx: step === 1 ? 0 : -1 // sentinel; normalized below
-        }
+          cycleIdx: step === 1 ? 0 : -1, // sentinel; normalized below
+        };
       } else if (exCycle) {
-        exCycle.cycleIdx += step
+        exCycle.cycleIdx += step;
       }
 
-      const cycle = exCycle
+      const cycle = exCycle;
       if (!cycle || cycle.matches.length === 0) {
-        hideWildmenu()
-        return
+        hideWildmenu();
+        return;
       }
-      const n = cycle.matches.length
-      const idx = ((cycle.cycleIdx % n) + n) % n
-      cycle.cycleIdx = idx
-      const match = cycle.matches[idx]
+      const n = cycle.matches.length;
+      const idx = ((cycle.cycleIdx % n) + n) % n;
+      cycle.cycleIdx = idx;
+      const match = cycle.matches[idx];
       // Mutate the input value directly. We deliberately DO NOT dispatch
       // a synthetic input event here: CM6's panel StateField reacts to
       // input events by re-evaluating the panel provider, which tears
@@ -1302,14 +1574,14 @@ function installExTabCompletion(): void {
       // `<input>`. That would invalidate exCycle.input on the very next
       // Tab, restarting the cycle at match 0. Submission reads
       // `inp.value` directly, so skipping the event is safe.
-      target.value = match.apply
-      target.focus()
-      target.setSelectionRange(match.apply.length, match.apply.length)
+      target.value = match.apply;
+      target.focus();
+      target.setSelectionRange(match.apply.length, match.apply.length);
       // Render / refresh the wildmenu with the highlighted match.
-      renderWildmenu(cycle.matches, idx, target)
+      renderWildmenu(cycle.matches, idx, target);
     },
-    true
-  )
+    true,
+  );
 
   // Hide the wildmenu when the ex prompt's own input is detached from
   // the document. Checking `isConnected` sidesteps false positives from
@@ -1318,155 +1590,165 @@ function installExTabCompletion(): void {
   // Tab press).
   const observer = new MutationObserver(() => {
     if (exCycle && !exCycle.input.isConnected) {
-      exCycle = null
-      hideWildmenu()
+      exCycle = null;
+      hideWildmenu();
     }
-  })
-  observer.observe(document.body, { childList: true, subtree: true })
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
 
   // Keep the wildmenu positioned correctly if the window resizes mid-
   // completion (e.g. user toggles sidebar while the prompt is open).
-  window.addEventListener('resize', () => {
-    if (exCycle && wildmenu?.root.style.display === 'block') {
-      positionWildmenu(exCycle.input)
+  window.addEventListener("resize", () => {
+    if (exCycle && wildmenu?.root.style.display === "block") {
+      positionWildmenu(exCycle.input);
     }
-  })
+  });
 }
 
 export function Editor(): JSX.Element {
-  const paneLayout = useStore((s) => s.paneLayout)
-  const activeNote = useStore((s) => s.activeNote)
-  const keymapOverrides = useStore((s) => s.keymapOverrides)
-  const vimInsertEscape = useStore((s) => s.vimInsertEscape)
-  const zenMode = useStore((s) => s.zenMode)
+  const paneLayout = useStore((s) => s.paneLayout);
+  const activeNote = useStore((s) => s.activeNote);
+  const keymapOverrides = useStore((s) => s.keymapOverrides);
+  const vimInsertEscape = useStore((s) => s.vimInsertEscape);
+  const zenMode = useStore((s) => s.zenMode);
+  const cloudSyncVisible = useCloudSyncStatusStore(
+    (state) => state.phase !== "hidden",
+  );
 
   useEffect(() => {
-    registerVimCommands()
-  }, [])
+    registerVimCommands();
+  }, []);
 
   useEffect(() => {
-    registerVimCommands()
-    syncVimKeymaps(keymapOverrides)
-  }, [keymapOverrides])
+    registerVimCommands();
+    syncVimKeymaps(keymapOverrides);
+  }, [keymapOverrides]);
 
   useEffect(() => {
-    applyVimInsertEscape(vimInsertEscape)
-  }, [vimInsertEscape])
+    applyVimInsertEscape(vimInsertEscape);
+  }, [vimInsertEscape]);
 
   return (
     <section className="flex min-w-0 flex-1 flex-col">
       <div className="flex min-h-0 min-w-0 flex-1">
         <PaneTreeView node={paneLayout} />
       </div>
-      {!zenMode && activeNote && <StatusBar note={activeNote} />}
+      {!zenMode && (activeNote || cloudSyncVisible) && (
+        <StatusBar note={activeNote} />
+      )}
     </section>
-  )
+  );
 }
 
 function PaneTreeView({ node }: { node: PaneLayout }): JSX.Element {
-  if (node.kind === 'leaf') {
-    return <EditorPane pane={node} />
+  if (node.kind === "leaf") {
+    return <EditorPane pane={node} />;
   }
-  return <PaneSplitView split={node} />
+  return <PaneSplitView split={node} />;
 }
 
 function PaneSplitView({ split }: { split: PaneSplit }): JSX.Element {
-  const resizeSplit = useStore((s) => s.resizeSplit)
-  const containerRef = useRef<HTMLDivElement | null>(null)
-  const isRow = split.direction === 'row'
+  const resizeSplit = useStore((s) => s.resizeSplit);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const isRow = split.direction === "row";
 
   const dragState = useRef<{
-    index: number
-    startClient: number
-    startSizes: number[]
-    totalPx: number
-  } | null>(null)
+    index: number;
+    startClient: number;
+    startSizes: number[];
+    totalPx: number;
+  } | null>(null);
 
   const onHandleMouseDown = useCallback(
     (handleIndex: number) => (e: React.MouseEvent<HTMLDivElement>) => {
-      if (!containerRef.current) return
-      e.preventDefault()
-      const rect = containerRef.current.getBoundingClientRect()
-      const totalPx = isRow ? rect.width : rect.height
+      if (!containerRef.current) return;
+      e.preventDefault();
+      const rect = containerRef.current.getBoundingClientRect();
+      const totalPx = isRow ? rect.width : rect.height;
       dragState.current = {
         index: handleIndex,
         startClient: isRow ? e.clientX : e.clientY,
         startSizes: split.sizes.slice(),
-        totalPx
-      }
+        totalPx,
+      };
       const onMove = (ev: MouseEvent): void => {
-        const st = dragState.current
-        if (!st) return
-        const delta = (isRow ? ev.clientX : ev.clientY) - st.startClient
-        const deltaRatio = st.totalPx > 0 ? delta / st.totalPx : 0
-        const next = st.startSizes.slice()
-        const min = 0.08
-        const a = next[st.index]
-        const b = next[st.index + 1]
-        const sum = a + b
-        let newA = a + deltaRatio
-        let newB = b - deltaRatio
+        const st = dragState.current;
+        if (!st) return;
+        const delta = (isRow ? ev.clientX : ev.clientY) - st.startClient;
+        const deltaRatio = st.totalPx > 0 ? delta / st.totalPx : 0;
+        const next = st.startSizes.slice();
+        const min = 0.08;
+        const a = next[st.index];
+        const b = next[st.index + 1];
+        const sum = a + b;
+        let newA = a + deltaRatio;
+        let newB = b - deltaRatio;
         if (newA < min) {
-          newA = min
-          newB = sum - min
+          newA = min;
+          newB = sum - min;
         }
         if (newB < min) {
-          newB = min
-          newA = sum - min
+          newB = min;
+          newA = sum - min;
         }
-        next[st.index] = newA
-        next[st.index + 1] = newB
-        resizeSplit(split.id, next)
-      }
+        next[st.index] = newA;
+        next[st.index + 1] = newB;
+        resizeSplit(split.id, next);
+      };
       const onUp = (): void => {
-        dragState.current = null
-        window.removeEventListener('mousemove', onMove)
-        window.removeEventListener('mouseup', onUp)
-        document.body.style.cursor = ''
-        document.body.style.userSelect = ''
-      }
-      window.addEventListener('mousemove', onMove)
-      window.addEventListener('mouseup', onUp)
-      document.body.style.cursor = isRow ? 'col-resize' : 'row-resize'
-      document.body.style.userSelect = 'none'
+        dragState.current = null;
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+      };
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+      document.body.style.cursor = isRow ? "col-resize" : "row-resize";
+      document.body.style.userSelect = "none";
     },
-    [isRow, resizeSplit, split.id, split.sizes]
-  )
+    [isRow, resizeSplit, split.id, split.sizes],
+  );
 
   const nodes = useMemo(() => {
-    const out: JSX.Element[] = []
+    const out: JSX.Element[] = [];
     split.children.forEach((child, i) => {
-      const basis = split.sizes[i] ?? 1 / split.children.length
+      const basis = split.sizes[i] ?? 1 / split.children.length;
       out.push(
         <div
           key={child.id}
-          className={['flex min-h-0 min-w-0', isRow ? '' : 'flex-col'].join(' ')}
+          className={["flex min-h-0 min-w-0", isRow ? "" : "flex-col"].join(
+            " ",
+          )}
           style={{ flex: `${basis} 1 0`, minWidth: 0, minHeight: 0 }}
         >
           <PaneTreeView node={child} />
-        </div>
-      )
+        </div>,
+      );
       if (i < split.children.length - 1) {
         out.push(
           <ResizeDivider
             key={`handle-${child.id}`}
-            orientation={isRow ? 'vertical' : 'horizontal'}
+            orientation={isRow ? "vertical" : "horizontal"}
             onMouseDown={onHandleMouseDown(i)}
-          />
-        )
+          />,
+        );
       }
-    })
-    return out
-  }, [isRow, onHandleMouseDown, split.children, split.sizes])
+    });
+    return out;
+  }, [isRow, onHandleMouseDown, split.children, split.sizes]);
 
   return (
     <div
       ref={containerRef}
-      className={['flex min-h-0 min-w-0 flex-1', isRow ? 'flex-row' : 'flex-col'].join(' ')}
+      className={[
+        "flex min-h-0 min-w-0 flex-1",
+        isRow ? "flex-row" : "flex-col",
+      ].join(" ")}
     >
       {nodes}
     </div>
-  )
+  );
 }
 
 /**
@@ -1476,33 +1758,31 @@ function PaneSplitView({ split }: { split: PaneSplit }): JSX.Element {
  */
 function ResizeDivider({
   orientation,
-  onMouseDown
+  onMouseDown,
 }: {
-  orientation: 'vertical' | 'horizontal'
-  onMouseDown: (e: React.MouseEvent<HTMLDivElement>) => void
+  orientation: "vertical" | "horizontal";
+  onMouseDown: (e: React.MouseEvent<HTMLDivElement>) => void;
 }): JSX.Element {
-  const isVertical = orientation === 'vertical'
+  const isVertical = orientation === "vertical";
   return (
     <div
       role="separator"
       aria-orientation={orientation}
       onMouseDown={onMouseDown}
       className={[
-        'group relative z-10 shrink-0 select-none bg-paper-300/70 transition-colors hover:bg-accent/60 active:bg-accent',
-        isVertical
-          ? 'w-px cursor-col-resize'
-          : 'h-px cursor-row-resize'
-      ].join(' ')}
+        "group relative z-10 shrink-0 select-none bg-paper-300/70 transition-colors hover:bg-accent/60 active:bg-accent",
+        isVertical ? "w-px cursor-col-resize" : "h-px cursor-row-resize",
+      ].join(" ")}
     >
       {/* Wider hit zone centered on the divider line. */}
       <div
         className={[
-          'absolute',
+          "absolute",
           isVertical
-            ? 'top-0 bottom-0 -left-1 w-[9px]'
-            : 'left-0 right-0 -top-1 h-[9px]'
-        ].join(' ')}
+            ? "top-0 bottom-0 -left-1 w-[9px]"
+            : "left-0 right-0 -top-1 h-[9px]",
+        ].join(" ")}
       />
     </div>
-  )
+  );
 }

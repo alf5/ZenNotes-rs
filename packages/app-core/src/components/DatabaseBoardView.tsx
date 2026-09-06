@@ -11,6 +11,7 @@ import {
   formatDate,
   optionLabel,
   splitMultiSelect,
+  splitNoteLinks,
   isCheckboxTrue
 } from '../lib/database-cells'
 import { isImeComposing } from '../lib/ime'
@@ -39,8 +40,8 @@ export function DatabaseBoardView({ csvPath, doc, view }: Props): JSX.Element {
 
   const map = useMemo(() => fieldsById(doc), [doc])
   const visibleRows = useMemo(
-    () => filterRows(doc.rows, view.filters, map),
-    [doc.rows, view.filters, map]
+    () => filterRows(doc.rows, view.filters, map, view.filterConjunction),
+    [doc.rows, view.filters, view.filterConjunction, map]
   )
 
   const titleField = doc.fields.find((f) => f.id !== doc.idFieldId)
@@ -161,6 +162,7 @@ export function DatabaseBoardView({ csvPath, doc, view }: Props): JSX.Element {
                           else if (f.type === 'date') content = formatDate(v)
                           else if (f.type === 'multiSelect') content = splitMultiSelect(v).map((x) => optionLabel(f, x)).join(', ')
                           else if (f.type === 'select') content = optionLabel(f, v)
+                          else if (f.type === 'note' || f.type === 'noteMulti') content = splitNoteLinks(v).join(', ')
                           else content = v
                           if (!content) return null
                           return (
