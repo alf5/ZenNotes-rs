@@ -43,6 +43,29 @@ renderer over `http://tauri.localhost`, so `bundledAssetUrl` passes the URL
 through untouched. Electron needs `zen-harper://` only because its renderer is
 `file://`. `supportsHarper` is therefore on.
 
+### `portable-config.ts` rots silently across re-vendors (found by smoke test)
+
+`src/bridge/portable-config.ts` is the PORT's own file — upstream's
+`apps/desktop/src/main/app-config.ts` TOML layer, copied — so a re-vendor does
+not touch it. Across v2.15 → v2.45 upstream added portable prefs that it never
+learned: **21 of 79 had no TOML mapping**, `workflowsEnabled`, `harperEnabled`,
+`harperDialect`, `atlasEnabled`, `autoPairs` and `textReplacements` among them.
+
+The failure is quiet, which is what makes it dangerous: those settings work
+normally in the app (localStorage) and simply never reach `config.toml`, so the
+one promise that file makes — sync your settings across machines with git,
+stow, chezmoi — was broken for them, and Workflows could not be switched on
+from the file at all.
+
+Fixed by mirroring upstream's `SCALAR_FIELDS`, `LIST_FIELDS` and the
+map-table fields wholesale; the port's 52 pre-existing entries were already
+byte-identical to upstream's, so this is a pure superset. `keepViewModeAcrossNotes`
+stays unmapped, matching upstream, which does not map it either.
+
+`src/__tests__/portable-config-parity.test.ts` now asserts the invariant against
+shared-domain's `PORTABLE_PREF_KEYS` — which IS vendored, so it updates itself
+on the next re-vendor and the test fails instead of the file rotting again.
+
 ### The renderer boot order is a chunking property (found by smoke test)
 
 app-core's store calls `getConfigSync()` while building its initial state and
