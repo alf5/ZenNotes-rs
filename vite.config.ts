@@ -91,6 +91,49 @@ function excalidrawFonts(): Plugin {
 
 function rendererManualChunk(id: string): string | undefined {
   const normalizedId = id.split('\\').join('/')
+
+  // The boot-order guard. `src/main.tsx` awaits `initPortableConfig()` before
+  // anything else loads, because app-core's store reads `getConfigSync()` while
+  // it builds its initial state and memoizes the result. A static import is
+  // evaluated before the importing module's body, so if any module the entry
+  // imports statically lands in the same chunk as that store, the store wins
+  // the race and config.toml is ignored for the whole session.
+  //
+  // main.tsx keeps its static graph down to portable-config, and this rule
+  // keeps portable-config (with its TOML parser) in a chunk of its own, so the
+  // two cannot be merged by a future re-vendor that shifts the module graph
+  // around. Guarded by src/__tests__/main-bootstrap-order.test.ts.
+  //
+  // Vite's `__vitePreload` helper rides along deliberately: the entry calls it
+  // for every dynamic import, so wherever that helper lands the entry gains a
+  // STATIC import of — and therefore evaluates — the whole chunk. Left alone it
+  // was grouped with the store, which re-created the exact race this rule
+  // exists to prevent even after main.tsx stopped importing the bridge.
+  if (
+    normalizedId.endsWith('/src/bridge/portable-config.ts') ||
+    normalizedId.includes('/node_modules/smol-toml/') ||
+    normalizedId.includes('vite/preload-helper')
+  ) {
+    return 'bootstrap-config'
+  }
+
+  // The other half of the same guard. `src/bridge/tauri-bridge.ts` is imported
+  // dynamically, but a dynamic import still evaluates its chunk's STATIC
+  // dependencies first — so when Rollup grouped the shared-domain helpers the
+  // bridge uses into the `app-store` chunk, `await import('./bridge/tauri-bridge')`
+  // evaluated app-core's store (and its memoizing `loadPrefs()`) BEFORE
+  // `createTauriBridge()` had assigned `window.zen`. The store saw no bridge,
+  // fell back to defaults, and config.toml was ignored for the session.
+  //
+  // shared-domain and bridge-contract are separate packages that app-core and
+  // the bridge both consume, so giving each its own chunk is the honest split
+  // as well as the one that keeps the store out of the bridge's static graph.
+  if (normalizedId.includes('/packages/shared-domain/src/')) {
+    return 'shared-domain'
+  }
+  if (normalizedId.includes('/packages/bridge-contract/src/')) {
+    return 'bridge-contract'
+  }
   if (normalizedId.endsWith('/packages/app-core/src/lib/wikilinks.ts')) {
     return 'app-wikilinks'
   }

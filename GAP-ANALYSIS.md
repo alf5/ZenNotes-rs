@@ -43,6 +43,39 @@ renderer over `http://tauri.localhost`, so `bundledAssetUrl` passes the URL
 through untouched. Electron needs `zen-harper://` only because its renderer is
 `file://`. `supportsHarper` is therefore on.
 
+### The renderer boot order is a chunking property (found by smoke test)
+
+app-core's store calls `getConfigSync()` while building its initial state and
+MEMOIZES the result, so `window.zen` must exist and `initPortableConfig()` must
+have resolved before that module evaluates. `src/main.tsx` has always documented
+this, and it was still broken in the first cut of this mirror: `config.toml` was
+ignored on every launch, so hand-edited settings never applied and the first-run
+wizard reappeared each time.
+
+Two distinct causes, both invisible in the source:
+
+1. `main.tsx` imported `./bridge/tauri-bridge` STATICALLY. Static imports are
+   evaluated before the importing module's body, so the bridge's chunk — which
+   Rollup had merged with the store — ran `loadPrefs()` before the top-level
+   `await`.
+2. Making that import dynamic was not enough. A dynamic import still evaluates
+   its chunk's static dependencies first, and the `tauri-bridge` chunk still
+   statically imported `app-store` because they shared the vendored
+   shared-domain helpers. The store therefore still evaluated before
+   `createTauriBridge()` had assigned `window.zen`.
+
+The fix is both halves: `main.tsx` statically imports only `portable-config`,
+and `rendererManualChunk` pins `bootstrap-config` (portable-config + smol-toml +
+Vite's `__vitePreload` helper, which the entry pulls in for every dynamic
+import), `shared-domain` and `bridge-contract` into chunks of their own.
+
+Because none of that is visible in the source or the type system, it is pinned
+by two tests: `src/__tests__/main-bootstrap-order.test.ts` (source shape) and
+`src/__tests__/bundle-boot-order.test.ts` (the built chunk graph — the one that
+actually catches cause 2). A root `vitest.config.ts` scopes `bun run test` to
+`src/**`, since an unscoped run also collects the suites vendored under
+`packaging/arch/src/bun-cache/`.
+
 ### Test-runner quirks on this machine (not code bugs)
 
 ```sh
