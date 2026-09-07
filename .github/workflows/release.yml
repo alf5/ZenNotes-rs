@@ -72,10 +72,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # bun is the project's package manager: bun.lock is the only lockfile in
+      # the repo, and tauri.conf.json's beforeBuildCommand shells out to `bun
+      # run build`. Node is still installed because some tooling in the
+      # dependency tree shells out to `node` itself.
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
+
+      - name: Set up bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -102,11 +111,22 @@ jobs:
             libssl-dev \
             libgtk-3-dev
 
+      # --frozen-lockfile so a release is built from the resolution committed
+      # in bun.lock and nothing else. Plain `npm install` (what this used to
+      # run, with no package-lock.json in the repo) re-resolved the whole tree
+      # on every release, which makes builds unreproducible and lets a bad
+      # transitive publish change or break a tagged release. The Arch PKGBUILD
+      # was fixed the same way in 0c6e8d8; this is CI catching up.
       - name: Install frontend dependencies
-        run: npm install
+        run: bun install --frozen-lockfile
 
-      - name: Build the app (npm runner — avoids tauri-action's bun autodetect)
-        run: npm run tauri build -- ${{ matrix.args }}
+      # No `--` before the args: npm strips that separator before appending,
+      # bun passes it through, and `tauri build` treats everything after a `--`
+      # as CARGO arguments. With the separator the macOS jobs would have handed
+      # `--target aarch64-apple-darwin` to cargo instead of to Tauri, so the
+      # bundle would not have landed where the upload step looks for it.
+      - name: Build the app
+        run: bun run tauri build ${{ matrix.args }}
 
       - name: Upload macOS bundles
         if: runner.os == 'macOS'
