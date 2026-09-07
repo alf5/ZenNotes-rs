@@ -58,6 +58,16 @@ const SCALAR_FIELDS: Partial<Record<PortablePrefKey, ScalarFieldMap>> = {
     tomlKey: 'yank_to_clipboard',
     comment: 'sync the system clipboard with Vim yank/delete/change and p/P paste'
   },
+  vimBlockImeInNormalMode: {
+    section: 'vim',
+    tomlKey: 'block_ime_in_normal_mode',
+    comment: 'keep the OS input method (a CJK IME) from composing in normal and visual mode, so hjkl stay motions'
+  },
+  vimWrappedLineMotions: {
+    section: 'vim',
+    tomlKey: 'wrapped_line_motions',
+    comment: 'display | logical — how $, I, A and dependent operators treat soft-wrapped lines'
+  },
   whichKeyHints: {
     section: 'vim',
     tomlKey: 'which_key_hints',
@@ -95,15 +105,40 @@ const SCALAR_FIELDS: Partial<Record<PortablePrefKey, ScalarFieldMap>> = {
     tomlKey: 'live_preview',
     comment: 'hide markdown syntax on inactive lines'
   },
+  showHeadingLevelLabels: {
+    section: 'editor',
+    tomlKey: 'show_heading_level_labels',
+    comment: 'show H1 through H6 badges before headings'
+  },
   renderTablesInLivePreview: {
     section: 'editor',
     tomlKey: 'render_tables',
     comment: 'render tables as widgets in live preview; off keeps them as plain text'
   },
+  syncTitleHeadingOnRename: {
+    section: 'editor',
+    tomlKey: 'sync_title_heading_on_rename',
+    comment: "renaming a note rewrites its leading '# heading' to match"
+  },
   markdownSnippets: {
     section: 'editor',
     tomlKey: 'markdown_snippets',
     comment: 'auto-close markdown delimiters while typing'
+  },
+  textReplacementsEnabled: {
+    section: 'editor',
+    tomlKey: 'text_replacements_enabled',
+    comment: 'expand configured text triggers while typing'
+  },
+  autoPairs: {
+    section: 'editor',
+    tomlKey: 'auto_pairs',
+    comment: 'auto-insert matching [] () and {} while typing'
+  },
+  autoPairQuotesInProse: {
+    section: 'editor',
+    tomlKey: 'auto_pair_quotes_in_prose',
+    comment: 'also auto-insert matching quotes outside Markdown code'
   },
   hideBuiltinTemplates: {
     section: 'editor',
@@ -121,7 +156,22 @@ const SCALAR_FIELDS: Partial<Record<PortablePrefKey, ScalarFieldMap>> = {
     tomlKey: 'font_size',
     comment: 'editor + preview font size (px)'
   },
+  mathFontScale: {
+    section: 'editor',
+    tomlKey: 'math_font_scale',
+    comment: 'math size as a percentage (50-200); scales $…$ and $$…$$ in editor and preview'
+  },
   editorLineHeight: { section: 'editor', tomlKey: 'line_height', comment: 'line-height multiplier' },
+  editorTabSize: {
+    section: 'editor',
+    tomlKey: 'tab_size',
+    comment: 'tab width in columns, from 1 through 8'
+  },
+  listIndentGuides: {
+    section: 'editor',
+    tomlKey: 'list_indent_guides',
+    comment: 'vertical guide lines at each nested list level'
+  },
   editorScrollOff: {
     section: 'editor',
     tomlKey: 'scroll_off',
@@ -152,10 +202,30 @@ const SCALAR_FIELDS: Partial<Record<PortablePrefKey, ScalarFieldMap>> = {
     tomlKey: 'math_renderer',
     comment: 'katex | typst: typesetter for $…$ / $$…$$ math'
   },
+  typstTagPreambles: {
+    section: 'editor',
+    tomlKey: 'typst_tag_preambles',
+    comment: 'true | false — prepend Typst definitions from notes in a `typst` folder, chosen by a note\'s tags'
+  },
+  harperEnabled: {
+    section: 'editor',
+    tomlKey: 'harper_enabled',
+    comment: 'true | false: grammar and spelling with Harper, checked on this device'
+  },
+  harperDialect: {
+    section: 'editor',
+    tomlKey: 'harper_dialect',
+    comment: 'american | british | australian | canadian | indian'
+  },
   looseMathDelimiters: {
     section: 'editor',
     tomlKey: 'loose_math_delimiters',
     comment: 'render $$…$$ display math even with text before/after the fences'
+  },
+  defaultPaneMode: {
+    section: 'editor',
+    tomlKey: 'default_view_mode',
+    comment: 'edit | split | preview — the mode a note opens in before it has a remembered one'
   },
   lineNumberMode: {
     section: 'editor',
@@ -233,6 +303,22 @@ const SCALAR_FIELDS: Partial<Record<PortablePrefKey, ScalarFieldMap>> = {
     comment: 'code / monospace font; empty = system default'
   },
   // view
+  atlasEnabled: {
+    section: 'view',
+    tomlKey: 'atlas_enabled',
+    comment: 'the Atlas map view of the vault (sidebar row, command, Space g); on by default'
+  },
+  workflowsEnabled: {
+    section: 'view',
+    tomlKey: 'workflows_enabled',
+    comment:
+      'opt in to the Workflows view, its sidebar row, command, and leader shortcut (off by default)'
+  },
+  assetSortOrder: {
+    section: 'view',
+    tomlKey: 'asset_sort_order',
+    comment: 'Assets view sort: name | used | type | size | modified, each -asc or -desc'
+  },
   noteSortOrder: {
     section: 'view',
     tomlKey: 'note_sort_order',
@@ -281,6 +367,11 @@ const SCALAR_FIELDS: Partial<Record<PortablePrefKey, ScalarFieldMap>> = {
     comment: 'show ISO week numbers in the calendar'
   },
   tasksViewMode: { section: 'view', tomlKey: 'tasks_view_mode', comment: 'list | calendar | kanban' },
+  showArchivedTasks: {
+    section: 'view',
+    tomlKey: 'show_archived_tasks',
+    comment: 'keep tasks from archived notes in the Tasks views'
+  },
   kanbanGroupBy: {
     section: 'view',
     tomlKey: 'kanban_group_by',
@@ -303,6 +394,11 @@ const LIST_FIELDS: Partial<Record<PortablePrefKey, ListFieldMap>> = {
     section: 'view',
     tomlKey: 'kanban_statuses',
     comment: 'custom-status Kanban columns, in order — e.g. ["backlog", "in_progress", "review", "done"]'
+  },
+  hiddenWorkflowPresets: {
+    section: 'view',
+    tomlKey: 'hidden_workflow_presets',
+    comment: 'built-in workflow recipes hidden from the gallery, by id — e.g. ["reading-log"]'
   }
 }
 
@@ -345,6 +441,11 @@ const MAP_TABLE_FIELDS: Partial<Record<PortablePrefKey, MapTableField>> = {
     table: 'tweaks',
     comment: ['Visual color tweaks from Settings → Appearance (token slug = color).'],
     example: '"accent" = "#ff3b30"'
+  },
+  textReplacements: {
+    table: 'text_replacements',
+    comment: ['Text replacements expanded while typing, keyed by trigger.'],
+    example: '"->" = "→"'
   }
 }
 
@@ -627,6 +728,17 @@ export async function initPortableConfig(): Promise<void> {
   })
 
   initialized = true
+}
+
+/** Every portable pref this module can round-trip through config.toml.
+ *  Exported for `src/__tests__/portable-config-parity.test.ts`, which fails the
+ *  build when a re-vendor adds a portable pref that has no TOML mapping here. */
+export function portableConfigMappedKeys(): Set<string> {
+  return new Set<string>([
+    ...Object.keys(SCALAR_FIELDS),
+    ...Object.keys(LIST_FIELDS),
+    ...Object.keys(MAP_TABLE_FIELDS)
+  ])
 }
 
 /** Synchronous snapshot for the bridge's `getConfigSync()`. `null` only when
