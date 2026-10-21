@@ -17,6 +17,7 @@ import { invoke } from '@tauri-apps/api/core'
 import {
   buildDefaultViews,
   inferFields,
+  initialDatabaseContents,
   parseCsv,
   parseRows,
   serializeRows
@@ -29,6 +30,7 @@ import {
   formDirFromCsvPath,
   formTitleFromCsvPath,
   type DatabaseDoc,
+  type DatabaseSeed,
   type DatabaseSidecar,
   type DbField,
   type DbRow,
@@ -241,11 +243,18 @@ export async function writeDatabaseSchema(
   )
 }
 
-/** Create a new empty database (`id` + `Name` fields) under folder/subpath. */
+/**
+ * Create a new database under `folder`/`subpath` and return it hydrated: empty
+ * (`id` + `Name` fields) by default, or holding the `seed`'s columns and rows
+ * when one is given (a Markdown table converted in place, #832). The folder
+ * root is resolved by Rust, so a root-mode vault creates at the vault root
+ * rather than inventing an `inbox/` directory.
+ */
 export async function createDatabase(
   folder: NoteFolder,
   subpath: string,
-  title?: string
+  title?: string,
+  seed?: DatabaseSeed
 ): Promise<DatabaseDoc> {
   const safeTitle = (title ?? 'Untitled Database').trim() || 'Untitled Database'
   const baseName = safeTitle.replace(/[\\/:*?"<>|]/g, '-')
@@ -262,25 +271,16 @@ export async function createDatabase(
   }
   const rel = csvPathForFormDir(formDirRel)
 
-  const idField: DbField = { id: randomUUID(), name: 'id', type: 'text', hidden: true }
-  const nameField: DbField = { id: randomUUID(), name: 'Name', type: 'text' }
-  const fields = [idField, nameField]
-  const { views, activeViewId } = buildDefaultViews(fields)
-  const sidecar: DatabaseSidecar = {
-    version: 1,
-    idFieldId: idField.id,
-    fields,
-    views,
-    activeViewId
-  }
+  const { sidecar, rows } = initialDatabaseContents(seed, randomUUID)
   await invoke('db_mkdir', { relPath: formDirRel })
   await persistSidecar(rel, sidecar)
-  await writeText(rel, serializeRows([], fields))
-  return hydrate(rel, sidecar, [])
+  await writeText(rel, serializeRows(rows, sidecar.fields))
+  return hydrate(rel, sidecar, rows)
 }
 
 /** Rename a database's `.base` folder (non-colliding); returns the new
- *  data.csv path. Everything lives inside, so nothing else is rewritten. */
+ *  data.csv path. Data, schema and pages move together, and the parallel
+ *  comment tree follows too (Rust routes it through the folder rename). */
 export async function renameDatabase(csvPath: string, newTitle: string): Promise<string> {
   const formDir = formDirFromCsvPath(toPosix(csvPath))
   if (!formDir) throw new Error(`Not a database folder: ${csvPath}`)
@@ -294,7 +294,7 @@ export async function renameDatabase(csvPath: string, newTitle: string): Promise
   while (await exists(csvPathForFormDir(targetRel))) {
     targetRel = makeFormDir(`${safeName} ${n++}`)
   }
-  await invoke('db_rename', { oldRel: formDir, newRel: targetRel })
+  await invoke('db_rename_form_dir', { oldRel: formDir, newRel: targetRel })
   return csvPathForFormDir(targetRel)
 }
 

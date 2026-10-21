@@ -139,7 +139,7 @@ describe('Workflows feature switch', () => {
   })
 
   it('offers the Cloud conflict queue only while files are waiting', async () => {
-    const { buildCommands } = await loadCommands()
+    const { buildCommands, useStore } = await loadCommands()
     const { useCloudSyncStatusStore } = await import('./cloud-auto-sync')
     const summary = {
       cursor: 3,
@@ -164,6 +164,11 @@ describe('Workflows feature switch', () => {
     useCloudSyncStatusStore.setState({ lastSummary: summary })
     const command = buildCommands().find((c) => c.id === 'app.cloud.reviewConflicts')
     expect(command?.title).toBe('Review Cloud Sync Conflicts')
+    // The leader only works with Vim on, so the palette names it only then.
+    useStore.setState({ vimMode: true })
+    expect(buildCommands().find((c) => c.id === 'app.cloud.reviewConflicts')?.shortcut).toBe('Space r')
+    useStore.setState({ vimMode: false })
+    expect(buildCommands().find((c) => c.id === 'app.cloud.reviewConflicts')?.shortcut).toBeUndefined()
 
     command?.run()
     expect(useCloudSyncStatusStore.getState().conflictReviewOpen).toBe(true)
@@ -174,6 +179,27 @@ describe('Workflows feature switch', () => {
     })
     expect(buildCommands().some((c) => c.id === 'app.cloud.reviewConflicts')).toBe(false)
   })
+
+  it("opens Settings → Cloud while this vault's Cloud vault is gone and nothing else waits", async () => {
+    const { buildCommands, useStore } = await loadCommands()
+    const { useCloudSyncStatusStore } = await import('./cloud-auto-sync')
+    const { consumeSettingsTarget } = await import('./settings-navigation')
+    useStore.setState({ settingsOpen: false })
+    useCloudSyncStatusStore.setState({
+      phase: 'unlinked',
+      removedVault: { vaultName: 'Cloud QA iPhone', reason: 'deleted' }
+    })
+
+    const command = buildCommands().find((c) => c.id === 'app.cloud.reviewVaultRemoval')
+    expect(command?.title).toBe('Review Cloud Vault')
+    expect(buildCommands().some((c) => c.id === 'app.cloud.reviewConflicts')).toBe(false)
+    command?.run()
+    expect(useStore.getState().settingsOpen).toBe(true)
+    expect(consumeSettingsTarget()).toBe('cloud')
+
+    useCloudSyncStatusStore.setState({ removedVault: null })
+    expect(buildCommands().some((c) => c.id === 'app.cloud.reviewVaultRemoval')).toBe(false)
+  })
 })
 
 describe('Workflow run entries', () => {
@@ -183,9 +209,17 @@ describe('Workflow run entries', () => {
       name: 'Reading log',
       description: 'Keep the table in sync',
       status: 'active' as const,
+      trigger: { type: 'manual' as const },
       mutates: true
     },
-    { id: 'half-idea', name: 'Half idea', description: '', status: 'draft' as const, mutates: false }
+    {
+      id: 'half-idea',
+      name: 'Half idea',
+      description: '',
+      status: 'draft' as const,
+      trigger: { type: 'manual' as const },
+      mutates: false
+    }
   ]
 
   it('lists one Run entry per active workflow and none for drafts', async () => {
@@ -259,6 +293,39 @@ describe('close-tab command shortcut', () => {
     const shortcut = buildCommands().find((c) => c.id === 'tab.close')?.shortcut
     expect(shortcut).not.toBe(':q')
     expect(shortcut).toMatch(/W/)
+  })
+})
+
+describe('template command shortcuts (#847)', () => {
+  it('show the template shortcut once one is set, and the leader key only with Vim on', async () => {
+    const { buildCommands, useStore } = await loadCommands()
+    // Linux: the template shortcuts ship unbound there.
+    Object.defineProperty(window, 'zen', {
+      configurable: true,
+      value: { ...window.zen, platformSync: () => 'linux' }
+    })
+    const shortcutOf = (id: string) => buildCommands().find((c) => c.id === id)?.shortcut
+
+    // Insert only exists with a note open.
+    useStore.setState({
+      vimMode: false,
+      keymapOverrides: {},
+      activeNote: { folder: 'inbox', path: 'inbox/Plan.md', title: 'Plan', body: '' } as never
+    })
+    expect(buildCommands().some((c) => c.id === 'template.insert')).toBe(true)
+    expect(shortcutOf('template.create')).toBeFalsy()
+    expect(shortcutOf('template.insert')).toBeFalsy()
+
+    useStore.setState({ vimMode: true })
+    expect(shortcutOf('template.create')).toMatch(/ t$/)
+    expect(shortcutOf('template.insert')).toMatch(/ i$/)
+
+    useStore.setState({
+      vimMode: false,
+      keymapOverrides: { 'global.newNoteFromTemplate': 'Alt+Mod+T', 'global.insertTemplate': 'Alt+Mod+Y' }
+    })
+    expect(shortcutOf('template.create')).toMatch(/T$/)
+    expect(shortcutOf('template.insert')).toMatch(/Y$/)
   })
 })
 
@@ -350,3 +417,54 @@ describe('note commands for a trashed note (#712)', () => {
   })
 })
 
+
+describe('favorite command (#810)', () => {
+  const note = { folder: 'inbox', path: 'inbox/Plan.md', title: 'Plan', body: '' } as never
+
+  it('flips its title with the active note and runs the store toggle', async () => {
+    const { buildCommands, useStore } = await loadCommands()
+    const toggleFavoriteActiveNote = vi.fn().mockResolvedValue(undefined)
+    useStore.setState({ activeNote: note, selectedPath: 'inbox/Plan.md', toggleFavoriteActiveNote })
+    const add = buildCommands().find((c) => c.id === 'note.favorite')
+    expect(add?.title).toBe('Add Note to Favorites')
+    expect(add?.when?.()).toBe(true)
+    await add?.run()
+    expect(toggleFavoriteActiveNote).toHaveBeenCalledTimes(1)
+
+    const settings = useStore.getState().vaultSettings
+    useStore.setState({ vaultSettings: { ...settings, favorites: ['inbox:Work', 'inbox/Plan.md'] } })
+    expect(buildCommands().find((c) => c.id === 'note.favorite')?.title).toBe(
+      'Remove Note from Favorites'
+    )
+  })
+
+  it('stays out of the palette with no note open or a trashed one, like the sidebar menu', async () => {
+    const { buildCommands, useStore } = await loadCommands()
+    useStore.setState({ activeNote: null, selectedPath: null })
+    expect(buildCommands().some((c) => c.id === 'note.favorite')).toBe(false)
+    useStore.setState({
+      activeNote: { folder: 'trash', path: 'trash/Gone.md', title: 'Gone', body: '' } as never,
+      selectedPath: 'trash/Gone.md'
+    })
+    expect(buildCommands().some((c) => c.id === 'note.favorite')).toBe(false)
+  })
+})
+
+describe('saved Tasks filters (#731)', () => {
+  it('lists one palette entry per saved filter, which opens Tasks and applies it', async () => {
+    const { buildCommands, useStore } = await loadCommands()
+    expect(buildCommands().some((c) => c.id.startsWith('tasks.savedFilter.'))).toBe(false)
+
+    useStore.getState().saveTaskFilter('Blocked', '@status:blocked')
+    useStore.getState().saveTaskFilter('Project alpha', '@project:alpha')
+    const entries = buildCommands().filter((c) => c.id.startsWith('tasks.savedFilter.'))
+    expect(entries.map((c) => c.title)).toEqual(['Tasks: Blocked', 'Tasks: Project alpha'])
+    expect(entries[1].keywords).toContain('@project:alpha')
+
+    const openTasksView = vi.fn().mockResolvedValue(undefined)
+    useStore.setState({ openTasksView })
+    await entries[1].run()
+    expect(openTasksView).toHaveBeenCalledTimes(1)
+    expect(useStore.getState().tasksFilter).toBe('@project:alpha')
+  })
+})

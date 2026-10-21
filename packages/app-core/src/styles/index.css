@@ -55,6 +55,16 @@
   box-sizing: content-box;
 }
 
+/* The conflicted-note banner keeps desktop density under a mouse. On a touch
+ * screen its Review is the nearest way into the Cloud conflict queue, so it
+ * gets a finger-sized target. */
+@media (pointer: coarse) {
+  [data-cloud-conflict-review] {
+    min-height: 44px;
+    min-width: 44px;
+  }
+}
+
 .task-kanban-column.is-drop-target {
   border-color: rgb(var(--z-accent) / 0.62);
   box-shadow: 0 0 0 1px rgb(var(--z-accent) / 0.28);
@@ -1460,20 +1470,23 @@ textarea,
 }
 
 /* The sidebar is one scroll region for all its sections (Quick access, Notes,
-   Tags, System). With many tags/notes it scrolls, but the global thumb — a dark
-   shadow colour at 18% — is nearly invisible on a dark sidebar, so the scroll
+   Tags, System). With many tags/notes it scrolls, but the global thumb (a dark
+   shadow colour at 18%) is nearly invisible on a dark sidebar, so the scroll
    affordance reads as "the list is just cut off". Tint this scroller's thumb
    with the sidebar's own foreground (currentColor adapts to light/dark themes
-   and the dark-sidebar option) at a higher opacity so it's discoverable. (#451) */
+   and the dark-sidebar option) so it's discoverable. (#451)
+   The strength lives in the colour because scrollbar parts ignore `opacity`:
+   the 0.3 this rule first used painted the thumb at full text colour. A browser
+   without color-mix keeps the plain currentColor line. */
 .zn-sidebar-scroll::-webkit-scrollbar-thumb {
   background: currentColor;
+  background: color-mix(in srgb, currentColor 30%, transparent);
   background-clip: padding-box;
-  opacity: 0.3;
 }
 .zn-sidebar-scroll::-webkit-scrollbar-thumb:hover {
   background: currentColor;
+  background: color-mix(in srgb, currentColor 50%, transparent);
   background-clip: padding-box;
-  opacity: 0.5;
 }
 
 /* Keep the horizontal tab-strip scrollbar slim (6px) so it doesn't eat into the
@@ -1495,6 +1508,9 @@ a,
 input,
 textarea,
 [role="button"] {
+  -webkit-app-region: no-drag;
+}
+.zn-app-dragging .drag-region {
   -webkit-app-region: no-drag;
 }
 
@@ -1567,6 +1583,23 @@ textarea,
   padding-left: calc(var(--z-list-hanging-indent, 0) + var(--z-list-indent-pad, 0ch));
   text-indent: calc(var(--z-list-hanging-indent, 0) * -1);
   --z-list-guide-color: rgb(var(--z-grey-0) / 0.16);
+}
+/* Each character of the leading whitespace and of a bullet or ordered marker
+ * takes at least its column count in ch (set inline by cm-markdown-list-indent),
+ * and so does the bullet drawn over a `-`, so a proportional font, whose space
+ * is about half a ch, lines the bullet up with its guide and the first line's
+ * text with the hanging indent (#952). A minimum width: with a monospace font
+ * they are already that wide. text-indent is inherited, and here it would pull
+ * the content out of its own box. */
+.cm-editor .cm-markdown-list-line .cm-list-prefix-cell,
+.cm-editor .cm-list-boxed-marker .cm-wq-bullet {
+  display: inline-block;
+  text-indent: 0;
+  white-space: pre;
+}
+
+.cm-editor .cm-list-boxed-marker .cm-wq-bullet {
+  min-width: 1ch;
 }
 .cm-editor .cm-cursor,
 .cm-editor .cm-dropCursor {
@@ -2159,7 +2192,7 @@ html[data-completed-task-style="gray-strikethrough"] .cm-editor .cm-task-done * 
   color: rgb(var(--z-fg));
 }
 
-/* Leading YAML frontmatter — render as a compact "properties" metadata card
+/* Leading YAML frontmatter: rendered as a compact "properties" metadata card
  * (see cm-frontmatter.ts). For database record pages these values mirror the
  * database fields, so it should read like a tidy property list, not body text. */
 .cm-editor .cm-frontmatter-line {
@@ -2172,38 +2205,17 @@ html[data-completed-task-style="gray-strikethrough"] .cm-editor .cm-task-done * 
   border-left: 1px solid rgb(var(--z-grey-0) / 0.13);
   border-right: 1px solid rgb(var(--z-grey-0) / 0.13);
 }
-.cm-editor .cm-frontmatter-line
-  :is(
-    .tok-meta,
-    .tok-string,
-    .tok-keyword,
-    .tok-atom,
-    .tok-heading,
-    .tok-heading1,
-    .tok-heading2,
-    .tok-heading3,
-    .tok-heading4,
-    .tok-heading5,
-    .tok-heading6
-  ) {
+/* The note grammar (cm-markdown-language.ts) keeps the frontmatter out of the
+ * markdown parse, so its lines carry no heading or list tokens; the only token
+ * inside the card is the `meta` mark on the two `---` fences, which must
+ * inherit the fence rows' transparent color below. */
+.cm-editor .cm-frontmatter-line .tok-meta {
   color: inherit;
-}
-/* Without a blank line before the closing `---`, CodeMirror's markdown parser
- * can tokenize the previous frontmatter line as a setext heading. The metadata
- * card owns frontmatter presentation, so suppress body heading typography here. */
-.cm-editor .cm-frontmatter-line
-  :is(.tok-heading, .tok-heading1, .tok-heading2, .tok-heading3, .tok-heading4, .tok-heading5, .tok-heading6) {
-  font-size: inherit;
-  font-weight: inherit;
-  line-height: inherit;
-  text-transform: none;
-  letter-spacing: 0;
 }
 /* The key (before the `:`) is a muted-but-legible label; the value renders at
  * normal text brightness (see the line rule above), so an all-frontmatter note
  * like a task file stays readable instead of fading into the background. */
-.cm-editor .cm-frontmatter-key,
-.cm-editor .cm-frontmatter-key :is(.tok-meta, .tok-string, .tok-keyword, .tok-atom) {
+.cm-editor .cm-frontmatter-key {
   color: rgb(var(--z-grey-1));
   font-weight: 500;
 }
@@ -2471,8 +2483,9 @@ html[data-completed-task-style="gray-strikethrough"] .cm-editor .cm-task-done * 
   text-underline-offset: 2px;
 }
 
-/* --- Math diagrams (TikZ / JSXGraph / function-plot) ------------------ */
+/* --- Diagrams (TikZ / D2 / JSXGraph / function-plot) ------------------ */
 .zen-tikz,
+.zen-d2,
 .zen-jsxgraph,
 .zen-function-plot {
   display: flex;
@@ -2572,7 +2585,8 @@ html[data-completed-task-style="gray-strikethrough"] .cm-editor .cm-task-done * 
   border-color: rgb(var(--z-bg-3));
   color: rgb(var(--z-fg-1));
 }
-.zen-tikz svg {
+.zen-tikz svg,
+.zen-d2 svg {
   max-width: 100%;
   height: auto;
 }
@@ -2618,7 +2632,8 @@ html[data-completed-task-style="gray-strikethrough"] .cm-editor .cm-task-done * 
   border-radius: 6px;
   margin: 0;
 }
-.zen-tikz-loading {
+.zen-tikz-loading,
+.zen-d2-loading {
   font-size: 11px;
   color: rgb(var(--z-fg-2));
   font-style: italic;
@@ -3035,12 +3050,21 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
   margin: var(--z-prose-block-gap) 0;
   font-size: 0.94em;
 }
-/* A table with persisted column widths (#294): honor the <colgroup> exactly via
-   fixed layout (sizes to the columns' sum) instead of stretching to 100%. */
+/* A table with persisted column widths (#294): fixed layout makes the
+   <colgroup> authoritative, so the table is exactly as wide as its columns
+   instead of stretching to 100%. Wider than the reading column, it scrolls
+   sideways in its wrapper (markdown.ts) as the editor's table does, instead
+   of squeezing every column (#920). */
+.prose-zen .zen-table-scroll {
+  margin: var(--z-prose-block-gap) 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
 .prose-zen table.zen-has-col-widths {
   table-layout: fixed;
-  width: auto;
-  max-width: 100%;
+  width: max-content;
+  margin: 0;
 }
 .prose-zen table.zen-has-col-widths th,
 .prose-zen table.zen-has-col-widths td {
@@ -3058,6 +3082,13 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
 @media print {
   .prose-zen table {
     max-width: 100%;
+  }
+  /* A page cannot scroll: a table with set widths shrinks to fit it again. */
+  .prose-zen .zen-table-scroll {
+    overflow: visible;
+  }
+  .prose-zen table.zen-has-col-widths {
+    width: auto;
   }
   .prose-zen th,
   .prose-zen td {
@@ -3581,7 +3612,10 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
   border-color: rgb(var(--z-accent) / 0.4);
 }
 
-.prose-zen .local-asset-embed {
+/* PDF, audio and video embeds. The editor's live preview draws audio and video
+   with the same builder as the reading view (see `cm-local-media-embed`), so
+   one set of rules dresses both. */
+:is(.prose-zen, .cm-editor) .local-asset-embed {
   margin: 1.25rem 0;
   overflow: hidden;
   border-radius: 14px;
@@ -3589,7 +3623,7 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
   background: color-mix(in srgb, theme("colors.paper.100") 90%, transparent);
 }
 
-.prose-zen .local-asset-embed-header {
+:is(.prose-zen, .cm-editor) .local-asset-embed-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -3598,7 +3632,10 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
   padding: 0.65rem 0.85rem;
 }
 
-.prose-zen .local-asset-embed-title {
+/* Grows so that the editor's two actions (Open, then `</>`) sit together at
+   the right edge rather than spread across the header. */
+:is(.prose-zen, .cm-editor) .local-asset-embed-title {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3608,7 +3645,7 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
   color: theme("colors.ink.800");
 }
 
-.prose-zen .local-asset-embed-open {
+:is(.prose-zen, .cm-editor) :is(.local-asset-embed-open, .local-asset-embed-edit) {
   flex-shrink: 0;
   border-radius: 999px;
   background: theme("colors.paper.200");
@@ -3619,8 +3656,8 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
   text-transform: uppercase;
 }
 
-.prose-zen .local-asset-embed-frame,
-.prose-zen .local-asset-embed-video {
+:is(.prose-zen, .cm-editor) .local-asset-embed-frame,
+:is(.prose-zen, .cm-editor) .local-asset-embed-video {
   display: block;
   width: 100%;
   min-height: 420px;
@@ -3628,10 +3665,86 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
   background: theme("colors.paper.50");
 }
 
-.prose-zen .local-asset-embed-audio {
+:is(.prose-zen, .cm-editor) .local-asset-embed-audio {
   display: block;
   width: calc(100% - 1.7rem);
   margin: 0.85rem;
+}
+
+/* An audio or video line in the editor. Off the cursor line its host line
+   drops its strut (`cm-image-embed-line`), so the block brings its own
+   line-height back, as the image caption does. */
+.cm-editor .cm-local-media-embed {
+  display: block;
+  width: 100%;
+  max-width: min(100%, 980px);
+  margin: 0.5rem 0 0.6rem;
+  line-height: 1.4;
+}
+
+/* CodeMirror measures a line once it is drawn, and a video sized by its own
+   metadata grows after that, leaving clicks and the caret aimed at stale
+   heights. In the editor the box takes its height from the pane width alone
+   and the picture letterboxes inside it. */
+.cm-editor .cm-local-media-embed .local-asset-embed-video {
+  min-height: 0;
+  height: auto;
+  aspect-ratio: 16 / 9;
+}
+
+/* The line under an embed whose file Cloud sync keeps on this device for its
+   size (`setCloudSyncNotice`). Its colour and size are tokens on the element;
+   these rules only seat it under each kind of embed. */
+:is(.prose-zen, .cm-editor) .local-asset-cloud-notice {
+  margin-top: 0.4rem;
+}
+
+:is(.prose-zen, .cm-editor) .local-image-embed > .local-asset-cloud-notice {
+  text-align: center;
+}
+
+:is(.prose-zen, .cm-editor)
+  :is(.local-asset-embed, .local-pdf-embed)
+  > .local-asset-cloud-notice {
+  margin-top: 0;
+  padding: 0.5rem 0.85rem;
+  border-top: 1px solid theme("colors.paper.300");
+}
+
+/* The compact PDF card is one flex row; the notice takes a row of its own. */
+:is(.prose-zen, .cm-editor) .local-asset-pinned-ref:has(> .local-asset-cloud-notice) {
+  flex-wrap: wrap;
+}
+
+:is(.prose-zen, .cm-editor) .local-asset-pinned-ref > .local-asset-cloud-notice {
+  flex-basis: 100%;
+  margin-top: 0;
+  padding: 0;
+  border-top: 0;
+}
+
+/* An embed whose file is not on this device (`buildMissingAssetNotice`): the
+   embed's card around one line, in place of the picture, document or player.
+   As on the Cloud notice, the line's colour and size are tokens on the
+   element. The editor drops the host line's strut (`cm-image-embed-line`), so
+   the card brings its own line-height. */
+:is(.prose-zen, .cm-editor) .local-asset-missing {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0.75rem 0;
+  padding: 0.6rem 0.85rem;
+  line-height: 1.4;
+}
+
+:is(.prose-zen, .cm-editor) .local-asset-missing-notice {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.cm-editor .cm-local-missing-embed {
+  max-width: min(100%, 980px);
+  margin: 0.5rem 0 0.6rem;
 }
 
 /* #463 — attachment chip: denotes a non-previewable file (`.tldraw`, `.zip`, …)
@@ -3828,6 +3941,35 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
 .prose-zen .callout > p {
   margin: 0.35em 0 0;
 }
+/* Foldable callouts (#853): `> [!type]-` and `> [!type]+` render as a
+   <details> whose <summary> is the title, so the whole title row toggles it.
+   The chevron follows the title, as in the editor. */
+.prose-zen details.callout > summary.callout-title {
+  display: block;
+  list-style: none;
+  cursor: pointer;
+}
+.prose-zen details.callout > summary.callout-title::-webkit-details-marker {
+  display: none;
+}
+.prose-zen details.callout > summary.callout-title::after {
+  content: "▾";
+  display: inline-block;
+  margin-left: 0.4em;
+  font-size: 0.8em;
+  opacity: 0.75;
+}
+.prose-zen details.callout:not([open]) > summary.callout-title {
+  margin-bottom: 0;
+}
+.prose-zen details.callout:not([open]) > summary.callout-title::after {
+  content: "▸";
+}
+.prose-zen details.callout > summary.callout-title:focus-visible {
+  outline: 2px solid rgb(var(--z-accent) / 0.6);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
 /* Callout color groups — the `data-callout` lists mirror the alias→group table
    in `lib/callout-types.ts` (kept in sync by hand; CSS can't import it). */
 .prose-zen .callout[data-callout="note"],
@@ -3906,10 +4048,191 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
   color: rgb(var(--z-red));
 }
 
-/* Mermaid diagram container */
-/* Mermaid block chrome — adapts to the current theme via CSS vars so
-   the card never clashes with the active palette. The SVG itself is
-   themed at render time via `buildMermaidTheme()` in Preview.tsx. */
+/* Mermaid diagrams, drawn by Pele (`lib/mermaid-render.ts`). The SVG paints
+   every colour through these variables, so a diagram follows the active theme,
+   a custom CSS theme included, and a theme switch repaints it without drawing
+   it again. The roles mirror the mermaid themeVariables they replace: nodes on
+   bg-2 with a bg-3 border, subgraphs on bg-softer, edges in grey-1, and the
+   chart series in the same order pie slices and git branches used. Fonts are
+   not set here: Pele writes the font it measured with into the SVG. */
+.pele {
+  --pele-bg: rgb(var(--z-bg));
+  --pele-fg: rgb(var(--z-fg-1));
+  --pele-muted: rgb(var(--z-grey-1));
+  --pele-line: rgb(var(--z-grey-1));
+  --pele-surface: rgb(var(--z-bg-2));
+  --pele-surface-alt: rgb(var(--z-bg-softer));
+  --pele-border: rgb(var(--z-bg-3));
+  --pele-accent: rgb(var(--z-accent));
+  --pele-critical: rgb(var(--z-red));
+  --pele-error: rgb(var(--z-red));
+  --pele-series-1: rgb(var(--z-accent));
+  --pele-series-2: rgb(var(--z-blue));
+  --pele-series-3: rgb(var(--z-green));
+  --pele-series-4: rgb(var(--z-purple));
+  --pele-series-5: rgb(var(--z-yellow));
+  --pele-series-6: rgb(var(--z-red));
+  --pele-series-7: rgb(var(--z-aqua));
+  --pele-series-8: rgb(var(--z-fg-1));
+}
+
+/* D2 diagrams (```d2) paint through theme classes (`fill-N1`, `stroke-B1`,
+   `color-N2` and so on) that D2 defines in a stylesheet inside each SVG. With
+   `zen-d2-themed` on the block (a diagram that picked no D2 theme of its own),
+   these rules outrank that stylesheet and map the classes onto the app theme,
+   in the roles the Pele rule above uses: text in fg-1, borders and edges in
+   grey-1, shapes on bg-1 and bg-2, accents in the accent colour. A colour the
+   author wrote (`style.fill`) is an attribute without a class and stays as
+   written. A theme switch repaints without drawing again. */
+/* D2 marks a shape with `link:` or `tooltip:` with a badge. Both are switched
+   off here (a diagram never navigates), so the badge would promise a click that
+   does nothing. */
+:is(.zen-d2, .cm-d2-block) .d2-svg .appendix-icon {
+  display: none;
+}
+.zen-d2-themed .d2-svg > rect:first-child {
+  /* D2's canvas: let the card or the note show through. */
+  fill: transparent;
+}
+.zen-d2-themed .d2-svg .fill-N1 {
+  fill: rgb(var(--z-fg-1));
+}
+.zen-d2-themed .d2-svg .stroke-N1 {
+  stroke: rgb(var(--z-fg-1));
+}
+.zen-d2-themed .d2-svg .color-N1 {
+  color: rgb(var(--z-fg-1));
+}
+.zen-d2-themed .d2-svg .background-color-N1 {
+  background-color: rgb(var(--z-fg-1));
+}
+.zen-d2-themed .d2-svg .fill-N2 {
+  fill: rgb(var(--z-fg-2));
+}
+.zen-d2-themed .d2-svg .stroke-N2 {
+  stroke: rgb(var(--z-fg-2));
+}
+.zen-d2-themed .d2-svg .color-N2 {
+  color: rgb(var(--z-fg-2));
+}
+.zen-d2-themed .d2-svg .background-color-N2 {
+  background-color: rgb(var(--z-fg-2));
+}
+.zen-d2-themed .d2-svg .fill-N3,
+.zen-d2-themed .d2-svg .fill-B1,
+.zen-d2-themed .d2-svg .fill-B2 {
+  fill: rgb(var(--z-grey-1));
+}
+.zen-d2-themed .d2-svg .stroke-N3,
+.zen-d2-themed .d2-svg .stroke-B1,
+.zen-d2-themed .d2-svg .stroke-B2 {
+  stroke: rgb(var(--z-grey-1));
+}
+.zen-d2-themed .d2-svg .color-N3,
+.zen-d2-themed .d2-svg .color-B1,
+.zen-d2-themed .d2-svg .color-B2 {
+  color: rgb(var(--z-grey-1));
+}
+.zen-d2-themed .d2-svg .background-color-N3,
+.zen-d2-themed .d2-svg .background-color-B1,
+.zen-d2-themed .d2-svg .background-color-B2 {
+  background-color: rgb(var(--z-grey-1));
+}
+.zen-d2-themed .d2-svg .fill-N4,
+.zen-d2-themed .d2-svg .fill-N5 {
+  fill: rgb(var(--z-bg-3));
+}
+.zen-d2-themed .d2-svg .stroke-N4,
+.zen-d2-themed .d2-svg .stroke-N5 {
+  stroke: rgb(var(--z-bg-3));
+}
+.zen-d2-themed .d2-svg .color-N4,
+.zen-d2-themed .d2-svg .color-N5 {
+  color: rgb(var(--z-bg-3));
+}
+.zen-d2-themed .d2-svg .background-color-N4,
+.zen-d2-themed .d2-svg .background-color-N5 {
+  background-color: rgb(var(--z-bg-3));
+}
+.zen-d2-themed .d2-svg .fill-N6,
+.zen-d2-themed .d2-svg .fill-B3,
+.zen-d2-themed .d2-svg .fill-B4 {
+  fill: rgb(var(--z-bg-2));
+}
+.zen-d2-themed .d2-svg .stroke-N6,
+.zen-d2-themed .d2-svg .stroke-B3,
+.zen-d2-themed .d2-svg .stroke-B4 {
+  stroke: rgb(var(--z-bg-2));
+}
+.zen-d2-themed .d2-svg .color-N6,
+.zen-d2-themed .d2-svg .color-B3,
+.zen-d2-themed .d2-svg .color-B4 {
+  color: rgb(var(--z-bg-2));
+}
+.zen-d2-themed .d2-svg .background-color-N6,
+.zen-d2-themed .d2-svg .background-color-B3,
+.zen-d2-themed .d2-svg .background-color-B4 {
+  background-color: rgb(var(--z-bg-2));
+}
+.zen-d2-themed .d2-svg .fill-B5,
+.zen-d2-themed .d2-svg .fill-AA4,
+.zen-d2-themed .d2-svg .fill-AB4 {
+  fill: rgb(var(--z-bg-1));
+}
+.zen-d2-themed .d2-svg .stroke-B5,
+.zen-d2-themed .d2-svg .stroke-AA4,
+.zen-d2-themed .d2-svg .stroke-AB4 {
+  stroke: rgb(var(--z-bg-1));
+}
+.zen-d2-themed .d2-svg .color-B5,
+.zen-d2-themed .d2-svg .color-AA4,
+.zen-d2-themed .d2-svg .color-AB4 {
+  color: rgb(var(--z-bg-1));
+}
+.zen-d2-themed .d2-svg .background-color-B5,
+.zen-d2-themed .d2-svg .background-color-AA4,
+.zen-d2-themed .d2-svg .background-color-AB4 {
+  background-color: rgb(var(--z-bg-1));
+}
+.zen-d2-themed .d2-svg .fill-N7,
+.zen-d2-themed .d2-svg .fill-B6,
+.zen-d2-themed .d2-svg .fill-AA5,
+.zen-d2-themed .d2-svg .fill-AB5 {
+  fill: rgb(var(--z-bg));
+}
+.zen-d2-themed .d2-svg .stroke-N7,
+.zen-d2-themed .d2-svg .stroke-B6,
+.zen-d2-themed .d2-svg .stroke-AA5,
+.zen-d2-themed .d2-svg .stroke-AB5 {
+  stroke: rgb(var(--z-bg));
+}
+.zen-d2-themed .d2-svg .color-N7,
+.zen-d2-themed .d2-svg .color-B6,
+.zen-d2-themed .d2-svg .color-AA5,
+.zen-d2-themed .d2-svg .color-AB5 {
+  color: rgb(var(--z-bg));
+}
+.zen-d2-themed .d2-svg .background-color-N7,
+.zen-d2-themed .d2-svg .background-color-B6,
+.zen-d2-themed .d2-svg .background-color-AA5,
+.zen-d2-themed .d2-svg .background-color-AB5 {
+  background-color: rgb(var(--z-bg));
+}
+.zen-d2-themed .d2-svg .fill-AA2 {
+  fill: rgb(var(--z-accent));
+}
+.zen-d2-themed .d2-svg .stroke-AA2 {
+  stroke: rgb(var(--z-accent));
+}
+.zen-d2-themed .d2-svg .color-AA2 {
+  color: rgb(var(--z-accent));
+}
+.zen-d2-themed .d2-svg .background-color-AA2 {
+  background-color: rgb(var(--z-accent));
+}
+
+/* Mermaid block chrome: adapts to the current theme via CSS vars so the card
+   never clashes with the active palette. */
 .prose-zen .mermaid {
   display: flex;
   flex-direction: column;
@@ -3925,6 +4248,11 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
 .prose-zen .mermaid svg {
   max-width: 100%;
   height: auto;
+}
+/* The error quotes the offending line with a caret row under it, which only
+   points at the right column when the text is not centred like the card. */
+.prose-zen .mermaid .zen-diagram-error {
+  text-align: left;
 }
 
 /* URL embeds (```embed) — a responsive video/iframe card. `aspect-ratio` is set
@@ -4319,6 +4647,7 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
   color: rgb(var(--z-fg-1));
 }
 .zen-diagram-modal-host .zen-tikz,
+.zen-diagram-modal-host .zen-d2,
 .zen-diagram-modal-host .zen-jsxgraph,
 .zen-diagram-modal-host .zen-function-plot,
 .zen-diagram-modal-host .mermaid {
@@ -4417,6 +4746,7 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
   width: 100%;
 }
 .zen-diagram-pan-content .zen-tikz,
+.zen-diagram-pan-content .zen-d2,
 .zen-diagram-pan-content .zen-jsxgraph,
 .zen-diagram-pan-content .zen-function-plot,
 .zen-diagram-pan-content .mermaid {
@@ -4880,6 +5210,61 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
   color: rgb(var(--z-accent));
 }
 
+/* List item fold arrow (#848): the widget is a zero-width anchor placed at
+ * the item's marker, so the arrow sits just left of the bullet, number or
+ * checkbox at any nesting depth and never shifts the text. The anchor is
+ * boxed and aligned like .cm-task-checkbox, so the arrow centres on the
+ * checkbox it sits beside. Revealed like the heading arrow: on line hover,
+ * on the caret line, and while folded. */
+.cm-list-fold-anchor {
+  position: relative;
+  display: inline-block;
+  width: 0;
+  height: 1.05em;
+  vertical-align: text-bottom;
+}
+/* text-indent: the list line's hanging indent is inherited and would push the
+ * glyph out of its box by the marker's width (six columns for a task). */
+.cm-list-fold-anchor,
+.cm-list-fold-arrow {
+  text-indent: 0;
+}
+.cm-list-fold-arrow {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  font-size: 12px;
+  line-height: 1;
+  color: theme("colors.ink.400");
+  opacity: 0;
+  cursor: pointer;
+  user-select: none;
+  border-radius: 4px;
+  transition:
+    opacity 120ms ease,
+    color 120ms ease,
+    background-color 120ms ease;
+}
+.cm-editor .cm-line:hover .cm-list-fold-arrow,
+.cm-editor .cm-activeLine .cm-list-fold-arrow,
+.cm-list-fold-arrow:hover,
+.cm-list-fold-arrow.is-folded {
+  opacity: 1;
+}
+.cm-list-fold-arrow:hover {
+  color: theme("colors.ink.900");
+  background: rgb(var(--z-bg-2));
+}
+.cm-list-fold-arrow.is-folded {
+  color: rgb(var(--z-accent));
+}
+
 /* The chip gutter must fit inside .cm-content's own box. The fold arrow
  * (≤28px + ≤10px gap) was sized to live inside the default 32px padding;
  * the chip needs another 30px beyond it, which only exists as centered-
@@ -4958,6 +5343,67 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
   background: rgb(var(--z-bg-2));
 }
 .prose-zen .prose-heading-fold-arrow.is-folded {
+  color: rgb(var(--z-accent));
+}
+
+/* --- Preview list item fold arrow (#848) --------------------------- */
+/* Just left of the item's marker, as in the editor. A bullet or number
+ * renders outside the item, right-aligned to it, as `• ` or `N. `; the
+ * enhancer counts a number's characters, so `10.` steps its arrow further
+ * left than `9.`. A task's checkbox sits in the item's own padding instead.
+ * Shown while the item itself is hovered (not one nested under it) and while
+ * it is folded. */
+@property --z-list-item-em {
+  syntax: "<length>";
+  inherits: true;
+  initial-value: 16px;
+}
+@property --z-list-item-ch {
+  syntax: "<length>";
+  inherits: true;
+  initial-value: 9.6px;
+}
+.prose-zen li.prose-list-foldable {
+  position: relative;
+  /* Registered lengths resolve here, in the item's font: the arrow's own
+   * smaller font would shrink every offset below along with its glyph. */
+  --z-list-item-em: 1em;
+  --z-list-item-ch: 1ch;
+}
+.prose-zen .prose-list-fold-arrow {
+  position: absolute;
+  left: calc(var(--z-list-marker-chars, 2) * var(--z-list-item-ch) * -1 - 20px);
+  top: calc(var(--z-list-item-em) * var(--z-editor-line-height, 1.7) / 2 - 8px);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  font-size: 12px;
+  line-height: 1;
+  color: theme("colors.ink.400");
+  opacity: 0;
+  cursor: pointer;
+  user-select: none;
+  border-radius: 4px;
+  transition:
+    opacity 120ms ease,
+    color 120ms ease,
+    background-color 120ms ease;
+}
+.prose-zen li.task-list-item > .prose-list-fold-arrow {
+  left: -20px;
+}
+.prose-zen li.prose-list-foldable:hover:not(:has(li:hover)) > .prose-list-fold-arrow,
+.prose-zen .prose-list-fold-arrow:hover,
+.prose-zen .prose-list-fold-arrow.is-folded {
+  opacity: 1;
+}
+.prose-zen .prose-list-fold-arrow:hover {
+  color: theme("colors.ink.900");
+  background: rgb(var(--z-bg-2));
+}
+.prose-zen .prose-list-fold-arrow.is-folded {
   color: rgb(var(--z-accent));
 }
 
@@ -5073,6 +5519,13 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
   width: fit-content;
   max-width: 100%;
 }
+/* With set widths the wrapper grows with its table, so the add-column rail
+   stays at the table's edge and the widget scrolls sideways (#920). Capped at
+   the editor's width, as before #294, the table squeezed its columns below the
+   widths it stored, and Preview, which honors them, disagreed with it. */
+.cm-table-wrapper:has(> table.cm-table-fixed) {
+  max-width: none;
+}
 .cm-table-widget table {
   border-collapse: collapse;
   border-spacing: 0;
@@ -5081,6 +5534,7 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
    widths authoritative; the table sizes to their sum and scrolls if wide. */
 .cm-table-widget table.cm-table-fixed {
   table-layout: fixed;
+  width: max-content;
 }
 .cm-table-widget table.cm-table-fixed .cm-table-cell {
   overflow-wrap: anywhere;
@@ -5483,6 +5937,22 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
   font-weight: 600;
   color: rgb(var(--callout-color));
 }
+/* The fold chevron after a foldable callout's title (#853). */
+.cm-wysiwyg .cm-editor .cm-callout-fold {
+  display: inline-block;
+  margin-left: 0.4em;
+  padding: 0 0.25em;
+  font-size: 0.8em;
+  color: rgb(var(--callout-color));
+  opacity: 0.75;
+  cursor: pointer;
+  user-select: none;
+  border-radius: 4px;
+}
+.cm-wysiwyg .cm-editor .cm-callout-fold:hover {
+  opacity: 1;
+  background: rgb(var(--callout-color) / 0.14);
+}
 /* A list line inside a callout/blockquote keeps its hanging indent, but it has
    to sit on TOP of the box's own left padding. Otherwise the list's negative
    text-indent (see .cm-markdown-list-line) drags the bullet out past the box's
@@ -5537,6 +6007,37 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
 }
 .cm-wysiwyg .cm-editor .cm-wikilink:hover {
   text-decoration-color: rgb(var(--z-accent));
+}
+/* Unresolved target: muted with a dashed underline, the reading view's
+   `a.wikilink.broken` look, so a link that would create a note reads apart
+   from one that opens a note (#768). */
+.cm-wysiwyg .cm-editor .cm-wikilink.cm-wikilink-broken {
+  text-decoration-style: dashed;
+  text-decoration-color: theme("colors.ink.400");
+}
+/* The label's own highlight spans (the link token inside `[[ ]]`) carry the
+   accent color themselves, so the muted color has to reach them too; the
+   parent's value alone never wins over a child's own declaration. */
+.cm-wysiwyg .cm-editor .cm-wikilink.cm-wikilink-broken,
+.cm-wysiwyg .cm-editor .cm-wikilink.cm-wikilink-broken * {
+  color: theme("colors.ink.500");
+}
+.cm-wysiwyg .cm-editor .cm-wikilink.cm-wikilink-broken:hover {
+  text-decoration-color: theme("colors.ink.500");
+}
+/* Live template tokens (#784): `{{modified_date}}` and friends render as the
+   note's last-saved time. The dotted underline says "computed, not typed";
+   click or move the caret onto it to see and edit the token itself. */
+.cm-wysiwyg .cm-editor .cm-live-token {
+  color: theme("colors.ink.700");
+  text-decoration: underline dotted;
+  text-decoration-color: theme("colors.ink.400");
+  text-underline-offset: 2px;
+  cursor: text;
+}
+.dark .cm-wysiwyg .cm-editor .cm-live-token {
+  color: theme("colors.ink.300");
+  text-decoration-color: theme("colors.ink.600");
 }
 /* Revealed `[[ ]]` / `|` markers when editing a wikilink — quiet grey, upright,
    no underline (the inner brackets otherwise inherit the italic/underline link
@@ -5730,4 +6231,66 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
 .prose-zen .zen-task-rollup-complete {
   color: rgb(var(--z-green));
   background-color: rgb(var(--z-green) / 0.12);
+}
+
+
+/* Reviewing an assistant's edits (cm-agent-review.ts): the merge view's
+   changes in the theme's own red and green instead of its fixed ones, and its
+   Accept / Reject buttons in the app's button shape. Scoped by the editor's
+   `zen-agent-review` class so they outrank the merge view's injected theme. */
+/* The bands run to the editor's right edge, not just the text column: a
+   border image with `fill`, pushed out to the right by its outset. That is
+   ink overflow, so it adds no horizontal scrolling, and the scroller clips
+   it at the edge of the pane. */
+.cm-editor.zen-agent-review .cm-deletedChunk {
+  background-color: transparent;
+  border-image-source: linear-gradient(rgb(var(--z-red) / 0.07), rgb(var(--z-red) / 0.07));
+  border-image-slice: 0 fill;
+  border-image-outset: 0 100vw 0 0;
+}
+.cm-editor.zen-agent-review .cm-deletedChunk .cm-deletedText {
+  background: rgb(var(--z-red) / 0.24);
+}
+.cm-editor.zen-agent-review .cm-changedLine {
+  background-color: transparent;
+  border-image-source: linear-gradient(rgb(var(--z-green) / 0.08), rgb(var(--z-green) / 0.08));
+  border-image-slice: 0 fill;
+  border-image-outset: 0 100vw 0 0;
+}
+.cm-editor.zen-agent-review .cm-changedText {
+  background: rgb(var(--z-green) / 0.24);
+}
+/* The unchanged stretch folded away between changes. The merge view picks
+   this bar's grey from CodeMirror's dark-theme flag, which ZenNotes never sets
+   (its themes are CSS variables), so every dark theme drew a near-white bar. */
+.cm-editor.zen-agent-review .cm-collapsedLines {
+  background: transparent;
+  border-image-source: linear-gradient(rgb(var(--z-bg-1)), rgb(var(--z-bg-1)));
+  border-image-slice: 0 fill;
+  border-image-outset: 0 100vw 0 0;
+  color: rgb(var(--z-grey-1));
+  font-size: 11px;
+}
+.cm-editor.zen-agent-review .cm-collapsedLines:hover {
+  color: rgb(var(--z-fg-2));
+}
+.cm-editor.zen-agent-review .cm-deletedChunk .zen-review-control {
+  margin: 0 2px;
+  padding: 1px 8px;
+  border: 1px solid theme("colors.paper.300");
+  border-radius: 6px;
+  background: theme("colors.paper.100");
+  color: theme("colors.ink.800");
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+.cm-editor.zen-agent-review .cm-deletedChunk .zen-review-accept:hover {
+  border-color: rgb(var(--z-green) / 0.55);
+  background: rgb(var(--z-green) / 0.14);
+}
+.cm-editor.zen-agent-review .cm-deletedChunk .zen-review-reject:hover {
+  border-color: rgb(var(--z-red) / 0.55);
+  background: rgb(var(--z-red) / 0.14);
 }

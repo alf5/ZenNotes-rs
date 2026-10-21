@@ -6,8 +6,8 @@
  *
  * WYSIWYG-only: registered via `wysiwygExtensions()`; never loads in Split.
  */
-import { syntaxTree } from '@codemirror/language'
-import { RangeSetBuilder, type EditorState } from '@codemirror/state'
+import { foldEffect, syntaxTree, unfoldEffect } from '@codemirror/language'
+import { RangeSetBuilder } from '@codemirror/state'
 import {
   Decoration,
   type DecorationSet,
@@ -17,18 +17,8 @@ import {
   WidgetType
 } from '@codemirror/view'
 import { calloutGroupFor } from './callout-types'
-/** Line number (1-based) of the closing `---` of leading YAML frontmatter,
- *  or -1 when there is none. Lets us leave the frontmatter fences to the
- *  frontmatter styling rather than rendering them as horizontal rules.
- *  (Inlined: the PR's full frontmatter-properties module isn't ported.) */
-function frontmatterEndLine(state: EditorState): number {
-  const doc = state.doc
-  if (doc.lines < 2 || doc.line(1).text.trim() !== '---') return -1
-  for (let i = 2; i <= doc.lines; i++) {
-    if (doc.line(i).text.trim() === '---') return i
-  }
-  return -1
-}
+import { CALLOUT_HEAD_RE, CalloutFoldChevron } from './cm-callout-fold'
+import { foldedExactly } from './cm-list-fold'
 
 const quoteLine = Decoration.line({ class: 'cm-wq-quote' })
 
@@ -68,9 +58,6 @@ const hrRule = Decoration.replace({ widget: new HrWidget() })
 /** Hide a fence line's ``` ```lang ``` / ``` ``` ``` text (inline, keeps the
  *  line + its card styling) when the cursor is outside the code block. */
 const hideInline = Decoration.replace({})
-
-/** Header of an Obsidian-style callout: `> [!type] optional title`. */
-const CALLOUT_RE = /^(\s*>\s?)\[!(\w+)\]\s?(.*)$/
 
 /** Collapse callout type aliases onto one color group, mirroring the Preview
  *  renderer (markdown.ts) via the shared `callout-types` table. */
@@ -121,10 +108,9 @@ function buildDecorations(view: EditorView): DecorationSet {
   const active = activeLineSet(view)
   const pending: Pending[] = []
   const quotedLines = new Set<number>()
-  // The properties widget owns the leading frontmatter (its `---` fences parse
-  // as HorizontalRule); skip that range so we don't emit an overlapping
-  // replace decoration over the same lines.
-  const fmEnd = frontmatterEndLine(state)
+  // The leading frontmatter is not part of the markdown tree (note grammar,
+  // cm-markdown-language.ts), so its fences never show up as HorizontalRule
+  // here; the properties widget owns those lines.
 
   for (const { from, to } of view.visibleRanges) {
     syntaxTree(state).iterate({
@@ -133,20 +119,28 @@ function buildDecorations(view: EditorView): DecorationSet {
       enter: (node) => {
         if (node.name === 'Blockquote') {
           const first = state.doc.lineAt(node.from).number
+          // A fold splits the viewport into ranges and the tree walk meets a
+          // quote once per range: its line classes are guarded by
+          // `quotedLines`, and its title decorations must not come twice.
+          if (quotedLines.has(first)) return
           const last = state.doc.lineAt(Math.max(node.from, node.to - 1)).number
           const firstLine = state.doc.line(first)
-          const callout = firstLine.text.match(CALLOUT_RE)
+          const callout = firstLine.text.match(CALLOUT_HEAD_RE)
           if (callout) {
             // Obsidian-style callout: a colored card with a typed title. Tag
-            // each line for the box (head/foot round the top/bottom).
+            // each line for the box (head/foot round the top/bottom). A folded
+            // callout is its title line alone, so that line closes the box.
             const group = calloutGroup(callout[2])
+            const marker = callout[3] ?? ''
+            const range = node.to > firstLine.to ? { from: firstLine.to, to: node.to } : null
+            const folded = range !== null && foldedExactly(state, range) !== null
             for (let n = first; n <= last; n++) {
               if (quotedLines.has(n)) continue
               quotedLines.add(n)
               const ln = state.doc.line(n)
               let cls = `cm-callout cm-callout-${group}`
               if (n === first) cls += ' cm-callout-head'
-              if (n === last) cls += ' cm-callout-foot'
+              if (n === last || (n === first && folded)) cls += ' cm-callout-foot'
               pending.push({
                 from: ln.from,
                 to: ln.from,
@@ -154,12 +148,22 @@ function buildDecorations(view: EditorView): DecorationSet {
                 line: true
               })
             }
-            // Header: render the title. Off the line, hide the `[!type]` token —
-            // the custom title stays (styled), or we show the type name.
+            // Header: render the title. Off the line, hide the `[!type]` token
+            // and its fold marker; the custom title stays (styled), or we show
+            // the type name. A foldable callout (#853) gets its chevron after
+            // the title.
             if (!active.has(first)) {
               const bStart = firstLine.from + callout[1].length
-              const bEnd = bStart + `[!${callout[2]}]`.length
-              if (callout[3].trim()) {
+              const bEnd = bStart + `[!${callout[2]}]${marker}`.length
+              if (marker && range) {
+                pending.push({
+                  from: firstLine.to,
+                  to: firstLine.to,
+                  deco: Decoration.widget({ widget: new CalloutFoldChevron(folded), side: -1 }),
+                  line: false
+                })
+              }
+              if (callout[4].trim()) {
                 let to = bEnd
                 if (state.doc.sliceString(to, to + 1) === ' ') to += 1
                 pending.push({ from: bStart, to, deco: hideInline, line: false })
@@ -187,7 +191,6 @@ function buildDecorations(view: EditorView): DecorationSet {
         }
         if (node.name === 'HorizontalRule') {
           const lineNo = state.doc.lineAt(node.from).number
-          if (fmEnd >= 1 && lineNo <= fmEnd) return // leave frontmatter to the properties widget
           if (active.has(lineNo)) return // reveal `---` source on the active line
           pending.push({ from: node.from, to: node.to, deco: hrRule, line: false })
           return
@@ -210,8 +213,9 @@ function buildDecorations(view: EditorView): DecorationSet {
               pending.push({ from: firstLine.from, to: firstLine.to, deco: hideInline, line: false })
             }
             // Only hide the last line if it's actually a closing fence — an
-            // unclosed block at EOF ends on a content line we must keep.
-            const closesWithFence = /^\s*(?:`{3,}|~{3,})\s*$/.test(lastLine.text)
+            // unclosed block at EOF ends on a content line we must keep. In a
+            // quote or callout the fence carries the `>` markers too.
+            const closesWithFence = /^\s*(?:>\s?)*(?:`{3,}|~{3,})\s*$/.test(lastLine.text)
             if (
               closesWithFence &&
               lastLine.number !== firstLine.number &&
@@ -262,7 +266,18 @@ export const wysiwygBlocksPlugin = ViewPlugin.fromClass(
       this.decorations = buildDecorations(view)
     }
     update(update: ViewUpdate): void {
-      if (update.docChanged || update.selectionSet || update.viewportChanged) {
+      if (
+        update.docChanged ||
+        update.selectionSet ||
+        update.viewportChanged ||
+        // A parse cut short by its time budget finishes in a later update that
+        // changes nothing else; without this the cards and hidden fences stay
+        // as the partial tree drew them until the next edit or cursor move.
+        syntaxTree(update.startState) !== syntaxTree(update.state) ||
+        update.transactions.some((tr) =>
+          tr.effects.some((e) => e.is(foldEffect) || e.is(unfoldEffect))
+        )
+      ) {
         this.decorations = buildDecorations(update.view)
       }
     }

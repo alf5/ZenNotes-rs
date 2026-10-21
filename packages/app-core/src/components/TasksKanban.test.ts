@@ -3,16 +3,23 @@ import type { VaultTask } from '@shared/tasks'
 import {
   applyColumnOrder,
   arrangeColumns,
+  compareCardsByDue,
   completeStatusOrder,
   cursorAfterCardMove,
   dropMutationsFor,
+  fieldColumns,
   IN_PROGRESS_COLUMN_ID,
   kanbanGroupByKeyPlan,
   kanbanPendingGroupByPlan,
   NO_VALUE_COLUMN_ID,
+  priorityColumns,
   statusColumns,
   taskIdentityKey,
-  type Column
+  type Column,
+  folderColumns,
+  noteLocationOf,
+  orderCards,
+  FOLDER_OTHER_LABEL
 } from './TasksKanban'
 
 function col(id: string): Column {
@@ -346,5 +353,253 @@ describe('completeStatusOrder (#677)', () => {
       'waiting',
       'done'
     ])
+  })
+})
+
+describe('folder board (#730)', () => {
+  const task = (sourcePath: string, noteFolder: VaultTask['noteFolder'], extra: Partial<VaultTask> = {}): VaultTask =>
+    ({
+      id: `${sourcePath}#0`,
+      sourcePath,
+      noteTitle: sourcePath.split('/').pop()!.replace(/\.md$/, ''),
+      noteFolder,
+      lineNumber: 0,
+      taskIndex: 0,
+      rawText: '- [ ] x',
+      content: 'x',
+      checked: false,
+      forwarded: false,
+      cancelled: false,
+      inProgress: false,
+      waiting: false,
+      tags: [],
+      ...extra
+    }) as VaultTask
+  const layout = (folderRoot = '', systemFolderPaths?: Record<string, string>) => ({
+    folderRoot,
+    systemFolderPaths: systemFolderPaths ?? null,
+    systemFolderLabels: null
+  })
+
+  it('locates a note under its system folder in inbox mode, root mode, and with a remapped folder', () => {
+    expect(noteLocationOf(task('inbox/Projects/alpha/plan.md', 'inbox'))).toEqual({ folder: 'inbox', dir: 'Projects/alpha', prefix: 'inbox' })
+    expect(noteLocationOf(task('inbox/plan.md', 'inbox'))).toEqual({ folder: 'inbox', dir: '', prefix: 'inbox' })
+    // Root mode: no prefix, so the first segment is a user folder.
+    expect(noteLocationOf(task('Projects/alpha/plan.md', 'inbox'))).toEqual({ folder: 'inbox', dir: 'Projects/alpha', prefix: '' })
+    expect(noteLocationOf(task('plan.md', 'inbox'))).toEqual({ folder: 'inbox', dir: '', prefix: '' })
+    // A vault whose inbox lives in `01 - Entry`: that prefix is the inbox, and a
+    // directory literally called inbox is a user folder.
+    const remapped = { inbox: '01 - Entry' }
+    expect(noteLocationOf(task('01 - Entry/Projects/plan.md', 'inbox'), remapped)).toEqual({ folder: 'inbox', dir: 'Projects', prefix: '01 - Entry' })
+    expect(noteLocationOf(task('inbox/plan.md', 'inbox'), remapped)).toEqual({ folder: 'inbox', dir: 'inbox', prefix: '' })
+    expect(noteLocationOf(task('quick/2026/plan.md', 'quick'))).toEqual({ folder: 'quick', dir: '2026', prefix: 'quick' })
+  })
+
+  it('gives every note folder its own column, system roots first, subfolders alphabetically', () => {
+    const columns = folderColumns(
+      [
+        task('inbox/Projects/beta/b.md', 'inbox'),
+        task('inbox/plan.md', 'inbox'),
+        task('inbox/Projects/alpha/a.md', 'inbox'),
+        task('inbox/Projects/alpha/deep/d.md', 'inbox'),
+        task('quick/q.md', 'quick'),
+        task('inbox/Areas/home.md', 'inbox'),
+        task('inbox/Projects/alpha/done.md', 'inbox', { checked: true })
+      ],
+      false,
+      layout()
+    )
+    expect(columns.map((c) => [c.id, c.label, c.tasks.length])).toEqual([
+      ['inbox', 'Inbox', 1],
+      ['inbox/Areas', 'Areas', 1],
+      ['inbox/Projects/alpha', 'Projects/alpha', 1],
+      ['inbox/Projects/alpha/deep', 'Projects/alpha/deep', 1],
+      ['inbox/Projects/beta', 'Projects/beta', 1],
+      ['quick', 'Quick Notes', 1]
+    ])
+  })
+
+  it('labels root-mode notes by their folder and the vault root by the inbox label', () => {
+    const columns = folderColumns([task('Projects/alpha/a.md', 'inbox'), task('plan.md', 'inbox')], false, layout())
+    expect(columns.map((c) => [c.id, c.label])).toEqual([
+      ['inbox', 'Inbox'],
+      ['Projects/alpha', 'Projects/alpha']
+    ])
+  })
+
+  it('with a root, groups by its children, rolls deeper notes up, and parks the rest in Other folders', () => {
+    const columns = folderColumns(
+      [
+        task('inbox/Projects/beta/b.md', 'inbox'),
+        task('inbox/Projects/alpha/a.md', 'inbox'),
+        task('inbox/Projects/alpha/deep/d.md', 'inbox'),
+        task('inbox/Projects/overview.md', 'inbox'),
+        task('inbox/Areas/home.md', 'inbox'),
+        task('inbox/plan.md', 'inbox'),
+        task('quick/q.md', 'quick')
+      ],
+      false,
+      layout('projects/')
+    )
+    expect(columns.map((c) => [c.id, c.label, c.tasks.length])).toEqual([
+      ['inbox/Projects', 'Projects', 1],
+      ['inbox/Projects/alpha', 'alpha', 2],
+      ['inbox/Projects/beta', 'beta', 1],
+      [NO_VALUE_COLUMN_ID, FOLDER_OTHER_LABEL, 3]
+    ])
+    // Root mode: same shape without the prefix.
+    const rootMode = folderColumns([task('Projects/alpha/a.md', 'inbox'), task('Notes/n.md', 'inbox')], false, layout('Projects'))
+    expect(rootMode.map((c) => c.id)).toEqual(['Projects/alpha', NO_VALUE_COLUMN_ID])
+  })
+
+  it('hides archived notes unless asked, and shows their column with the archive label when shown', () => {
+    const tasks = [task('inbox/a.md', 'inbox'), task('archive/old/o.md', 'archive')]
+    expect(folderColumns(tasks, false, layout()).map((c) => c.id)).toEqual(['inbox'])
+    expect(folderColumns(tasks, true, layout()).map((c) => [c.id, c.label])).toEqual([
+      ['inbox', 'Inbox'],
+      ['archive/old', 'Archive / old']
+    ])
+  })
+})
+
+describe('forwarded and cancelled records stay off every board (#786)', () => {
+  // One task forwarded Note 1 → Note 2 → Note 3: two `[>]` trail records and
+  // one live copy. Plus a cancelled and a done task for the other closed states.
+  const chain: VaultTask[] = [
+    card({ content: 'Write the report', sourcePath: 'inbox/Note 1.md', forwarded: true, priority: 'high' }),
+    card({ content: 'Write the report', sourcePath: 'inbox/Note 2.md', forwarded: true, priority: 'high' }),
+    card({ content: 'Write the report', sourcePath: 'inbox/Note 3.md', priority: 'high' }),
+    card({ content: 'Old idea', sourcePath: 'inbox/Note 3.md', taskIndex: 1, cancelled: true }),
+    card({ content: 'Shipped', sourcePath: 'inbox/Note 3.md', taskIndex: 2, checked: true }),
+    card({ content: 'Still open', sourcePath: 'inbox/Note 3.md', taskIndex: 3 })
+  ].map((task) => ({ ...task, noteFolder: 'inbox' as const }))
+
+  const cards = (columns: Column[]): string[] =>
+    columns.flatMap((c) => c.tasks.map((t) => `${t.sourcePath} › ${t.content}`))
+
+  it('shows the forwarded task once on the Priority board, from the note it lives in now', () => {
+    const columns = priorityColumns(chain)
+    expect(columnIds(columns, 'high')).toEqual(['Write the report'])
+    expect(cards(columns)).toEqual(['inbox/Note 3.md › Write the report', 'inbox/Note 3.md › Still open'])
+  })
+
+  it('shows it once on the Folder board too', () => {
+    const columns = folderColumns(chain, false, {
+      folderRoot: '',
+      systemFolderPaths: null,
+      systemFolderLabels: null
+    })
+    expect(cards(columns)).toEqual(['inbox/Note 3.md › Write the report', 'inbox/Note 3.md › Still open'])
+  })
+
+  it('and the Status board keeps leaving the trail records out', () => {
+    const columns = statusColumns(chain, TODAY)
+    expect(cards(columns)).toEqual([
+      'inbox/Note 3.md › Write the report',
+      'inbox/Note 3.md › Still open',
+      'inbox/Note 3.md › Shipped'
+    ])
+  })
+})
+
+// #949: a task note's `status: done` both closes it and names its column, so a
+// Custom status board with a configured `done` column must keep it there.
+describe('closed task notes on the Custom status board (#949)', () => {
+  const taskNote = (content: string, status: string): VaultTask =>
+    card({
+      content,
+      kind: 'file',
+      sourcePath: `inbox/${content}.md`,
+      taskIndex: -1,
+      status,
+      fields: { status },
+      checked: status === 'done',
+      cancelled: status === 'cancelled',
+      inProgress: status === 'in-progress'
+    })
+  // A note with frontmatter `status: in-progress` lends that status to its
+  // checkboxes, and a checked box keeps its own explicit `@status:done`.
+  const checkbox = (content: string, status: string, checked: boolean, taskIndex: number): VaultTask =>
+    card({ content, sourcePath: 'inbox/Checklist.md', taskIndex, status, fields: { status }, checked })
+  const tasks = [
+    taskNote('Completed demo task', 'done'),
+    taskNote('Active demo task', 'in-progress'),
+    taskNote('Dropped demo task', 'cancelled'),
+    checkbox('Finished step', 'in-progress', true, 0),
+    checkbox('Next step', 'in-progress', false, 1),
+    checkbox('Shipped step', 'done', true, 2)
+  ]
+  const statuses = ['open', 'in-progress', 'waiting', 'done']
+
+  it('keeps a done task note in the configured Done column, still checked', () => {
+    const columns = fieldColumns(tasks, 'status', statuses)
+    expect(ids(columns)).toEqual(['open', 'in-progress', 'waiting', 'done', NO_VALUE_COLUMN_ID])
+    expect(columnIds(columns, 'done')).toEqual(['Completed demo task'])
+    expect(columns.find((c) => c.id === 'done')!.tasks[0].checked).toBe(true)
+    expect(columnIds(columns, 'in-progress')).toEqual(['Active demo task', 'Next step'])
+  })
+
+  it('leaves closed task notes off when their status has no configured column', () => {
+    const columns = fieldColumns(tasks, 'status', ['open', 'in-progress'])
+    expect(ids(columns)).toEqual(['open', 'in-progress', NO_VALUE_COLUMN_ID])
+    expect(columns.flatMap((c) => c.tasks.map((t) => t.content))).toEqual(['Active demo task', 'Next step'])
+  })
+
+  it('shows a cancelled task note once a cancelled column is configured', () => {
+    const columns = fieldColumns(tasks, 'status', [...statuses, 'cancelled'])
+    expect(columnIds(columns, 'cancelled')).toEqual(['Dropped demo task'])
+  })
+
+  it('keeps checked checkbox tasks off, whatever status they carry or inherit', () => {
+    const columns = fieldColumns(tasks, 'status', statuses)
+    const shown = columns.flatMap((c) => c.tasks.map((t) => t.content))
+    expect(shown).not.toContain('Finished step')
+    expect(shown).not.toContain('Shipped step')
+  })
+})
+
+// #889: a column can follow its cards' due dates instead of the order they
+// were dragged into, on every board, custom status boards included.
+describe('card order by due date (#889)', () => {
+  const dated = (content: string, due: string | undefined, sourcePath: string, taskIndex = 0): VaultTask =>
+    card({ content, due, sourcePath, taskIndex })
+  const texts = (columns: Column[], i: number): string[] => columns[i].tasks.map((t) => t.content)
+
+  const late = dated('Late', '2026-10-20', 'inbox/a.md')
+  const soon = dated('Soon', '2026-10-06', 'inbox/b.md')
+  const undated = dated('Someday', undefined, 'inbox/c.md')
+  const sameDayFirst = dated('Same day, first line', '2026-10-06', 'inbox/d.md', 0)
+  const sameDaySecond = dated('Same day, second line', '2026-10-06', 'inbox/d.md', 3)
+
+  it('puts the earliest due date first and cards without one last', () => {
+    const sorted = [undated, late, soon].sort(compareCardsByDue).map((t) => t.content)
+    expect(sorted).toEqual(['Soon', 'Late', 'Someday'])
+  })
+
+  it('breaks a same-day tie by note, then by the task\'s place in it', () => {
+    const sorted = [sameDaySecond, soon, sameDayFirst].sort(compareCardsByDue).map((t) => t.content)
+    expect(sorted).toEqual(['Soon', 'Same day, first line', 'Same day, second line'])
+  })
+
+  // The reporter's case: a custom status board whose column was hand-arranged
+  // once keeps that arrangement forever, however the due dates change.
+  const arranged = new Map([
+    ['field:status:review', [taskIdentityKey(undated), taskIdentityKey(late), taskIdentityKey(soon)]]
+  ])
+  const board = (): Column[] => [colWith('review', [soon, late, undated]), colWith('done', [late])]
+
+  it('by due date, ignores the dragged arrangement of a custom status column', () => {
+    expect(texts(orderCards('field:status', board(), 'due', arranged), 0)).toEqual(['Soon', 'Late', 'Someday'])
+  })
+
+  it('manually, replays the dragged arrangement, which ordering by date left in place', () => {
+    expect(texts(orderCards('field:status', board(), 'manual', arranged), 0)).toEqual(['Someday', 'Late', 'Soon'])
+  })
+
+  it('sorts every column without touching the built ones', () => {
+    const built = [colWith('review', [undated, late, soon])]
+    const out = orderCards('field:status', built, 'due', new Map())
+    expect(texts(out, 0)).toEqual(['Soon', 'Late', 'Someday'])
+    expect(texts(built, 0)).toEqual(['Someday', 'Late', 'Soon'])
   })
 })

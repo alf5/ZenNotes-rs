@@ -231,6 +231,25 @@ describe('suggestAt: parameters complete by declared type', () => {
     expect([result.from, result.to]).toEqual([16, 21])
   })
 
+  it('keeps offering tags along a comma-separated list', () => {
+    const items = suggestAt(ctxOf(`books | tagged #book, ${CARET}`, VAULT)).items
+    expect(inserts(items)).toEqual(['#book', '#project', '#meeting'])
+  })
+
+  it('offers no second tag after a bare space, which would not parse', () => {
+    expect(suggestAt(ctxOf(`books | tagged #book ${CARET}`, VAULT)).items).toEqual([])
+  })
+
+  it('completes only the list entry under the caret when commas have no spaces', () => {
+    const last = suggestAt(ctxOf(`books | not-tagged #book,#pro${CARET}`, VAULT))
+    expect(inserts(last.items)).toEqual(['#project'])
+    expect([last.from, last.to]).toEqual([25, 29])
+
+    const first = suggestAt(ctxOf(`books | tagged #bo${CARET},#project`, VAULT))
+    expect(inserts(first.items)).toEqual(['#book'])
+    expect([first.from, first.to]).toEqual([15, 18])
+  })
+
   it('offers the render styles with what each one produces', () => {
     const items = suggestAt(ctxOf(`books | render ${CARET}`, VAULT)).items
     expect(labels(items)).toEqual(['table', 'list', 'count', 'links'])

@@ -3,20 +3,14 @@
 //! apps/desktop/src/main/vault.ts.
 
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::Path;
 
 use crate::ipc::types::NoteMeta;
+use crate::vault::atomic::write_file_atomic;
 use crate::vault::comments;
 use crate::vault::layout;
 use crate::vault::notes::{self, folder_for_relative_path, read_meta, resolve_safe, to_posix};
-
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
+use crate::vault::sidecars;
 
 /// Port of `sanitizeNoteTitle`: strip path-hostile chars, collapse spaces,
 /// cap at 200 chars, default to "Untitled".
@@ -65,6 +59,30 @@ fn unique_title(dir: &Path, base_title: &str, ext: &str) -> String {
     }
 }
 
+/// `uniqueFilename` — the first free name for `filename` in `dir`, keeping
+/// its extension: `Note.md`, `Note 2.md`, `Note 3.md`, …
+fn unique_filename(dir: &Path, filename: &str) -> String {
+    let (base, ext) = match filename.rfind('.') {
+        Some(idx) if idx > 0 => (&filename[..idx], &filename[idx..]),
+        _ => (filename, ""),
+    };
+    let mut candidate = filename.to_string();
+    let mut n = 2;
+    while dir.join(&candidate).exists() {
+        candidate = format!("{base} {n}{ext}");
+        n += 1;
+    }
+    candidate
+}
+
+/// A brand-new file at `rel`: any creation date or agent edit record left
+/// at that name belongs to a note that is gone, never to this one.
+fn forget_stale_sidecars(root: &Path, abs: &Path) -> Result<(), String> {
+    let rel = sidecars::rel_of(root, abs);
+    sidecars::remove_note_creation(root, &rel, false)?;
+    sidecars::remove_agent_edit_record(root, &rel, false)
+}
+
 fn rel_of(root: &Path, abs: &Path) -> String {
     let root_abs = crate::vault::config::resolve_path(&root.to_string_lossy());
     let abs_str = crate::vault::config::resolve_path(&abs.to_string_lossy());
@@ -78,12 +96,18 @@ fn folder_of(root: &Path, abs: &Path) -> Option<String> {
     folder_for_relative_path(&rel_of(root, abs))
 }
 
-pub fn write_note(root: &Path, rel: &str, body: &str) -> Result<NoteMeta, String> {
+/// `writeNote`. Atomic on purpose (#585): see vault/atomic.rs. Because the
+/// save replaces the inode, the note's creation date is recorded first, except
+/// in a temporary folder session, which never gets `.zennotes` state.
+pub fn write_note(root: &Path, rel: &str, body: &str, ephemeral: bool) -> Result<NoteMeta, String> {
     let abs = resolve_safe(root, rel)?;
     if let Some(parent) = abs.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("mkdir failed: {e}"))?;
     }
-    fs::write(&abs, body).map_err(|e| format!("write failed: {e}"))?;
+    if !ephemeral {
+        sidecars::prepare_note_creation(root, &sidecars::rel_of(root, &abs))?;
+    }
+    write_file_atomic(&abs, body)?;
     let folder = folder_of(root, &abs).ok_or_else(|| format!("Note not in a known folder: {rel}"))?;
     read_meta(root, &abs, &folder, None, None)
 }
@@ -123,6 +147,7 @@ pub fn create_note(
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir failed: {e}"))?;
     let final_title = unique_title(&dir, &base, "md");
     let abs = dir.join(format!("{final_title}.md"));
+    forget_stale_sidecars(root, &abs)?;
     fs::write(&abs, format!("# {final_title}\n\n")).map_err(|e| format!("write failed: {e}"))?;
     read_meta(root, &abs, folder, None, None)
 }
@@ -158,6 +183,7 @@ pub fn create_excalidraw(
         "files": {}
     });
     let body = serde_json::to_string_pretty(&seed).map_err(|e| e.to_string())?;
+    forget_stale_sidecars(root, &abs)?;
     fs::write(&abs, body).map_err(|e| format!("write failed: {e}"))?;
     read_meta(root, &abs, folder, None, None)
 }
@@ -199,6 +225,7 @@ pub fn write_drawing_file(
     let base = if base.is_empty() { "Untitled drawing" } else { base };
     let final_title = unique_title(&dir_abs, base, "excalidraw");
     let abs = dir_abs.join(format!("{final_title}.excalidraw"));
+    forget_stale_sidecars(root, &abs)?;
     fs::write(&abs, body).map_err(|e| format!("write failed: {e}"))?;
     let rel = if clean_dir.is_empty() {
         format!("{final_title}.excalidraw")
@@ -220,27 +247,25 @@ pub fn rename_note(root: &Path, rel: &str, next_title: &str) -> Result<NoteMeta,
     let target = dir.join(format!("{trimmed}.{ext}"));
 
     if target != abs {
-        let same_file = match (fs::canonicalize(&abs), fs::canonicalize(&target)) {
-            (Ok(a), Ok(b)) => a == b,
-            _ => false,
-        };
-        if target.exists() && !same_file {
-            return Err(format!("A note named \"{trimmed}\" already exists in {folder}"));
-        }
-        // Two-step rename for case-only changes on case-insensitive filesystems.
-        if abs.to_string_lossy().to_lowercase() == target.to_string_lossy().to_lowercase()
-            && abs != target
-        {
-            let tmp = PathBuf::from(format!("{}_rename_tmp_{}", abs.to_string_lossy(), now_ms()));
-            fs::rename(&abs, &tmp).map_err(|e| format!("rename failed: {e}"))?;
-            fs::rename(&tmp, &target).map_err(|e| format!("rename failed: {e}"))?;
-        } else {
-            fs::rename(&abs, &target).map_err(|e| format!("rename failed: {e}"))?;
+        // Said plainly, since the app shows this reason to whoever is
+        // renaming. A case-only rename finds the note itself on a
+        // case-insensitive disk.
+        let source = sidecars::file_identity(&abs).map_err(|e| format!("stat failed: {e}"))?;
+        match sidecars::file_identity(&target) {
+            Ok(taken) if taken != source => {
+                return Err(format!("A note named “{trimmed}” already exists in this folder"))
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("stat failed: {e}")),
         }
     }
-    let meta = read_meta(root, &target, &folder, None, None)?;
-    comments::move_note_comments(root, rel, &meta.path);
-    Ok(meta)
+    let mut meta = None;
+    sidecars::relocate_note(root, rel, &target, || {
+        meta = Some(read_meta(root, &target, &folder, None, None)?);
+        Ok(())
+    })?;
+    meta.ok_or_else(|| "rename failed".to_string())
 }
 
 fn folder_subpath_of(root: &Path, abs: &Path) -> String {
@@ -276,14 +301,13 @@ fn move_between_folders(root: &Path, rel: &str, target: &str) -> Result<NoteMeta
         resolve_safe(&target_root, &subpath)?
     };
     fs::create_dir_all(&dest_dir).map_err(|e| format!("mkdir failed: {e}"))?;
-    let base_title = notes::title_from_path(Path::new(&filename));
-    let ext = notes::note_extension(&filename);
-    let final_title = unique_title(&dest_dir, &base_title, ext);
-    let dest_abs = dest_dir.join(format!("{final_title}.{ext}"));
-    fs::rename(&abs, &dest_abs).map_err(|e| format!("move failed: {e}"))?;
-    let meta = read_meta(root, &dest_abs, target, None, None)?;
-    comments::move_note_comments(root, rel, &meta.path);
-    Ok(meta)
+    let dest_abs = dest_dir.join(unique_filename(&dest_dir, &filename));
+    let mut meta = None;
+    sidecars::relocate_note(root, rel, &dest_abs, || {
+        meta = Some(read_meta(root, &dest_abs, target, None, None)?);
+        Ok(())
+    })?;
+    meta.ok_or_else(|| "move failed".to_string())
 }
 
 pub fn move_to_trash(root: &Path, rel: &str) -> Result<NoteMeta, String> {
@@ -299,28 +323,60 @@ pub fn unarchive_note(root: &Path, rel: &str) -> Result<NoteMeta, String> {
     move_between_folders(root, rel, "inbox")
 }
 
+/// `emptyTrash`: the trash folder, its comment tree and its creation dates
+/// are detached together into a temporary folder, then erased.
 pub fn empty_trash(root: &Path) -> Result<(), String> {
-    let trash_dir = root.join("trash");
-    let Ok(entries) = fs::read_dir(&trash_dir) else {
-        return Ok(()); // no trash dir yet
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        comments::remove_note_comments(root, &format!("trash/{name}"));
-        let path = entry.path();
-        if path.is_dir() {
-            let _ = fs::remove_dir_all(&path);
-        } else {
-            let _ = fs::remove_file(&path);
-        }
+    let trash_dir = layout::folder_root(root, "trash");
+    let trash_rel = sidecars::rel_of(root, &trash_dir);
+    let temporary = sidecars::internal_temp_dir(root, "trash-delete-")?;
+    sidecars::relocate_folder_trees(
+        vec![
+            (trash_dir, temporary.join("content")),
+            (comments::comments_root(root).join(&trash_rel), temporary.join("comments")),
+            (sidecars::note_metadata_path(root, &trash_rel, true)?, temporary.join("metadata")),
+        ],
+        || Ok(()),
+    )?;
+    sidecars::discard_temp_dir(&temporary, "Trash");
+    if let Err(error) = sidecars::remove_agent_edit_record(root, &trash_rel, true) {
+        eprintln!("Agent edit cleanup pending: {error}");
     }
     Ok(())
 }
 
-pub fn delete_note(root: &Path, rel: &str) -> Result<(), String> {
+/// `deleteNote`: the note leaves together with its comments and its
+/// creation date, so a later note of the same name never inherits them.
+pub fn delete_note(root: &Path, rel: &str, ephemeral: bool) -> Result<(), String> {
     let abs = resolve_safe(root, rel)?;
-    let _ = fs::remove_file(&abs);
-    comments::remove_note_comments(root, rel);
+    let source = match fs::symlink_metadata(&abs) {
+        Ok(meta) => Some(meta),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("stat failed: {e}")),
+    };
+    if source.as_ref().is_some_and(|m| m.is_dir()) {
+        return Err("Use the folder action to delete a directory.".into());
+    }
+    let note_rel = sidecars::rel_of(root, &abs);
+    let comments = comments::comments_path(root, &note_rel);
+    let has_comments = comments.exists();
+    if ephemeral && !has_comments {
+        let _ = fs::remove_file(&abs);
+    } else {
+        let temporary = sidecars::internal_temp_dir(root, "note-delete-")?;
+        sidecars::relocate_folder_trees(
+            vec![
+                (abs.clone(), temporary.join("content")),
+                (comments, temporary.join("comments")),
+                (sidecars::note_metadata_path(root, &note_rel, false)?, temporary.join("metadata")),
+            ],
+            || Ok(()),
+        )?;
+        // Once detached, cleanup cannot attach the old discussion to a new note.
+        sidecars::discard_temp_dir(&temporary, "Note");
+    }
+    if let Err(error) = sidecars::remove_agent_edit_record(root, &note_rel, false) {
+        eprintln!("Agent edit cleanup pending: {error}");
+    }
     Ok(())
 }
 
@@ -350,14 +406,13 @@ pub fn move_note(
     }
 
     fs::create_dir_all(&dest_dir).map_err(|e| format!("mkdir failed: {e}"))?;
-    let base_title = notes::title_from_path(Path::new(&filename));
-    let ext = notes::note_extension(&filename);
-    let final_title = unique_title(&dest_dir, &base_title, ext);
-    let dest_abs = dest_dir.join(format!("{final_title}.{ext}"));
-    fs::rename(&old_abs, &dest_abs).map_err(|e| format!("move failed: {e}"))?;
-    let meta = read_meta(root, &dest_abs, target_folder, None, None)?;
-    comments::move_note_comments(root, old_rel, &meta.path);
-    Ok(meta)
+    let dest_abs = dest_dir.join(unique_filename(&dest_dir, &filename));
+    let mut meta = None;
+    sidecars::relocate_note(root, old_rel, &dest_abs, || {
+        meta = Some(read_meta(root, &dest_abs, target_folder, None, None)?);
+        Ok(())
+    })?;
+    meta.ok_or_else(|| "move failed".to_string())
 }
 
 pub fn duplicate_note(root: &Path, rel: &str) -> Result<NoteMeta, String> {
@@ -369,6 +424,7 @@ pub fn duplicate_note(root: &Path, rel: &str) -> Result<NoteMeta, String> {
     let copy_title = unique_title(&dir, &format!("{base_title} copy"), ext);
     let dest_abs = dir.join(format!("{copy_title}.{ext}"));
     let body = fs::read_to_string(&abs).map_err(|e| format!("read failed: {e}"))?;
+    forget_stale_sidecars(root, &dest_abs)?;
     fs::write(&dest_abs, body).map_err(|e| format!("write failed: {e}"))?;
     let meta = read_meta(root, &dest_abs, &folder, None, None)?;
     comments::copy_note_comments(root, rel, &meta.path);
@@ -426,7 +482,7 @@ mod tests {
     fn write_then_read_roundtrips_metadata() {
         let v = vault();
         create_note(v.path(), "inbox", Some("X"), "").unwrap();
-        let meta = write_note(v.path(), "inbox/X.md", "# X\n\n#tag body").unwrap();
+        let meta = write_note(v.path(), "inbox/X.md", "# X\n\n#tag body", false).unwrap();
         assert_eq!(meta.tags, vec!["tag".to_string()]);
     }
 
@@ -473,7 +529,7 @@ mod tests {
     #[test]
     fn append_adds_at_end_and_start() {
         let v = vault();
-        write_note(v.path(), "inbox/A.md", "body").unwrap();
+        write_note(v.path(), "inbox/A.md", "body", false).unwrap();
         append_to_note(v.path(), "inbox/A.md", "tail", "end").unwrap();
         let after_end = fs::read_to_string(v.path().join("inbox/A.md")).unwrap();
         assert!(after_end.contains("body") && after_end.trim_end().ends_with("tail"));

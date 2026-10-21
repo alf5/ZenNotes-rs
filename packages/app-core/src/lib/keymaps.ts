@@ -14,6 +14,8 @@ export type KeymapId =
   | "global.commandPalette"
   | "global.newQuickNote"
   | "global.newNoteHere"
+  | "global.newNoteFromTemplate"
+  | "global.insertTemplate"
   | "global.openSettings"
   | "global.openFile"
   | "global.toggleSidebar"
@@ -63,7 +65,9 @@ export type KeymapId =
   | "vim.leaderFormatNote"
   | "vim.leaderCopyMarkdown"
   | "vim.leaderToggleFavorite"
+  | "vim.leaderTableToDatabase"
   | "vim.leaderQuickCapture"
+  | "vim.leaderHideToTray"
   | "vim.leaderTemplatePicker"
   | "vim.leaderInsertTemplate"
   | "vim.leaderDailyNote"
@@ -85,6 +89,7 @@ export type KeymapId =
   | "vim.tabNext"
   | "vim.hintMode"
   | "vim.goToDefinition"
+  | "vim.createNoteFromLink"
   | "vim.foldCurrent"
   | "vim.unfoldCurrent"
   | "vim.foldAll"
@@ -94,6 +99,10 @@ export type KeymapId =
   | "vim.harperSuggest"
   | "vim.harperAddWord"
   | "vim.harperIgnore"
+  | "vim.reviewNextChange"
+  | "vim.reviewPreviousChange"
+  | "vim.reviewAcceptChange"
+  | "vim.reviewRejectChange"
   | "nav.moveDown"
   | "nav.moveUp"
   | "nav.moveLeft"
@@ -117,6 +126,7 @@ export type KeymapId =
   | "nav.unarchive"
   | "tasks.moveTaskUp"
   | "tasks.moveTaskDown"
+  | "tasks.savedFilters"
   | "editor.moveLineUp"
   | "editor.moveLineDown"
   | "editor.hopMarkerForward"
@@ -124,9 +134,40 @@ export type KeymapId =
   | "editor.foldHeading"
   | "editor.unfoldHeading"
   | "editor.toggleCheckbox"
-  | "editor.reflowParagraph";
+  | "editor.reflowParagraph"
+  | "editor.reviewNextChange"
+  | "editor.reviewPreviousChange"
+  | "editor.reviewAcceptChange"
+  | "editor.reviewRejectChange";
 
 export type KeymapOverrides = Partial<Record<KeymapId, string>>;
+
+/**
+ * The stored form of "this action has no key". An override equal to the empty
+ * string means the user removed the binding on purpose: nothing fires the
+ * action until it is rebound or reset, the which-key hints and the manual
+ * stop advertising it, and it never collides with anything. It is distinct
+ * from a missing override (the default applies) and from a recording that
+ * has not captured a key yet. TOML has no null, so config.toml carries it
+ * as `"action.id" = ""`.
+ */
+export const UNBOUND_BINDING = "";
+
+/** What the UI calls an unbound action wherever a key would otherwise show. */
+export const UNBOUND_LABEL = "Unbound";
+
+export function isUnboundBinding(
+  binding: string | null | undefined,
+): binding is typeof UNBOUND_BINDING {
+  return binding === UNBOUND_BINDING;
+}
+
+export function isKeymapUnbound(
+  overrides: KeymapOverrides | null | undefined,
+  id: KeymapId,
+): boolean {
+  return isUnboundBinding(overrides?.[id]);
+}
 
 export interface KeymapDefinition {
   id: KeymapId;
@@ -196,6 +237,31 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
       "Create a note in the active note's folder (or the browsed folder when no note is open) and focus its title. Wins over Vim's Ctrl+N (cursor down) when Mod is Ctrl.",
     defaultBinding: "Mod+N",
   },
+  // The template actions were reachable only through Vim's leader (Space t,
+  // Space i) and the palette, so with Vim off no key could reach them (#847).
+  // Windows and Linux ship unbound: Ctrl+Alt+T opens a terminal on most Linux
+  // desktops, and Ctrl/Cmd+Alt+I is Electron's DevTools.
+  {
+    id: "global.newNoteFromTemplate",
+    kind: "shortcut",
+    scope: "app",
+    group: "global",
+    title: "New note from template",
+    description:
+      "Open the template picker to create a note, as Vim's Leader t does. Unbound on Windows and Linux until you set a key.",
+    defaultBinding: "",
+    defaultBindingMac: "Alt+Mod+T",
+  },
+  {
+    id: "global.insertTemplate",
+    kind: "shortcut",
+    scope: "app",
+    group: "global",
+    title: "Insert template into current note",
+    description:
+      "Render a template into the note you are editing, as Vim's Leader i does. Unbound until you set a key.",
+    defaultBinding: "",
+  },
   {
     id: "global.openSettings",
     kind: "shortcut",
@@ -212,7 +278,7 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     group: "global",
     title: "Open file",
     description:
-      "Open a single markdown file from outside the vault. On macOS the File menu also binds ⌘O. In Vim mode on Windows/Linux the editor keeps Ctrl+O for the jumplist and insert-mode i_CTRL-O, so this fires when focus is outside the editor or with Vim off — rebind either to change that.",
+      "Open a single markdown file from outside the vault. On macOS the File menu also binds ⌘O. In Vim mode on Windows/Linux the editor keeps Ctrl+O for the jumplist and insert-mode i_CTRL-O, so this fires when focus is outside the editor or with Vim off. Rebind either to change that.",
     defaultBinding: "Mod+O",
   },
   {
@@ -339,7 +405,7 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     group: "global",
     title: "Close active tab",
     description:
-      "Close the current note or virtual tab. With Vim mode on and Mod resolving to Ctrl, Ctrl+W stays Vim's pane prefix while a tab is open; close the tab with :q or :bd, or rebind this.",
+      "Close the current note or virtual tab. With Settings open it closes Settings, and in a floating window or the quick capture window it closes that window; while a dialog, palette or menu is open it does nothing. With Vim mode on and Mod resolving to Ctrl, Ctrl+W stays Vim's pane prefix while a tab is open; close the tab with :q or :bd, or rebind this.",
     defaultBinding: "Mod+W",
   },
   {
@@ -497,7 +563,7 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     title: "Leader: review Cloud conflicts",
     // `c` is the calendar and `s` the search group, so review takes `r`.
     description:
-      "Open the Cloud sync conflict queue. Available while files are waiting on a decision.",
+      "Open the Cloud sync conflict queue, or the vault settings question. Available while files or settings are waiting on a decision, and while this vault's Cloud vault is gone, when it opens Settings → Cloud.",
     defaultBinding: "r",
     vimOnly: true,
     maxTokens: 1,
@@ -613,6 +679,19 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     maxTokens: 1,
   },
   {
+    id: "vim.leaderTableToDatabase",
+    kind: "sequence",
+    scope: "leader",
+    group: "vim",
+    title: "Leader note action: convert table to database",
+    // `d` for database; `t` stays free for whatever the note group needs next.
+    description:
+      "Turn the Markdown table under the cursor into a database and leave a link to it in the note.",
+    defaultBinding: "d",
+    vimOnly: true,
+    maxTokens: 1,
+  },
+  {
     id: "vim.leaderQuickCapture",
     kind: "sequence",
     scope: "leader",
@@ -620,6 +699,18 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     title: "Leader: open quick capture",
     description: "Open the floating quick capture window.",
     defaultBinding: "q",
+    vimOnly: true,
+    maxTokens: 1,
+  },
+  {
+    id: "vim.leaderHideToTray",
+    kind: "sequence",
+    scope: "leader",
+    group: "vim",
+    title: "Leader: hide window to tray",
+    // `b` for background: the window steps away and the app keeps running.
+    description: "Hide this window to the tray, with Keep running in the tray on.",
+    defaultBinding: "b",
     vimOnly: true,
     maxTokens: 1,
   },
@@ -856,12 +947,24 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     maxTokens: 2,
   },
   {
+    id: "vim.createNoteFromLink",
+    kind: "sequence",
+    scope: "vim-editor",
+    group: "vim",
+    title: "Create note for link at cursor",
+    description:
+      "Follow the link under the cursor; a note that does not exist yet is created at once, without the confirmation.",
+    defaultBinding: "g D",
+    vimOnly: true,
+    maxTokens: 2,
+  },
+  {
     id: "vim.foldCurrent",
     kind: "sequence",
     scope: "vim-editor",
     group: "vim",
-    title: "Fold heading at cursor",
-    description: "Collapse the heading section at the cursor.",
+    title: "Fold heading or list item at cursor",
+    description: "Collapse the heading section, the list item or the callout at the cursor; on a line under a list item or inside a foldable callout, fold that.",
     defaultBinding: "z c",
     vimOnly: true,
     maxTokens: 2,
@@ -871,8 +974,8 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     kind: "sequence",
     scope: "vim-editor",
     group: "vim",
-    title: "Unfold heading at cursor",
-    description: "Expand the heading section at the cursor.",
+    title: "Unfold heading or list item at cursor",
+    description: "Expand the heading section or the list item folded at the cursor.",
     defaultBinding: "z o",
     vimOnly: true,
     maxTokens: 2,
@@ -882,8 +985,8 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     kind: "sequence",
     scope: "vim-editor",
     group: "vim",
-    title: "Fold all headings",
-    description: "Collapse every heading section in the note.",
+    title: "Fold all headings and lists",
+    description: "Collapse every heading section, every list item with lines under it and every foldable callout, nested.",
     defaultBinding: "z M",
     vimOnly: true,
     maxTokens: 2,
@@ -893,8 +996,8 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     kind: "sequence",
     scope: "vim-editor",
     group: "vim",
-    title: "Unfold all headings",
-    description: "Expand every heading section in the note.",
+    title: "Unfold all headings and lists",
+    description: "Expand every fold in the note.",
     defaultBinding: "z R",
     vimOnly: true,
     maxTokens: 2,
@@ -907,6 +1010,50 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     title: "Next Harper suggestion",
     description: "Jump to the next grammar or spelling problem Harper found. Needs Grammar and spelling with Harper on.",
     defaultBinding: "] s",
+    vimOnly: true,
+    maxTokens: 2,
+  },
+  {
+    id: "vim.reviewNextChange",
+    kind: "sequence",
+    scope: "vim-editor",
+    group: "vim",
+    title: "Next change to review",
+    description: "While reviewing an assistant's edits, jump to the next change. Vim's own diff-mode key.",
+    defaultBinding: "] c",
+    vimOnly: true,
+    maxTokens: 2,
+  },
+  {
+    id: "vim.reviewPreviousChange",
+    kind: "sequence",
+    scope: "vim-editor",
+    group: "vim",
+    title: "Previous change to review",
+    description: "While reviewing an assistant's edits, jump to the previous change.",
+    defaultBinding: "[ c",
+    vimOnly: true,
+    maxTokens: 2,
+  },
+  {
+    id: "vim.reviewAcceptChange",
+    kind: "sequence",
+    scope: "vim-editor",
+    group: "vim",
+    title: "Accept change",
+    description: "While reviewing an assistant's edits, keep the change at the cursor (diff put).",
+    defaultBinding: "d p",
+    vimOnly: true,
+    maxTokens: 2,
+  },
+  {
+    id: "vim.reviewRejectChange",
+    kind: "sequence",
+    scope: "vim-editor",
+    group: "vim",
+    title: "Reject change",
+    description: "While reviewing an assistant's edits, put back what the change replaced (diff obtain).",
+    defaultBinding: "d o",
     vimOnly: true,
     maxTokens: 2,
   },
@@ -1161,6 +1308,17 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     maxTokens: 1,
   },
   {
+    id: "tasks.savedFilters",
+    kind: "sequence",
+    scope: "views",
+    group: "view-actions",
+    title: "Pick a saved Tasks filter",
+    description:
+      "Open the picker of saved Tasks filters and apply one (Tasks view, Vim mode). Save the current filter with :savefilter <name>.",
+    defaultBinding: "F",
+    maxTokens: 1,
+  },
+  {
     id: "editor.hopMarkerForward",
     kind: "shortcut",
     scope: "vim-editor",
@@ -1178,7 +1336,7 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     group: "view-actions",
     title: "Hop before previous marker",
     description:
-      "Move the cursor to the near side of the previous inline marker on the line — `**bold**|` becomes `**bold|**`, and again to land before the opening `**`. Works with Vim mode on or off.",
+      "Move the cursor to the near side of the previous inline marker on the line: `**bold**|` becomes `**bold|**`, and again to land before the opening `**`. Works with Vim mode on or off.",
     defaultBinding: "Alt+[",
     defaultBindingMac: "Ctrl+,",
   },
@@ -1187,17 +1345,53 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     kind: "shortcut",
     scope: "vim-editor",
     group: "view-actions",
-    title: "Fold heading",
-    description: "Fold the heading section containing the cursor.",
+    title: "Fold heading or list item",
+    description: "Fold the heading section, the list item or the callout at the cursor; on a line under a list item or inside a foldable callout, fold that.",
     defaultBinding: "Mod+Alt+F",
+  },
+  {
+    id: "editor.reviewNextChange",
+    kind: "shortcut",
+    scope: "vim-editor",
+    group: "view-actions",
+    title: "Next change to review",
+    description: "While reviewing an assistant's edits, jump to the next change.",
+    defaultBinding: "Mod+Alt+ArrowDown",
+  },
+  {
+    id: "editor.reviewPreviousChange",
+    kind: "shortcut",
+    scope: "vim-editor",
+    group: "view-actions",
+    title: "Previous change to review",
+    description: "While reviewing an assistant's edits, jump to the previous change.",
+    defaultBinding: "Mod+Alt+ArrowUp",
+  },
+  {
+    id: "editor.reviewAcceptChange",
+    kind: "shortcut",
+    scope: "vim-editor",
+    group: "view-actions",
+    title: "Accept change",
+    description: "While reviewing an assistant's edits, keep the change at the cursor.",
+    defaultBinding: "Mod+Shift+Enter",
+  },
+  {
+    id: "editor.reviewRejectChange",
+    kind: "shortcut",
+    scope: "vim-editor",
+    group: "view-actions",
+    title: "Reject change",
+    description: "While reviewing an assistant's edits, put back what the change at the cursor replaced.",
+    defaultBinding: "Mod+Shift+Backspace",
   },
   {
     id: "editor.unfoldHeading",
     kind: "shortcut",
     scope: "vim-editor",
     group: "view-actions",
-    title: "Unfold heading",
-    description: "Unfold the heading section containing the cursor.",
+    title: "Unfold heading or list item",
+    description: "Unfold the heading section or the list item folded at the cursor.",
     defaultBinding: "Mod+Alt+U",
   },
   {
@@ -1207,7 +1401,7 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     group: "view-actions",
     title: "Move line up",
     description:
-      "Move the current line (or selected lines) up in the note editor — reorders the markdown, so it sticks in the file. Works with Vim mode on or off.",
+      "Move the current line (or selected lines) up in the note editor. It reorders the markdown, so it sticks in the file. Works with Vim mode on or off.",
     defaultBinding: "Alt+ArrowUp",
   },
   {
@@ -1217,7 +1411,7 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     group: "view-actions",
     title: "Move line down",
     description:
-      "Move the current line (or selected lines) down in the note editor — reorders the markdown, so it sticks in the file. Works with Vim mode on or off.",
+      "Move the current line (or selected lines) down in the note editor. It reorders the markdown, so it sticks in the file. Works with Vim mode on or off.",
     defaultBinding: "Alt+ArrowDown",
   },
   {
@@ -1333,7 +1527,9 @@ export function getKeymapBinding(
   id: KeymapId,
 ): string {
   const override = overrides?.[id];
-  return override || getDefaultKeymapBinding(id);
+  // A string override wins even when it is empty: that is an unbound action,
+  // not a missing override, and must not fall back to the default.
+  return typeof override === "string" ? override : getDefaultKeymapBinding(id);
 }
 
 export function getSequenceTokens(
@@ -1633,6 +1829,12 @@ export function normalizeKeymapOverrides(input: unknown): KeymapOverrides {
   for (const definition of KEYMAP_DEFINITIONS) {
     const raw = (input as Record<string, unknown>)[definition.id];
     if (typeof raw !== "string") continue;
+    // An empty (or blank) value is a deliberate unbind and survives as such;
+    // it is not a broken binding to be dropped in favor of the default.
+    if (raw.trim() === UNBOUND_BINDING) {
+      overrides[definition.id] = UNBOUND_BINDING;
+      continue;
+    }
     const normalized = normalizeKeymapBinding(definition.id, raw);
     // The platform's default, not the cross-platform one: a definition with a
     // `defaultBindingMac` has two defaults, and comparing against the wrong one
@@ -1709,6 +1911,7 @@ export function matchesShortcutBinding(
   event: KeyboardEvent,
   binding: string,
 ): boolean {
+  if (isUnboundBinding(binding)) return false;
   const normalized = shortcutBindingFromEvent(event);
   if (!!normalized && normalized === binding) return true;
   // Layouts with shifted digits (French AZERTY, Czech) type punctuation on
@@ -1749,6 +1952,7 @@ export function eventMatchesUserOverride(
   if (!overrides) return false;
   for (const [id, binding] of Object.entries(overrides)) {
     if (id === excludeId || typeof binding !== "string") continue;
+    if (isUnboundBinding(binding)) continue;
     const definition = KEYMAP_INDEX.get(id as KeymapId);
     if (!definition || definition.kind !== "shortcut") continue;
     if (definition.scope !== "app") continue;
@@ -1803,6 +2007,9 @@ export function formatKeymapBinding(binding: string, kind: KeymapKind): string {
     .join(" ");
 }
 
+/** The binding as the UI shows it, or the empty string for an unbound
+ *  action so a caller can leave the key column, chip or tooltip out
+ *  entirely. Surfaces that want a word instead use `UNBOUND_LABEL`. */
 export function getKeymapDisplay(
   overrides: KeymapOverrides | null | undefined,
   id: KeymapId,
@@ -1811,11 +2018,47 @@ export function getKeymapDisplay(
   return formatKeymapBinding(getKeymapBinding(overrides, id), definition.kind);
 }
 
+/** A leader chord as the palette shows it ("Space r"), or the empty string
+ *  when either step is unbound: half a sequence cannot be pressed, so no
+ *  surface names it. */
+export function getLeaderChordDisplay(
+  overrides: KeymapOverrides | null | undefined,
+  id: KeymapId,
+): string {
+  const leader = getKeymapDisplay(overrides, "vim.leaderPrefix");
+  const step = getKeymapDisplay(overrides, id);
+  return leader && step ? `${leader} ${step}` : "";
+}
+
+/** `label (display)` while the action has a key, the bare label once it is
+ *  unbound: a tooltip must not read "Go back ()". */
+export function labelWithShortcut(label: string, display: string): string {
+  return display ? `${label} (${display})` : label;
+}
+
 export function describeCurrentBinding(
   overrides: KeymapOverrides | null | undefined,
   id: KeymapId,
 ): string {
   return getKeymapDisplay(overrides, id);
+}
+
+/**
+ * Whether a shortcut belongs to a feature this host has. Agent edit review
+ * needs `supportsAgentEditReview` and Harper needs `supportsHarper`; where
+ * they are absent (the web client, the phones and iPads) the shortcuts can
+ * never fire, so Settings → Keymap leaves them out instead of offering keys
+ * for a review or a grammar check that does not exist there.
+ */
+export function keymapAvailableOnHost(
+  id: KeymapId,
+  capabilities: { supportsAgentEditReview?: boolean; supportsHarper?: boolean },
+): boolean {
+  if (id.startsWith("editor.review") || id.startsWith("vim.review")) {
+    return capabilities.supportsAgentEditReview === true;
+  }
+  if (id.startsWith("vim.harper")) return capabilities.supportsHarper === true;
+  return true;
 }
 
 export function getKeymapDefinitionsByGroup(): Array<{

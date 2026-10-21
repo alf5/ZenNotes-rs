@@ -1,7 +1,9 @@
+import { followApplicationLink } from './application-link-open'
 import { useStore } from '../store'
-import { offerCreateNoteFromLink } from './create-note-from-link'
+import { createNoteFromLinkNow, offerCreateNoteFromLink } from './create-note-from-link'
 import { externalFileLink, openExternalFileLink } from './external-file-link'
-import { externalLinkUrl, resolveInternalNoteHref } from './internal-links'
+import { externalUrlForLink, resolveInternalNoteHref, type LineLinkKind } from './internal-links'
+import { openWikilinkAttachment } from './open-wikilink-attachment'
 import { resolveWikilinkPath } from './wikilinks'
 import {
   openDatabaseFromWikilink,
@@ -18,9 +20,23 @@ import {
  * Shared so links follow the same way wherever they're rendered — the main
  * editor's click / Cmd-click handlers and the WYSIWYG table cell both call this
  * (#445). Returns true when it handled the target.
+ *
+ * With `createWithoutAsking`, a dead link creates its note at the suggested
+ * path right away instead of asking first: the modifier-click and `gD` fast
+ * path (#768).
+ *
+ * `kind` says how the target was written; an href unless told otherwise. A
+ * caller holding a `[[wikilink]]` passes 'wikilink', so a note name that looks
+ * like a domain (`[[2024.01.15]]`) opens its note instead of the browser.
  */
-export function followLinkTarget(target: string): boolean {
-  const external = externalLinkUrl(target)
+export interface FollowLinkOptions {
+  createWithoutAsking?: boolean
+  kind?: LineLinkKind
+}
+
+export function followLinkTarget(target: string, options: FollowLinkOptions = {}): boolean {
+  if (followApplicationLink(target)) return true
+  const external = externalUrlForLink(target, options.kind ?? 'markdown')
   if (external) {
     window.open(external, '_blank')
     return true
@@ -45,6 +61,10 @@ export function followLinkTarget(target: string): boolean {
     focusSoon()
     return true
   }
+  // A wikilink at a file in the vault (`[[assets/diagram.png]]`, a PDF) opens
+  // that file in its own tab. Before #757 it fell through to the create offer
+  // below and proposed a note named `assets/diagram.png.md`.
+  if (openWikilinkAttachment(target)) return true
   // A link to a file outside the vault (`~/…`, `file://…`, an absolute path):
   // open it with the OS default app instead of treating it as a note. (#424)
   if (externalFileLink(target)) {
@@ -53,6 +73,7 @@ export function followLinkTarget(target: string): boolean {
   }
   // Dead link — don't leave it a silent dead end. Offer to create the note (with
   // a confirmation), matching the `gd` follow-link path. (Discord: dead links)
-  void offerCreateNoteFromLink(target)
+  if (options.createWithoutAsking) void createNoteFromLinkNow(target)
+  else void offerCreateNoteFromLink(target)
   return true
 }

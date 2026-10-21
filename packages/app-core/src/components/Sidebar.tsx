@@ -1,3 +1,4 @@
+import { runNoteLifecycleAction, runNoteBatchAction, runEmptyTrash } from "../lib/note-lifecycle-actions";
 import {
   createContext,
   memo,
@@ -23,9 +24,7 @@ import {
   useStore,
 } from "../store";
 import { Button } from "./ui/Button";
-import { confirmMoveToTrash } from "../lib/confirm-trash";
-import { moveNoteToTrash } from "../lib/trash-note";
-import { buildMoveNotePrompt, parseMoveNoteTarget } from "../lib/move-note";
+import { buildMoveNotePrompt, moveNoteVocabulary, parseMoveNoteTarget } from "../lib/move-note";
 import { buildTagTree, extractTags, flattenTagTree } from "../lib/tags";
 import { isTypstPreamblePath, resolveTypstPreambleFolder } from "../lib/typst-preamble";
 import { focusEditorNormalMode } from "../lib/editor-focus";
@@ -51,6 +50,7 @@ import {
   FolderPlusIcon,
   NotePlusIcon,
   PanelLeftIcon,
+  PencilIcon,
   PlusIcon,
   SearchIcon,
   SettingsIcon,
@@ -65,6 +65,7 @@ import { ResizeHandle } from "./ResizeHandle";
 import { VaultBadge } from "./VaultBadge";
 import { confirmApp } from '../lib/confirm-requests'
 import { promptApp } from '../lib/prompt-requests'
+import { canRenameVault, renameVaultWithPrompt } from '../lib/rename-vault'
 import { naturalCompare } from '../lib/natural-sort'
 import { resolveQuickNoteTitle } from "../lib/quick-note-title";
 import { recordRendererPerf } from "../lib/perf";
@@ -80,22 +81,27 @@ import {
   dateNoteDirectoryDisplayLabel,
   favoriteFolderKey,
   folderIconKey,
-  isFavoriteFolderKey,
   isPrimaryNotesAtRoot,
   folderForVaultRelativePath,
   normalizeVaultSettings,
   noteFolderSubpath,
-  parseFavoriteFolderKey,
+  resolveFavoriteItems,
   sidebarRevealTarget,
+  type FavoriteItem,
 } from "../lib/vault-layout";
 import { resolveFolderPath } from "@shared/system-folder-paths";
 import {
   getCurrentDragPayload,
   hasZenItem,
   readDragPayload,
-  setDragPayload,
   type DragPayload,
 } from "../lib/dnd";
+import { setSidebarDragPayload } from "../lib/sidebar-drag-preview";
+import {
+  useStableSidebarIdxBase,
+  type SidebarIdxCounter,
+  type SidebarIdxPass,
+} from "../lib/sidebar-idx-counter";
 import { manualOrderCompare, parentDirOf } from "../lib/manual-order";
 import { resolveSystemFolderLabels } from "../lib/system-folder-labels";
 import { assetTabPath } from "../lib/asset-tabs";
@@ -140,6 +146,7 @@ import {
   subscribePublishedNoteChanges,
 } from "../lib/published-note-events";
 import { useToastStore } from "../lib/toast";
+import { chromeCarriesWindowDrag } from "../lib/window-chrome";
 
 const ACTIVE_TAG_PARSE_DELAY_MS = 220;
 const ACTIVE_TAG_PARSE_LARGE_BODY_CHARS = 120_000;
@@ -319,11 +326,6 @@ type SidebarSelectionItem =
   | { kind: "note"; path: string }
   | { kind: "folder"; folder: NoteFolder; subpath: string };
 
-/** A favorite resolved to a live note or folder for rendering. */
-type FavoriteItem =
-  | { kind: "note"; key: string; path: string; title: string; isDrawing: boolean }
-  | { kind: "folder"; key: string; folder: NoteFolder; subpath: string; label: string };
-
 function noteSelectionKey(path: string): string {
   return `note:${encodeURIComponent(path)}`;
 }
@@ -450,6 +452,7 @@ export function Sidebar(): JSX.Element {
   const allFolders = useStore((s) => s.folders);
   const hasAssetsDir = useStore((s) => s.hasAssetsDir);
   const focusedPanel = useStore((s) => s.focusedPanel);
+  const vimMode = useStore((s) => s.vimMode);
   const sidebarCursorIndex = useStore((s) => s.sidebarCursorIndex);
   const activeNote = useStore((s) => s.activeNote);
   const activeDirty = useStore((s) => s.activeDirty);
@@ -494,6 +497,7 @@ export function Sidebar(): JSX.Element {
   const newDatabase = useStore((s) => s.newDatabase);
   const toggleFavorite = useStore((s) => s.toggleFavorite);
   const toggleTasksExcludedFolder = useStore((s) => s.toggleTasksExcludedFolder);
+  const toggleTasksIncludedFolder = useStore((s) => s.toggleTasksIncludedFolder);
   const createDatabase = useStore((s) => s.createDatabase);
   const createNoteInChosenFolder = useStore((s) => s.createNoteInChosenFolder);
   const openTemplatePaletteForFolder = useStore((s) => s.openTemplatePaletteForFolder);
@@ -502,7 +506,6 @@ export function Sidebar(): JSX.Element {
   const toggleSidebar = useStore((s) => s.toggleSidebar);
   const setFocusedPanel = useStore((s) => s.setFocusedPanel);
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
-  const appUpdateState = useAppUpdateState();
   const renameTag = useStore((s) => s.renameTag);
   const deleteTag = useStore((s) => s.deleteTag);
   const tagsCollapsed = useStore((s) => s.tagsCollapsed);
@@ -518,8 +521,11 @@ export function Sidebar(): JSX.Element {
   const revealFolderAction = useStore((s) => s.revealFolder);
   const revealAssetsDir = useStore((s) => s.revealAssetsDir);
   const refreshAssets = useStore((s) => s.refreshAssets);
+  const renameAsset = useStore((s) => s.renameAsset);
+  const moveAsset = useStore((s) => s.moveAsset);
   const deleteAssetAction = useStore((s) => s.deleteAsset);
   const sidebarWidth = useStore((s) => s.sidebarWidth);
+  const showWindowTitleBar = useStore((s) => s.showWindowTitleBar);
   const setSidebarWidth = useStore((s) => s.setSidebarWidth);
   // Footer degrade ladder (#539). The width is the pref, which is exactly the
   // rendered width (the aside is fixed-width and shrink-0), so this stays a
@@ -560,15 +566,6 @@ export function Sidebar(): JSX.Element {
   const setVaultSettings = useStore((s) => s.setVaultSettings);
   const canRevealInFileManager =
     window.zen.getAppInfo().runtime === "desktop" && workspaceMode !== "remote";
-  const appUpdateBadge = appUpdateBadgeLabel(appUpdateState);
-  const appUpdateSettingsTitle =
-    appUpdateState?.phase === "downloaded"
-      ? "Settings, update ready to install"
-      : appUpdateState?.phase === "downloading"
-        ? "Settings, update downloading"
-        : appUpdateState?.phase === "available"
-          ? "Settings, update available"
-          : "Settings";
   const canSwitchLocalVaults =
     window.zen.getAppInfo().runtime === "desktop" &&
     window.zen.getCapabilities().supportsLocalFilesystemPickers;
@@ -577,6 +574,10 @@ export function Sidebar(): JSX.Element {
     window.zen.getCapabilities().supportsRemoteWorkspace;
   const canSwitchVaults = canSwitchLocalVaults || canUseRemoteWorkspaces;
   const canCloseCurrentVault = canSwitchLocalVaults && workspaceMode !== "remote" && !!vault;
+  // A display name (#692) is a vault.json setting, so any host that can write
+  // one can rename; only a temporary folder session and a remote workspace
+  // cannot.
+  const canRenameCurrentVault = canRenameVault({ vault, workspaceMode });
   const absolutePathLabel =
     workspaceMode === "remote" ? "Copy Server Path" : "Copy Absolute Path";
   const canManageAssetFiles =
@@ -956,8 +957,7 @@ export function Sidebar(): JSX.Element {
       const curDir = slash === -1 ? "" : payload.path.slice(0, slash);
       if (curDir === targetDir) return; // already in this folder
       try {
-        await window.zen.moveAsset(payload.path, targetDir);
-        await refreshAssets();
+        await moveAsset(payload.path, targetDir);
       } catch (err) {
         window.alert((err as Error).message);
       }
@@ -1255,40 +1255,12 @@ export function Sidebar(): JSX.Element {
     return next;
   }, [notes, allFolders, assetFiles, vaultSettings]);
 
-  // Resolve favorite keys to live notes/folders. Keys whose target no longer
-  // exists (renamed away, deleted, trashed) are silently skipped — the Favorites
-  // section never shows a broken row. Order follows the stored favorites list.
-  const favoriteItems = useMemo<FavoriteItem[]>(() => {
-    const out: FavoriteItem[] = [];
-    for (const key of vaultSettings.favorites) {
-      if (isFavoriteFolderKey(key)) {
-        const parsed = parseFavoriteFolderKey(key);
-        if (!parsed || !parsed.subpath) continue;
-        const exists = allFolders.some(
-          (f) => f.folder === parsed.folder && f.subpath === parsed.subpath,
-        );
-        if (!exists) continue;
-        out.push({
-          kind: "folder",
-          key,
-          folder: parsed.folder,
-          subpath: parsed.subpath,
-          label: parsed.subpath.split("/").slice(-1)[0],
-        });
-      } else {
-        const note = notes.find((n) => n.path === key);
-        if (!note || note.folder === "trash") continue;
-        out.push({
-          kind: "note",
-          key,
-          path: note.path,
-          title: note.title,
-          isDrawing: isExcalidrawPath(note.path),
-        });
-      }
-    }
-    return out;
-  }, [vaultSettings.favorites, notes, allFolders]);
+  // Shared with the home view's Favorites section, so both surfaces agree on
+  // which keys still resolve to a live note or folder.
+  const favoriteItems = useMemo<FavoriteItem[]>(
+    () => resolveFavoriteItems(vaultSettings.favorites, notes, allFolders),
+    [vaultSettings.favorites, notes, allFolders],
+  );
 
   // Daily/weekly notes grouped for the pinned date-nav: daily by year → month →
   // day, weekly by year → week, all newest-first.
@@ -1690,19 +1662,7 @@ export function Sidebar(): JSX.Element {
       items.push({
         label: `Move ${liveNotes.length} note${liveNotes.length === 1 ? "" : "s"}…`,
         onSelect: async () => {
-          const target = await promptApp(
-            buildMoveNotePrompt(
-              { title: `${liveNotes.length} notes`, path: liveNotes[0]!.path },
-              allFolders,
-            ),
-          );
-          if (!target) return;
-          const dest = parseMoveNoteTarget(target);
-          for (const note of liveNotes) {
-            await window.zen.moveNote(note.path, dest.folder, dest.subpath);
-          }
-          if (selectedActiveNote) await selectNote(null);
-          await refreshAndClear();
+          if (await runNoteBatchAction(liveNotes.map(note => note.path), "move")) clearSelection();
         },
       });
     }
@@ -1712,13 +1672,7 @@ export function Sidebar(): JSX.Element {
         label: `Move ${archivableNotes.length} note${archivableNotes.length === 1 ? "" : "s"} to ${folderLabels.archive}`,
         icon: <ArchiveIcon />,
         onSelect: async () => {
-          const paths = archivableNotes.map((note) => note.path);
-          if (!(await useStore.getState().confirmArchiveNotes(paths))) return;
-          for (const note of archivableNotes) {
-            await window.zen.archiveNote(note.path);
-          }
-          if (selectedActiveNote) await selectNote(null);
-          await refreshAndClear();
+          if (await runNoteBatchAction(archivableNotes.map(note => note.path), "archive")) clearSelection();
         },
       });
     }
@@ -1728,11 +1682,7 @@ export function Sidebar(): JSX.Element {
         label: `Move ${archivedNotes.length} archived note${archivedNotes.length === 1 ? "" : "s"} to ${folderLabels.inbox}`,
         icon: <ArrowUpRightIcon />,
         onSelect: async () => {
-          for (const note of archivedNotes) {
-            await window.zen.unarchiveNote(note.path);
-          }
-          if (selectedActiveNote) await selectNote(null);
-          await refreshAndClear();
+          if (await runNoteBatchAction(archivedNotes.map(note => note.path), "restore")) clearSelection();
         },
       });
     }
@@ -1743,20 +1693,7 @@ export function Sidebar(): JSX.Element {
         icon: <TrashIcon />,
         danger: true,
         onSelect: async () => {
-          const ok = await confirmApp({
-            title: `Move ${liveNotes.length} note${liveNotes.length === 1 ? "" : "s"} to ${folderLabels.trash}?`,
-            description: "You can restore them from Trash later.",
-            confirmLabel: `Move to ${folderLabels.trash}`,
-            danger: true,
-          });
-          if (!ok) return;
-          for (const note of liveNotes) {
-            await moveNoteToTrash(note.path, {
-              temporarySession: vault?.temporary === true,
-            });
-          }
-          if (selectedActiveNote) await selectNote(null);
-          await refreshAndClear();
+          if (await runNoteBatchAction(liveNotes.map(note => note.path), "trash")) clearSelection();
         },
       });
     }
@@ -1766,11 +1703,7 @@ export function Sidebar(): JSX.Element {
         label: `Restore ${trashedNotes.length} note${trashedNotes.length === 1 ? "" : "s"}`,
         icon: <ArrowUpRightIcon />,
         onSelect: async () => {
-          for (const note of trashedNotes) {
-            await window.zen.restoreFromTrash(note.path);
-          }
-          if (selectedActiveNote) await selectNote(null);
-          await refreshAndClear();
+          if (await runNoteBatchAction(trashedNotes.map(note => note.path), "restore")) clearSelection();
         },
       });
       items.push({
@@ -1778,18 +1711,7 @@ export function Sidebar(): JSX.Element {
         icon: <TrashIcon />,
         danger: true,
         onSelect: async () => {
-          const ok = await confirmApp({
-            title: `Delete ${trashedNotes.length} note${trashedNotes.length === 1 ? "" : "s"} permanently?`,
-            description: "This cannot be undone.",
-            confirmLabel: "Delete permanently",
-            danger: true,
-          });
-          if (!ok) return;
-          for (const note of trashedNotes) {
-            await window.zen.deleteNote(note.path);
-          }
-          if (selectedActiveNote) await selectNote(null);
-          await refreshAndClear();
+          if (await runNoteBatchAction(trashedNotes.map(note => note.path), "delete")) clearSelection();
         },
       });
     }
@@ -1903,18 +1825,7 @@ export function Sidebar(): JSX.Element {
           icon: <TrashIcon />,
           danger: true,
           disabled: trashCount === 0,
-          onSelect: async () => {
-            const ok = await confirmApp({
-              title: `Delete ${trashCount} trashed note${trashCount === 1 ? "" : "s"} permanently?`,
-              description: "This cannot be undone.",
-              confirmLabel: `Empty ${folderLabels.trash}`,
-              danger: true,
-            });
-            if (!ok) return;
-            await window.zen.emptyTrash();
-            await refreshNotes();
-            if (selectedPath?.startsWith("trash/")) await selectNote(null);
-          },
+          onSelect: runEmptyTrash,
         },
         { kind: "separator" },
         ...iconItems,
@@ -2089,19 +2000,28 @@ export function Sidebar(): JSX.Element {
       },
     });
 
-    // Vault-level Tasks exclusion (#458). The list stores on-disk relative
-    // paths, so a root-primary inbox's top level resolves to "": no valid
-    // entry to toggle, hide the item there.
+    // Vault-level Task folders (#962) and Tasks exclusion (#458). Both lists
+    // store on-disk relative paths, so a root-primary inbox's top level
+    // resolves to "": no valid entry to toggle, hide the items there.
     const tasksExcludeRelDir = vaultRelativeFolderPath(
       folder,
       subpath,
       vaultSettings,
     );
     if (tasksExcludeRelDir) {
+      const taskFolder = (
+        vaultSettings.tasks?.includedFolders ?? []
+      ).includes(tasksExcludeRelDir);
       const tasksExcluded = (
         vaultSettings.tasks?.excludedFolders ?? []
       ).includes(tasksExcludeRelDir);
       items.push({ kind: "separator" });
+      items.push({
+        label: taskFolder ? "Stop Using as Task Folder" : "Use as Task Folder",
+        onSelect: async () => {
+          await toggleTasksIncludedFolder(tasksExcludeRelDir);
+        },
+      });
       items.push({
         label: tasksExcluded ? "Include in Tasks" : "Exclude from Tasks",
         onSelect: async () => {
@@ -2195,6 +2115,7 @@ export function Sidebar(): JSX.Element {
     openColorPicker,
     toggleFavorite,
     toggleTasksExcludedFolder,
+    toggleTasksIncludedFolder,
     bulkSelectionMenuItems,
     selectedSidebarKeys,
   ]);
@@ -2301,9 +2222,12 @@ export function Sidebar(): JSX.Element {
       items.push({
         label: "Move…",
         onSelect: async () => {
-          const target = await promptApp(buildMoveNotePrompt(n, allFolders));
-          if (!target) return;
-          const dest = parseMoveNoteTarget(target);
+          const state = useStore.getState();
+          const vocabulary = moveNoteVocabulary(state.vaultSettings, state.systemFolderLabels, allFolders);
+          const target = await promptApp(buildMoveNotePrompt(n, allFolders, vocabulary));
+          // Empty is an answer (the notes root); only null is the Cancel.
+          if (target === null) return;
+          const dest = parseMoveNoteTarget(target, vocabulary);
           await moveNoteAction(n.path, dest.folder, dest.subpath);
         },
       });
@@ -2433,10 +2357,7 @@ export function Sidebar(): JSX.Element {
         label: folderLabels.archive,
         icon: <ArchiveIcon />,
         onSelect: async () => {
-          if (!(await useStore.getState().confirmArchiveNotes([n.path]))) return;
-          await window.zen.archiveNote(n.path);
-          await refreshNotes();
-          if (selectedPath === n.path) await selectNote(null);
+          await runNoteLifecycleAction(n.path, "archive");
         },
       });
       items.push({
@@ -2444,15 +2365,7 @@ export function Sidebar(): JSX.Element {
         icon: <TrashIcon />,
         danger: true,
         onSelect: async () => {
-          if (!(await confirmMoveToTrash(n.title))) return;
-          if (
-            !(await moveNoteToTrash(n.path, {
-              temporarySession: vault?.temporary === true,
-            }))
-          )
-            return;
-          await refreshNotes();
-          if (selectedPath === n.path) await selectNote(null);
+          await runNoteLifecycleAction(n.path, "trash");
         },
       });
     } else if (n.folder === "archive") {
@@ -2460,9 +2373,7 @@ export function Sidebar(): JSX.Element {
         label: `Move to ${folderLabels.inbox}`,
         icon: <ArrowUpRightIcon />,
         onSelect: async () => {
-          const meta = await window.zen.unarchiveNote(n.path);
-          await refreshNotes();
-          if (selectedPath === n.path) await selectNote(meta.path);
+          await runNoteLifecycleAction(n.path, "restore");
         },
       });
       items.push({
@@ -2470,15 +2381,7 @@ export function Sidebar(): JSX.Element {
         icon: <TrashIcon />,
         danger: true,
         onSelect: async () => {
-          if (!(await confirmMoveToTrash(n.title))) return;
-          if (
-            !(await moveNoteToTrash(n.path, {
-              temporarySession: vault?.temporary === true,
-            }))
-          )
-            return;
-          await refreshNotes();
-          if (selectedPath === n.path) await selectNote(null);
+          await runNoteLifecycleAction(n.path, "trash");
         },
       });
     } else {
@@ -2486,9 +2389,7 @@ export function Sidebar(): JSX.Element {
         label: "Restore",
         icon: <ArrowUpRightIcon />,
         onSelect: async () => {
-          const meta = await window.zen.restoreFromTrash(n.path);
-          await refreshNotes();
-          if (selectedPath === n.path) await selectNote(meta.path);
+          await runNoteLifecycleAction(n.path, "restore");
         },
       });
       items.push({
@@ -2496,9 +2397,7 @@ export function Sidebar(): JSX.Element {
         icon: <TrashIcon />,
         danger: true,
         onSelect: async () => {
-          await window.zen.deleteNote(n.path);
-          await refreshNotes();
-          if (selectedPath === n.path) await selectNote(null);
+          await runNoteLifecycleAction(n.path, "delete");
         },
       });
     }
@@ -2571,8 +2470,7 @@ export function Sidebar(): JSX.Element {
             },
           });
           if (!next || next === asset.name) return;
-          await window.zen.renameAsset(asset.path, next);
-          await refreshAssets();
+          await renameAsset(asset.path, next);
         },
       });
       items.push({
@@ -2595,8 +2493,7 @@ export function Sidebar(): JSX.Element {
             },
           });
           if (target === null || target === currentDir) return;
-          await window.zen.moveAsset(asset.path, target);
-          await refreshAssets();
+          await moveAsset(asset.path, target);
         },
       });
       items.push({
@@ -2770,6 +2667,15 @@ export function Sidebar(): JSX.Element {
     }
 
     items.push({ kind: "separator" });
+    if (canRenameCurrentVault) {
+      items.push({
+        label: "Rename Vault…",
+        icon: <PencilIcon className="h-4 w-4" />,
+        onSelect: async () => {
+          await renameVaultWithPrompt();
+        },
+      });
+    }
     if (canCloseCurrentVault) {
       items.push({
         label: "Close Current Vault",
@@ -2811,6 +2717,7 @@ export function Sidebar(): JSX.Element {
     return items;
   }, [
     canCloseCurrentVault,
+    canRenameCurrentVault,
     canSwitchLocalVaults,
     canUseRemoteWorkspaces,
     closeVault,
@@ -2875,8 +2782,11 @@ export function Sidebar(): JSX.Element {
 
   const isSidebarFocused = focusedPanel === "sidebar";
   // Mutable counter reset on each render — assigns sequential data-sidebar-idx to each item.
-  const idxCounter = useRef<{ value: number }>({ value: 0 });
+  const idxCounter = useRef<SidebarIdxCounter>({ value: 0 });
   idxCounter.current.value = 0;
+  // New on every render, so the tree components below can tell "Sidebar
+  // rendered me" from "I re-rendered alone" (see useStableSidebarIdxBase).
+  const idxPass: SidebarIdxPass = {};
   const vimCursor = isSidebarFocused ? sidebarCursorIndex : -1;
   const vaultHeaderIdx = canSwitchVaults ? idxCounter.current.value++ : -1;
   const vaultHeaderVimHighlight = vimCursor === vaultHeaderIdx;
@@ -3030,7 +2940,11 @@ export function Sidebar(): JSX.Element {
   return (
     <SidebarScrollerContext.Provider value={sidebarScrollRef}>
     <aside
-      className={`glass-sidebar relative flex shrink-0 flex-col pt-3${isSidebarFocused ? " panel-focused" : ""}`}
+      // The pane ring answers "which pane do Ctrl+W h/j/k/l move from", a
+      // question only Vim mode asks; a click into the sidebar with Vim off
+      // used to draw it too, and read as a terminal to people who never use
+      // the keys it stands for.
+      className={`glass-sidebar relative flex shrink-0 flex-col pt-3${isSidebarFocused && vimMode ? " panel-focused" : ""}`}
       style={{ width: sidebarWidth }}
       // Programmatic focus target for focusSidebarPanel (the Focus Sidebar
       // command); -1 keeps it out of the tab order.
@@ -3043,7 +2957,15 @@ export function Sidebar(): JSX.Element {
       onFocusCapture={() => setFocusedPanel("sidebar")}
     >
       {/* Vault header + top-right actions */}
-      <div className="flex items-center justify-between px-3 pb-3">
+      <div
+        // -mt-3 pt-3 pulls the drag into the aside's top padding, the strip a
+        // hidden title bar left behind.
+        className={`flex items-center justify-between px-3 pb-3${
+          chromeCarriesWindowDrag(showWindowTitleBar, window.zen.getAppInfo().runtime)
+            ? " drag-region -mt-3 pt-3"
+            : ""
+        }`}
+      >
         {canSwitchVaults ? (
           <button
             type="button"
@@ -3220,7 +3142,7 @@ export function Sidebar(): JSX.Element {
           </p>
           <p className="mt-1 text-xs leading-5 text-ink-600">
             This vault is in <span className="font-medium text-ink-800">Inbox</span> mode, so
-            top-level files and folders are hidden — intentional for many setups. Switch to{" "}
+            top-level files and folders are hidden, which is intentional for many setups. Switch to{" "}
             <span className="font-medium text-ink-800">Vault root</span> to show them, or dismiss
             this notice.
           </p>
@@ -3425,6 +3347,7 @@ export function Sidebar(): JSX.Element {
             onSelectItem={handleSidebarItemSelect}
             dragPayloadForItem={dragPayloadForItem}
             idxCounter={idxCounter.current}
+            idxPass={idxPass}
             vimCursor={vimCursor}
             sidebarFocused={isSidebarFocused}
             groupByKind={groupByKind}
@@ -3507,6 +3430,7 @@ export function Sidebar(): JSX.Element {
                 onSelectItem={handleSidebarItemSelect}
                 dragPayloadForItem={dragPayloadForItem}
                 idxCounter={idxCounter.current}
+                idxPass={idxPass}
                 vimCursor={vimCursor}
                 sidebarFocused={isSidebarFocused}
                 groupByKind={groupByKind}
@@ -3540,6 +3464,7 @@ export function Sidebar(): JSX.Element {
               onSelectItem={handleSidebarItemSelect}
               dragPayloadForItem={dragPayloadForItem}
               idxCounter={idxCounter.current}
+              idxPass={idxPass}
               vimCursor={vimCursor}
               sidebarFocused={isSidebarFocused}
               groupByKind={groupByKind}
@@ -3821,11 +3746,7 @@ export function Sidebar(): JSX.Element {
           sidebarFocused={isSidebarFocused}
           sidebarData={{ type: "help" }}
         />
-        <SidebarFooterAction
-          icon={<SettingsIcon />}
-          label="Settings"
-          title={appUpdateSettingsTitle}
-          badgeLabel={appUpdateBadge ?? undefined}
+        <SidebarSettingsAction
           iconOnly={!footerShowsLabels}
           onClick={() => setSettingsOpen(true)}
           sidebarIdx={idxCounter.current.value++}
@@ -4483,9 +4404,7 @@ function countNotesInTree(node: TreeNode): number {
 /* ---------- Tree rendering ---------- */
 
 /** Mutable counter threaded through tree rendering for sequential data-sidebar-idx attributes. */
-interface IdxCounter {
-  value: number;
-}
+type IdxCounter = SidebarIdxCounter;
 
 interface TreeRenderProps {
   folder: NoteFolder;
@@ -4521,6 +4440,7 @@ interface TreeRenderProps {
   dragPayloadForItem: (item: SidebarSelectionItem) => DragPayload;
   /** Sequential index counter for vim navigation data attributes. */
   idxCounter: IdxCounter;
+  idxPass: SidebarIdxPass;
   /** The highlighted cursor index when sidebar is vim-focused (-1 if not focused). */
   vimCursor: number;
   /** Whether the sidebar currently owns keyboard focus. */
@@ -4553,6 +4473,7 @@ function FolderTreeContents({
   onSelectItem,
   dragPayloadForItem,
   idxCounter,
+  idxPass,
   vimCursor,
   sidebarFocused,
   groupByKind,
@@ -4562,6 +4483,9 @@ function FolderTreeContents({
   tree: TreeNode;
   depth: number;
 } & TreeRenderProps): JSX.Element {
+  // This component re-renders alone whenever its entry limit resets, which a
+  // sidebar focus change does every time.
+  const childIdxPass = useStableSidebarIdxBase(idxCounter, idxPass);
   const entries = useMemo(
     () => getTreeRenderEntries(tree, showNotes, sortComparator, groupByKind),
     [tree, showNotes, sortComparator, groupByKind],
@@ -4645,6 +4569,7 @@ function FolderTreeContents({
               onSelectItem={onSelectItem}
               dragPayloadForItem={dragPayloadForItem}
               idxCounter={idxCounter}
+              idxPass={childIdxPass}
               vimCursor={vimCursor}
               sidebarFocused={sidebarFocused}
               groupByKind={groupByKind}
@@ -4725,6 +4650,7 @@ function FolderTreeRoot({
   onSelectItem,
   dragPayloadForItem,
   idxCounter,
+  idxPass,
   vimCursor,
   sidebarFocused,
   groupByKind,
@@ -4738,6 +4664,7 @@ function FolderTreeRoot({
    *  revealed on hover. Used to surface a quick "+" for Quick Notes. */
   headerAction?: JSX.Element;
 } & TreeRenderProps): JSX.Element {
+  const childIdxPass = useStableSidebarIdxBase(idxCounter, idxPass);
   const rootKey = `${folder}:`;
   const isCollapsed = collapsed.has(rootKey);
   const total = countNotesInTree(tree);
@@ -4831,6 +4758,7 @@ function FolderTreeRoot({
           onSelectItem={onSelectItem}
           dragPayloadForItem={dragPayloadForItem}
           idxCounter={idxCounter}
+          idxPass={childIdxPass}
           vimCursor={vimCursor}
           sidebarFocused={sidebarFocused}
           groupByKind={groupByKind}
@@ -4864,11 +4792,13 @@ function SubTree({
   onSelectItem,
   dragPayloadForItem,
   idxCounter,
+  idxPass,
   vimCursor,
   sidebarFocused,
   groupByKind,
   showSidebarChevrons,
 }: { node: TreeNode; depth: number } & TreeRenderProps): JSX.Element {
+  const childIdxPass = useStableSidebarIdxBase(idxCounter, idxPass);
   const key = `${folder}:${node.subpath}`;
   const isCollapsed = collapsed.has(key);
   const iconOption = resolveFolderIconOption(
@@ -4969,7 +4899,7 @@ function SubTree({
         onContextMenu={(e) => onContextMenu(e, folder, node.subpath)}
         draggable
         onDragStart={(e) =>
-          setDragPayload(
+          setSidebarDragPayload(
             e,
             dragPayloadForItem({ kind: "folder", folder, subpath: node.subpath }),
           )
@@ -5052,6 +4982,7 @@ function SubTree({
                   onSelectItem={onSelectItem}
                   dragPayloadForItem={dragPayloadForItem}
                   idxCounter={idxCounter}
+                  idxPass={childIdxPass}
                   vimCursor={vimCursor}
                   sidebarFocused={sidebarFocused}
                   groupByKind={groupByKind}
@@ -5168,7 +5099,10 @@ const NoteLeaf = memo(function NoteLeaf({
   );
   const handleDragStart = useCallback(
     (event: React.DragEvent<HTMLButtonElement>) => {
-      setDragPayload(event, dragPayloadForItem({ kind: "note", path: note.path }));
+      setSidebarDragPayload(
+        event,
+        dragPayloadForItem({ kind: "note", path: note.path }),
+      );
     },
     [dragPayloadForItem, note.path],
   );
@@ -5405,7 +5339,7 @@ function AssetLeaf({
     : "";
   const handleDragStart = useCallback(
     (event: React.DragEvent<HTMLButtonElement>) => {
-      setDragPayload(event, { kind: "asset", path: asset.path });
+      setSidebarDragPayload(event, { kind: "asset", path: asset.path });
     },
     [asset.path],
   );
@@ -5988,6 +5922,56 @@ function SidebarRow({
   );
 }
 
+interface SidebarFooterActionProps {
+  icon: JSX.Element;
+  label: string;
+  title?: string;
+  count?: number;
+  badgeLabel?: string;
+  active?: boolean;
+  /** Narrow-sidebar mode (#539): the label is dropped and the tooltip and
+   *  aria-label carry it instead, so the row never outgrows the sidebar. */
+  iconOnly?: boolean;
+  onClick: () => void;
+  sidebarIdx?: number;
+  vimHighlight?: boolean;
+  sidebarFocused?: boolean;
+  sidebarData?: { type: string };
+}
+
+/**
+ * The Settings row carries the updater badge, so it is the one piece of the
+ * sidebar that needs the updater state. It subscribes here, in a leaf, rather
+ * than in Sidebar itself: a download broadcasts a new state about once a
+ * second for its whole duration, and each broadcast used to re-render the
+ * entire sidebar tree to repaint one percentage badge (#868).
+ */
+function SidebarSettingsAction(
+  props: Omit<
+    SidebarFooterActionProps,
+    "icon" | "label" | "title" | "badgeLabel"
+  >,
+): JSX.Element {
+  const appUpdateState = useAppUpdateState();
+  const title =
+    appUpdateState?.phase === "downloaded"
+      ? "Settings, update ready to install"
+      : appUpdateState?.phase === "downloading"
+        ? "Settings, update downloading"
+        : appUpdateState?.phase === "available"
+          ? "Settings, update available"
+          : "Settings";
+  return (
+    <SidebarFooterAction
+      {...props}
+      icon={<SettingsIcon />}
+      label="Settings"
+      title={title}
+      badgeLabel={appUpdateBadgeLabel(appUpdateState) ?? undefined}
+    />
+  );
+}
+
 /** Compact labeled action used in the sidebar footer. Same vim-nav
  *  wiring as SidebarRow (sidebarIdx / sidebarData), but kept short so
  *  vault utilities stay legible without stealing space from the tree. */
@@ -6004,22 +5988,7 @@ function SidebarFooterAction({
   vimHighlight,
   sidebarFocused = false,
   sidebarData,
-}: {
-  icon: JSX.Element;
-  label: string;
-  title?: string;
-  count?: number;
-  badgeLabel?: string;
-  active?: boolean;
-  /** Narrow-sidebar mode (#539): the label is dropped and the tooltip and
-   *  aria-label carry it instead, so the row never outgrows the sidebar. */
-  iconOnly?: boolean;
-  onClick: () => void;
-  sidebarIdx?: number;
-  vimHighlight?: boolean;
-  sidebarFocused?: boolean;
-  sidebarData?: { type: string };
-}): JSX.Element {
+}: SidebarFooterActionProps): JSX.Element {
   const strongActive = !!active && (!sidebarFocused || !!vimHighlight);
   const resolvedTitle = title ?? label;
   return (
@@ -6375,6 +6344,13 @@ function DateNotesNav({
   return <div className="flex flex-col">{rows}</div>;
 }
 
+/**
+ * The key chip on the cursor row (`m` opens the row's menu). The key is
+ * Vim's: VimNav owns every single-letter shortcut and stands down entirely
+ * with Vim mode off, so with Vim off the chip named a key that did nothing.
+ * Read from the store here rather than threaded through six row components,
+ * which is one subscription, since only the cursor row mounts a chip.
+ */
 function RowKeyHint({
   active,
   keyLabel,
@@ -6385,7 +6361,9 @@ function RowKeyHint({
   keyLabel: string;
   label?: string;
   compact?: boolean;
-}): JSX.Element {
+}): JSX.Element | null {
+  const vimMode = useStore((s) => s.vimMode);
+  if (!vimMode) return null;
   return (
     <span
       className={[

@@ -40,6 +40,10 @@ pub struct PersistedConfig {
     pub zoom_factor: f64,
     pub quick_capture_hotkey: String,
     pub quick_capture_pinned: bool,
+    /// Closing the last window hides it to the tray instead (#947). Kept here,
+    /// not in the portable config.toml: it is needed before any renderer runs,
+    /// and whether a tray exists at all depends on this machine's desktop.
+    pub keep_running_in_tray: bool,
     /// Untouched passthrough for fields owned by later milestones.
     pub extra: Map<String, Value>,
 }
@@ -53,6 +57,7 @@ impl Default for PersistedConfig {
             zoom_factor: 1.0,
             quick_capture_hotkey: DEFAULT_QUICK_CAPTURE_HOTKEY.into(),
             quick_capture_pinned: false,
+            keep_running_in_tray: false,
             extra: Map::new(),
         }
     }
@@ -87,6 +92,7 @@ impl PersistedConfig {
         if let Some(Value::Bool(pinned)) = extra.remove("quickCapturePinned") {
             cfg.quick_capture_pinned = pinned;
         }
+        cfg.keep_running_in_tray = extra.remove("keepRunningInTray") == Some(Value::Bool(true));
         if let Some(local) = extra.remove("localVaults") {
             cfg.local_vaults = normalize_local_vaults(&local);
         }
@@ -114,6 +120,7 @@ impl PersistedConfig {
             Value::String(self.quick_capture_hotkey.clone()),
         );
         obj.insert("quickCapturePinned".into(), Value::Bool(self.quick_capture_pinned));
+        obj.insert("keepRunningInTray".into(), Value::Bool(self.keep_running_in_tray));
         Value::Object(obj)
     }
 }
@@ -182,6 +189,27 @@ pub fn remember_local_vault(
     out.extend(rest);
     out.truncate(MAX_REMEMBERED_VAULTS);
     out
+}
+
+/// Port of `renameLocalVault` (#692): the remembered list with one vault's
+/// name replaced in place. Order and `lastOpenedAt` are untouched, because a
+/// rename is not a visit.
+pub fn rename_local_vault(
+    entries: &[PersistedLocalVault],
+    root: &str,
+    name: &str,
+) -> Vec<PersistedLocalVault> {
+    let target = resolve_path(root);
+    entries
+        .iter()
+        .map(|e| {
+            if resolve_path(&e.root) == target {
+                PersistedLocalVault { name: name.to_string(), ..e.clone() }
+            } else {
+                e.clone()
+            }
+        })
+        .collect()
 }
 
 /// Port of `forgetLocalVault`.

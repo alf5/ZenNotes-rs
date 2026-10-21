@@ -11,7 +11,7 @@ use tauri_plugin_dialog::DialogExt;
 use crate::ipc::types::{
     AssetMeta, CustomTemplateFile, DeletedAsset, FolderEntry, ImportedAsset,
     ImportedWorkflowFile, LocalVaultEntry, NoteComment, NoteContent, NoteMeta,
-    VaultDemoTourResult, VaultInfo, VaultSettings, VaultTask, VaultTextSearchCapabilities,
+    VaultInfo, VaultSettings, VaultTextSearchCapabilities,
     VaultTextSearchMatch, WorkflowFile, WriteTemplateInput,
 };
 use crate::search;
@@ -20,13 +20,12 @@ use crate::vault::assets;
 use crate::vault::comments;
 use crate::vault::config;
 use crate::vault::crud;
-use crate::vault::demo_tour;
 use crate::vault::folders;
 use crate::vault::layout;
 use crate::vault::listing;
 use crate::vault::notes;
 use crate::vault::settings;
-use crate::vault::tasks;
+use crate::vault::sidecars;
 use crate::vault::templates;
 use crate::vault::workflows;
 
@@ -59,7 +58,7 @@ fn open_vault(
 ) -> Result<VaultInfo, String> {
     layout::ensure_vault_layout(root).map_err(|e| format!("Failed to prepare vault: {e}"))?;
     let resolved = PathBuf::from(config::resolve_path(&root.to_string_lossy()));
-    let vault = layout::vault_info(&resolved);
+    let vault = settings::describe_vault(&resolved);
     state.set_current(Some(vault.clone()));
 
     // (Re)start the filesystem watcher for the newly active vault.
@@ -81,6 +80,40 @@ fn open_vault(
     .map_err(|e| format!("Failed to persist config: {e}"))?;
 
     Ok(vault)
+}
+
+/// Port of `syncLocalVaultName` (#692): re-read the open vault's display
+/// name and give the active vault and the remembered-vaults list the result.
+/// After a settings save this makes a rename land everywhere at once; on
+/// getCurrentVault and every listing it makes an edit to vault.json from
+/// outside (a git pull, another machine) show up. Returns the vault in effect.
+fn sync_local_vault_name(app: &AppHandle, state: &AppState) -> Option<VaultInfo> {
+    let current = state.current()?;
+    let name = settings::describe_vault(Path::new(&current.root)).name;
+    let current = if current.name != name {
+        let renamed = VaultInfo { name: name.clone(), ..current };
+        state.set_current(Some(renamed.clone()));
+        renamed
+    } else {
+        current
+    };
+    // A temporary session is never remembered, so it has no entry to rename.
+    if current.temporary != Some(true) {
+        if let Ok(dir) = config_dir(app) {
+            let resolved = config::resolve_path(&current.root);
+            let stale = config::load_config(&dir)
+                .local_vaults
+                .iter()
+                .any(|e| config::resolve_path(&e.root) == resolved && e.name != name);
+            if stale {
+                let root = current.root.clone();
+                let _ = config::update_config(&dir, move |cfg| {
+                    cfg.local_vaults = config::rename_local_vault(&cfg.local_vaults, &root, &name);
+                });
+            }
+        }
+    }
+    Some(current)
 }
 
 // ---- v2.15 phase A: workspace state, drawings, deleted assets -------------
@@ -221,12 +254,26 @@ pub fn db_mkdir(state: State<AppState>, rel_path: String) -> Result<(), String> 
     std::fs::create_dir_all(abs).map_err(|e| format!("mkdir failed: {e}"))
 }
 
+/// Rename a database's `<Name>.base` folder. Like upstream's renameDatabase,
+/// a database inside a top folder goes through the folder rename (so its
+/// comment tree, creation dates and agent edits follow, and folder icons and
+/// colors keyed on it are rewritten); one outside every top folder (a
+/// root-level database in an inbox-mode vault) moves its trees directly.
 #[tauri::command]
-pub fn db_rename(state: State<AppState>, old_rel: String, new_rel: String) -> Result<(), String> {
+pub fn db_rename_form_dir(state: State<AppState>, old_rel: String, new_rel: String) -> Result<(), String> {
     let root = require_root(&state)?;
     let old_abs = notes::resolve_safe(&root, &old_rel)?;
     let new_abs = notes::resolve_safe(&root, &new_rel)?;
-    std::fs::rename(old_abs, new_abs).map_err(|e| format!("rename failed: {e}"))
+    if let Some(folder) = notes::folder_for_relative_path(&notes::to_posix(&old_rel)) {
+        let top = layout::folder_root(&root, &folder);
+        if let (Ok(old_sub), Ok(new_sub)) = (old_abs.strip_prefix(&top), new_abs.strip_prefix(&top)) {
+            let (old_sub, new_sub) = (notes::to_posix(&old_sub.to_string_lossy()), notes::to_posix(&new_sub.to_string_lossy()));
+            if !old_sub.is_empty() && !new_sub.is_empty() {
+                return folders::rename_folder(&root, &folder, &old_sub, &new_sub).map(|_| ());
+            }
+        }
+    }
+    folders::rename_folder_trees(&root, &old_rel, &new_rel, || Ok(()))
 }
 
 /// Vault-relative root of a NoteFolder ("" when the primary notes area is the
@@ -303,7 +350,7 @@ pub fn app_open_folder_temporary(
     if !listing::folder_has_markdown(&resolved) {
         return Ok(());
     }
-    let mut vault = layout::vault_info(&resolved);
+    let mut vault = settings::describe_vault(&resolved);
     vault.temporary = Some(true);
     state.set_current(Some(vault));
     match crate::watcher::spawn(app.clone(), resolved.clone()) {
@@ -332,7 +379,7 @@ pub fn vault_get_current(
     app: AppHandle,
     state: State<AppState>,
 ) -> Result<Option<VaultInfo>, String> {
-    if let Some(v) = state.current() {
+    if let Some(v) = sync_local_vault_name(&app, &state) {
         return Ok(Some(v));
     }
     let dir = config_dir(&app)?;
@@ -345,7 +392,14 @@ pub fn vault_get_current(
 }
 
 #[tauri::command]
-pub fn vault_list_local(app: AppHandle) -> Result<Vec<LocalVaultEntry>, String> {
+pub fn vault_list_local(
+    app: AppHandle,
+    state: State<AppState>,
+) -> Result<Vec<LocalVaultEntry>, String> {
+    // The open vault first: a display name that changed on disk (#692)
+    // reaches the remembered list here, so the switcher and the sidebar
+    // header, which read that list, never lag behind the vault they show.
+    sync_local_vault_name(&app, &state);
     let dir = config_dir(&app)?;
     let cfg = config::load_config(&dir);
     let mut entries = config::local_vaults_to_entries(&cfg.local_vaults);
@@ -355,7 +409,7 @@ pub fn vault_list_local(app: AppHandle) -> Result<Vec<LocalVaultEntry>, String> 
             entries.insert(
                 0,
                 LocalVaultEntry {
-                    name: config::basename(&resolved),
+                    name: settings::describe_vault(Path::new(&resolved)).name,
                     root: resolved,
                     last_opened_at: 0,
                 },
@@ -473,7 +527,7 @@ pub fn vault_list_folders(state: State<AppState>) -> Result<Vec<FolderEntry>, St
 
 #[tauri::command]
 pub fn vault_write_note(state: State<AppState>, rel_path: String, body: String) -> Result<NoteMeta, String> {
-    crud::write_note(&require_root(&state)?, &rel_path, &body)
+    crud::write_note(&require_root(&state)?, &rel_path, &body, active_vault_is_temporary(&state))
 }
 
 #[tauri::command]
@@ -508,7 +562,7 @@ pub fn vault_rename_note(state: State<AppState>, rel_path: String, next_title: S
 
 #[tauri::command]
 pub fn vault_delete_note(state: State<AppState>, rel_path: String) -> Result<(), String> {
-    crud::delete_note(&require_root(&state)?, &rel_path)
+    crud::delete_note(&require_root(&state)?, &rel_path, active_vault_is_temporary(&state))
 }
 
 #[tauri::command]
@@ -570,7 +624,7 @@ pub fn vault_rename_folder(
 
 #[tauri::command]
 pub fn vault_delete_folder(state: State<AppState>, folder: String, subpath: String) -> Result<(), String> {
-    folders::delete_folder(&require_root(&state)?, &folder, &subpath)
+    folders::delete_folder(&require_root(&state)?, &folder, &subpath, active_vault_is_temporary(&state))
 }
 
 #[tauri::command]
@@ -674,16 +728,97 @@ pub fn vault_import_pasted_image(
     assets::import_pasted_image(&require_root(&state)?, &data, &mime_type, suggested_name.as_deref())
 }
 
-// ---- M8: tasks -----------------------------------------------------------
+// ---- tasks: the file layer under src/bridge/tasks.ts ----------------------
+// Parsing runs in the webview through vendored @shared/tasks, as upstream's
+// main process does (apps/desktop/src/main/tasks.ts): the rules a task is
+// read by stay one definition. These commands only say which notes are live
+// and hand over their text.
 
+/// A note Tasks may read: its path, title and top folder.
+#[derive(serde::Serialize)]
+pub struct TaskSource {
+    path: String,
+    title: String,
+    folder: String,
+}
+
+const LIVE_FOLDERS: [&str; 3] = ["inbox", "quick", "archive"];
+
+fn task_source(rel: String, folder: String) -> Option<TaskSource> {
+    // Drawings are JSON, never task lists; trash never feeds Tasks.
+    if !LIVE_FOLDERS.contains(&folder.as_str()) || notes::is_excalidraw_path(&rel) {
+        return None;
+    }
+    let title = notes::title_from_path(Path::new(&rel));
+    Some(TaskSource { path: rel, title, folder })
+}
+
+/// Every live note, without reading any of them.
 #[tauri::command]
-pub fn vault_scan_tasks(state: State<AppState>) -> Result<Vec<VaultTask>, String> {
-    Ok(tasks::scan_all_tasks(&require_root(&state)?))
+pub fn vault_task_sources(state: State<AppState>) -> Result<Vec<TaskSource>, String> {
+    let root = require_root(&state)?;
+    Ok(listing::list_note_paths(&root)
+        .into_iter()
+        .filter_map(|(rel, folder)| task_source(rel, folder))
+        .collect())
+}
+
+/// One note, when it is live (a single-note rescan after an edit).
+#[tauri::command]
+pub fn vault_task_source_for(state: State<AppState>, rel_path: String) -> Result<Option<TaskSource>, String> {
+    require_root(&state)?;
+    let posix = notes::to_posix(&rel_path);
+    Ok(notes::folder_for_relative_path(&posix).and_then(|folder| task_source(posix, folder)))
+}
+
+/// Many vault files' text in one round trip; None for any that is missing
+/// or unreadable.
+#[tauri::command]
+pub fn db_read_texts(state: State<AppState>, rel_paths: Vec<String>) -> Result<Vec<Option<String>>, String> {
+    let root = require_root(&state)?;
+    Ok(rel_paths
+        .iter()
+        .map(|rel| notes::resolve_safe(&root, rel).ok().and_then(|abs| std::fs::read_to_string(abs).ok()))
+        .collect())
+}
+
+// ---- agent edit records (docs/ideas/agent-edit-review.md) -----------------
+// The file layer of apps/desktop/src/main/agent-edit-files.ts. Records are
+// written by an assistant editing through upstream's MCP server (this build
+// ships none, but the vault is shared with it); the webview parses and
+// validates them with vendored @shared/agent-edits.
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentEditFile {
+    note_path: String,
+    text: String,
 }
 
 #[tauri::command]
-pub fn vault_scan_tasks_for(state: State<AppState>, rel_path: String) -> Result<Vec<VaultTask>, String> {
-    Ok(tasks::scan_tasks_for_path(&require_root(&state)?, &rel_path))
+pub fn vault_list_agent_edits(state: State<AppState>) -> Result<Vec<AgentEditFile>, String> {
+    let Ok(root) = require_root(&state) else { return Ok(Vec::new()) };
+    Ok(sidecars::list_agent_edit_texts(&root)
+        .into_iter()
+        .map(|(note_path, text)| AgentEditFile { note_path, text })
+        .collect())
+}
+
+#[tauri::command]
+pub fn vault_read_agent_edit(state: State<AppState>, rel_path: String) -> Result<Option<String>, String> {
+    let Ok(root) = require_root(&state) else { return Ok(None) };
+    Ok(sidecars::read_agent_edit_text(&root, &rel_path))
+}
+
+/// Save a review's progress (an already validated, serialized record), or
+/// delete the record with None. A temporary folder session gets no state.
+#[tauri::command]
+pub fn vault_write_agent_edit(state: State<AppState>, rel_path: String, text: Option<String>) -> Result<(), String> {
+    let root = require_root(&state)?;
+    if active_vault_is_temporary(&state) {
+        return Ok(());
+    }
+    sidecars::write_agent_edit_text(&root, &rel_path, text.as_deref())
 }
 
 // ---- M9: comments --------------------------------------------------------
@@ -710,7 +845,11 @@ pub fn vault_get_settings(state: State<AppState>) -> Result<VaultSettings, Strin
 }
 
 #[tauri::command]
-pub fn vault_set_settings(state: State<AppState>, next: serde_json::Value) -> Result<VaultSettings, String> {
+pub fn vault_set_settings(
+    app: AppHandle,
+    state: State<AppState>,
+    next: serde_json::Value,
+) -> Result<VaultSettings, String> {
     let root = require_root(&state)?;
     // Ephemeral session: apply for this run but never write .zennotes state
     // into a temporarily-opened folder (upstream ephemeral-vaults contract).
@@ -718,7 +857,11 @@ pub fn vault_set_settings(state: State<AppState>, next: serde_json::Value) -> Re
         let fallback = settings::infer_primary_notes_location(&root);
         return Ok(settings::normalize_vault_settings(Some(&next), &fallback));
     }
-    settings::set_vault_settings(&root, &next)
+    let saved = settings::set_vault_settings(&root, &next)?;
+    // The display name may have moved with this save (#692); the active vault
+    // and the remembered list follow before the renderer hears back.
+    sync_local_vault_name(&app, &state);
+    Ok(saved)
 }
 
 #[tauri::command]
@@ -741,14 +884,22 @@ pub fn vault_delete_template(state: State<AppState>, source_path: String) -> Res
     templates::delete_custom_template(&require_root(&state)?, &source_path)
 }
 
+/// Scaffold the vault's folders (`ensureVaultLayout`), for the demo tour,
+/// which places its notes from vendored data in src/bridge/demo-tour.ts.
 #[tauri::command]
-pub fn vault_generate_demo_tour(state: State<AppState>) -> Result<VaultDemoTourResult, String> {
-    demo_tour::generate_demo_tour(&require_root(&state)?)
+pub fn db_ensure_vault_layout(state: State<AppState>) -> Result<(), String> {
+    layout::ensure_vault_layout(&require_root(&state)?).map_err(|e| format!("layout failed: {e}"))
 }
 
+/// Remove a vault directory only when it is empty (`removeDirIfEmpty`).
 #[tauri::command]
-pub fn vault_remove_demo_tour(state: State<AppState>) -> Result<VaultDemoTourResult, String> {
-    demo_tour::remove_demo_tour(&require_root(&state)?)
+pub fn db_remove_dir_if_empty(state: State<AppState>, rel_path: String) -> Result<(), String> {
+    let root = require_root(&state)?;
+    let abs = notes::resolve_safe(&root, &rel_path)?;
+    if std::fs::read_dir(&abs).map(|mut d| d.next().is_none()).unwrap_or(false) {
+        let _ = std::fs::remove_dir(&abs);
+    }
+    Ok(())
 }
 
 // ---- v2.45 M18: workflows -------------------------------------------------
@@ -1009,4 +1160,130 @@ fn prune_empty_dirs(root: &std::path::Path, start: Option<&std::path::Path>) {
             None => return,
         }
     }
+}
+
+// ---- v2.73: what the workflow applier needs to carry sidecars and links ----
+// Upstream's applier (apps/desktop/src/main/workflow-apply.ts) moves each
+// note's comments, creation date and agent edit record with it (#839), and
+// puts a symlinked note back as the same link on undo. These are the file
+// operations that takes, each as narrow as the applier's use of it.
+
+/// The text of the symlink at a vault path, or None when it is not one.
+#[tauri::command]
+pub fn db_link_text(state: State<AppState>, rel_path: String) -> Result<Option<String>, String> {
+    let root = require_root(&state)?;
+    let abs = notes::resolve_safe(&root, &rel_path)?;
+    match std::fs::symlink_metadata(&abs) {
+        Ok(meta) if meta.file_type().is_symlink() => std::fs::read_link(&abs)
+            .map(|text| Some(text.to_string_lossy().to_string()))
+            .map_err(|e| format!("readlink failed: {e}")),
+        Ok(_) => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("stat failed: {e}")),
+    }
+}
+
+/// Whether anything at all sits at a vault path, a symlink that points at
+/// nothing included (`db_exists` follows links and calls such a link free,
+/// and a rename onto it would replace the link without a trace).
+#[tauri::command]
+pub fn db_path_taken(state: State<AppState>, rel_path: String) -> Result<bool, String> {
+    let root = require_root(&state)?;
+    sidecars::path_exists(&notes::resolve_safe(&root, &rel_path)?).map_err(|e| format!("stat failed: {e}"))
+}
+
+/// Give the symlink at a vault path the text `text`, which must name the same
+/// file the link already names: a spelling, never a new target. Checked here
+/// rather than trusted, so an edited or synced run ledger cannot use undo to
+/// plant a link to anywhere and then write through it.
+#[tauri::command]
+pub fn db_respell_link(state: State<AppState>, rel_path: String, text: String) -> Result<(), String> {
+    let root = require_root(&state)?;
+    sidecars::respell_link(&notes::resolve_safe(&root, &rel_path)?, &text)
+}
+
+/// Rename a note (or a sidecar) the way the app moves one: parents created,
+/// and a symlinked note keeps pointing at its file (`rebaseMovedLink`).
+#[tauri::command]
+pub fn db_rename_entry(state: State<AppState>, old_rel: String, new_rel: String) -> Result<(), String> {
+    let root = require_root(&state)?;
+    let old_abs = notes::resolve_safe(&root, &old_rel)?;
+    let new_abs = notes::resolve_safe(&root, &new_rel)?;
+    if let Some(parent) = new_abs.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir failed: {e}"))?;
+    }
+    std::fs::rename(&old_abs, &new_abs).map_err(|e| format!("rename failed: {e}"))?;
+    sidecars::rebase_moved_link(&old_abs, &new_abs).map_err(|e| format!("relink failed: {e}"))
+}
+
+/// Remove what sits at a vault path AS ITSELF (a file, or a symlink, never
+/// through it): the file a link points at is not the run's to delete. Then
+/// prune the directories that leaves empty, below the top-level folders.
+#[tauri::command]
+pub fn db_remove_entry(state: State<AppState>, rel_path: String) -> Result<(), String> {
+    let root = require_root(&state)?;
+    let abs = notes::resolve_safe(&root, &rel_path)?;
+    match std::fs::remove_file(&abs) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(format!("remove failed: {e}")),
+        _ => {}
+    }
+    prune_empty_dirs(&root, abs.parent());
+    Ok(())
+}
+
+/// The vault-relative path of a note's sidecar, derived from the note's path
+/// every time (never taken from a ledger), so a restore can only ever aim at
+/// some note's own comments, creation date or edit record.
+#[tauri::command]
+pub fn db_sidecar_rel(state: State<AppState>, note_rel: String, kind: String) -> Result<String, String> {
+    let root = require_root(&state)?;
+    let rel = sidecars::rel_of(&root, &notes::resolve_safe(&root, &note_rel)?);
+    let abs = match kind.as_str() {
+        "comments" => comments::comments_path(&root, &rel),
+        "metadata" => sidecars::note_metadata_path(&root, &rel, false)?,
+        "agent-edits" => sidecars::agent_edit_path(&root, &rel)?,
+        other => return Err(format!("Unknown sidecar: {other}")),
+    };
+    Ok(sidecars::rel_of(&root, &abs))
+}
+
+/// Write a note's creation date down before its file is replaced or moved
+/// (`prepareNoteCreation`). A temporary folder session gets no state.
+#[tauri::command]
+pub fn db_prepare_note_creation(state: State<AppState>, rel_path: String) -> Result<(), String> {
+    let root = require_root(&state)?;
+    if active_vault_is_temporary(&state) {
+        return Ok(());
+    }
+    sidecars::prepare_note_creation(&root, &rel_path)
+}
+
+/// Prune empty directories upward from a sidecar's folder, strictly inside the
+/// sidecar tree it belongs to. An empty leftover there is not harmless: a
+/// folder rename refuses a destination whose comments or metadata directory
+/// already exists, so one left behind by an undo would block that name.
+#[tauri::command]
+pub fn db_prune_sidecar_dirs(state: State<AppState>, rel_dir: String) -> Result<(), String> {
+    let root = require_root(&state)?;
+    let start = notes::resolve_safe(&root, &rel_dir)?;
+    let bases = [
+        PathBuf::from(config::resolve_path(&comments::comments_root(&root).to_string_lossy())),
+        sidecars::note_metadata_root(&root),
+        sidecars::agent_edits_root(&root),
+    ];
+    let Some(base) = bases.into_iter().find(|b| start != *b && start.starts_with(b)) else {
+        return Ok(());
+    };
+    let mut dir = start;
+    while dir != base && dir.starts_with(&base) {
+        let empty = std::fs::read_dir(&dir).map(|mut d| d.next().is_none()).unwrap_or(false);
+        if !empty || std::fs::remove_dir(&dir).is_err() {
+            break;
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent.to_path_buf(),
+            None => break,
+        }
+    }
+    Ok(())
 }

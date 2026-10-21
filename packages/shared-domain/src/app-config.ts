@@ -1,14 +1,11 @@
-// Portable application config — the subset of user preferences that travel
-// between machines via a plain-text config file (config.toml). This is the
-// single source of truth for *which* preference keys are portable; both the
-// renderer (to extract/apply the subset) and the desktop main process (to
-// read/write the file) import from here so the two never drift.
-//
-// Machine-local UI state (pane widths, collapsed folders, pinned reference,
-// onboarding flag, last-opened vault, window geometry) is deliberately NOT
-// listed here — it stays in localStorage / the runtime config so a synced
-// dotfile doesn't churn on every drag and never carries machine-specific
-// layout state.
+import type { PortablePrefKey, AppConfigPortable } from '@zennotes/bridge-contract/app-config'
+import { PORTABLE_PREF_KEYS } from '@zennotes/bridge-contract/app-config'
+export type { PortablePrefKey, AppConfigPortable } from '@zennotes/bridge-contract/app-config'
+export { PORTABLE_PREF_KEYS } from '@zennotes/bridge-contract/app-config'
+
+// Portable preferences are defined by the bridge contract and re-exported here
+// for existing consumers. This module owns normalization, defaults, and selection.
+// Machine-local layout and session state remain outside portable config.
 
 /** Bumped when the on-disk config layout changes in a way that needs a
  *  migration. Written as `config_version` at the top of the file. */
@@ -51,112 +48,6 @@ export function defaultTimeFormat(): TimeFormat {
   return '24h'
 }
 
-/**
- * Preference keys (matching the renderer's `Prefs` shape) persisted to the
- * portable config file. Keep this list in sync with `Prefs` in
- * `packages/app-core/src/store.ts`; new portable settings should be added
- * here AND given a TOML mapping in `apps/desktop/src/main/app-config.ts`.
- */
-export const PORTABLE_PREF_KEYS = [
-  // vim
-  'vimMode',
-  'vimInsertEscape',
-  'vimYankToClipboard',
-  'vimBlockImeInNormalMode',
-  'vimWrappedLineMotions',
-  'whichKeyHints',
-  'whichKeyHintMode',
-  'whichKeyHintTimeoutMs',
-  // keymaps (overrides only)
-  'keymapOverrides',
-  // search
-  'vaultTextSearchBackend',
-  'ripgrepBinaryPath',
-  'fzfBinaryPath',
-  // editor
-  'livePreview',
-  'showHeadingLevelLabels',
-  'listIndentGuides',
-  'renderTablesInLivePreview',
-  'completedTaskStyle',
-  'mathRenderer',
-  'typstTagPreambles',
-  'harperEnabled',
-  'harperDialect',
-  'looseMathDelimiters',
-  'keepViewModeAcrossNotes',
-  'defaultPaneMode',
-  'syncTitleHeadingOnRename',
-  'markdownSnippets',
-  'textReplacementsEnabled',
-  'textReplacements',
-  'autoPairs',
-  'autoPairQuotesInProse',
-  'hideBuiltinTemplates',
-  'tabsEnabled',
-  'wrapTabs',
-  'editorFontSize',
-  'mathFontScale',
-  'editorLineHeight',
-  'editorTabSize',
-  'editorScrollOff',
-  'timeFormat',
-  'previewMaxWidth',
-  'editorMaxWidth',
-  'lineNumberMode',
-  'lineNumberPosition',
-  'viewSettingsScope',
-  'wordWrap',
-  'previewSmoothScroll',
-  'pdfEmbedInEditMode',
-  'pdfExportUseTheme',
-  // appearance
-  'themeId',
-  'themeFamily',
-  'themeMode',
-  'enabledOverrides',
-  'themeTweaks',
-  'darkSidebar',
-  'showSidebarChevrons',
-  'contentAlign',
-  'unifiedSidebar',
-  // typography
-  'interfaceFont',
-  'textFont',
-  'monoFont',
-  // features
-  'workflowsEnabled',
-  'hiddenWorkflowPresets',
-  'atlasEnabled',
-  // view
-  'systemFolderLabels',
-  'noteSortOrder',
-  'assetSortOrder',
-  'groupByKind',
-  'nestedTags',
-  'autoReveal',
-  'quickNoteDateTitle',
-  'quickNoteTitlePrefix',
-  'autoCalendarPanel',
-  'calendarWeekStart',
-  'calendarShowWeekNumbers',
-  'tasksViewMode',
-  'showArchivedTasks',
-  'kanbanGroupBy',
-  'kanbanColumnTitles',
-  'kanbanStatuses'
-] as const
-
-export type PortablePrefKey = (typeof PORTABLE_PREF_KEYS)[number]
-
-/**
- * Transport shape for the portable config across the IPC boundary. Values are
- * `unknown` on purpose — the file is user-editable plain text, so the renderer
- * funnels everything through `normalizePrefs()` for validation rather than
- * trusting compile-time types here.
- */
-export type AppConfigPortable = Partial<Record<PortablePrefKey, unknown>>
-
 const PORTABLE_KEY_SET: ReadonlySet<string> = new Set(PORTABLE_PREF_KEYS)
 
 /** True when `key` is one of the portable preference keys. */
@@ -191,6 +82,8 @@ export const PORTABLE_DEFAULTS: Record<PortablePrefKey, unknown> = {
   whichKeyHintMode: 'timed',
   whichKeyHintTimeoutMs: 900,
   keymapOverrides: {},
+  ignoredKeys: [],
+  externalApplicationSchemes: [],
   vaultTextSearchBackend: 'auto',
   ripgrepBinaryPath: null,
   fzfBinaryPath: null,
@@ -205,8 +98,18 @@ export const PORTABLE_DEFAULTS: Record<PortablePrefKey, unknown> = {
   harperDialect: 'american',
   looseMathDelimiters: false,
   keepViewModeAcrossNotes: false,
+  keepPanelsAcrossNotes: true,
+  persistUndoHistory: false,
   defaultPaneMode: 'edit',
   syncTitleHeadingOnRename: true,
+  // Keep what a note said before an assistant edits it through MCP, so the
+  // edit can be reviewed (docs/ideas/agent-edit-review.md). The MCP server
+  // reads it from config.toml, without the app running.
+  reviewAgentEdits: true,
+  // The desktop app's anonymous count of installs and updates: version, OS,
+  // architecture and install kind, with no identifier (lib/whats-new.ts sends
+  // it with the first launch of each version). Settings > About turns it off.
+  usageCount: true,
   markdownSnippets: true,
   textReplacementsEnabled: true,
   textReplacements: { '->': '→' },
@@ -236,6 +139,7 @@ export const PORTABLE_DEFAULTS: Record<PortablePrefKey, unknown> = {
   enabledOverrides: {},
   themeTweaks: {},
   darkSidebar: true,
+  showWindowTitleBar: true,
   showSidebarChevrons: true,
   contentAlign: 'center',
   unifiedSidebar: true,
@@ -243,6 +147,7 @@ export const PORTABLE_DEFAULTS: Record<PortablePrefKey, unknown> = {
   textFont: null,
   monoFont: null,
   workflowsEnabled: false,
+  workflowEventTriggers: true,
   hiddenWorkflowPresets: [],
   atlasEnabled: true,
   systemFolderLabels: {},
@@ -259,6 +164,9 @@ export const PORTABLE_DEFAULTS: Record<PortablePrefKey, unknown> = {
   tasksViewMode: 'list',
   showArchivedTasks: false,
   kanbanGroupBy: 'status',
+  kanbanCardSort: 'manual',
+  kanbanFolderRoot: '',
   kanbanColumnTitles: {},
-  kanbanStatuses: []
+  kanbanStatuses: [],
+  savedTaskFilters: {}
 }

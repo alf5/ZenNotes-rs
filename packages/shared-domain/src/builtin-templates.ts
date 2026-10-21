@@ -123,7 +123,7 @@ export const BUILTIN_TEMPLATES: NoteTemplate[] = [
     name: 'Meeting Notes',
     description: 'Agenda, notes, decisions, and action items',
     category: 'Engineering',
-    titleTemplate: 'Meeting — {{date:YYYY-MM-DD}}',
+    titleTemplate: 'Meeting {{date:YYYY-MM-DD}}',
     body: `# {{title}}
 
 - **Date:** {{date}}
@@ -148,7 +148,7 @@ export const BUILTIN_TEMPLATES: NoteTemplate[] = [
     name: '1:1',
     description: 'One-on-one: wins, blockers, growth, follow-ups',
     category: 'Engineering',
-    titleTemplate: '1-1 — {{date:YYYY-MM-DD}}',
+    titleTemplate: '1-1 {{date:YYYY-MM-DD}}',
     body: `# {{title}}
 
 - **Date:** {{date}}
@@ -200,13 +200,13 @@ export const BUILTIN_TEMPLATES: NoteTemplate[] = [
     titleTemplate: '{{date:YYYY}}-W{{week}}',
     body: `# Week {{week}}, {{date:YYYY}}
 
-## Last week — review
+## Last week: review
 
 - {{cursor}}
 
 ## Wins
 
-## This week — plan
+## This week: plan
 
 - [ ]
 

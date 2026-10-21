@@ -392,6 +392,32 @@ describe('filters', () => {
     expect(await outTitles([step('all'), step('not-tagged', ['#book'])])).toHaveLength(5)
   })
 
+  it('a tag list keeps a note carrying any of its tags, nested ones included', async () => {
+    expect(await outTitles([step('all'), step('tagged', ['#recipe,', '#project'])])).toEqual([
+      'Compiler',
+      'Engine',
+      'Recipe'
+    ])
+    expect(await outTitles([step('tag', ['#meeting,', '#recipe'])])).toEqual(['Meeting', 'Recipe'])
+  })
+
+  it('`not-tagged` with a list drops a note carrying any of them', async () => {
+    expect(await outTitles([step('all'), step('not-tagged', ['#book,', '#project'])])).toEqual([
+      'Meeting',
+      'Recipe',
+      'Pipes | Tubes'
+    ])
+  })
+
+  it('`no-tags` keeps only the notes with no tag at all', async () => {
+    const loose = note('inbox/Loose.md', 'Loose', 'inbox', [], {}, DAY)
+    expect(
+      await outTitles([step('all'), step('no-tags')], { notes: [...NOTES, loose] })
+    ).toEqual(['Loose'])
+    // The untagged archived note stays out with the rest of the archive.
+    expect(await outTitles([step('all'), step('no-tags')])).toEqual([])
+  })
+
   it('`in` narrows to a folder subtree', async () => {
     expect(await outTitles([step('all'), step('in', ['inbox/projects'])])).toEqual([
       'Compiler',
@@ -1280,6 +1306,18 @@ describe('invariants', () => {
     expect(titles(plan.wires.out)).toHaveLength(4)
   })
 
+  it('plans no writes for tags separated only by spaces', async () => {
+    // Older builds read `not-tagged #book #project` as `not-tagged #book`, so
+    // the line must not start meaning something wider now that lists exist.
+    const plan = await planPipeline([
+      step('all'),
+      step('not-tagged', ['#book', '#project']),
+      step('trash')
+    ])
+    expect(plan.ops).toEqual([])
+    expect(plan.diagnostics[0].severity).toBe('error')
+  })
+
   it('aborts a pipeline at a source that is not its head', async () => {
     // A source past the head would REPLACE the wire with a vault-wide query,
     // so the `trash` after it must never see that widened set.
@@ -1361,6 +1399,19 @@ describe('remapped system folders', () => {
     expect(plan.wires.out.map((n) => n.title)).toEqual(['Gone'])
   })
 
+  it('`folder inbox` and `in inbox` still mean THE inbox after a remap', async () => {
+    const source = await planWorkflow(
+      workflow([stmt('out', null, [step('folder', ['inbox'])])]),
+      makeCtx(remapReader, { systemFolderDirs: dirs })
+    )
+    expect(source.wires.out.map((n) => n.title)).toEqual(['Idea'])
+    const filter = await planWorkflow(
+      workflow([stmt('out', null, [step('all'), step('in', ['inbox'])])]),
+      makeCtx(remapReader, { systemFolderDirs: dirs })
+    )
+    expect(filter.wires.out.map((n) => n.title)).toEqual(['Idea'])
+  })
+
   it('the `trash` step projects into the remapped directory', async () => {
     const plan = await planWorkflow(
       workflow([stmt('out', null, [step('all'), step('trash')])]),
@@ -1374,5 +1425,45 @@ describe('remapped system folders', () => {
     expect(folderTarget('trash', 'inbox/demo/X.md', dirs)).toBe('99 - Deleted/demo/X.md')
     expect(folderTarget('archive', '01 - Entry/X.md', dirs)).toBe('Shelf/X.md')
     expect(folderTarget('trash', 'inbox/demo/X.md')).toBe('trash/demo/X.md')
+  })
+})
+
+/* -------------------------------------------------------------------------- */
+/*  Notes at the vault root (#840)                                            */
+/* -------------------------------------------------------------------------- */
+
+// With vault.json `primaryNotesLocation: root` the primary notes area is the
+// root itself, so its directory is the empty string, which `folder` refuses on
+// purpose, and no note has an `inbox` directory. The system name is the only
+// way to spell it, and it must reach the subfolders too.
+describe('notes at the vault root', () => {
+  const rootNotes: WorkflowNote[] = [
+    { ...note('Dune.md', 'Dune', '', ['book'], {}, DAY), system: 'inbox' },
+    { ...note('Areas/Gym/Plan.md', 'Plan', 'Areas/Gym', [], {}, DAY), system: 'inbox' },
+    { ...note('quick/Scratch.md', 'Scratch', 'quick', [], {}, DAY), system: 'quick' },
+    { ...note('archive/Old.md', 'Old', 'archive', ['book'], {}, DAY), system: 'archive' }
+  ]
+  const rootReader: VaultReader = {
+    listNotes: async () => rootNotes,
+    readBody: async () => ''
+  }
+  const out = async (steps: WorkflowStep[]): Promise<string[]> => {
+    const plan = await planWorkflow(workflow([stmt('out', null, steps)]), makeCtx(rootReader))
+    return plan.wires.out.map((n) => n.title)
+  }
+
+  it('`folder inbox` is the root and everything under it', async () => {
+    expect(await out([step('folder', ['inbox'])])).toEqual(['Dune', 'Plan'])
+  })
+
+  it('a directory name still narrows to that directory', async () => {
+    expect(await out([step('folder', ['Areas'])])).toEqual(['Plan'])
+    expect(await out([step('folder', ['Areas/Gym'])])).toEqual(['Plan'])
+  })
+
+  it('the other system names keep their meaning', async () => {
+    expect(await out([step('folder', ['quick'])])).toEqual(['Scratch'])
+    expect(await out([step('folder', ['archive'])])).toEqual(['Old'])
+    expect(await out([step('tag', ['#book']), step('in', ['inbox'])])).toEqual(['Dune'])
   })
 })

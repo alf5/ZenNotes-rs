@@ -124,6 +124,64 @@ describe('bindParams parks what it cannot bind', () => {
   })
 })
 
+describe('tag lists bind as one comma-separated argument', () => {
+  const def = (kind: string): NodeDef => {
+    const found = nodeDef(kind)
+    if (!found) throw new Error(`no node def for ${kind}`)
+    return found
+  }
+
+  it('binds one tag exactly as before lists existed', () => {
+    expect(bindParams(def('tag'), ['#book'], 1)).toEqual({ args: { tag: 'book' }, diagnostics: [] })
+  })
+
+  it('stores a list comma-joined without the hashes, spaces or not', () => {
+    expect(bindParams(def('tagged'), ['#book,', '#article'], 1)).toEqual({
+      args: { tag: 'book,article' },
+      diagnostics: []
+    })
+    expect(bindParams(def('not-tagged'), ['#a,#b,', 'c'], 1).args.tag).toBe('a,b,c')
+  })
+
+  it('drops a repeated tag whatever its case, as tags match', () => {
+    expect(bindParams(def('tagged'), ['#Book,', '#book,', '#art'], 1).args.tag).toBe('Book,art')
+  })
+
+  it('refuses tags separated only by spaces and shows the comma form', () => {
+    const bound = bindParams(def('not-tagged'), ['#a', '#b'], 1)
+    expect(bound.args.tag).toBeUndefined()
+    expect(bound.args[RAW_ARG]).toBe('#a #b')
+    expect(bound.diagnostics).toEqual([
+      { severity: 'error', message: 'separate tags with commas: `not-tagged #a, #b`', line: 1 }
+    ])
+  })
+
+  it('refuses an empty entry rather than guessing what was meant', () => {
+    for (const tokens of [['#a,'], ['#a,,', '#b'], [',#a']]) {
+      const bound = bindParams(def('tagged'), tokens, 1)
+      expect(bound.args.tag).toBeUndefined()
+      expect(bound.args[RAW_ARG]).toBe(tokens.join(' '))
+      expect(bound.diagnostics[0]?.message).toBe('`tagged` has an empty entry in its tag list')
+    }
+  })
+
+  it('names the entry that is not a tag', () => {
+    const bound = bindParams(def('tagged'), ['#book,', '#2024'], 1)
+    expect(bound.args[RAW_ARG]).toBe('#book, #2024')
+    expect(bound.diagnostics[0]?.message).toBe('`#2024` is not a valid tag')
+  })
+
+  it('still needs at least one tag', () => {
+    expect(bindParams(def('tagged'), [], 1).diagnostics).toEqual([
+      { severity: 'error', message: '`tagged` needs tag', line: 1 }
+    ])
+  })
+
+  it('`no-tags` takes no argument', () => {
+    expect(bindParams(def('no-tags'), [], 1)).toEqual({ args: {}, diagnostics: [] })
+  })
+})
+
 describe('sanitizeTagChars — what survives typing a tag (#532)', () => {
   // The canvas inspector runs every keystroke through this. It has to keep
   // exactly what `bindParams` would accept, in any script: an ASCII-only

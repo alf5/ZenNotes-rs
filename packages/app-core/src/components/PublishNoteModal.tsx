@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react'
 import { getZenBridge, type ZenBridge } from '@zennotes/bridge-contract/bridge'
 import type { CloudPublishedNote } from '@zennotes/bridge-contract/cloud-sync'
-import { publishCloudNoteWithFeedback, type PublishableCloudNote } from '../lib/cloud-publishing'
+import { CloudPublishUnconfirmedError, publishCloudNoteWithFeedback, type PublishableCloudNote } from '../lib/cloud-publishing'
 import { notifyPublishedNoteChanged } from '../lib/published-note-events'
 import { Button } from './ui/Button'
+import type { CloudErrorCopy } from '@zennotes/shared-domain/cloud-error-copy'
+import { CloudErrorMessage, cloudErrorCopy } from './CloudErrorMessage'
 import { Modal } from './ui/Modal'
 
 export function PublishNoteModal({
@@ -18,7 +20,8 @@ export function PublishNoteModal({
   const [existing, setExisting] = useState<CloudPublishedNote | null>(null)
   const [loading, setLoading] = useState(true)
   const [publishing, setPublishing] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<CloudErrorCopy | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -31,7 +34,7 @@ export function PublishNoteModal({
       })
       .catch((reason: unknown) => {
         if (!cancelled) {
-          setError(reason instanceof Error ? reason.message : 'Could not load publishing settings.')
+          setError(cloudErrorCopy(reason, "ZenNotes couldn't load your publishing settings. Try again in a moment.", bridge))
         }
       })
       .finally(() => {
@@ -46,13 +49,22 @@ export function PublishNoteModal({
   const publish = async (): Promise<void> => {
     setPublishing(true)
     setError(null)
+    setNotice(null)
 
     try {
       const outcome = await publishCloudNoteWithFeedback(note, bridge)
       notifyPublishedNoteChanged({ notePath: note.path, url: outcome.url })
       onClose()
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Could not publish this note.')
+      if (reason instanceof CloudPublishUnconfirmedError) {
+        setNotice(reason.message)
+        if (reason.publicNote) {
+          setExisting(reason.publicNote)
+          notifyPublishedNoteChanged({ notePath: note.path, url: reason.publicNote.url })
+        }
+      } else {
+        setError(cloudErrorCopy(reason, "ZenNotes couldn't publish this note. Try again in a moment.", bridge))
+      }
     } finally {
       setPublishing(false)
     }
@@ -67,16 +79,22 @@ export function PublishNoteModal({
           : 'Add this note to your public publication. Its link stays the same when you update it.'}
       />
       <Modal.Body className="space-y-3">
+        {notice && <div role="status" className="rounded-lg border border-warning/35 bg-warning/10 px-3 py-2 text-sm text-ink-700">{notice}</div>}
         <p className="text-sm leading-6 text-ink-500">
           Theme and logo are managed for your full publication in ZenNotes Cloud.
         </p>
         {error && (
           <div role="alert" className="rounded-lg border border-danger/35 bg-danger/10 px-3 py-2 text-sm text-danger">
-            {error}
+            <CloudErrorMessage message={error.message} detail={error.detail} />
           </div>
         )}
       </Modal.Body>
       <Modal.Footer>
+        {notice && existing && (
+          <Button variant="secondary" disabled={publishing} onClick={() => window.open(existing.url, '_blank')}>
+            Open public note
+          </Button>
+        )}
         <Button variant="secondary" disabled={publishing} onClick={onClose}>
           Cancel
         </Button>

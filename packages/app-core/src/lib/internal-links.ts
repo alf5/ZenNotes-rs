@@ -118,6 +118,8 @@ function unwrapMdUrl(url: string): string {
   return trimmed
 }
 
+const EXPLICIT_EXTERNAL_RE = /^(https?:|mailto:|tel:)/i
+
 const LOCAL_FILE_EXT_RE =
   /\.(md|markdown|txt|png|apng|avif|gif|jpe?g|svg|webp|pdf|mp3|m4a|aac|flac|ogg|wav|mp4|m4v|mov|ogv|webm|canvas|excalidraw)$/i
 
@@ -131,7 +133,7 @@ const LOCAL_FILE_EXT_RE =
 export function externalLinkUrl(href: string): string | null {
   const h = href.trim()
   if (!h) return null
-  if (/^(https?:|mailto:|tel:)/i.test(h)) return h
+  if (EXPLICIT_EXTERNAL_RE.test(h)) return h
   if (/^[a-zA-Z][a-zA-Z\d+.-]*:/.test(h)) return null // another scheme — not ours
   if (h.startsWith('#') || h.startsWith('/') || h.startsWith('.') || h.startsWith('//')) return null
   // Bare domain heuristic: `host.tld` (one or more labels) optionally followed
@@ -143,57 +145,93 @@ export function externalLinkUrl(href: string): string | null {
   return `https://${h}`
 }
 
+/** Which way a link is followed: a wikilink resolves a note name first, while
+ *  a Markdown link or a bare URL is an href. */
+export type LineLinkKind = 'wikilink' | 'markdown' | 'url'
+
 /**
- * The link at a document offset — a `[[wikilink]]` name, a Markdown link's
- * URL, or a bare URL — with its full source range in `doc` offsets. The range
- * lets pointer-driven callers confirm the mouse actually sits on the link's
- * rendered glyphs: a position alone cannot tell "on the link" from "clamped to
- * the link", which is how blank space beside a line once hovered and followed
- * a line-ending link (#587). Returns null when the offset isn't inside a link.
+ * The address a link of this kind opens in the browser, or null. A wikilink
+ * names a note, so only an explicit scheme (`[[https://…]]`) sends one there:
+ * read as an href, `[[2024.01.15]]` passed the bare-domain guess and opened
+ * https://2024.01.15.
  */
-export function linkRangeAtCursor(
-  doc: string,
-  pos: number
-): { target: string; from: number; to: number } | null {
+export function externalUrlForLink(target: string, kind: LineLinkKind): string | null {
+  if (kind !== 'wikilink') return externalLinkUrl(target)
+  const name = target.trim()
+  return EXPLICIT_EXTERNAL_RE.test(name) ? name : null
+}
+
+export interface LineLink {
+  kind: LineLinkKind
+  target: string
+  /** Span of the whole link source, in offsets into the text searched: the
+   *  line for `linkRangesInLine`, the document for `linkRangeAtCursor`. */
+  from: number
+  to: number
+}
+
+// The link shapes the editor follows, in the order they claim a position, so
+// `linkRangeAtCursor` and `linkRangesInLine` can never disagree about a target.
+// Angle-bracketed URLs can contain `)`, so they match ahead of the plain form.
+const LINK_SHAPES: ReadonlyArray<{
+  kind: LineLinkKind
+  re: RegExp
+  target: (m: RegExpMatchArray) => string
+}> = [
+  { kind: 'wikilink', re: /\[\[([^\]|]+?)(?:\|[^\]]+)?\]\]/g, target: (m) => m[1] },
+  { kind: 'markdown', re: /\[([^\]]*)\]\(<([^>]+)>\)/g, target: (m) => m[2] },
+  { kind: 'markdown', re: /\[([^\]]*)\]\(([^)]+)\)/g, target: (m) => unwrapMdUrl(m[2]) },
+  { kind: 'url', re: /https?:\/\/[^\s)>\]]+/g, target: (m) => m[0] }
+]
+
+/**
+ * The link at a document offset (a `[[wikilink]]` name, a Markdown link's
+ * URL, or a bare URL), with its kind and its full source range in `doc`
+ * offsets. The range lets pointer-driven callers confirm the mouse actually
+ * sits on the link's rendered glyphs: a position alone cannot tell "on the
+ * link" from "clamped to the link", which is how blank space beside a line
+ * once hovered and followed a line-ending link (#587). The kind is what tells
+ * a note name from an href when the link is followed. Returns null when the
+ * offset isn't inside a link.
+ */
+export function linkRangeAtCursor(doc: string, pos: number): LineLink | null {
   const lineStart = doc.lastIndexOf('\n', pos - 1) + 1
   const lineEnd = doc.indexOf('\n', pos)
   const line = doc.slice(lineStart, lineEnd === -1 ? undefined : lineEnd)
   const col = pos - lineStart
-  const hit = (m: RegExpExecArray, target: string) =>
-    col >= m.index && col < m.index + m[0].length
-      ? { target, from: lineStart + m.index, to: lineStart + m.index + m[0].length }
-      : null
-  const wikiRe = /\[\[([^\]|]+?)(?:\|[^\]]+)?\]\]/g
-  let m: RegExpExecArray | null
-  while ((m = wikiRe.exec(line)) !== null) {
-    const found = hit(m, m[1])
-    if (found) return found
-  }
-  // Angle-bracketed URLs can contain `)` so match them specifically first.
-  const mdAngleRe = /\[([^\]]*)\]\(<([^>]+)>\)/g
-  while ((m = mdAngleRe.exec(line)) !== null) {
-    const found = hit(m, m[2])
-    if (found) return found
-  }
-  const mdRe = /\[([^\]]*)\]\(([^)]+)\)/g
-  while ((m = mdRe.exec(line)) !== null) {
-    const found = hit(m, unwrapMdUrl(m[2]))
-    if (found) return found
-  }
-  const urlRe = /https?:\/\/[^\s)>\]]+/g
-  while ((m = urlRe.exec(line)) !== null) {
-    const found = hit(m, m[0])
-    if (found) return found
+  for (const shape of LINK_SHAPES) {
+    for (const m of line.matchAll(shape.re)) {
+      const start = m.index ?? 0
+      if (col >= start && col < start + m[0].length) {
+        return {
+          kind: shape.kind,
+          target: shape.target(m),
+          from: lineStart + start,
+          to: lineStart + start + m[0].length
+        }
+      }
+    }
   }
   return null
 }
 
 /**
- * The link target at a document offset — a `[[wikilink]]` name, a Markdown
- * link's URL, or a bare URL. Returns null when the offset isn't inside a link.
+ * Every link in one line of source, in reading order, with the same targets
+ * `linkRangeAtCursor` reports for a position inside each. A link inside
+ * another (the URL of `[label](https://…)`) belongs to the outer one and is
+ * not listed on its own.
  */
-export function extractLinkAtCursor(doc: string, pos: number): string | null {
-  return linkRangeAtCursor(doc, pos)?.target ?? null
+export function linkRangesInLine(line: string): LineLink[] {
+  const links: LineLink[] = []
+  for (const shape of LINK_SHAPES) {
+    for (const m of line.matchAll(shape.re)) {
+      const from = m.index ?? 0
+      const to = from + m[0].length
+      if (links.some((link) => from < link.to && to > link.from)) continue
+      links.push({ kind: shape.kind, target: shape.target(m), from, to })
+    }
+  }
+  return links.sort((a, b) => a.from - b.from)
 }
 
 /**

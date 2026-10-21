@@ -1,6 +1,6 @@
 /**
- * Client-side render loop for the three "math diagram" block types:
- * TikZ, JSXGraph, and function-plot.
+ * Client-side render loop for the fenced diagram types other than Mermaid:
+ * TikZ, D2, JSXGraph, and function-plot.
  *
  * Preview.tsx calls `renderDiagrams(rootEl, { themeKey })` after each
  * markdown render (and again when the theme changes). Each function
@@ -11,11 +11,12 @@
  * Every library is loaded once, lazily, and memoized.
  */
 
+import { renderD2Svg, withUniqueD2Ids } from "./d2-render";
 import { attachInlineDiagramPanZoom } from "./inline-diagram-pan-zoom";
 
 function prepareDiagramShell(
   el: HTMLElement,
-  kind: "tikz" | "jsxgraph" | "function-plot",
+  kind: "tikz" | "d2" | "jsxgraph" | "function-plot",
   source: string,
 ): HTMLDivElement {
   const expanded = el.dataset.zenDiagramExpanded === "true";
@@ -305,7 +306,7 @@ async function renderTikzBlock(el: HTMLElement): Promise<void> {
   surface.innerHTML =
     '<div class="zen-tikz-loading text-[11px] opacity-60">Rendering TikZ…</div>';
   if (typeof window.zen?.renderTikz !== "function") {
-    surface.innerHTML = `<pre class="zen-diagram-error">TikZ renderer not loaded. Quit (⌘Q) and relaunch the app — the preload script is only attached when a window is first created, so a plain reload isn't enough.</pre>`;
+    surface.innerHTML = `<pre class="zen-diagram-error">TikZ renderer not loaded. Quit (⌘Q) and relaunch the app: the preload script is only attached when a window is first created, so a plain reload isn't enough.</pre>`;
     return;
   }
   try {
@@ -328,6 +329,36 @@ async function renderTikzBlock(el: HTMLElement): Promise<void> {
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     surface.innerHTML = `<pre class="zen-diagram-error">TikZ error: ${escapeHtml(message)}</pre>`;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// D2: architecture and flow diagrams, compiled in a WebAssembly worker
+// ---------------------------------------------------------------------------
+
+async function renderD2Block(el: HTMLElement): Promise<void> {
+  const source = el.getAttribute("data-d2-source") ?? el.textContent ?? "";
+  if (!source.trim()) return;
+  el.setAttribute("data-d2-source", source);
+  const surface = prepareDiagramShell(el, "d2", source);
+  const loading = document.createElement("div");
+  loading.className = "zen-d2-loading";
+  loading.textContent = "Rendering D2…";
+  surface.replaceChildren(loading);
+  const result = await renderD2Svg(source);
+  if (result.ok) {
+    // Already sanitized in d2-render: no script, no fetch, no navigation.
+    surface.innerHTML = withUniqueD2Ids(result.svg);
+    // The app palette repaints D2's theme classes unless the diagram chose a
+    // D2 theme of its own.
+    el.classList.toggle("zen-d2-themed", !result.ownTheme);
+    if (el.dataset.zenDiagramExpanded !== "true") attachInlineDiagramPanZoom(surface);
+  } else {
+    // The message quotes the source, so it is text, never markup.
+    const error = document.createElement("pre");
+    error.className = "zen-diagram-error";
+    error.textContent = `D2 error: ${result.error}`;
+    surface.replaceChildren(error);
   }
 }
 
@@ -627,6 +658,17 @@ export async function renderDiagrams(
     if (el.getAttribute("data-zen-rendered-hash") === stamp) continue;
     el.setAttribute("data-zen-rendered-hash", stamp);
     tasks.push(renderTikzBlock(el));
+  }
+
+  for (const el of Array.from(root.querySelectorAll<HTMLElement>(".zen-d2"))) {
+    if (opts.expanded) el.dataset.zenDiagramExpanded = "true";
+    else delete el.dataset.zenDiagramExpanded;
+    const source = el.getAttribute("data-d2-source") ?? el.textContent ?? "";
+    // Colour comes from CSS, so a theme switch needs no redraw.
+    const stamp = `d2|${opts.expanded ? "expanded" : "normal"}|${source}`;
+    if (el.getAttribute("data-zen-rendered-hash") === stamp) continue;
+    el.setAttribute("data-zen-rendered-hash", stamp);
+    tasks.push(renderD2Block(el));
   }
 
   for (const el of Array.from(

@@ -12,9 +12,19 @@
  *    Vim runs its paste. codemirror-vim never reads the OS clipboard on `p`.
  *  - a yank handler other modules register (used for highlight-on-yank), invoked
  *    on yank so the active view can flash the yanked range.
+ *
+ * It also makes the `+` and `*` registers read the system clipboard, images
+ * included (`installSystemClipboardRegisters`).
  */
 import { ViewPlugin, type EditorView } from '@codemirror/view'
+import type { Extension } from '@codemirror/state'
 import { Vim, getCM } from '@replit/codemirror-vim'
+import { editorImagePaste, pasteImageFilesIntoEditor, readSystemClipboard } from './editor-paste-images'
+
+interface VimRegister {
+  toString(): string
+  setText?: (text: string, linewise?: boolean, blockwise?: boolean) => void
+}
 
 interface PatchableRegisterController {
   pushText: (
@@ -24,10 +34,8 @@ interface PatchableRegisterController {
     linewise?: boolean,
     blockwise?: boolean
   ) => void
-  unnamedRegister?: {
-    toString(): string
-    setText?: (text: string, linewise?: boolean, blockwise?: boolean) => void
-  }
+  unnamedRegister?: VimRegister
+  getRegister?: (name?: string) => VimRegister | undefined
 }
 
 let clipboardEnabled = false
@@ -91,6 +99,84 @@ export function setPasteFromClipboardEnabled(on: boolean): void {
   pasteEnabled = on
 }
 
+/** Registers that stand for the system clipboard, as both do in Vim on macOS and Windows. */
+const SYSTEM_CLIPBOARD_REGISTERS = new Set(['+', '*'])
+
+interface VimEditor {
+  cm6?: EditorView
+  state?: { vim?: { visualMode?: boolean } }
+  replaceSelection(text: string): void
+}
+
+interface VimPasteActions {
+  continuePaste(cm: unknown, actionArgs: unknown, vim: unknown, text: string, register: VimRegister): void
+}
+
+type VimActionFn = Parameters<typeof Vim.defineAction>[1]
+
+let systemClipboardRegistersInstalled = false
+
+function registerController(): PatchableRegisterController | null {
+  return Vim.getRegisterController() as unknown as PatchableRegisterController | null
+}
+
+/**
+ * A put lands clipboard images on a line of their own, below the cursor line
+ * for `p` and above it for `P`, the way a linewise put lands, rather than
+ * splitting the line at the cursor.
+ */
+function putClipboardImages(cm: VimEditor, images: File[], after: boolean): boolean {
+  const view = cm.cm6
+  if (!view || images.length === 0 || !view.state.facet(editorImagePaste)) return false
+  const line = view.state.doc.lineAt(view.state.selection.main.head)
+  if (cm.state?.vim?.visualMode) Vim.exitVisualMode(cm as unknown as Parameters<typeof Vim.exitVisualMode>[0])
+  return pasteImageFilesIntoEditor(view, images, after ? line.to : line.from)
+}
+
+/**
+ * codemirror-vim reads the system clipboard only for `"+p`, and only as text;
+ * `"*p` and insert-mode `<C-r>+` / `<C-r>*` read in-memory registers the system
+ * clipboard never fills. These overrides make both registers read it, and an
+ * image on it lands as an embed through the note's paste import, as Mod+V does.
+ * Every other register keeps codemirror-vim's own behaviour.
+ */
+export function installSystemClipboardRegisters(): void {
+  if (systemClipboardRegistersInstalled) return
+  systemClipboardRegistersInstalled = true
+  Vim.defineAction('paste', function (
+    this: VimPasteActions,
+    cm: VimEditor,
+    actionArgs: { registerName?: string; after?: boolean },
+    vim: unknown
+  ): void {
+    const name = actionArgs.registerName
+    const register = registerController()?.getRegister?.(name)
+    if (!register) return
+    if (!name || !SYSTEM_CLIPBOARD_REGISTERS.has(name)) {
+      this.continuePaste(cm, actionArgs, vim, register.toString(), register)
+      return
+    }
+    void readSystemClipboard().then(({ images, text }) => {
+      if (putClipboardImages(cm, images, actionArgs.after === true)) return
+      // Linewise when the text ends in a newline, as the unnamed-register `p` reads it.
+      register.setText?.(text, /\n$/.test(text))
+      this.continuePaste(cm, actionArgs, vim, text, register)
+    })
+  } as unknown as VimActionFn)
+  Vim.defineAction('insertRegister', ((cm: VimEditor, actionArgs: { selectedCharacter?: string }) => {
+    const name = actionArgs.selectedCharacter
+    if (!name || !SYSTEM_CLIPBOARD_REGISTERS.has(name)) {
+      const text = registerController()?.getRegister?.(name)?.toString()
+      if (text) cm.replaceSelection(text)
+      return
+    }
+    void readSystemClipboard().then(({ images, text }) => {
+      if (cm.cm6 && pasteImageFilesIntoEditor(cm.cm6, images)) return
+      if (text) cm.replaceSelection(text)
+    })
+  }) as unknown as VimActionFn)
+}
+
 /**
  * Editor extension that makes Vim `p` / `P` paste the *system* clipboard.
  *
@@ -101,13 +187,14 @@ export function setPasteFromClipboardEnabled(on: boolean): void {
  * hand the key back to Vim so all of its paste behaviour (linewise handling,
  * counts, visual-mode replace) runs unchanged.
  */
-export const vimClipboardPasteExtension = ViewPlugin.fromClass(
+export const vimClipboardPasteExtension: Extension = ViewPlugin.fromClass(
   class {
     private readonly view: EditorView
     private readonly onKeyDown: (e: KeyboardEvent) => void
 
     constructor(view: EditorView) {
       this.view = view
+      installSystemClipboardRegisters()
       this.onKeyDown = (e: KeyboardEvent): void => {
         if (!pasteEnabled) return
         if (e.key !== 'p' && e.key !== 'P') return
@@ -141,25 +228,15 @@ export const vimClipboardPasteExtension = ViewPlugin.fromClass(
           }
         }
 
-        const clipboard = navigator.clipboard
-        if (!clipboard?.readText) {
+        void readSystemClipboard().then(({ images, text }) => {
+          if (putClipboardImages(cm as unknown as VimEditor, images, key === 'p')) return
+          if (text) {
+            // Linewise when the clipboard ends in a newline, matching how a
+            // linewise yank is stored, so `p` opens a new line as expected.
+            registerController()?.unnamedRegister?.setText?.(text, /\n$/.test(text))
+          }
           replay()
-          return
-        }
-        void clipboard
-          .readText()
-          .then((text) => {
-            if (text) {
-              const controller = Vim.getRegisterController() as unknown as PatchableRegisterController | null
-              // Linewise when the clipboard ends in a newline, matching how a
-              // linewise yank is stored, so `p` opens a new line as expected.
-              controller?.unnamedRegister?.setText?.(text, /\n$/.test(text))
-            }
-            replay()
-          })
-          .catch(() => {
-            replay()
-          })
+        })
       }
       // Capture phase so we run before CodeMirror's own key handling and can
       // stop the event from reaching the Vim keymap.

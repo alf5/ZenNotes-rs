@@ -1,4 +1,120 @@
-# Gap analysis: upstream ZenNotes v2.15.0 → v2.45.0
+# Gap analysis: upstream ZenNotes v2.45.0 → v2.73.0
+
+Status of the mirror as of 2026-10-21, on branch `mirror-v2.73`.
+
+Upstream reference clone: `~/delme/zennotes` (tags up to `v2.73.0`). The gap
+crossed here was 451 upstream commits: ~72k changed lines across the three
+vendored packages, ~18k in `apps/desktop/src`, and a bridge contract with one
+new required member (`openExternalUrl`) and ~35 new optional ones.
+
+## Frontend
+
+- `packages/{app-core,bridge-contract,shared-domain}` re-vendored **verbatim**
+  from `v2.73.0` (confirmed byte-identical to `v2.45.0` before replacing, and to
+  `v2.73.0` after). New deps come in through the workspaces: `pele` (replaces
+  mermaid for ```` ```mermaid ```` fences), `@terrastruct/d2`, `@codemirror/merge`
+  (agent edit review), `@lezer/common`, `@scure/bip39`, `hash-wasm`.
+- `vite.config.ts`: the `pele-runtime` and `d2-runtime` chunks are deferred
+  preloads (as upstream's web config), and `@codemirror/merge` is kept out of
+  `vendor-editor` (as upstream's DESKTOP config; the web one lacks the rule).
+  The boot-order guards hold: the entry still statically imports only
+  `bootstrap-config`.
+- `tailwind.config.js` now uses the vendored `packages/app-core/build/tailwind-preset.cjs`
+  (identical theme to the old inline copy), so the next re-vendor updates it.
+  `packages/app-core/build/vite.mjs` (a plugin for external hosts) is vendored
+  but unused, like upstream's own apps.
+- `docs/specs/cloud-e2ee-vectors.json` vendored at its monorepo path: a
+  shared-domain test reads it as `../../../docs/specs/…` (same reason
+  `tooling/vite/harper-wasm-asset.ts` lives where it does).
+
+## Port-owned copies of upstream logic (these rot silently on a re-vendor)
+
+| File | Upstream | Done |
+|---|---|---|
+| `src/bridge/portable-config.ts` | `apps/desktop/src/main/app-config.ts` | Field tables and serializer re-spliced wholesale; both sections are byte-identical to upstream again, which matters because the file is SHARED with upstream ZenNotes (`~/.config/zennotes/config.toml`): any difference makes the two apps rewrite it back and forth. 11 prefs had no mapping (the parity test caught them); the keymap reference now renders the same bytes on every OS (#901); the watcher's own-write guard only applies while writes settle (9aebb6f3). The parity test's last exemption (`keepViewModeAcrossNotes`) is gone: upstream maps it since v2.52. |
+| `src/bridge/workflows.ts` | `apps/desktop/src/main/workflow-apply.ts` | Path ops now carry each note's comments, creation date and agent edit record (journalled, undone, drift-checked) (#839); a leftover discussion at the destination refuses the run; a symlinked note moves as the same link and undo moves it back, never planting one (the re-spell is checked in Rust); journal entries share one fsync; the journal key folds case on macOS/Windows. Covered by `src/__tests__/workflow-applier.test.ts`. |
+| `src/bridge/databases.ts` | `apps/desktop/src/main/databases.ts` | `createDatabase` seeds (#832, table → database); rename goes through the folder rename so the comment tree follows. |
+| `src/bridge/drag-region.ts` | the stylesheet's drag selectors | Honours `.zn-app-dragging`; utility windows' headers (inline `WebkitAppRegion`, which WebKitGTK drops) are matched structurally. With the title bar off (#754) the tab strip carries `.drag-region`. |
+| task parsing | `apps/desktop/src/main/tasks.ts` | **Moved to TS** (`src/bridge/tasks.ts`) over vendored `@shared/tasks`. The Rust parser was a v2.1-era port that knew no `[>]`/`[-]`/`[/]` states, `@field:value` fields, `#task` files, or excluded/included Task folders (#458, #962). |
+| demo tour | `shared-domain/demo-tour-data.ts` | **Moved to TS** (`src/bridge/demo-tour.ts`, imported on demand). The embedded JSON was the v2.1 tour; regenerating now also removes a tour seeded under the older note names. |
+
+## Backend (Rust)
+
+- **Note sidecars** (`src-tauri/src/vault/sidecars.rs`, port of
+  `note-sidecars.ts`, `note-creation-metadata.ts`, `agent-edit-files.ts`):
+  comments, `.zennotes/note-metadata/<note>.metadata.json` creation dates and
+  agent edit records move with a note on rename/move, and leave with it on
+  delete, empty-trash and folder delete (detached into a temp dir in one
+  transaction, then erased). Folder renames move all three trees and rewrite
+  folder icons, folder COLORS (missing before) and the Task-folder lists in the
+  same transaction, rolling everything back on failure. Renaming onto another
+  note's name is refused by file identity.
+- **Atomic note saves** (`vault/atomic.rs`): `vault_write_note` was a plain
+  truncating write, the data-loss window upstream closed in #585. Now temp file
+  + rename through symlinks, with the creation date recorded first so a save
+  no longer resets it.
+- **Assets** aligned with upstream's layout, which the port had missed since
+  v2.4 (#185, #377): drops and pastes land in `assets/`; `assets` is reserved;
+  opening a vault migrates loose root attachments and `attachements/`/`_assets/`
+  into it (idempotent; Obsidian vaults keep loose root files). Imported images,
+  PDFs, audio and video become `![[vault/path]]` embeds; a pasted `image.png`
+  gets the timestamped name (#775). Deliberate deviation: the migration leaves
+  a root-level `.excalidraw` alone, since in a root-mode vault it is a note.
+- Comments keep `author` and `parentId` (#738); the watcher emits the
+  `agent-edits` and `templates` scopes; vault display names (#692) name the
+  vault in `VaultInfo` and the remembered list, synced on every read.
+- New commands: undo history (`undo_history.rs`, #793; app data dir, hashed
+  names, pruned at launch), agent edit records, `app_open_external_url` (the
+  application-scheme gate lives in Rust because the webview has no opener
+  permission of its own), `app_install_info` (#814), the tray (#947, below),
+  and the file primitives the applier needs.
+- **Tray** (`tray.rs`): "Keep running in the tray" hides the last visible
+  workspace window instead of closing it; the icon's menu opens windows, Quick
+  Capture, or quits. The setting is machine-local. On Linux the appindicator
+  library is probed first, because tray-icon panics without it (and the
+  release profile aborts on panic); without it the setting stays off. Also
+  ported: a hidden Quick Capture panel no longer keeps the app alive after the
+  last window closes (last-window.ts).
+
+## Bridge
+
+`openExternalUrl`, undo history, agent edit review, tray, `getAppInfo`
+(`hostKind`, `arch`, `os`, `engine`, `install`), `createDatabase(seed)`.
+Inbound `[[wikilinks]]` now follow a note rename (upstream #111, v2.3, never
+ported until now) and references follow an asset rename/move (#785), both in
+`src/bridge/link-rewrites.ts` over the vendored rewriters. Capabilities:
+`supportsUndoFile`, `supportsAgentEditReview` on.
+
+Found by the smoke test and fixed: `window.open` of an outside URL did nothing
+(WebKitGTK under Tauri opens no window and calls no browser), and app-core
+opens every external link that way, so links in notes, Help and the release
+notes never opened in this port. `createTauriBridge` now routes such calls
+through `app_open_external_url`, the role Electron's `setWindowOpenHandler`
+plays upstream.
+
+Known and upstream's: the What's New window offers "Set up ZenNotes Cloud"
+whenever Cloud is not connected, without asking `supportsCloudSync`, so it
+shows here too. Its button opens Settings on the first page, because this
+build has no Cloud page to open. Vendored code, so it is left as upstream has it.
+
+## Not carried over
+
+| Gap | Why |
+|---|---|
+| `sendUsageCount` | Upstream's anonymous install count goes to zennotes.org; sent from here it would count this port as upstream. Absent, so the Settings switch has no effect. |
+| MCP server token, managed `zn` CLI updates | No MCP server or CLI ships in this build. |
+| Cloud end-to-end encryption, backup paging | Cloud sync remains out of scope (see below). |
+| `--new-window` (#815) | Single-vault backend; a second workspace window is "Open Vault in New Window". |
+| macOS title-bar toggle | Upstream hides the traffic lights; this build is verified on Linux only, where windows are frameless and the app draws its own controls. |
+| PDF export | Still the M16 stub (`exportNotePdf` resolves null); `src/export-window.tsx` is dormant and was not re-mirrored. |
+| Remapped system folders (#115, v2.20) | Pre-existing: the Rust layout ignores `systemFolderPaths`, so a custom on-disk path for Inbox/Archive/Trash is not honoured. Large (listing, classification and every move). |
+
+The earlier open items below (cloud sync, docx export, grammar vetting,
+`onFrameEscape`, per-window workflow lock) are unchanged.
+
+---
+
+# Gap analysis: upstream ZenNotes v2.15.0 → v2.45.0 (historical)
 
 Status of the mirror as of 2026-09-07. Phase 1 (re-vendor + frontend parity) is
 **done**, and so is most of the new backend surface; the open items are listed

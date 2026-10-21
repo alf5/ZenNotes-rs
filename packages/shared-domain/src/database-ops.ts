@@ -26,18 +26,27 @@ import {
   FORM_DIR_SUFFIX,
   isFormDirName,
   type DatabaseDoc,
+  type DatabaseSeed,
   type DatabaseSidecar,
   type DatabaseSummary,
   type DbField,
   type DbRow,
   type DbView
 } from './databases'
-import { buildDefaultViews, inferFields, parseCsv, parseRows, serializeRows } from './database-csv'
+import {
+  buildDefaultViews,
+  inferFields,
+  initialDatabaseContents,
+  parseCsv,
+  parseRows,
+  serializeRows
+} from './database-csv'
 import {
   resolveFolderPath,
   systemFolderForDirName,
   type SystemFolderPaths
 } from './system-folder-paths'
+import { randomUUID } from './random-uuid'
 
 /** Where the vault keeps its system folders on disk. Both halves matter to
  *  path composition, and the server honors both, so getting either wrong
@@ -70,7 +79,12 @@ export interface DatabaseOps {
   openDatabase(csvPath: string): Promise<DatabaseDoc>
   writeDatabaseRows(csvPath: string, rows: DbRow[]): Promise<DatabaseDoc>
   writeDatabaseSchema(csvPath: string, sidecar: DatabaseSidecar, rows: DbRow[]): Promise<DatabaseDoc>
-  createDatabase(folder: NoteFolder, subpath: string, title?: string): Promise<DatabaseDoc>
+  createDatabase(
+    folder: NoteFolder,
+    subpath: string,
+    title?: string,
+    seed?: DatabaseSeed
+  ): Promise<DatabaseDoc>
   createRecordPage(csvPath: string, title: string, body: string): Promise<string>
   renameDatabase(csvPath: string, newTitle: string): Promise<string>
   listDatabases(): Promise<DatabaseSummary[]>
@@ -80,7 +94,7 @@ const SCHEMA_SAMPLE_ROWS = 50
 const DB_TITLE_BAD = /[\\/:*?"<>|]/g
 
 function dbGenId(): string {
-  return globalThis.crypto.randomUUID()
+  return randomUUID()
 }
 function dbToPosix(p: string): string {
   return p.replace(/\\/g, '/')
@@ -281,7 +295,8 @@ export function createDatabaseOps(io: DatabaseFileOps): DatabaseOps {
   async function createDatabase(
     folder: NoteFolder,
     subpath: string,
-    title?: string
+    title?: string,
+    seed?: DatabaseSeed
   ): Promise<DatabaseDoc> {
     const layout = await io.vaultLayout()
     const baseTitle = (title ?? 'Untitled Database').trim() || 'Untitled Database'
@@ -289,29 +304,19 @@ export function createDatabaseOps(io: DatabaseFileOps): DatabaseOps {
     const dirRel = vaultRelDir(folder, subpath, layout)
     const csvFor = (name: string): string =>
       csvPathForFormDir(joinSub(dirRel, `${name}${FORM_DIR_SUFFIX}`))
-    // Resolve a non-colliding <Name>.base under the directory.
+    // A partial database still owns its directory, even without data.csv.
+    const occupied = new Set((await io.listFolders()).map((entry) => vaultRelDir(entry.folder, entry.subpath, layout).toLowerCase()))
     let name = baseName
     let n = 2
-    while ((await io.readFileTextOrNull(csvFor(name))) !== null) name = `${baseName} ${n++}`
+    while (occupied.has(formDirFromCsvPath(csvFor(name))!.toLowerCase()) || (await io.readFileTextOrNull(csvFor(name))) !== null) name = `${baseName} ${n++}`
     const csvPath = csvFor(name)
     const folderSub = joinSub(subpath, `${name}${FORM_DIR_SUFFIX}`)
 
-    const idField: DbField = { id: dbGenId(), name: 'id', type: 'text', hidden: true }
-    const nameField: DbField = { id: dbGenId(), name: 'Name', type: 'text' }
-    const fields = [idField, nameField]
-    const { views, activeViewId } = buildDefaultViews(fields, dbGenId)
-    const sidecar: DatabaseSidecar = {
-      version: 1,
-      idFieldId: idField.id,
-      fields,
-      views,
-      activeViewId
-    }
-
+    const { sidecar, rows } = initialDatabaseContents(seed, dbGenId)
     await io.createFolder(folder, folderSub)
     await dbPersistSidecar(csvPath, sidecar)
-    await io.writeFile(csvPath, serializeRows([], fields))
-    return dbHydrate(csvPath, sidecar, [])
+    await io.writeFile(csvPath, serializeRows(rows, sidecar.fields))
+    return dbHydrate(csvPath, sidecar, rows)
   }
 
   async function createRecordPage(csvPath: string, title: string, body: string): Promise<string> {
@@ -339,15 +344,16 @@ export function createDatabaseOps(io: DatabaseFileOps): DatabaseOps {
       parentRel ? `${parentRel}/${name}${FORM_DIR_SUFFIX}` : `${name}${FORM_DIR_SUFFIX}`
     let targetFormDir = makeFormDir(safeName)
     if (targetFormDir === oldFormDir) return csvPath
+    const layout = await io.vaultLayout()
+    const occupied = new Set((await io.listFolders()).map((entry) => vaultRelDir(entry.folder, entry.subpath, layout)))
     let n = 2
-    while ((await io.readFileTextOrNull(csvPathForFormDir(targetFormDir))) !== null) {
+    while (occupied.has(targetFormDir) || (await io.readFileTextOrNull(csvPathForFormDir(targetFormDir))) !== null) {
       targetFormDir = makeFormDir(`${safeName} ${n++}`)
     }
-    const layout = await io.vaultLayout()
     const { folder, subpath: oldSub } = splitVaultPath(oldFormDir, layout)
     const { subpath: newSub } = splitVaultPath(targetFormDir, layout)
-    await io.renameFolder(folder, oldSub, newSub)
-    return csvPathForFormDir(targetFormDir)
+    const canonical = await io.renameFolder(folder, oldSub, newSub)
+    return csvPathForFormDir(vaultRelDir(folder, canonical, layout))
   }
 
   async function listDatabases(): Promise<DatabaseSummary[]> {

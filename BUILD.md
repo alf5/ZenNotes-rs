@@ -13,7 +13,10 @@ This produces, under `src-tauri/target/release/`:
 - `bundle/appimage/ZenNotes-rs_*.AppImage`
 
 The Rust build and the **deb/rpm** bundles work out of the box on any Linux
-machine with the usual Tauri prerequisites. The **AppImage** target needs two
+machine with the usual Tauri prerequisites. At runtime, "Keep running in the
+tray" (Settings → Appearance → Window) needs an appindicator library
+(`libayatana-appindicator`; Debian/Ubuntu `libayatana-appindicator3-1`). It is
+optional: without it the app probes, finds none, and keeps that setting off. The **AppImage** target needs two
 extra things on rolling-release / bleeding-edge distros (Arch, and anything with
 a very recent `binutils` + `gdk-pixbuf`). Both are worked around below.
 
@@ -25,10 +28,16 @@ a very recent `binutils` + `gdk-pixbuf`). Both are worked around below.
 # Rust backend
 (cd src-tauri && cargo test)
 
+# Port-owned TS (boot order, config parity, the workflow applier). The
+# bundle-boot-order test reads dist/, so build first.
+bun run build && NODE_OPTIONS='--no-experimental-webstorage' bun run test
+
 # Vendored frontend packages. app-core must run from its OWN directory: its
 # vendored vitest.config.ts registers the Harper and oniguruma wasm plugins,
 # and passing `--root` from elsewhere overrides the config, after which ~19
 # tests fail on an unresolvable `harper.js/...wasm?url` import.
+# (one shared-domain test reads docs/specs/cloud-e2ee-vectors.json, vendored
+# at that monorepo path for it)
 (cd packages/shared-domain && ../../node_modules/.bin/vitest run)
 (cd packages/app-core && NODE_OPTIONS='--no-experimental-webstorage' \
   LC_ALL=en_US.UTF-8 ../../node_modules/.bin/vitest run)

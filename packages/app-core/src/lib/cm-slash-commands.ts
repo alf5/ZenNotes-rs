@@ -42,7 +42,7 @@ const COMMANDS: SlashCmd[] = [
   { label: 'Numbered list', detail: '1.', icon: '1.', insert: '1. ' },
   { label: 'Quote', detail: '>', icon: '❝', insert: '> ' },
   { label: 'Code block', detail: '```', icon: '</>', insert: '```\n\n```', cursorOffset: -4 },
-  { label: 'Divider', detail: '---', icon: '—', insert: '---\n' },
+  { label: 'Divider', detail: '---', icon: '─', insert: '---\n' },
   { label: 'Table', detail: '|', icon: '⊞', insert: '| Column 1 | Column 2 |\n| --- | --- |\n| | |' },
   { label: 'Math block', detail: '$$', icon: '∑', insert: '$$\n\n$$', cursorOffset: -3 },
   {

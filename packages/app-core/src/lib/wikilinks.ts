@@ -9,7 +9,7 @@ const INVALID_NOTE_PATH_CHARS = /[\\:*?"<>|#^\[\]]/
  * reads code as a link. Line-based and indentation-tolerant: a fence nested
  * under a list item is still a code block (#293). Mirrors `stripCodeContent` in
  * tags.ts, apps/desktop/src/main/vault.ts, apps/desktop/src/mcp/vault-ops.ts,
- * and apps/server/internal/vault/parse.go — keep all five in sync.
+ * and internal/vault/parse.go in ZenNotes/znserver — keep all five in sync.
  */
 function stripCodeContent(body: string): string {
   if (!body.includes('`') && !body.includes('~')) return body
@@ -54,6 +54,17 @@ function stripMdExtension(value: string): string {
 
 function normalizeForCompare(value: string): string {
   return value.trim().toLowerCase()
+}
+
+// Trim leading and trailing slashes with a linear scan. The equivalent
+// `/\/+$/` regex backtracks quadratically on a target made of many slashes,
+// and wikilink targets come straight from note text.
+function trimSlashes(value: string): string {
+  let start = 0
+  let end = value.length
+  while (start < end && value.charCodeAt(start) === 47) start++
+  while (end > start && value.charCodeAt(end - 1) === 47) end--
+  return value.slice(start, end)
 }
 
 export function isPathLikeWikilinkTarget(target: string): boolean {
@@ -143,11 +154,89 @@ export function isSameFileHeadingLink(target: string): boolean {
   return stripWikilinkAnchor(target).trim() === '' && wikilinkHeadingAnchor(target) != null
 }
 
-function resolveExplicitPath(notes: NoteRef[], target: string): NoteRef | null {
+/** The first note with a key, and how many notes share it. */
+interface KeyedNotes<T> {
+  first: T
+  count: number
+}
+
+/**
+ * Lookup tables for one notes array, so a target costs a few map reads
+ * instead of a scan of the vault. Resolution used to filter and search every
+ * note for every target, and callers resolve targets in bulk: the status bar
+ * counted backlinks by resolving every link in the vault on each note switch,
+ * about five seconds in a 6,577-note vault with 13,672 links (#880).
+ *
+ * Every table covers non-trash notes in array order, so `first` is the note
+ * the old `find` returned and `count` is the length the old `filter` saw.
+ */
+interface ResolverIndex<T extends NoteRef> {
+  byTitle: Map<string, T>
+  byPath: Map<string, KeyedNotes<T>>
+  /** Keyed on every `/`-led tail of a path, the strings `endsWith` could match. */
+  byPathTail: Map<string, KeyedNotes<T>>
+}
+
+/**
+ * Per-array memo. Store updates replace the notes array, so identity is the
+ * revision. Length and both ends are rechecked because a caller that grows
+ * or splices an array in place would otherwise read a stale index.
+ */
+interface ArrayMemo<V> {
+  length: number
+  head: unknown
+  tail: unknown
+  value: V
+}
+
+function memoForArray<K extends object, V>(
+  cache: WeakMap<K, ArrayMemo<V>>,
+  notes: K & readonly unknown[],
+  build: () => V
+): V {
+  const hit = cache.get(notes)
+  const head = notes[0]
+  const tail = notes[notes.length - 1]
+  if (hit && hit.length === notes.length && hit.head === head && hit.tail === tail) {
+    return hit.value
+  }
+  const value = build()
+  cache.set(notes, { length: notes.length, head, tail, value })
+  return value
+}
+
+function addKeyed<T>(map: Map<string, KeyedNotes<T>>, key: string, note: T): void {
+  const entry = map.get(key)
+  if (entry) entry.count++
+  else map.set(key, { first: note, count: 1 })
+}
+
+const resolverIndexes = new WeakMap<readonly NoteRef[], ArrayMemo<ResolverIndex<NoteRef>>>()
+
+function resolverIndexFor<T extends NoteRef>(notes: readonly T[]): ResolverIndex<T> {
+  return memoForArray(resolverIndexes, notes, () => {
+    const byTitle = new Map<string, NoteRef>()
+    const byPath = new Map<string, KeyedNotes<NoteRef>>()
+    const byPathTail = new Map<string, KeyedNotes<NoteRef>>()
+    for (const note of notes) {
+      if (note.folder === 'trash') continue
+      const title = normalizeForCompare(note.title)
+      if (!byTitle.has(title)) byTitle.set(title, note)
+      const path = normalizeForCompare(note.path)
+      addKeyed(byPath, path, note)
+      for (let slash = path.indexOf('/'); slash !== -1; slash = path.indexOf('/', slash + 1)) {
+        addKeyed(byPathTail, path.slice(slash), note)
+      }
+    }
+    return { byTitle, byPath, byPathTail }
+  }) as ResolverIndex<T>
+}
+
+function resolveExplicitPath<T extends NoteRef>(index: ResolverIndex<T>, target: string): T | null {
   const normalized = normalizeSlashes(target.trim())
   if (!normalized) return null
 
-  const trimmed = stripMdExtension(normalized).replace(/^\/+/, '').replace(/\/+$/, '')
+  const trimmed = trimSlashes(stripMdExtension(normalized))
   if (!trimmed) return null
 
   let relPath: string | null = null
@@ -158,38 +247,33 @@ function resolveExplicitPath(notes: NoteRef[], target: string): NoteRef | null {
   }
 
   if (!relPath) return null
-  const needle = normalizeForCompare(relPath)
-  return notes.find((note) => normalizeForCompare(note.path) === needle) ?? null
+  return index.byPath.get(normalizeForCompare(relPath))?.first ?? null
 }
 
-function resolvePathSuffix(notes: NoteRef[], target: string): NoteRef | null {
-  const trimmed = stripMdExtension(normalizeSlashes(target.trim()))
-    .replace(/^\/+/, '')
-    .replace(/\/+$/, '')
+function resolvePathSuffix<T extends NoteRef>(index: ResolverIndex<T>, target: string): T | null {
+  const trimmed = trimSlashes(stripMdExtension(normalizeSlashes(target.trim())))
   if (!trimmed) return null
 
-  const suffix = normalizeForCompare(`/${trimmed}.md`)
-  const exact = normalizeForCompare(`${trimmed}.md`)
-  const matches = notes.filter((note) => {
-    const path = normalizeForCompare(note.path)
-    return path === exact || path.endsWith(suffix)
-  })
-  return matches.length === 1 ? matches[0] : null
+  // A path equal to `exact` can never also end with `/` + `trimmed`, which is
+  // longer, so the two groups never share a note and their counts add.
+  const exact = index.byPath.get(normalizeForCompare(`${trimmed}.md`))
+  const suffix = index.byPathTail.get(normalizeForCompare(`/${trimmed}.md`))
+  if ((exact?.count ?? 0) + (suffix?.count ?? 0) !== 1) return null
+  return (exact ?? suffix)!.first
 }
 
 export function resolveWikilinkTarget<T extends NoteRef>(notes: T[], target: string): T | null {
   // `[[Doc#Heading]]` / `[[Doc^block]]` point at a spot inside Doc — resolve the
   // document, ignoring the anchor. (#196)
   const doc = stripWikilinkAnchor(target)
-  const visible = notes.filter((note) => note.folder !== 'trash')
+  const index = resolverIndexFor(notes)
   if (isPathLikeWikilinkTarget(doc)) {
-    return (resolveExplicitPath(visible, doc) ??
-      resolvePathSuffix(visible, doc)) as T | null
+    return resolveExplicitPath(index, doc) ?? resolvePathSuffix(index, doc)
   }
 
   const needle = normalizeForCompare(stripMdExtension(doc))
   if (!needle) return null
-  return visible.find((note) => normalizeForCompare(note.title) === needle) ?? null
+  return index.byTitle.get(needle) ?? null
 }
 
 /**
@@ -211,19 +295,36 @@ export function resolveWikilinkPath<T extends NoteRef>(
   return null
 }
 
-export function backlinksForNote<T extends NoteRef & Pick<NoteMeta, 'wikilinks'>>(
+type LinkingNote = NoteRef & Pick<NoteMeta, 'wikilinks'>
+
+const backlinkIndexes = new WeakMap<readonly LinkingNote[], ArrayMemo<Map<string, LinkingNote[]>>>()
+
+/**
+ * Notes whose wikilinks resolve to `current`, in notes order. Every link in the
+ * vault is resolved once per notes array into an incoming map, so asking about
+ * another note (a note switch) is a lookup, not another pass over the vault.
+ */
+export function backlinksForNote<T extends LinkingNote>(
   notes: T[],
   current: Pick<NoteMeta, 'path'>
 ): T[] {
-  const out: T[] = []
-  for (const note of notes) {
-    if (note.folder === 'trash' || note.path === current.path) continue
-    if (!note.wikilinks?.length) continue
-    if (note.wikilinks.some((target) => resolveWikilinkTarget(notes, target)?.path === current.path)) {
-      out.push(note)
+  const incoming = memoForArray(backlinkIndexes, notes, () => {
+    const map = new Map<string, LinkingNote[]>()
+    for (const note of notes) {
+      if (note.folder === 'trash' || !note.wikilinks?.length) continue
+      const linked = new Set<string>()
+      for (const target of note.wikilinks) {
+        const path = resolveWikilinkTarget(notes, target)?.path
+        if (path === undefined || path === note.path || linked.has(path)) continue
+        linked.add(path)
+        const sources = map.get(path)
+        if (sources) sources.push(note)
+        else map.set(path, [note])
+      }
     }
-  }
-  return out
+    return map
+  })
+  return (incoming.get(current.path) ?? []).slice() as T[]
 }
 
 /**

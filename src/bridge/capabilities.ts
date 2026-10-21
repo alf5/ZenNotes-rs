@@ -21,6 +21,14 @@ import type { ZenCapabilities } from '@zennotes/bridge-contract/bridge'
  *    served same-origin from Tauri's asset protocol, so `bundledAssetUrl`
  *    passes the URL through untouched and no privileged scheme is needed
  *    (Electron needs `zen-harper://` only because its renderer is `file://`).
+ *
+ * The v2.73 additions:
+ *  - supportsUndoFile             — on: undo history between launches, kept
+ *    under the app's data folder by src-tauri/src/undo_history.rs (#793)
+ *  - supportsAgentEditReview      — on: reviews the `.zennotes/agent-edits`
+ *    records an assistant leaves through upstream's MCP server; see
+ *    src/bridge/agent-edits.ts
+ *  - supportsEncryptedBackupArchive — absent: cloud backups are out of scope
  */
 export const TAURI_CAPABILITIES: ZenCapabilities = {
   supportsUpdater: false,
@@ -33,5 +41,7 @@ export const TAURI_CAPABILITIES: ZenCapabilities = {
   supportsCloudSync: false,
   supportsCustomCodeLanguages: true,
   supportsWorkflows: true,
-  supportsHarper: true
+  supportsHarper: true,
+  supportsUndoFile: true,
+  supportsAgentEditReview: true
 }

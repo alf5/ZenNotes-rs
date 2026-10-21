@@ -1,7 +1,7 @@
 {
   "name": "@zennotes/shared-domain",
   "private": true,
-  "version": "2.45.0",
+  "version": "2.73.0",
   "type": "module",
   "exports": {
     "./*": "./src/*.ts"
@@ -13,10 +13,13 @@
     "test:run": "vitest run"
   },
   "dependencies": {
+    "@scure/bip39": "2.4.0",
     "@zennotes/bridge-contract": "*",
+    "hash-wasm": "4.12.0",
     "lz-string": "^1.5.0"
   },
   "devDependencies": {
+    "typescript": "^5.7.2",
     "vitest": "^3.2.6"
   }
 }

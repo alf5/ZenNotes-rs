@@ -42,20 +42,26 @@ import {
 /** Minimum draggable column width (px) for the resize handles (#294). */
 const MIN_COL_WIDTH = 48
 import { openTableContextMenu } from './cm-table-menu'
+import { convertTableToDatabase } from './table-to-database'
 import { renderMarkdown } from './markdown'
 import { getCM, Vim } from '@replit/codemirror-vim'
 import { undo, redo } from '@codemirror/commands'
 import { useStore } from '../store'
-import { matchesSequenceToken, matchesShortcutBinding } from './keymaps'
+import { isMacPlatform, matchesSequenceToken, matchesShortcutBinding, type KeymapId } from './keymaps'
+import { writeClipboardText } from './clipboard-text'
 import { followLinkTarget } from './follow-link'
-import { extractLinkAtCursor } from './internal-links'
+import { linkRangeAtCursor, type LineLinkKind } from './internal-links'
 
-/** The follow target for a rendered link anchor inside a table cell: a
- *  wikilink's name (`data-wikilink`) or a plain link's href. Returns null for
- *  anchors that carry neither. */
-function linkTargetFromAnchor(anchor: HTMLAnchorElement): string | null {
-  if (anchor.classList.contains('wikilink')) return anchor.dataset.wikilink?.trim() || null
-  return anchor.getAttribute('href')?.trim() || null
+/** The follow target for a rendered link anchor inside a table cell, with its
+ *  kind: a wikilink's name (`data-wikilink`) or a plain link's href. Returns
+ *  null for anchors that carry neither. */
+function linkFromAnchor(anchor: HTMLAnchorElement): { target: string; kind: LineLinkKind } | null {
+  if (anchor.classList.contains('wikilink')) {
+    const target = anchor.dataset.wikilink?.trim()
+    return target ? { target, kind: 'wikilink' } : null
+  }
+  const href = anchor.getAttribute('href')?.trim()
+  return href ? { target: href, kind: 'markdown' } : null
 }
 
 /** True when the editor is in Vim mode — gates the table's modal (normal /
@@ -99,6 +105,16 @@ function saveVimRegister(operator: 'yank' | 'delete' | 'change', text: string): 
   if (!text) return
   vimRegisters()?.pushText('"', operator, text, false, false)
 }
+
+/** Whole table rows go in as lines, so `p` in the note puts them on lines of their
+ *  own, the way a linewise yank does, instead of splicing them into a line. */
+function saveVimRegisterLines(text: string): void {
+  if (!text) return
+  vimRegisters()?.pushText('"', 'yank', text, true, false)
+}
+
+/** Navigation a user may have remapped onto a Ctrl chord (#213). */
+const NAV_KEYMAP_IDS: KeymapId[] = ['nav.moveLeft', 'nav.moveRight', 'nav.moveDown', 'nav.moveUp']
 
 /** The unnamed register's content flattened to fit a single-line cell: a
  *  linewise yank sheds its trailing newline, and interior line/cell breaks
@@ -191,7 +207,7 @@ export function tableBlockAt(doc: Text, pos: number): { from: number; to: number
 /** Find the enclosing `Table` node range for a doc position, or null. The range
  *  is extended over a trailing `zen:cols` width marker so re-serialization
  *  replaces both (no duplicate markers, no leaked raw comment). */
-function tableRangeAt(view: EditorView, pos: number): { from: number; to: number } | null {
+export function tableRangeAt(view: EditorView, pos: number): { from: number; to: number } | null {
   let node = syntaxTree(view.state).resolveInner(pos, 1)
   while (node) {
     if (node.name === 'Table') {
@@ -202,6 +218,55 @@ function tableRangeAt(view: EditorView, pos: number): { from: number; to: number
     node = node.parent
   }
   return tableBlockAt(view.state.doc, pos)
+}
+
+/**
+ * The rendered table the user last worked in, per editor.
+ *
+ * A palette or leader command that acts on "the table under the cursor"
+ * cannot read it from the selection while tables are widgets: the atomic
+ * range keeps the caret out of the block, and by the time the command runs,
+ * focus has already left the cell for the palette input. So the editor
+ * remembers the widget that last took focus and forgets it as soon as focus
+ * lands back in the note text, where the caret is the better authority again.
+ * The element is kept alongside its position so a table that is still on
+ * screen resolves live (robust to edits above it), and one whose widget was
+ * rebuilt while the palette was up still resolves from where it started.
+ */
+const lastFocusedTable = new WeakMap<EditorView, { el: HTMLElement; anchor: number }>()
+const focusTrackedViews = new WeakSet<EditorView>()
+
+function trackTableFocus(view: EditorView): void {
+  if (focusTrackedViews.has(view)) return
+  focusTrackedViews.add(view)
+  view.contentDOM.addEventListener('focusin', (event) => {
+    const widget = (event.target as HTMLElement | null)?.closest?.<HTMLElement>('.cm-table-widget')
+    if (!widget) {
+      lastFocusedTable.delete(view)
+      return
+    }
+    try {
+      lastFocusedTable.set(view, { el: widget, anchor: view.posAtDOM(widget) })
+    } catch {
+      // A widget that is no longer part of the view has nothing to record.
+    }
+  })
+}
+
+/** Document position of the rendered table whose cell holds focus, or held it
+ *  most recently since the caret was last in the note text. Null when no table
+ *  was visited, or the editor itself has had focus since. */
+export function focusedTableAnchor(view: EditorView): number | null {
+  const entry = lastFocusedTable.get(view)
+  if (!entry) return null
+  if (entry.el.isConnected) {
+    try {
+      return view.posAtDOM(entry.el)
+    } catch {
+      // Detached between the check and the lookup; fall back to the recorded start.
+    }
+  }
+  return entry.anchor
 }
 
 /**
@@ -404,6 +469,7 @@ class TableWidget extends WidgetType {
 
   toDOM(view: EditorView): HTMLElement {
     this.view = view
+    trackTableFocus(view)
     const root = document.createElement('div')
     root.className = 'cm-table-widget'
     root.setAttribute('contenteditable', 'false')
@@ -628,11 +694,11 @@ class TableWidget extends WidgetType {
       if (editable.dataset.rendered !== 'true') return
       const anchor = (event.target as HTMLElement | null)?.closest<HTMLAnchorElement>('a')
       if (!anchor || !editable.contains(anchor)) return
-      const target = linkTargetFromAnchor(anchor)
-      if (!target) return
+      const link = linkFromAnchor(anchor)
+      if (!link) return
       event.preventDefault()
       event.stopPropagation()
-      followLinkTarget(target)
+      followLinkTarget(link.target, { kind: link.kind })
     })
     editable.addEventListener('input', () => {
       this.dirty = true
@@ -664,7 +730,9 @@ class TableWidget extends WidgetType {
         row,
         col,
         model: this.model,
-        apply: (next, focus) => this.applyMenuAction(next, focus, anchor)
+        apply: (next, focus) => this.applyMenuAction(next, focus, anchor),
+        convertToDatabase: () => this.convertToDatabase(anchor),
+        duplicateTable: () => this.duplicateTable(anchor)
       })
     })
     cell.append(editable)
@@ -857,6 +925,17 @@ class TableWidget extends WidgetType {
         if (!event.metaKey && !event.ctrlKey && !event.altKey) {
           event.stopPropagation()
         }
+        // A chord is an app or system shortcut, never a Vim command. Read as plain
+        // letters, the platform copy (Cmd-C, Ctrl-C off macOS) ran `c` and emptied a
+        // visual selection, and Cmd-S ran `s`. Copy and cut act on the selection;
+        // everything else is left to the app.
+        if (this.isAppChord(event)) {
+          if (this.visualMode && (this.isPlatformChord(event, 'c') || this.isPlatformChord(event, 'x'))) {
+            event.preventDefault()
+            this.copyVisualSelection(this.isPlatformChord(event, 'x'))
+          }
+          return
+        }
         const cellText = editable.dataset.raw ?? ''
         if (this.visualMode) {
           event.preventDefault()
@@ -924,8 +1003,8 @@ class TableWidget extends WidgetType {
           event.preventDefault()
           this.pendingG = false
           if (event.key === 'd') {
-            const target = extractLinkAtCursor(cellText, this.cursorOffset)
-            if (target) followLinkTarget(target)
+            const link = linkRangeAtCursor(cellText, this.cursorOffset)
+            if (link) followLinkTarget(link.target, { kind: link.kind })
           }
           return
         }
@@ -1737,8 +1816,57 @@ class TableWidget extends WidgetType {
     // the text can be pasted anywhere with `p` — another cell or the note body.
     // The system clipboard now follows the yank-to-clipboard setting (the
     // register patch mirrors it) instead of being written unconditionally.
-    saveVimRegister('yank', this.visualSelectionText(ranges))
+    const rows = this.visualSelectionMarkdown()
+    if (rows !== null) saveVimRegisterLines(rows)
+    else saveVimRegister('yank', this.visualSelectionText(ranges))
     this.finishVisualAtStart(first, false)
+  }
+
+  /** The platform copy or cut of a visual selection: the same text a yank takes,
+   *  written to the system clipboard. Cut then empties the cells, as `d` does. */
+  private copyVisualSelection(cut: boolean): void {
+    const ranges = this.visualSelectionRanges()
+    const first = ranges[0]
+    if (!first) return
+    const rows = this.visualSelectionMarkdown()
+    writeClipboardText(rows !== null ? `${rows}\n` : this.visualSelectionText(ranges))
+    if (cut) this.deleteVisualSelection(false)
+    else this.finishVisualAtStart(first, false)
+  }
+
+  /** A visual-line selection as Markdown table rows, laid out with the whole
+   *  table's column widths. The header brings its delimiter row, so a selection
+   *  from the header down pastes as a complete table. Null outside line mode. */
+  private visualSelectionMarkdown(): string | null {
+    if (this.visualMode !== 'line' || !this.visualAnchor || !this.visualHead) return null
+    this.syncFromDom()
+    const firstRow = Math.min(this.visualAnchor.row, this.visualHead.row)
+    const lastRow = Math.max(this.visualAnchor.row, this.visualHead.row)
+    // Header, delimiter, then one line per body row.
+    const lines = serializeTable({ ...this.model, colWidths: undefined }).split('\n')
+    const picked = firstRow < 0 ? [lines[0], lines[1]] : []
+    for (let row = Math.max(0, firstRow); row <= lastRow; row++) {
+      const line = lines[row + 2]
+      if (line !== undefined) picked.push(line)
+    }
+    return picked.join('\n')
+  }
+
+  /** A modified key the widget leaves to the app: anything with Cmd, and Ctrl
+   *  chords other than Vim's Ctrl-r redo or a navigation key remapped onto one.
+   *  Ctrl+Alt is AltGr, which types characters (`@` on a German layout). */
+  private isAppChord(event: KeyboardEvent): boolean {
+    if (event.metaKey) return true
+    if (!event.ctrlKey || event.altKey) return false
+    if (event.key === 'r') return false
+    const overrides = useStore.getState().keymapOverrides
+    return !NAV_KEYMAP_IDS.some((id) => matchesSequenceToken(event, overrides, id))
+  }
+
+  /** Cmd (Ctrl off macOS) plus `key`: the platform clipboard shortcut. */
+  private isPlatformChord(event: KeyboardEvent, key: string): boolean {
+    const primary = isMacPlatform() ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey
+    return primary && !event.altKey && event.key.toLowerCase() === key
   }
 
   /** Visual `p`/`P`: the register replaces the selection; the replaced text
@@ -1960,8 +2088,34 @@ class TableWidget extends WidgetType {
       row,
       col,
       model: this.model,
-      apply: (next, focus) => this.applyMenuAction(next, focus, anchor)
+      apply: (next, focus) => this.applyMenuAction(next, focus, anchor),
+      convertToDatabase: () => this.convertToDatabase(anchor),
+      duplicateTable: () => this.duplicateTable(anchor)
     })
+  }
+
+  /** Hand this table to the database converter (#832). The focus moving into
+   *  the menu already committed any dirty cell, so the document holds the
+   *  table's current contents; `anchor` re-finds it after that rebuild. */
+  private convertToDatabase(anchor?: number): void {
+    this.commitIfDirty()
+    const pos = anchor ?? this.captureTableAnchor()
+    if (pos == null) return
+    void convertTableToDatabase(this.view, pos)
+  }
+
+  /** A copy of the table right below it, a blank line apart, with its column
+   *  widths: the table menu's Duplicate table. */
+  private duplicateTable(anchor?: number): void {
+    this.commitIfDirty()
+    const pos = anchor ?? this.captureTableAnchor()
+    if (pos == null) return
+    const range = tableBlockAt(this.view.state.doc, pos)
+    if (!range) return
+    this.view.dispatch({
+      changes: { from: range.to, insert: `\n\n${this.view.state.sliceDoc(range.from, range.to)}` }
+    })
+    requestAnimationFrame(() => this.view.focus())
   }
 
   ignoreEvent(): boolean {

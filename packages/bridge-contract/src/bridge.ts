@@ -1,7 +1,11 @@
+import type { ZenPlatform } from './platform.js'
 import type {
   AppUpdateState,
   AssetMeta,
   CliInstallStatus,
+  CliInstallRequest,
+  CliUpdateCheckRequest,
+  CliUpdateState,
   DeletedAsset,
   ExternalFileContent,
   ExternalFileLink,
@@ -14,6 +18,8 @@ import type {
   ListNotesPageResponse,
   NoteComment,
   NoteCommentInput,
+  AgentEditRecord,
+  AgentEditSummary,
   NoteContent,
   NoteFolder,
   NoteMeta,
@@ -27,6 +33,7 @@ import type {
   ServerSessionStatus,
   VaultSettings,
   TikzRenderResponse,
+  TraySyncStatus,
   VaultChangeEvent,
   VaultDemoTourResult,
   VaultInfo,
@@ -34,16 +41,21 @@ import type {
   VaultTextSearchCapabilities,
   VaultTextSearchMatch,
   VaultTextSearchToolPaths
-} from './ipc'
-import type { CustomTemplateFile, WriteTemplateInput } from './templates'
+} from './ipc.js'
+import type { CustomTemplateFile, WriteTemplateInput } from './templates.js'
 import type {
   CloudAccountConnectResult,
   CloudAccountStatus,
+  CloudBackupItemsPage,
+  CloudBackupItemsQuery,
   CloudBackupNoteRestoreResult,
   CloudBackupRestoreResult,
   CloudBackupSchedule,
   CloudBackupSnapshot,
   CloudBackupSnapshotItem,
+  CloudEncryptionRecoveryPrompt,
+  CloudEncryptionSecretInput,
+  CloudEncryptionStatus,
   CloudPublishedNote,
   CloudPublishedNoteResult,
   CloudPublishNoteInput,
@@ -58,7 +70,7 @@ import type {
   CloudSyncSettingsConflict,
   CloudSyncVault,
   CloudVaultLink
-} from './cloud-sync'
+} from './cloud-sync.js'
 import type {
   ApplyWorkflowInput,
   ExportWorkflowInput,
@@ -68,28 +80,31 @@ import type {
   WorkflowRunSummary,
   WorkflowUndoResult,
   WriteWorkflowInput
-} from './workflows'
-import type { VaultTask } from '@zennotes/shared-domain/tasks'
+} from './workflows.js'
+import type { VaultTask } from './tasks.js'
 import type {
   DatabaseDoc,
+  DatabaseSeed,
   DatabaseSidecar,
   DatabaseSummary,
   DbRow
-} from '@zennotes/shared-domain/databases'
+} from './databases.js'
 import type {
   McpClientId,
   McpClientStatus,
   McpInstructionsPayload,
-  McpServerRuntime
-} from '@zennotes/shared-domain/mcp-clients'
-import type { AppConfigPortable } from '@zennotes/shared-domain/app-config'
-import type { CustomTheme } from '@zennotes/shared-domain/custom-themes'
-import type { Override } from '@zennotes/shared-domain/overrides'
+  McpServerRuntime,
+  McpServerTokenState
+} from './mcp-clients.js'
+import type { AppConfigPortable } from './app-config.js'
+import type { ExternalUrlResult } from './application-links.js'
+import type { CustomTheme } from './custom-themes.js'
+import type { Override } from './overrides.js'
 import type {
   CustomCodeLanguage,
   CustomCodeLanguageInstallInput,
   CustomCodeLanguageUpdateInput
-} from '@zennotes/shared-domain/custom-code-languages'
+} from './custom-code-languages.js'
 
 export interface ZenCapabilities {
   supportsUpdater: boolean
@@ -109,6 +124,20 @@ export interface ZenCapabilities {
    *  Harper's worker and ships it. Absent on hosts that have not verified
    *  that yet (the mobile shells), which hides the setting there. */
   supportsHarper?: boolean
+  /** The host can keep per-note undo history between launches, somewhere
+   *  machine-local that is not the vault (`readNoteUndoHistory` and friends).
+   *  Absent everywhere but the desktop app, which hides the setting. (#793) */
+  supportsUndoFile?: boolean
+  /** The host can read and write agent edit records for a local vault
+   *  (`listAgentEdits` and friends), so assistant edits made through MCP can
+   *  be reviewed. Absent where records are not reachable yet (the web client
+   *  and the phones), which hides the review. */
+  supportsAgentEditReview?: boolean
+  /** The host can save a readable archive of an end-to-end encrypted vault's
+   *  backup: the desktop app opens the service's archive item by item. The
+   *  phones refuse it, so where this is absent Settings says where to save
+   *  one instead of offering a button that can only fail. */
+  supportsEncryptedBackupArchive?: boolean
 }
 
 export interface ZenAppInfo {
@@ -117,15 +146,27 @@ export interface ZenAppInfo {
   version: string
   description: string
   homepage?: string
+  /** Legacy renderer family. Use hostKind to distinguish native mobile shells. */
   runtime: 'desktop' | 'web'
+  hostKind?: 'desktop' | 'browser' | 'ios' | 'android'
+  /** The details a bug report needs beside the version, read by `:version`
+   *  and Settings > About (#814). Each host fills in what it knows; a field
+   *  it cannot answer is left out of the report, never guessed. */
+  arch?: string
+  /** Operating system name and version, e.g. `macOS 26.0`, `Ubuntu 24.04.1 LTS (kernel 6.8.0)`. */
+  os?: string
+  /** What runs the renderer, e.g. `Electron 38.1.0 (Chromium 140.0.7339.133, Node 22.19.0)`. */
+  engine?: string
+  /** How this copy was installed, e.g. `AppImage`, `deb package`, `package manager or tarball`. */
+  install?: string
 }
 
 export interface ZenBridge {
   getCapabilities(): ZenCapabilities
   getAppInfo(): ZenAppInfo
 
-  platform(): Promise<NodeJS.Platform>
-  platformSync(): NodeJS.Platform
+  platform(): Promise<ZenPlatform>
+  platformSync(): ZenPlatform
   listSystemFonts(): Promise<string[]>
   getAppIconDataUrl(): Promise<string | null>
   zoomInApp(): Promise<number>
@@ -133,6 +174,11 @@ export interface ZenBridge {
   resetAppZoom(): Promise<number>
   getAppUpdateState(): Promise<AppUpdateState>
   checkForAppUpdates(): Promise<AppUpdateState>
+  /** The desktop app's anonymous install/update count: one message to
+   *  zennotes.org with the event, version, OS, architecture and install kind,
+   *  no identifier. The caller checks the setting; the host refuses
+   *  development builds and test runs, and sends each event once per run. */
+  sendUsageCount?(event: 'install' | 'update'): Promise<void>
   checkForAppUpdatesWithUi(): Promise<void>
   downloadAppUpdate(): Promise<AppUpdateState>
   installAppUpdate(): Promise<void>
@@ -151,15 +197,35 @@ export interface ZenBridge {
   listCloudVaults(): Promise<CloudSyncVault[]>
   getCloudVaultLink(): Promise<CloudVaultLink | null>
   linkCloudVault(vaultId: string): Promise<CloudVaultLink>
-  createAndLinkCloudVault(name: string): Promise<CloudVaultLink>
+  createAndLinkCloudVault(name: string, options?: { encrypted?: boolean }): Promise<CloudVaultLink>
+  /** End-to-end encryption; hosts that cannot open encrypted vaults leave these out. */
+  getCloudEncryptionStatus?(): Promise<CloudEncryptionStatus>
+  prepareCloudEncryptionSetup?(passphrase: string): Promise<CloudEncryptionRecoveryPrompt>
+  finishCloudEncryptionSetup?(setupId: string): Promise<void>
+  unlockCloudEncryption?(secret: CloudEncryptionSecretInput): Promise<void>
+  changeCloudEncryptionPassphrase?(
+    current: CloudEncryptionSecretInput,
+    next: string
+  ): Promise<void>
+  prepareNewCloudRecoveryKey?(
+    current: CloudEncryptionSecretInput
+  ): Promise<CloudEncryptionRecoveryPrompt>
+  finishNewCloudRecoveryKey?(setupId: string): Promise<void>
+  lockCloudEncryption?(): Promise<void>
+  /** Moves the linked readable Cloud vault into a new end-to-end encrypted one. */
+  encryptCloudVault?(): Promise<CloudVaultLink>
   unlinkCloudVault(): Promise<void>
   deleteCloudVault(): Promise<void>
   syncCloudVault(): Promise<CloudSyncRunSummary>
+  hasCloudVaultChanges?(): Promise<boolean>
+  /** Hosts with multiple workspace windows coordinate draft saves before sync. */
+  onCloudSyncWindow?(handlers: import('./cloud-sync.js').CloudSyncWindowHandlers): () => void
   getCloudBootstrapConflict(
     conflict: CloudSyncBootstrapConflict
   ): Promise<CloudSyncBootstrapConflictDetails>
   resolveCloudBootstrapConflict(resolution: CloudSyncBootstrapConflictResolution): Promise<void>
-  getCloudConflict(conflictId: string): Promise<CloudSyncPendingConflictDetails>
+  getCloudConflict(conflictId: string, reviewId?: string): Promise<CloudSyncPendingConflictDetails>
+  releaseCloudConflictReview?(conflictId: string, reviewId: string): Promise<void>
   saveCloudConflictDraft(conflictId: string, draftText: string | null): Promise<void>
   resolveCloudConflict(resolution: CloudSyncPendingConflictResolution): Promise<void>
   getCloudSettingsConflict(): Promise<CloudSyncSettingsConflict | null>
@@ -168,6 +234,12 @@ export interface ZenBridge {
   getCloudBackupSchedule(): Promise<CloudBackupSchedule>
   updateCloudBackupSchedule(enabled: boolean): Promise<CloudBackupSchedule>
   listCloudBackupItems(backupId: string): Promise<CloudBackupSnapshotItem[]>
+  /** One page of a backup's notes, searched by path on the service. Hosts
+   *  without it list the first page alone, and Settings filters that page. */
+  listCloudBackupItemsPage?(
+    backupId: string,
+    query: CloudBackupItemsQuery
+  ): Promise<CloudBackupItemsPage>
   createCloudBackup(label?: string): Promise<CloudBackupSnapshot>
   downloadCloudBackup(backupId: string): Promise<void>
   deleteCloudBackup(backupId: string): Promise<void>
@@ -211,6 +283,14 @@ export interface ZenBridge {
   readWorkspaceState(): Promise<string | null>
   /** Write the current vault's `.zennotes/workspace.json` (raw JSON string). (#292) */
   writeWorkspaceState(json: string): Promise<void>
+  /** Undo history saved for a note of the current vault, or null. Opaque JSON
+   *  the renderer wrote earlier; it lives with the app, not in the vault, and
+   *  never syncs. Only on hosts with `supportsUndoFile`. (#793) */
+  readNoteUndoHistory?(path: string): Promise<string | null>
+  /** Save a note's undo history, or forget it with `null`. (#793) */
+  writeNoteUndoHistory?(path: string, json: string | null): Promise<void>
+  /** Forget every saved undo history, in every vault. (#793) */
+  clearNoteUndoHistories?(): Promise<void>
   /** True when the vault is in `inbox` mode but its root holds notes that only
    *  `root` mode would surface (drives the "Switch to Vault root" banner). */
   rootContentHiddenByInboxMode(): Promise<boolean>
@@ -277,13 +357,29 @@ export interface ZenBridge {
   readNote(relPath: string): Promise<NoteContent>
   readNoteComments(relPath: string): Promise<NoteComment[]>
   writeNoteComments(relPath: string, comments: NoteCommentInput[]): Promise<NoteComment[]>
+  /** Notes with assistant edits to review, newest first. Only on hosts with
+   *  `supportsAgentEditReview`. */
+  listAgentEdits?(): Promise<AgentEditSummary[]>
+  /** A note's agent edit record, or null when there is none. */
+  readAgentEdit?(relPath: string): Promise<AgentEditRecord | null>
+  /** Save a review's progress, or delete the record with `null`. */
+  writeAgentEdit?(relPath: string, record: AgentEditRecord | null): Promise<void>
   scanTasks(): Promise<VaultTask[]>
   scanTasksForPath(relPath: string): Promise<VaultTask[]>
   /** Resolves to null when the `.csv` no longer exists (e.g. a stale tab). */
   openDatabase(relPath: string): Promise<DatabaseDoc | null>
   writeDatabaseRows(relPath: string, rows: DbRow[]): Promise<DatabaseDoc>
   writeDatabaseSchema(relPath: string, sidecar: DatabaseSidecar, rows: DbRow[]): Promise<DatabaseDoc>
-  createDatabase(folder: NoteFolder, subpath: string, title?: string): Promise<DatabaseDoc>
+  /** Create a `<title>.base` database under `folder`/`subpath`. Empty (an `id`
+   *  + `Name` grid) by default; with a `seed`, its columns and rows become
+   *  the initial contents, typed the way an adopted CSV would be (#832).
+   *  The resolved doc's `title` may carry a collision suffix (`Name 2`). */
+  createDatabase(
+    folder: NoteFolder,
+    subpath: string,
+    title?: string,
+    seed?: DatabaseSeed
+  ): Promise<DatabaseDoc>
   /** Rename a database's `.base` folder; resolves to the new `data.csv` path. */
   renameDatabase(csvPath: string, newTitle: string): Promise<string>
   /** Create a record's "page" note (returns its vault-relative path). */
@@ -320,6 +416,8 @@ export interface ZenBridge {
    * when the open fails, so callers can surface a message.
    */
   openExternalFile(href: string): Promise<{ ok: boolean; error?: string }>
+  /** Open a URL through the host after checking enabled application schemes. */
+  openExternalUrl(url: string): Promise<ExternalUrlResult>
   /**
    * Open a VAULT asset (vault-relative path) with the OS default app. Unlike
    * `openExternalFile` this resolves against the vault the host actually has:
@@ -417,17 +515,46 @@ export interface ZenBridge {
   /** Whether the quick-capture window stays pinned on top (won't hide on blur). */
   getQuickCapturePinned(): Promise<boolean>
   setQuickCapturePinned(pinned: boolean): Promise<boolean>
+  /** Desktop only (#947): whether closing the last window hides it to the
+   *  tray instead. Optional so the web and phone bridges need no stub. */
+  getKeepRunningInTray?(): Promise<boolean>
+  /** Resolves to the setting now in effect. */
+  setKeepRunningInTray?(enabled: boolean): Promise<boolean>
+  /** Hide this window to the tray. Resolves false, and leaves the window
+   *  alone, while the tray is off: a hidden window would be unreachable. */
+  hideWindowToTray?(): Promise<boolean>
+  /** This window's Cloud sync state for the tray; null when there is none. */
+  reportTraySyncStatus?(status: TraySyncStatus | null): void
+  /** Quit the app for real. Linux and Windows have no app menu, so with the
+   *  tray holding the window this is the way out besides the icon's menu. */
+  quitApp?(): void
   renderTikz(source: string): Promise<TikzRenderResponse>
 
   mcpGetRuntime(): Promise<McpServerRuntime>
   mcpGetStatuses(): Promise<McpClientStatus[]>
   mcpInstall(id: McpClientId): Promise<McpClientStatus>
   mcpUninstall(id: McpClientId): Promise<McpClientStatus>
+  /** Desktop only: whether assistants can use the token of the server the app
+   *  is on (#830). Optional so the web and phone bridges need no stub. */
+  mcpGetServerTokenState?(): Promise<McpServerTokenState>
+  /** Desktop only: saves the app's token for that server where zn and the MCP
+   *  servers look. */
+  mcpShareServerToken?(): Promise<McpServerTokenState>
+  /** Desktop only: removes it again, only when it is still the app's token. */
+  mcpRemoveServerToken?(): Promise<McpServerTokenState>
   mcpGetInstructions(): Promise<McpInstructionsPayload>
   mcpSetInstructions(next: string | null): Promise<McpInstructionsPayload>
   cliGetStatus(): Promise<CliInstallStatus>
-  cliInstall(): Promise<CliInstallStatus>
+  cliInstall(request?: CliInstallRequest): Promise<CliInstallStatus>
   cliUninstall(): Promise<CliInstallStatus>
+  /** Desktop only: the managed `zn` version and its update state. */
+  cliUpdateGetState?(): Promise<CliUpdateState>
+  /** Desktop only: check the latest signed CLI release now. */
+  cliUpdateCheck?(request: CliUpdateCheckRequest): Promise<CliUpdateState>
+  /** Desktop only: install newer CLI releases automatically or only report them. */
+  cliSetAutoUpdate?(enabled: boolean): Promise<CliUpdateState>
+  /** Desktop only: every change to the CLI update state, including scheduled checks. */
+  onCliUpdateState?(cb: (state: CliUpdateState) => void): () => void
   raycastGetStatus(): Promise<RaycastExtensionStatus>
   raycastInstall(): Promise<RaycastExtensionStatus>
   clipboardWriteText(text: string): void

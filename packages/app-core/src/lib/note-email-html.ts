@@ -17,6 +17,7 @@
 // diagram fences stay as code. The title is stated in the fragment via the
 // shared export-title rule, so an email never starts mid-thought.
 import { unified } from 'unified'
+import { remarkSingleDashParagraph } from '@shared/single-dash-underline'
 import remarkParse from 'remark-parse'
 import remarkGfm from 'remark-gfm'
 import remarkFrontmatter from 'remark-frontmatter'
@@ -133,6 +134,7 @@ export function renderNoteEmailHtml(
   const titled = withExportTitle(rewriteWikilinkImageEmbeds(body), noteTitle)
   const rendered = unified()
     .use(remarkParse)
+    .use(remarkSingleDashParagraph)
     .use(remarkGfm)
     .use(remarkFrontmatter, ['yaml', 'toml'])
     .use(remarkRehype)

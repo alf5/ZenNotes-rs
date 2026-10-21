@@ -15,12 +15,14 @@ export function CloudConflictReviewHost(): JSX.Element | null {
   const open = useCloudSyncStatusStore((state) => state.conflictReviewOpen);
   const summary = useCloudSyncStatusStore((state) => state.lastSummary);
   const vaultName = useCloudSyncStatusStore((state) => state.vaultName);
+  const startId = useCloudSyncStatusStore((state) => state.conflictReviewStartId);
   if (!open || summary === null) return null;
   if (resolvableCloudConflictCount(summary) === 0) return null;
   return (
     <CloudConflictDialog
       summary={summary}
       vaultName={vaultName ?? "Cloud vault"}
+      startConflictId={startId}
       onClose={closeCloudConflictReview}
     />
   );

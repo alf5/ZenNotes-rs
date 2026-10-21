@@ -2,6 +2,24 @@ import { describe, expect, it } from 'vitest'
 import { CloudSyncApiClient, type CloudSyncHttpRequest } from './cloud-sync-api'
 
 describe('CloudSyncApiClient', () => {
+  it('exposes the host bootstrap budget without rewriting requested pagination', async () => {
+    const requests: CloudSyncHttpRequest[] = []
+    const client = new CloudSyncApiClient({
+      async request<Response>(request: CloudSyncHttpRequest): Promise<Response> {
+        requests.push(request)
+        return {} as Response
+      }
+    }, { bootstrapContentPageBytes: 1024 * 1024 })
+    await client.manifest('vault', { includeContent: true, page: 7, perPage: 25 })
+    expect(client.bootstrapContentPageBytes).toBe(1024 * 1024)
+    expect(requests[0].path).toBe('/api/v1/vaults/vault/manifest?include_content=true&page=7&per_page=25')
+  })
+
+  it.each([0, -1, 1.5, Infinity, NaN])('rejects an invalid bootstrap budget: %s', (bootstrapContentPageBytes) => {
+    expect(() => new CloudSyncApiClient({ request: async () => ({} as never) }, { bootstrapContentPageBytes }))
+      .toThrow('positive integer')
+  })
+
   it('builds versioned manifest and change requests without platform-specific code', async () => {
     const requests: CloudSyncHttpRequest[] = []
     const client = new CloudSyncApiClient({
@@ -96,12 +114,14 @@ describe('CloudSyncApiClient', () => {
       {
         method: 'POST',
         path: '/api/v1/vaults/vault%2F1/uploads',
-        body: upload
+        body: upload,
+        retryOnRateLimit: true
       },
       {
         method: 'POST',
         path: '/api/v1/vaults/vault%2F1/uploads/upload%2F1/complete',
-        timeoutMs: 300_000
+        timeoutMs: 300_000,
+        retryOnRateLimit: true
       },
       {
         method: 'DELETE',
@@ -210,6 +230,33 @@ describe('CloudSyncApiClient', () => {
     ])
   })
 
+  it('pages and searches a backup on the service, and lists it as before when asked for neither', async () => {
+    const requests: CloudSyncHttpRequest[] = []
+    const client = new CloudSyncApiClient({
+      async request<Response>(request: CloudSyncHttpRequest): Promise<Response> {
+        requests.push(request)
+        return {} as Response
+      }
+    })
+
+    await client.listBackupItems('vault/1', 'backup/1')
+    await client.listBackupItems('vault/1', 'backup/1', {})
+    await client.listBackupItems('vault/1', 'backup/1', { page: 2, search: '  foo  ' })
+    await client.listBackupItems('vault/1', 'backup/1', { page: 1, search: '   ' })
+    await client.listBackupItems('vault/1', 'backup/1', { search: 'Launch plan & 100%' })
+
+    expect(requests).toEqual([
+      { method: 'GET', path: '/api/v1/vaults/vault%2F1/backups/backup%2F1/items' },
+      { method: 'GET', path: '/api/v1/vaults/vault%2F1/backups/backup%2F1/items' },
+      { method: 'GET', path: '/api/v1/vaults/vault%2F1/backups/backup%2F1/items?page=2&search=foo' },
+      { method: 'GET', path: '/api/v1/vaults/vault%2F1/backups/backup%2F1/items?page=1' },
+      {
+        method: 'GET',
+        path: '/api/v1/vaults/vault%2F1/backups/backup%2F1/items?search=Launch%20plan%20%26%20100%25'
+      }
+    ])
+  })
+
   it('lists, publishes, updates, and unpublishes notes', async () => {
     const requests: CloudSyncHttpRequest[] = []
     const client = new CloudSyncApiClient({
@@ -232,8 +279,8 @@ describe('CloudSyncApiClient', () => {
     const payload = JSON.stringify({ ...input, tikz_svgs: [], asset_refs: [] })
     expect(requests).toEqual([
       { method: 'GET', path: '/api/v1/shares' },
-      { method: 'POST', path: '/api/v1/shares', body: { payload } },
-      { method: 'PUT', path: '/api/v1/shares/42', body: { payload } },
+      { method: 'POST', path: '/api/v1/shares', body: { payload }, timeoutMs: 300_000 },
+      { method: 'PUT', path: '/api/v1/shares/42', body: { payload }, timeoutMs: 300_000 },
       { method: 'DELETE', path: '/api/v1/shares/42' }
     ])
   })
@@ -274,6 +321,60 @@ describe('CloudSyncApiClient', () => {
     expect(asset).toBeInstanceOf(File)
     expect((asset as File).name).toBe('photo.png')
     expect([...new Uint8Array(await (asset as File).arrayBuffer())]).toEqual([1, 2, 3])
+  })
+
+  it('stages published-note attachments and publishes naming the upload, without files', async () => {
+    const requests: CloudSyncHttpRequest[] = []
+    const client = new CloudSyncApiClient({
+      async request<Response>(request: CloudSyncHttpRequest): Promise<Response> {
+        requests.push(request)
+        return {} as Response
+      }
+    })
+    const upload = {
+      share_id: 42,
+      assets: [{ ref: 'photo.png', name: 'photo.png', mime: 'image/png', byte_length: 3, sha256: 'a'.repeat(64) }]
+    }
+
+    await client.createPublishUpload(upload)
+    await client.updatePublishedNote(42, {
+      note_path: 'inbox/Photo.md',
+      title: 'Photo',
+      markdown: '![Photo](photo.png)',
+      appearance: { theme: 'paper', logo: null },
+      upload_id: '01upload',
+      asset_refs: ['photo.png']
+    })
+    await client.abortPublishUpload('01 upload')
+
+    expect(requests).toEqual([
+      { method: 'POST', path: '/api/v1/shares/uploads', body: upload },
+      {
+        method: 'PUT',
+        path: '/api/v1/shares/42',
+        body: {
+          payload: JSON.stringify({
+            note_path: 'inbox/Photo.md',
+            title: 'Photo',
+            markdown: '![Photo](photo.png)',
+            appearance: { theme: 'paper', logo_action: 'remove' },
+            tikz_svgs: [],
+            asset_refs: ['photo.png'],
+            upload_id: '01upload'
+          })
+        },
+        timeoutMs: 300_000
+      },
+      { method: 'DELETE', path: '/api/v1/shares/uploads/01%20upload' }
+    ])
+    await expect(client.publishNote({
+      note_path: 'inbox/Photo.md',
+      title: 'Photo',
+      markdown: '',
+      appearance: { theme: 'paper', logo: { ref: 'brand-logo', name: 'logo.png', mime: 'image/png', base64: 'AQID' } },
+      upload_id: '01upload',
+      asset_refs: []
+    })).rejects.toThrow('A staged publish cannot replace the logo.')
   })
 
   it('serializes published appearance and a replacement logo', async () => {

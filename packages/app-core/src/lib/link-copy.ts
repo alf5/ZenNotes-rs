@@ -9,7 +9,7 @@
 import type { EditorView } from '@codemirror/view'
 import type { ContextMenuItem } from '../components/ContextMenu'
 import { writeClipboardText } from './clipboard-text'
-import { externalLinkUrl, linkRangeAtCursor } from './internal-links'
+import { externalUrlForLink, linkRangeAtCursor, type LineLinkKind } from './internal-links'
 import { useToastStore } from './toast'
 
 export type CopyableLinkKind = 'url' | 'email' | 'phone'
@@ -31,9 +31,10 @@ function decodeSafe(value: string): string {
 }
 
 /** The copyable form of a link target (`https://…`, `mailto:…`, `tel:…`, or a
- *  bare domain), or null when the target is not an outside link. */
-export function copyableLink(target: string): CopyableLink | null {
-  const url = externalLinkUrl(target)
+ *  bare domain in an href), or null when the target is not an outside link. A
+ *  wikilink is a note name, so `[[2024.01.15]]` is not a web link. */
+export function copyableLink(target: string, kind: LineLinkKind = 'markdown'): CopyableLink | null {
+  const url = externalUrlForLink(target, kind)
   if (!url) return null
   if (/^mailto:/i.test(url)) {
     const address = decodeSafe(url.slice('mailto:'.length).split('?')[0] ?? '').trim()
@@ -95,7 +96,7 @@ export function linkMenuItems(link: CopyableLink): ContextMenuItem[] {
 /** The copyable link at a document offset, or null. */
 export function copyableLinkAt(view: EditorView, pos: number): CopyableLink | null {
   const range = linkRangeAtCursor(view.state.doc.toString(), pos)
-  return range ? copyableLink(range.target) : null
+  return range ? copyableLink(range.target, range.kind) : null
 }
 
 /** Keyboard path (`gy`, Copy Link Under Cursor): copy the link the caret is

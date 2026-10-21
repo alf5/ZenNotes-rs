@@ -12,17 +12,19 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Annotation, Compartment, EditorState, type Transaction } from '@codemirror/state'
-import { EditorView, drawSelection, highlightActiveLine, keymap } from '@codemirror/view'
+import { EditorView, highlightActiveLine, keymap } from '@codemirror/view'
 import { Vim, vim } from '@replit/codemirror-vim'
 import { history, historyKeymap, indentWithTab } from '@codemirror/commands'
 import { vimAwareDefaultKeymap, vimAwareMarkdownKeymap, vimAwareSearchKeymap } from '../lib/cm-vim-default-keymap'
+import { mapDefaultHalfPageKeys, registerHalfPageMotion } from '../lib/cm-vim-half-page-motion'
 import { vimVisualHighlightExtension } from '../lib/cm-vim-visual-highlight'
-import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
-import { resolveCodeLanguage } from '../lib/cm-code-languages'
+import { noteMarkdown } from '../lib/cm-markdown-language'
 import { customCodeFenceHighlightExtension } from '../lib/cm-custom-code-languages'
+import { vimHalfPageKeymap } from '../lib/vim-half-page-keymap'
 import { applyVimInsertEscape } from '../lib/vim-insert-escape'
 import { markdownListIndentPlugin } from '../lib/cm-markdown-list-indent'
 import { appMarkdownSnippetExtension } from '../lib/markdown-snippets-config'
+import { isTouchPrimaryDevice, vimImeGuard } from '../lib/cm-vim-ime-guard'
 import { syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language'
 import type { ExternalFileContent } from '@shared/ipc'
 import { livePreviewPlugin } from '../lib/cm-live-preview'
@@ -31,11 +33,13 @@ import { LazyPreview as Preview } from './LazyPreview'
 import { CloseIcon, InboxIcon } from './icons'
 import {
   applyTheme,
+  floatingCursorDrawSelection,
   lineNumberExtension,
   loadFloatingPrefs,
   paperHighlight
 } from './FloatingNoteApp'
 import { editorTabSize } from '../lib/editor-tab-size'
+import { useCloseWindowShortcut } from '../lib/close-shortcut'
 import { linkRangeAtCursor } from '../lib/internal-links'
 import { pointerOverRange } from '../lib/cm-pointer-range'
 import {
@@ -162,13 +166,17 @@ export function ExternalFileApp(): JSX.Element {
         extensions: [
           appMarkdownSnippetExtension(),
           new Compartment().of(prefs.vimMode ? vim() : []),
+          // No text input outside Vim insert mode, as in every other editor:
+          // without it a CJK input method composed over hjkl and typed `ia`
+          // into a file opened from outside the vault (#921).
+          vimImeGuard(() => prefs.vimBlockImeInNormalMode && !isTouchPrimaryDevice()),
           vimVisualHighlightExtension,
           history(),
-          drawSelection(),
+          floatingCursorDrawSelection(),
           editorTabSize(prefs.editorTabSize),
           highlightActiveLine(),
           prefs.wordWrap ? EditorView.lineWrapping : [],
-          markdown({ base: markdownLanguage, codeLanguages: resolveCodeLanguage, addKeymap: false }),
+          noteMarkdown(),
           customCodeFenceHighlightExtension,
           vimAwareMarkdownKeymap,
           markdownListIndentPlugin,
@@ -178,6 +186,9 @@ export function ExternalFileApp(): JSX.Element {
           prefs.livePreview ? livePreviewPlugin : [],
           lineNumberExtension(prefs.lineNumberMode),
           keymap.of([
+            // No keymap overrides in this window, so the default Ctrl+D /
+            // Ctrl+U reach Vim ahead of the search and history keymaps (#825).
+            ...vimHalfPageKeymap(prefs.vimMode, {}),
             indentWithTab,
             ...vimAwareDefaultKeymap(prefs.vimMode),
             ...historyKeymap,
@@ -245,18 +256,8 @@ export function ExternalFileApp(): JSX.Element {
     return () => window.removeEventListener('beforeunload', flush)
   }, [persist])
 
-  // Cmd/Ctrl+W closes the standalone window.
-  useEffect(() => {
-    const handler = (event: KeyboardEvent): void => {
-      const mod = event.metaKey || event.ctrlKey
-      if (!mod || event.altKey) return
-      if (event.key.toLowerCase() !== 'w') return
-      event.preventDefault()
-      window.zen.windowClose()
-    }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
-  }, [])
+  // The close shortcut closes the standalone window, like its close button.
+  useCloseWindowShortcut()
 
   const currentBody = useCallback((): string => {
     return viewRef.current?.state.doc.toString() ?? bodyRef.current ?? content?.body ?? ''
@@ -417,6 +418,9 @@ function deferredClose(): void {
 function registerExternalFileVimCommands(): void {
   if (externalFileVimRegistered) return
   externalFileVimRegistered = true
+
+  registerHalfPageMotion()
+  mapDefaultHalfPageKeys()
 
   Vim.defineEx('write', 'w', () => {
     void externalFileHandlers.persist?.()

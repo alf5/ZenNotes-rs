@@ -60,8 +60,34 @@ describe('app update state labels', () => {
     expect(appUpdatePrimaryActionLabel(state)).toBeNull()
   })
 
+  it('shows installation progress without offering a second install', () => {
+    const state = updateState('installing', { message: 'Approve the administrator prompt.' })
+    expect(appUpdateBadgeLabel(state)).toBe('Installing')
+    expect(appUpdateNoticeLabel(state)).toBe(state.message)
+    expect(appUpdatePrimaryActionLabel(state)).toBeNull()
+  })
+
+  it('keeps failures visible and offers update details', () => {
+    const state = updateState('error', { availableVersion: '2.50.4' })
+    expect(appUpdateBadgeLabel(state)).toBe('Update error')
+    expect(appUpdateNoticeLabel(state)).toBe('ZenNotes update needs attention')
+    expect(appUpdatePrimaryActionLabel(state)).toBe('Details')
+  })
+
   it('stays quiet when there is no update needing attention', () => {
     const state = updateState('not-available')
+
+    expect(appUpdateBadgeLabel(state)).toBeNull()
+    expect(appUpdateNoticeLabel(state)).toBeNull()
+    expect(appUpdatePrimaryActionLabel(state)).toBeNull()
+  })
+
+  it('stays quiet while waiting for the network: the host retries by itself (#812)', () => {
+    // Launching offline used to surface as "update needs attention" with a
+    // Details button, for a check that was going to be retried anyway.
+    const state = updateState('offline', {
+      message: "ZenNotes can't reach GitHub right now (net::ERR_INTERNET_DISCONNECTED)."
+    })
 
     expect(appUpdateBadgeLabel(state)).toBeNull()
     expect(appUpdateNoticeLabel(state)).toBeNull()

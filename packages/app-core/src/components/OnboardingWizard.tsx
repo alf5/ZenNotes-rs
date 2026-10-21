@@ -4,7 +4,8 @@ import { resolveAuto, THEMES, type ThemeFamily, type ThemeMode } from '../lib/th
 import {
   DEFAULT_DAILY_NOTES_DIRECTORY,
   type PrimaryNotesLocation,
-  type VaultSettings
+  type VaultSettings,
+  type WorkspaceMode
 } from '@shared/ipc'
 import { normalizeDailyNotesDirectory } from '../lib/vault-layout'
 import { Button } from './ui/Button'
@@ -13,6 +14,21 @@ import appIcon from '../assets/zennotes-app-icon.png'
 type StepId = 'welcome' | 'vim' | 'theme' | 'vault' | 'layout' | 'done'
 
 const STEP_ORDER: StepId[] = ['welcome', 'vim', 'theme', 'vault', 'layout', 'done']
+
+/**
+ * The steps this wizard shows. A vault on a ZenNotes Server was set up where
+ * it lives, and its layout is the server's, shared with every other app
+ * connected to it, so there is no layout to choose: the wizard goes from the
+ * vault straight to the end. A folder on this machine still gets the step.
+ */
+function visibleSteps(workspaceMode: WorkspaceMode): StepId[] {
+  return workspaceMode === 'remote' ? STEP_ORDER.filter((step) => step !== 'layout') : STEP_ORDER
+}
+
+/** The step after `step` among `steps`, which may not include `step` itself. */
+function stepAfter(steps: StepId[], step: StepId): StepId {
+  return steps.find((s) => STEP_ORDER.indexOf(s) > STEP_ORDER.indexOf(step)) ?? 'done'
+}
 
 const STEP_LABELS: Record<StepId, string> = {
   welcome: 'Welcome',
@@ -122,39 +138,45 @@ export function OnboardingWizard(): JSX.Element {
   const setVaultSettings = useStore((s) => s.setVaultSettings)
   const completeOnboarding = useStore((s) => s.completeOnboarding)
   const openHelpView = useStore((s) => s.openHelpView)
+  const workspaceMode = useStore((s) => s.workspaceMode)
 
   const capabilities = window.zen.getCapabilities()
   const appInfo = window.zen.getAppInfo()
   const isServerVaultSetup =
     appInfo.runtime === 'web' && !capabilities.supportsLocalFilesystemPickers
   const canConnectRemote = appInfo.runtime === 'desktop' && capabilities.supportsRemoteWorkspace
+  const steps = visibleSteps(workspaceMode)
 
-  // Start where the user actually needs to act: skip to the vault step if a
+  // Start where the user actually needs to act: past the vault step if a
   // vault is already connected (returning user who never finished onboarding).
-  const [stepId, setStepId] = useState<StepId>(vault ? 'layout' : 'welcome')
-  // Auto-advance from `vault` to `layout` runs once per session — once the
-  // user has reached `layout`, going back to `vault` should be a real visit
-  // (so they can pick a different folder) instead of an instant bounce.
+  const [stepId, setStepId] = useState<StepId>(() =>
+    vault ? stepAfter(steps, 'vault') : 'welcome'
+  )
+  // Auto-advance past `vault` runs once per session: once the user has moved
+  // on, going back to `vault` should be a real visit (so they can pick a
+  // different folder) instead of an instant bounce.
   const autoAdvancedRef = useRef<boolean>(!!vault)
-  // Highest step the user has reached. The rail uses this to gate forward
-  // jumps so unreached steps stay non-interactive.
-  const [maxReachedIndex, setMaxReachedIndex] = useState<number>(
-    vault ? STEP_ORDER.indexOf('layout') : 0
+  // Highest step the user has reached, as an index into STEP_ORDER. The rail
+  // uses this to gate forward jumps so unreached steps stay non-interactive.
+  const [maxReachedIndex, setMaxReachedIndex] = useState<number>(() =>
+    vault ? STEP_ORDER.indexOf(stepAfter(steps, 'vault')) : 0
   )
 
-  const stepIndex = STEP_ORDER.indexOf(stepId)
+  const stepIndex = steps.indexOf(stepId)
+  const railMaxReached =
+    steps.filter((step) => STEP_ORDER.indexOf(step) <= maxReachedIndex).length - 1
 
   const goToStep = (next: StepId): void => {
     setStepId(next)
     const nextIdx = STEP_ORDER.indexOf(next)
-    if (nextIdx > maxReachedIndex) setMaxReachedIndex(nextIdx)
+    setMaxReachedIndex((reached) => Math.max(reached, nextIdx))
   }
   const goNext = (): void => {
-    const next = STEP_ORDER[stepIndex + 1]
+    const next = steps[stepIndex + 1]
     if (next) goToStep(next)
   }
   const goBack = (): void => {
-    const prev = STEP_ORDER[stepIndex - 1]
+    const prev = steps[stepIndex - 1]
     if (prev) goToStep(prev)
   }
   const finish = (): void => {
@@ -166,14 +188,15 @@ export function OnboardingWizard(): JSX.Element {
 
   // Once a vault becomes available on the 'vault' step, advance automatically
   // so the wizard reflects the user's progress without an extra click. Only
-  // fires the first time — otherwise clicking Back from `layout` would bounce
-  // straight forward again.
+  // fires the first time, or clicking Back from the next step would bounce
+  // straight forward again. Connecting to a server sets the vault and the
+  // workspace mode together, so `steps` already knows which step is next.
   useEffect(() => {
     if (stepId === 'vault' && vault && !autoAdvancedRef.current) {
       autoAdvancedRef.current = true
-      setStepId('layout')
+      goToStep(stepAfter(steps, 'vault'))
     }
-  }, [stepId, vault])
+  }, [stepId, vault, workspaceMode])
 
   // Enter to advance, Esc to skip, ←/→ to navigate.
   useEffect(() => {
@@ -215,15 +238,15 @@ export function OnboardingWizard(): JSX.Element {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [stepId, stepIndex, vault])
+  }, [stepId, stepIndex, vault, workspaceMode])
 
   return (
     <div className="flex h-[calc(100vh-2.75rem)] w-full items-center justify-center overflow-y-auto px-6 py-10">
       <div className="flex w-full max-w-2xl flex-col gap-8">
         <StepRail
           current={stepIndex}
-          maxReached={maxReachedIndex}
-          steps={STEP_ORDER}
+          maxReached={railMaxReached}
+          steps={steps}
           onSelect={(target) => goToStep(target)}
         />
 
@@ -327,7 +350,7 @@ function StepRail({
             }}
             disabled={!reachable || active}
             aria-current={active ? 'step' : undefined}
-            aria-label={`${STEP_LABELS[step]} — step ${i + 1} of ${steps.length}`}
+            aria-label={`${STEP_LABELS[step]}, step ${i + 1} of ${steps.length}`}
             className={[
               'group flex flex-1 flex-col items-stretch gap-1.5 rounded-md p-1 text-left transition-colors',
               reachable && !active
@@ -481,7 +504,7 @@ function VimStep({
       <StepHeading
         eyebrow="Step 1"
         title="Vim mode"
-        subtitle="ZenNotes is built around Vim motions — leader keys, normal/insert, gg/G, hjkl across the sidebar. You can change this any time in Settings."
+        subtitle="ZenNotes is built around Vim motions: leader keys, normal/insert, gg/G, hjkl across the sidebar. You can change this any time in Settings."
       />
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <ChoiceCard
@@ -725,7 +748,7 @@ function VaultStep({
         subtitle={
           isServerVaultSetup
             ? 'Pick the folder on the server that ZenNotes should treat as your vault.'
-            : 'Pick a folder on this machine. ZenNotes stores notes as plain .md files — yours to keep, back up, and sync however you like.'
+            : 'Pick a folder on this machine. ZenNotes stores notes as plain .md files, yours to keep, back up, and sync however you like.'
         }
       />
 
@@ -782,7 +805,7 @@ function LayoutStep({
   primaryLocation: PrimaryNotesLocation
   dailyEnabled: boolean
   dailyDirectory: string
-  setVaultSettings: (next: VaultSettings) => Promise<void>
+  setVaultSettings: (next: VaultSettings) => Promise<unknown>
   hasVault: boolean
   onBack: () => void
   onNext: () => void
@@ -820,7 +843,7 @@ function LayoutStep({
         <StepHeading
           eyebrow="Step 4"
           title="Vault layout"
-          subtitle="Pick a vault first — these settings live inside the vault."
+          subtitle="Pick a vault first: these settings live inside the vault."
         />
         <StepFooter primaryLabel="Back to vault" onPrimary={onBack} hideBack />
       </div>
@@ -931,7 +954,7 @@ function DoneStep({
         subtitle={
           hasVault
             ? "Here are a few shortcuts to get you started. You can revisit any of this from Settings."
-            : 'You skipped the vault step — open the welcome screen any time to pick one.'
+            : 'You skipped the vault step. Open the welcome screen any time to pick one.'
         }
       />
 

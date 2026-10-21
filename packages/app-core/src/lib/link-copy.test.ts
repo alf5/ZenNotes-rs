@@ -34,6 +34,14 @@ describe('copyableLink', () => {
     expect(copyableLink('tel:+1-555-0100')).toMatchObject({ kind: 'phone', value: '+1-555-0100' })
   })
 
+  it('reads a wikilink as a note name, so a dotted one is not a web link', () => {
+    expect(copyableLink('2024.01.15', 'wikilink')).toBeNull()
+    expect(copyableLink('https://example.net', 'wikilink')).toMatchObject({
+      kind: 'url',
+      value: 'https://example.net'
+    })
+  })
+
   it('is null for notes, wikilinks, anchors, and local files', () => {
     expect(copyableLink('Meeting notes')).toBeNull()
     expect(copyableLink('folder/Note.md')).toBeNull()
@@ -107,6 +115,15 @@ describe('copyLinkAtCursor', () => {
     const written: string[] = []
     zenWindow.zen = { clipboardWriteText: (value) => written.push(value) }
     const view = editor('go to [[Meeting notes]] now', 12)
+    expect(copyLinkAtCursor(view)).toBe(false)
+    expect(written).toEqual([])
+    view.destroy()
+  })
+
+  it('does not copy a wikilink whose name looks like a domain', () => {
+    const written: string[] = []
+    zenWindow.zen = { clipboardWriteText: (value) => written.push(value) }
+    const view = editor('go to [[2024.01.15]] now', 10)
     expect(copyLinkAtCursor(view)).toBe(false)
     expect(written).toEqual([])
     view.destroy()

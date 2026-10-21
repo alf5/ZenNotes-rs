@@ -102,6 +102,15 @@ trigger: manual
 
 all | frobnicate alpha beta | write "O.md"
 `],
+  ['tag lists and untagged notes', `---
+name: Lists
+trigger: manual
+---
+
+reading = tag #book, #article
+reading | not-tagged #someday, #reference | clipboard
+all | no-tags | render list | write "Untagged.md"
+`],
   ['unknown frontmatter keys', `---
 name: Meta
 trigger: manual
@@ -134,7 +143,9 @@ describe('serializeWorkflow: unbindable arguments survive the save', () => {
     ['a bad duration', 'x = all | since 7x'],
     ['a digit-leading tag', 'x = tag #2024'],
     ['a bad sort direction with the field bound', 'x = all | sort title sideways'],
-    ['a quoted token that failed to bind', 'x = all | since "7 x"']
+    ['a quoted token that failed to bind', 'x = all | since "7 x"'],
+    ['tags separated only by spaces', 'x = all | not-tagged #a #b'],
+    ['a tag list with an empty entry', 'x = all | tagged #a,, #b']
   ]
 
   for (const [label, line] of PARKED) {
@@ -303,6 +314,13 @@ describe('serializeTrigger', () => {
 })
 
 describe('serializeWorkflow: shape', () => {
+  it('writes a tag list the one way the docs show it', () => {
+    const head = `---\nname: W\nstatus: active\ntrigger: manual\n---\n\n`
+    const parsed = parseWorkflow(`${head}x = all | tagged #a,#b, #A\n`, 'wf')
+    expect(parsed.diagnostics).toEqual([])
+    expect(serializeWorkflow(parsed.workflow)).toBe(`${head}x = all | tagged #a, #b\n`)
+  })
+
   it('writes a body-less workflow as frontmatter alone', () => {
     expect(serializeWorkflow(wf({ name: 'Empty' }))).toBe(
       '---\nname: Empty\nstatus: active\ntrigger: manual\n---\n'

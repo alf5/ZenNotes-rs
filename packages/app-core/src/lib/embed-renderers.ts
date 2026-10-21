@@ -230,7 +230,7 @@ export function renderEmbedElement(
   if (!parsed) {
     // Unsupported provider: keep the URL as a clickable link rather than
     // embedding an arbitrary site in an iframe.
-    el.innerHTML = `<div class="zen-embed-unsupported">Can't embed this link yet — <a href="${escapeHtml(url)}">${escapeHtml(url)}</a></div>`
+    el.innerHTML = `<div class="zen-embed-unsupported">Can't embed this link yet: <a href="${escapeHtml(url)}">${escapeHtml(url)}</a></div>`
     return
   }
   const surface = document.createElement('div')

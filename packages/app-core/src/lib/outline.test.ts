@@ -121,3 +121,14 @@ describe('activeOutlineLineForCursor — discussion #597', () => {
     expect(activeOutlineLineForCursor([], 20)).toBeNull()
   })
 })
+
+describe('parseOutline: a lone dash under a line (#898)', () => {
+  it('is a list starting, not a heading', () => {
+    expect(parseOutline('Some text\n-\n')).toEqual([])
+    expect(parseOutline('Some text\n- \n')).toEqual([])
+  })
+
+  it('still lists a line over two or more dashes', () => {
+    expect(parseOutline('Some text\n--\n')).toMatchObject([{ level: 2, text: 'Some text', line: 1 }])
+  })
+})

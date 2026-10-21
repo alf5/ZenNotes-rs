@@ -127,6 +127,17 @@ describe('getVisiblePanels — the focus cycle (#285, #477)', () => {
     ...over
   })
 
+  // Tornado300 (Discord, 2026-10-09): Ctrl-w l from the sidebar landed on
+  // 'editor', where the Tags view's keys stand down.
+  it('puts the Tags view in the editor slot so pane navigation can return to it', () => {
+    expect(getVisiblePanels(visibility({ tagsViewOpen: true, outlineOpen: true }))).toEqual([
+      'sidebar',
+      'notelist',
+      'tags',
+      'outline'
+    ])
+  })
+
   it('appends the calendar last (after connections/comments) when open', () => {
     expect(getVisiblePanels(visibility({ calendarOpen: true }))).toEqual([
       'sidebar',

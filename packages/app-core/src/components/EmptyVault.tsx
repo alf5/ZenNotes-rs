@@ -103,7 +103,7 @@ export function EmptyVault(): JSX.Element {
           <p className="mt-2 text-sm text-ink-600">
             {isServerVaultSetup
               ? 'Choose the vault directory on the server running ZenNotes. The normal self-hosted path is `make up`, which serves the browser app and server together.'
-              : 'Choose a folder on your computer to use as your vault. ZenNotes will store your notes there as plain markdown files — yours to keep, back up, and sync any way you like.'}
+              : 'Choose a folder on your computer to use as your vault. ZenNotes will store your notes there as plain markdown files, yours to keep, back up, and sync any way you like.'}
           </p>
           {isServerVaultSetup && (
             <p className="mt-2 text-xs text-ink-500">

@@ -88,6 +88,14 @@ export function PromptModal({
   const [activeSuggestion, setActiveSuggestion] = useState(-1)
   const inputRef = useRef<HTMLInputElement | null>(null)
   const suggestionsRef = useRef<HTMLDivElement | null>(null)
+  // Decided once, when the prompt opens. Left alone, the dialog shell hands its
+  // first control (this input) the focus, which on a phone raises the keyboard
+  // over the very list (2.52.0 to 2.60.0 shipped that way). A tap-first prompt
+  // asks the shell for the panel instead: focus still leaves the note
+  // underneath, and no keyboard appears.
+  const [tapFirst] = useState(
+    () => !shouldAutofocusPrompt(isCoarsePointer(), options.suggestions?.length ?? 0)
+  )
 
   const filteredSuggestions = useMemo(() => {
     const suggestions = options.suggestions ?? []
@@ -128,7 +136,7 @@ export function PromptModal({
   }, [options.initialValue, options.title])
 
   useEffect(() => {
-    if (!shouldAutofocusPrompt(isCoarsePointer(), options.suggestions?.length ?? 0)) return
+    if (tapFirst) return
     const t = setTimeout(() => {
       inputRef.current?.focus()
       inputRef.current?.select()
@@ -181,6 +189,7 @@ export function PromptModal({
       layer="modal"
       onClose={onCancel}
       closeOnEsc={false}
+      initialFocus={tapFirst ? 'panel' : undefined}
       data={{ 'data-prompt-modal': '' }}
     >
       <Modal.Header title={options.title} description={options.description} />

@@ -354,6 +354,12 @@ export function TagView(): JSX.Element {
     <div
       ref={rootRef}
       className="flex min-h-0 flex-1 flex-col bg-paper-100 text-ink-900"
+      // EditorPane claims 'editor' for any click or focus inside the pane, which
+      // made the key handler above stand down after the first click on a tag
+      // chip or the filter. Inner capture handlers run after the pane's, so the
+      // view wins it back, as Tasks and Atlas do.
+      onMouseDownCapture={() => useStore.getState().setFocusedPanel('tags')}
+      onFocusCapture={() => useStore.getState().setFocusedPanel('tags')}
     >
       <div className="flex items-center gap-2 border-b border-paper-300/50 px-4 py-3">
         <TagIcon width={18} height={18} />
@@ -375,8 +381,8 @@ export function TagView(): JSX.Element {
                     onClick={() => setTagMatchMode(m)}
                     title={
                       m === 'all'
-                        ? 'All — notes with every selected tag (AND)'
-                        : 'Any — notes with at least one selected tag (OR)'
+                        ? 'All: notes with every selected tag (AND)'
+                        : 'Any: notes with at least one selected tag (OR)'
                     }
                     className={[
                       'px-2 py-1 text-xs transition-colors',
@@ -395,7 +401,7 @@ export function TagView(): JSX.Element {
             <button
               type="button"
               onClick={() => setSelectedTags([])}
-              title="Clear all selected tags (c)"
+              title={vimMode ? 'Clear all selected tags (c)' : 'Clear all selected tags'}
               className="rounded-md border border-paper-300/60 px-2 py-1 text-xs text-current/60 transition-colors hover:bg-paper-200/70 hover:text-current/90"
             >
               Clear all
@@ -660,7 +666,9 @@ export function TagView(): JSX.Element {
         </form>
       ) : (
         <div className="border-t border-paper-300/50 px-4 py-1.5 text-xs text-current/40">
-          j/k move · Enter/o open · click chips to toggle · c clear tags · / filter · : command · :q close
+          {vimMode
+            ? 'j/k move · Enter/o open · click chips to toggle · c clear tags · / filter · : command · :q close'
+            : '↑/↓ move · Enter open · click chips to toggle'}
         </div>
       )}
       {tagMenu && (

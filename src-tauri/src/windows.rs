@@ -62,6 +62,9 @@ pub fn toggle_quick_capture(app: &AppHandle, pinned: bool) -> Result<(), String>
         let visible = win.is_visible().unwrap_or(false);
         if visible {
             let _ = win.hide();
+            // A panel left after the last window closed holds the app only
+            // until it hides (upstream last-window.ts).
+            crate::tray::schedule_quit_if_only_quick_capture_left(app);
         } else {
             let _ = win.show();
             let _ = win.set_focus();
@@ -193,7 +196,8 @@ pub fn move_external_file_to_vault(
         .unwrap_or_else(|| "Untitled".to_string());
     // Write into the primary notes folder via the note-create path.
     let meta = crate::vault::crud::create_note(&root, "inbox", Some(&base), "")?;
-    crate::vault::crud::write_note(&root, &meta.path, &body)?;
+    let ephemeral = state.current().and_then(|v| v.temporary).unwrap_or(false);
+    crate::vault::crud::write_note(&root, &meta.path, &body, ephemeral)?;
     let _ = std::fs::remove_file(&path);
     state.set_external_file(window.label(), root.join(meta.path.replace('/', std::path::MAIN_SEPARATOR_STR)));
     Ok(MoveExternalFileResult {

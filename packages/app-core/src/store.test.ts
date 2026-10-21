@@ -87,32 +87,59 @@ function installZen(overrides: Record<string, unknown> = {}): void {
   })
 }
 
-// The most recent store module a test loaded. `vi.resetModules` gives every
-// test a fresh module, but timers the OLD module already scheduled keep
-// running: `updateNoteBody` debounces a `persistNote` at 350ms
-// (pathSaveTimers), and database edits debounce a write at 400ms
-// (databaseSaveTimers). A test that schedules either without awaiting it
-// leaves a straggler that fires against whichever `window.zen` spy is
-// installed one or two tests later; a partial mock there turns the write
-// into `undefined.catch`, which is an unhandled error that fails the whole
-// run (seen on the macOS runner). The cure is the afterEach below: it
-// starves both timers' bail-out checks on the old store, so a stray
-// persistNote finds nothing dirty and a stray database write finds no doc,
-// and each returns before touching `window.zen`.
-let lastLoadedStore: { useStore: { setState: (partial: object) => void } } | null = null
+// Every store module the running test loaded (a relaunch test loads two).
+// `vi.resetModules` gives every test a fresh module, but timers the OLD
+// module already scheduled keep running: `updateNoteBody` debounces a
+// `persistNote` at 350ms (pathSaveTimers), database edits debounce a write at
+// 400ms (databaseSaveTimers), and opening a vault refreshes its assets 2s
+// later (scheduleAssetsRefreshForVault). A test that schedules any of them
+// without awaiting it leaves a straggler that fires against whichever
+// `window.zen` spy is installed tests later; a partial mock there turns the
+// write into `undefined.catch`, which is an unhandled error that fails the
+// whole run (seen on the macOS runner). The asset refresh can also outlive
+// the file: on a slow runner it fired after vitest had torn down the jsdom
+// environment, and `window is not defined` failed the Windows build. The cure
+// is the afterEach below: it starves every timer's bail-out check on the old
+// stores, so a stray persistNote finds nothing dirty, a stray database write
+// finds no doc and a stray asset refresh finds its vault closed, and each
+// returns before touching `window`.
+type LoadedStoreModule = { useStore: { setState: (partial: object) => void } }
+const loadedStores = new Set<LoadedStoreModule>()
 
 async function loadStore() {
   vi.resetModules()
   localStorage.clear()
   const mod = await import('./store')
-  lastLoadedStore = mod as unknown as typeof lastLoadedStore
+  loadedStores.add(mod as unknown as LoadedStoreModule)
   return mod
 }
 
 afterEach(() => {
-  lastLoadedStore?.useStore.setState({ noteDirty: {}, databases: {} })
-  lastLoadedStore = null
+  for (const loaded of loadedStores) {
+    loaded.useStore.setState({ noteDirty: {}, databases: {}, vault: null })
+  }
+  loadedStores.clear()
 })
+
+type LoadedStore = Awaited<ReturnType<typeof loadStore>>['useStore']
+
+/** Run `work` on a fake clock and let `ms` of it pass: the unlink of an open
+ *  note waits for its file to come back before the tab closes (#863). */
+async function onFakeClock(ms: number, work: () => Promise<unknown>): Promise<void> {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  try {
+    const done = work()
+    await vi.advanceTimersByTimeAsync(ms)
+    await done
+  } finally {
+    vi.useRealTimers()
+  }
+}
+
+const applyUnlink = (useStore: LoadedStore, path: string): Promise<void> =>
+  onFakeClock(2000, () => useStore.getState().applyChange({ kind: 'unlink', path, folder: 'inbox' }))
+
+const missing = (path: string): Error => Object.assign(new Error(`ENOENT: ${path}`), { code: 'ENOENT' })
 
 async function flushAsyncWork(): Promise<void> {
   await new Promise((resolve) => window.setTimeout(resolve, 0))
@@ -177,7 +204,7 @@ describe('tasks cache freshness', () => {
     expect(useStore.getState().vaultTasks).toEqual(freshTasks)
   })
 
-  it('isolates tasks from a note until its cloud conflict is resolved', async () => {
+  it('keeps local tasks visible and refreshable while their cloud conflict is pending', async () => {
     const conflicted = {
       ...makeTask('choose this later'),
       id: 'inbox/Conflict.md#0',
@@ -189,7 +216,9 @@ describe('tasks cache freshness', () => {
       sourcePath: 'inbox/Other.md'
     }
     const scanTasks = vi.fn().mockResolvedValue([conflicted, unaffected])
-    installZen({ scanTasks })
+    const edited = { ...conflicted, content: 'local task edited while waiting' }
+    const scanTasksForPath = vi.fn().mockResolvedValue([edited])
+    installZen({ scanTasks, scanTasksForPath })
 
     const { useStore } = await loadStore()
     const { useCloudSyncStatusStore } = await import('./lib/cloud-auto-sync')
@@ -218,10 +247,15 @@ describe('tasks cache freshness', () => {
       }
     })
 
-    expect(useStore.getState().vaultTasks).toEqual([unaffected])
+    expect(useStore.getState().vaultTasks).toEqual([conflicted, unaffected])
     await useStore.getState().refreshTasks()
-    expect(useStore.getState().vaultTasks).toEqual([unaffected])
+    expect(useStore.getState().vaultTasks).toEqual([conflicted, unaffected])
+    await useStore.getState().rescanTasksForPath(conflicted.sourcePath)
+    expect(useStore.getState().vaultTasks).toEqual([unaffected, edited])
+    expect(scanTasksForPath).toHaveBeenCalledWith(conflicted.sourcePath)
 
+    const resolved = { ...conflicted, content: 'task from the resolved note' }
+    scanTasks.mockResolvedValue([resolved, unaffected])
     useCloudSyncStatusStore.setState({
       lastSummary: {
         cursor: 3,
@@ -234,7 +268,7 @@ describe('tasks cache freshness', () => {
       }
     })
     await useStore.getState().refreshTasks()
-    expect(useStore.getState().vaultTasks).toEqual([conflicted, unaffected])
+    expect(useStore.getState().vaultTasks).toEqual([resolved, unaffected])
   })
 })
 
@@ -303,6 +337,120 @@ describe('daily note patterns', () => {
     await useStore.getState().openDailyNoteForDate(new Date(2026, 5, 9))
 
     expect(createNote).toHaveBeenCalledWith('inbox', '2026-06-09-Tue', '2026/06-Jun')
+  })
+})
+
+describe('daily task rollover', () => {
+  it.each([false, true])('replaces empty template tasks and preserves real work (open: %s)', async (open) => {
+    const iso = (date: Date) => [date.getFullYear(), String(date.getMonth() + 1).padStart(2, '0'),
+      String(date.getDate()).padStart(2, '0')].join('-')
+    const now = new Date()
+    const yesterday = new Date(now)
+    yesterday.setDate(yesterday.getDate() - 1)
+    const sourcePath = `inbox/Daily Notes/${iso(yesterday)}.md`
+    const targetPath = `inbox/Daily Notes/${iso(now)}.md`
+    const files = new Map([[sourcePath, '## Tasks\n\n- [ ] Carry this task\n- [ ]\n- [x] Done\n']])
+    const notes = () => [...files].map(([path, body]) => makeNote(body, path))
+    const createNote = vi.fn(async () => {
+      files.set(targetPath, '')
+      return makeNote('', targetPath)
+    })
+    installZen({
+      createNote,
+      listNotes: vi.fn(async () => notes()),
+      readNote: vi.fn(async (path: string) => makeNote(files.get(path)!, path)),
+      writeNote: vi.fn(async (path: string, body: string) => {
+        files.set(path, body)
+        return makeNote(body, path)
+      })
+    })
+    const { useStore } = await loadStore()
+    useStore.setState({
+      notes: notes(),
+      customTemplates: [{
+        id: 'custom:daily', name: 'Daily', description: '', category: 'Custom', builtin: false,
+        body: '## Tasks\n\n- [ ]\n- [ ] Existing template task\n- [ ]\n- [ ]\n\n## Notes\n'
+      }],
+      vaultSettings: {
+        ...useStore.getState().vaultSettings,
+        dailyNotes: { enabled: true, directory: 'Daily Notes', templateId: 'custom:daily' }
+      }
+    })
+
+    expect(await useStore.getState().rolloverUnfinishedTasksIntoToday({ force: true, open })).toBe(1)
+    expect(createNote).toHaveBeenCalledOnce()
+    const body = useStore.getState().noteContents[targetPath]?.body ?? files.get(targetPath)
+    expect(body).toBe('## Tasks\n\n- [ ] Existing template task\n- [ ] Carry this task\n\n## Notes\n')
+    expect(files.get(sourcePath)).toBe('## Tasks\n\n- [ ]\n- [x] Done\n')
+    expect(await useStore.getState().rolloverUnfinishedTasksIntoToday({ force: true, open })).toBe(0)
+  })
+
+  // The reported flow (#817): today's note is opened once with nothing to
+  // roll, then a task is typed into yesterday's note, then today's note is
+  // opened again. The once-per-day marker used to make the second open a
+  // no-op until the next day.
+  it('rolls a task added to a past daily note after today was already opened', async () => {
+    const iso = (date: Date) => [date.getFullYear(), String(date.getMonth() + 1).padStart(2, '0'),
+      String(date.getDate()).padStart(2, '0')].join('-')
+    const now = new Date()
+    const yesterday = new Date(now)
+    yesterday.setDate(yesterday.getDate() - 1)
+    const sourcePath = `inbox/Daily Notes/${iso(yesterday)}.md`
+    const targetPath = `inbox/Daily Notes/${iso(now)}.md`
+    const files = new Map([[sourcePath, `# ${iso(yesterday)}\n\n`]])
+    const stamps = new Map([[sourcePath, 1]])
+    const notes = () =>
+      [...files].map(([path, body]) => ({ ...makeNote(body, path), updatedAt: stamps.get(path) ?? 1 }))
+    const readNote = vi.fn(async (path: string) => makeNote(files.get(path)!, path))
+    installZen({
+      createNote: vi.fn(async () => {
+        files.set(targetPath, `# ${iso(now)}\n\n`)
+        return makeNote(files.get(targetPath)!, targetPath)
+      }),
+      listNotes: vi.fn(async () => notes()),
+      readNote,
+      writeNote: vi.fn(async (path: string, body: string) => {
+        files.set(path, body)
+        return makeNote(body, path)
+      })
+    })
+    const { useStore } = await loadStore()
+    useStore.setState({
+      notes: notes(),
+      vaultSettings: {
+        ...useStore.getState().vaultSettings,
+        dailyNotes: { enabled: true, directory: 'Daily Notes', rolloverUnfinishedTasks: true }
+      }
+    })
+
+    expect(await useStore.getState().rolloverUnfinishedTasksIntoToday()).toBe(0)
+    const readsAfterFirstRun = readNote.mock.calls.length
+    expect(readNote).toHaveBeenCalledWith(sourcePath)
+
+    // Opening today again with nothing changed must not re-read the past
+    // note the record already vouches for.
+    useStore.setState({ notes: notes() })
+    expect(await useStore.getState().rolloverUnfinishedTasksIntoToday()).toBe(0)
+    expect(readNote.mock.calls.length).toBe(readsAfterFirstRun)
+
+    // The user types a task into yesterday's note; the autosave lands on disk
+    // and the watcher re-lists the vault with a fresh mtime and size.
+    files.set(sourcePath, `# ${iso(yesterday)}\n\n- [ ] Call the bank\n`)
+    stamps.set(sourcePath, 2)
+    useStore.setState({ notes: notes() })
+
+    expect(await useStore.getState().rolloverUnfinishedTasksIntoToday()).toBe(1)
+    expect(files.get(targetPath)).toBe(`# ${iso(now)}\n- [ ] Call the bank\n`)
+    expect(files.get(sourcePath)).toBe(`# ${iso(yesterday)}\n\n`)
+
+    // A note the rollover just trimmed is read once more before it is
+    // trusted again, so the trim itself can never hide a task.
+    const readsAfterMove = readNote.mock.calls.length
+    stamps.set(sourcePath, 3)
+    useStore.setState({ notes: notes() })
+    expect(await useStore.getState().rolloverUnfinishedTasksIntoToday()).toBe(0)
+    expect(readNote.mock.calls.length).toBe(readsAfterMove + 1)
+    expect(readNote).toHaveBeenLastCalledWith(sourcePath)
   })
 })
 
@@ -522,13 +670,25 @@ describe('local vault shortcuts', () => {
     })
 
     const { useStore } = await loadStore()
-    useStore.setState({ vault: { root: '/Users/test/Notes', name: 'Notes' } })
+    useStore.setState({
+      vault: { root: '/Users/test/Notes', name: 'Notes' },
+      assetFilesListed: true
+    })
+    // The previous vault's listing must not vouch for the next vault's empty
+    // list, or every embed there would read as missing until its files land.
+    const listedWhenVaultChanged: boolean[] = []
+    const unsubscribe = useStore.subscribe((state, prev) => {
+      if (state.vault !== prev.vault) listedWhenVaultChanged.push(state.assetFilesListed)
+    })
 
     await useStore.getState().openLocalVault('/Users/test/Work')
+    unsubscribe()
 
     expect(listAssets).toHaveBeenCalledTimes(1)
     expect(useStore.getState().assetFiles).toEqual(assetFiles)
     expect(useStore.getState().hasAssetsDir).toBe(true)
+    expect(listedWhenVaultChanged).toEqual([false])
+    expect(useStore.getState().assetFilesListed).toBe(true)
   })
 
   it('switches from a remote workspace to a local vault that shares the server path', async () => {
@@ -599,6 +759,7 @@ describe('local vault shortcuts', () => {
           updatedAt: 1
         }
       ],
+      assetFilesListed: true,
       selectedPath: 'inbox/Note.md',
       activeNote: makeNote('Body')
     })
@@ -611,6 +772,7 @@ describe('local vault shortcuts', () => {
     expect(useStore.getState().notes).toEqual([])
     expect(useStore.getState().folders).toEqual([])
     expect(useStore.getState().assetFiles).toEqual([])
+    expect(useStore.getState().assetFilesListed).toBe(false)
     expect(useStore.getState().selectedPath).toBeNull()
     expect(useStore.getState().activeNote).toBeNull()
     expect(useStore.getState().workspaceRestored).toBe(true)
@@ -685,6 +847,88 @@ describe('local vault shortcuts', () => {
   })
 })
 
+describe('per-note panels survive a restart (#794)', () => {
+  const vault = { root: '/Users/test/Notes', name: 'Notes' }
+  const WORKSPACE_KEY = 'zen:workspace:v1'
+
+  function installVault(paths: string[]): void {
+    installZen({
+      openLocalVault: vi.fn().mockResolvedValue(vault),
+      listNotes: vi.fn().mockResolvedValue(paths.map((path) => makeNote(path, path))),
+      readNote: vi.fn().mockImplementation((path: string) => Promise.resolve(makeNote(path, path)))
+    })
+  }
+
+  /** A fresh store module over the SAME localStorage: what a relaunch is. */
+  async function relaunch() {
+    vi.resetModules()
+    const mod = await import('./store')
+    loadedStores.add(mod as unknown as LoadedStoreModule)
+    return mod
+  }
+
+  function savedSnapshot(): { panePanels?: Record<string, Record<string, { outline?: boolean }>> } {
+    return JSON.parse(localStorage.getItem(WORKSPACE_KEY) ?? '{}')[vault.root] ?? {}
+  }
+
+  it('saves them with the workspace and brings them back on the next launch', async () => {
+    installVault(['inbox/A.md', 'inbox/B.md'])
+    const first = await loadStore()
+    await first.useStore.getState().openLocalVault(vault.root)
+    await first.useStore.getState().selectNote('inbox/A.md')
+    const paneId = first.useStore.getState().activePaneId
+
+    // Toggling a panel is the only thing that changed, so it has to ask for
+    // the save itself: no tab or layout change is coming to do it.
+    first.useStore
+      .getState()
+      .updatePanePanelsForPath(paneId, 'inbox/A.md', (panels) => ({ ...panels, outline: true }))
+    expect(savedSnapshot().panePanels?.[paneId]?.['inbox/A.md']?.outline).toBe(true)
+
+    const second = await relaunch()
+    await second.useStore.getState().openLocalVault(vault.root)
+    const restored = second.useStore.getState()
+    expect(restored.activePaneId).toBe(paneId)
+    expect(restored.panePanels[paneId]['inbox/A.md'].outline).toBe(true)
+    expect(restored.panePanels[paneId]['inbox/B.md']).toBeUndefined()
+  })
+
+  it('forgets a note that was deleted while the app was closed', async () => {
+    installVault(['inbox/A.md', 'inbox/B.md'])
+    const first = await loadStore()
+    await first.useStore.getState().openLocalVault(vault.root)
+    await first.useStore.getState().selectNote('inbox/A.md')
+    const paneId = first.useStore.getState().activePaneId
+    for (const path of ['inbox/A.md', 'inbox/B.md']) {
+      first.useStore
+        .getState()
+        .updatePanePanelsForPath(paneId, path, (panels) => ({ ...panels, outline: true }))
+    }
+
+    installVault(['inbox/A.md'])
+    const second = await relaunch()
+    await second.useStore.getState().openLocalVault(vault.root)
+    expect(Object.keys(second.useStore.getState().panePanels[paneId])).toEqual(['inbox/A.md'])
+  })
+
+  it('opens a snapshot written before 2.52, which has no panels in it', async () => {
+    installVault(['inbox/A.md'])
+    const first = await loadStore()
+    await first.useStore.getState().openLocalVault(vault.root)
+    await first.useStore.getState().selectNote('inbox/A.md')
+    // In the app the workspace effect asks for this save after a tab change.
+    first.useStore.getState().persistWorkspace()
+    const all = JSON.parse(localStorage.getItem(WORKSPACE_KEY) ?? '{}')
+    delete all[vault.root].panePanels
+    localStorage.setItem(WORKSPACE_KEY, JSON.stringify(all))
+
+    const second = await relaunch()
+    await second.useStore.getState().openLocalVault(vault.root)
+    expect(second.useStore.getState().panePanels).toEqual({})
+    expect(second.useStore.getState().selectedPath).toBe('inbox/A.md')
+  })
+})
+
 describe('asset undo', () => {
   it('records deleted assets and restores them on undo', async () => {
     const deleted = {
@@ -719,6 +963,91 @@ describe('asset undo', () => {
     expect(restoreDeletedAsset).toHaveBeenCalledWith(deleted)
     expect(useStore.getState().assetUndoStack).toEqual([])
     expect(listAssets).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('asset index', () => {
+  const listedClip = {
+    path: 'assets/clip.mp4',
+    name: 'clip.mp4',
+    kind: 'video' as const,
+    siblingOrder: 0,
+    size: 42,
+    updatedAt: 1
+  }
+
+  it('marks the listing read once it lands, even when the vault holds no files', async () => {
+    installZen({ listAssets: vi.fn().mockResolvedValue([]) })
+    const { useStore } = await loadStore()
+    expect(useStore.getState().assetFilesListed).toBe(false)
+
+    await useStore.getState().refreshAssets()
+
+    expect(useStore.getState().assetFiles).toEqual([])
+    expect(useStore.getState().assetFilesListed).toBe(true)
+  })
+
+  it('lists files the app just imported at once, and no listing read before the import drops them', async () => {
+    const pasted = {
+      name: 'paste.png',
+      path: 'assets/paste.png',
+      markdown: '![[assets/paste.png]]',
+      kind: 'image' as const
+    }
+    const settled = {
+      path: 'assets/paste.png',
+      name: 'paste.png',
+      kind: 'image' as const,
+      siblingOrder: 3,
+      size: 512,
+      updatedAt: 9
+    }
+    const landings: Array<(assets: unknown[]) => void> = []
+    const listAssets = vi.fn(
+      () => new Promise<unknown[]>((resolve) => { landings.push(resolve) })
+    )
+    installZen({ listAssets })
+    const { useStore } = await loadStore()
+    useStore.setState({ assetFiles: [listedClip], assetFilesListed: true })
+    const paths = (): string[] => useStore.getState().assetFiles.map((asset) => asset.path)
+    // A listing already on its way, read before the paste was written.
+    const earlier = useStore.getState().refreshAssets()
+
+    useStore.getState().indexImportedAssets([pasted, { ...pasted }])
+
+    // At once, before any listing: the embed about to go into the note finds it.
+    expect(paths()).toEqual(['assets/paste.png', 'assets/clip.mp4'])
+    landings[0]!([listedClip])
+    await earlier
+    expect(paths()).toEqual(['assets/paste.png', 'assets/clip.mp4'])
+
+    // The listing started for the import settles the file's real details.
+    expect(listAssets).toHaveBeenCalledTimes(2)
+    landings[1]!([settled, listedClip])
+    await vi.waitFor(() => expect(useStore.getState().assetFiles).toEqual([settled, listedClip]))
+  })
+
+  it('adds nothing for files already listed, or before the first listing lands', async () => {
+    const listAssets = vi.fn().mockResolvedValue([])
+    installZen({ listAssets })
+    const { useStore } = await loadStore()
+    const imported = {
+      name: 'clip.mp4',
+      path: 'assets/clip.mp4',
+      markdown: '![[assets/clip.mp4]]',
+      kind: 'video' as const
+    }
+
+    useStore.setState({ assetFiles: [listedClip], assetFilesListed: true })
+    const listed = useStore.getState().assetFiles
+    useStore.getState().indexImportedAssets([imported])
+    expect(useStore.getState().assetFiles).toBe(listed)
+
+    // That first listing is on its way, and it carries the new file too.
+    useStore.setState({ assetFiles: [], assetFilesListed: false })
+    useStore.getState().indexImportedAssets([{ ...imported, path: 'assets/new.mp4' }])
+    expect(useStore.getState().assetFiles).toEqual([])
+    expect(listAssets).not.toHaveBeenCalled()
   })
 })
 
@@ -1430,6 +1759,37 @@ describe('viewSettingsScope (#292 — global vs per-vault)', () => {
   })
 })
 
+describe('window title bar preference (#754)', () => {
+  it('defaults on, persists off, and stays off through Zen mode', async () => {
+    installZen()
+    const { useStore } = await loadStore()
+    expect(useStore.getState().showWindowTitleBar).toBe(true)
+    useStore.getState().setShowWindowTitleBar(false)
+    useStore.getState().setFocusMode(true)
+    useStore.getState().setFocusMode(false)
+    expect(useStore.getState().showWindowTitleBar).toBe(false)
+    expect(JSON.parse(localStorage.getItem('zen:prefs:v2') ?? '{}').showWindowTitleBar).toBe(false)
+    vi.resetModules()
+    const reloaded = await import('./store')
+    expect(reloaded.useStore.getState().showWindowTitleBar).toBe(false)
+  })
+
+  it('loads the portable value and applies another window changing it', async () => {
+    let onConfigChange: ((config: Record<string, unknown>) => void) | undefined
+    installZen({
+      getConfigSync: () => ({ showWindowTitleBar: false }),
+      onConfigChange: (listener: typeof onConfigChange) => { onConfigChange = listener }
+    })
+    const { useStore, initConfigSync } = await loadStore()
+    expect(useStore.getState().showWindowTitleBar).toBe(false)
+    initConfigSync()
+    onConfigChange?.({ showWindowTitleBar: true })
+    expect(useStore.getState().showWindowTitleBar).toBe(true)
+    onConfigChange?.({ showWindowTitleBar: 'false' })
+    expect(useStore.getState().showWindowTitleBar).toBe(true)
+  })
+})
+
 describe('pdfExportUseTheme — theme in PDF export', () => {
   it('defaults off and round-trips through persistence', async () => {
     installZen()
@@ -1490,6 +1850,40 @@ describe('vimWrappedLineMotions (#638)', () => {
     )
     const { useStore } = await loadStore()
     expect(useStore.getState().vimWrappedLineMotions).toBe('display')
+  })
+})
+
+describe('kanbanCardSort (#889)', () => {
+  it('defaults to the manual order and round-trips due-date ordering', async () => {
+    installZen()
+    const { useStore } = await loadStore()
+    expect(useStore.getState().kanbanCardSort).toBe('manual')
+
+    useStore.getState().setKanbanCardSort('due')
+    expect(useStore.getState().kanbanCardSort).toBe('due')
+    const saved = JSON.parse(localStorage.getItem('zen:prefs:v2') ?? '{}')
+    expect(saved.kanbanCardSort).toBe('due')
+
+    vi.resetModules()
+    const reloaded = await import('./store')
+    expect(reloaded.useStore.getState().kanbanCardSort).toBe('due')
+  })
+
+  it('normalizes an unknown stored value to the manual order', async () => {
+    installZen()
+    localStorage.setItem('zen:prefs:v2', JSON.stringify({ kanbanCardSort: 'priority' }))
+    const { useStore } = await loadStore()
+    expect(useStore.getState().kanbanCardSort).toBe('manual')
+  })
+
+  it('leaves the saved hand arrangement alone while cards follow due dates', async () => {
+    installZen()
+    const { useStore } = await loadStore()
+    const arranged = ['inbox/b.md\u00000', 'inbox/a.md\u00000']
+    useStore.getState().setKanbanCardOrder({ 'field:status:review': arranged })
+    useStore.getState().setKanbanCardSort('due')
+    useStore.getState().setKanbanCardSort('manual')
+    expect(useStore.getState().kanbanCardOrder['field:status:review']).toEqual(arranged)
   })
 })
 
@@ -1614,15 +2008,17 @@ describe('deleteDatabaseRows (#391 — purge record-page schema mappings)', () =
   }
 
   it('purges the deleted row page mapping and trashes the note on confirm', async () => {
-    const moveToTrash = vi.fn().mockResolvedValue({})
+    const moveToTrash = vi.fn().mockResolvedValue({ ...makeNote('', 'trash/r1.md'), folder: 'trash' })
     installZen({
       moveToTrash,
+      writeNote: vi.fn().mockImplementation(async (path) => makeNote('', path)),
+      setVaultSettings: vi.fn().mockImplementation(async (settings) => settings),
       writeDatabaseSchema: vi.fn().mockResolvedValue(undefined),
       writeDatabaseRows: vi.fn().mockResolvedValue(undefined)
     })
     const { useStore } = await loadStore()
     const { getConfirmRequest, settleConfirmRequest } = await import('./lib/confirm-requests')
-    useStore.setState({ databases: { [CSV]: makeDbDoc() } })
+    useStore.setState({ vault: { root: '/test', name: 'Test' }, databases: { [CSV]: makeDbDoc() } })
 
     const p = useStore.getState().deleteDatabaseRows(CSV, ['r1'])
     const req = getConfirmRequest()
@@ -1638,15 +2034,17 @@ describe('deleteDatabaseRows (#391 — purge record-page schema mappings)', () =
   })
 
   it('keeps the note on cancel but still purges the stale mapping', async () => {
-    const moveToTrash = vi.fn().mockResolvedValue({})
+    const moveToTrash = vi.fn().mockResolvedValue({ ...makeNote('', 'trash/r1.md'), folder: 'trash' })
     installZen({
       moveToTrash,
+      writeNote: vi.fn().mockImplementation(async (path) => makeNote('', path)),
+      setVaultSettings: vi.fn().mockImplementation(async (settings) => settings),
       writeDatabaseSchema: vi.fn().mockResolvedValue(undefined),
       writeDatabaseRows: vi.fn().mockResolvedValue(undefined)
     })
     const { useStore } = await loadStore()
     const { getConfirmRequest, settleConfirmRequest } = await import('./lib/confirm-requests')
-    useStore.setState({ databases: { [CSV]: makeDbDoc() } })
+    useStore.setState({ vault: { root: '/test', name: 'Test' }, databases: { [CSV]: makeDbDoc() } })
 
     const p = useStore.getState().deleteDatabaseRows(CSV, ['r1'])
     settleConfirmRequest(getConfirmRequest()!, false) // "Keep note"
@@ -1665,7 +2063,7 @@ describe('deleteDatabaseRows (#391 — purge record-page schema mappings)', () =
     })
     const { useStore } = await loadStore()
     const { getConfirmRequest } = await import('./lib/confirm-requests')
-    useStore.setState({ databases: { [CSV]: makeDbDoc() } })
+    useStore.setState({ vault: { root: '/test', name: 'Test' }, databases: { [CSV]: makeDbDoc() } })
 
     await useStore.getState().deleteDatabaseRows(CSV, ['r2']) // r2 has no linked page
     expect(getConfirmRequest()).toBeNull() // no prompt
@@ -1704,6 +2102,36 @@ describe('renameNote heading sync (#455)', () => {
     return { renameNote, writeNote, readNote }
   }
 
+  // The editor reads this to tell "my note has a new path" from "I am being
+  // shown another note", so it has to land with the path change itself.
+  it('logs the rename in the same update that rewrites the path', async () => {
+    installRename()
+    const { useStore } = await loadStore()
+    useStore.setState({ vault: { root: '/Users/test/Notes', name: 'Notes' } })
+    const seen: Array<{ tabHasNewPath: boolean; logged: boolean }> = []
+    const unsubscribe = useStore.subscribe((state) => {
+      const logged = state.recentPathRewrites.some(
+        (entry) => entry.from === 'inbox/Untitled.md' && entry.to === 'inbox/Groceries.md'
+      )
+      const tabHasNewPath = 'inbox/Groceries.md' in state.noteContents
+      if (logged || tabHasNewPath) seen.push({ tabHasNewPath, logged })
+    })
+    useStore.setState({
+      noteContents: { 'inbox/Untitled.md': { ...metaOf('inbox/Untitled.md', 'Untitled'), body: BODY } }
+    })
+
+    await useStore.getState().renameNote('inbox/Untitled.md', 'Groceries')
+    unsubscribe()
+
+    expect(seen.length).toBeGreaterThan(0)
+    expect(seen.every((update) => update.logged)).toBe(true)
+    expect(useStore.getState().recentPathRewrites.at(-1)).toMatchObject({
+      root: '/Users/test/Notes',
+      from: 'inbox/Untitled.md',
+      to: 'inbox/Groceries.md'
+    })
+  })
+
   it('retitles the heading of a note that is not open, straight on disk', async () => {
     const { writeNote, readNote } = installRename()
     const { useStore } = await loadStore()
@@ -1741,6 +2169,41 @@ describe('renameNote heading sync (#455)', () => {
     await useStore.getState().renameNote('inbox/Untitled.md', 'Groceries')
 
     expect(order.slice(0, 2)).toEqual(['save', 'rename'])
+  })
+
+  // Every rename in the UI comes through here without a host, so a refusal
+  // has to say why instead of leaving the old name in place silently (#839).
+  it('tells the user why a rename was refused', async () => {
+    installRename({
+      renameNote: vi
+        .fn()
+        .mockRejectedValue(
+          new Error(
+            "Error invoking remote method 'vault:rename-note': Error: A note named “Groceries” already exists in this folder"
+          )
+        )
+    })
+    const { useStore } = await loadStore()
+    const { useToastStore } = await import('./lib/toast')
+    useStore.setState({ notes: [metaOf('inbox/Untitled.md', 'Untitled')] })
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    await useStore.getState().renameNote('inbox/Untitled.md', 'Groceries')
+
+    expect(useToastStore.getState().toasts.map((toast) => [toast.type, toast.message])).toEqual([
+      ['error', 'Could not rename “Untitled”: A note named “Groceries” already exists in this folder']
+    ])
+  })
+
+  it('leaves a refused rename to a host that asked to handle it', async () => {
+    installRename({ renameNote: vi.fn().mockRejectedValue(new Error('refused')) })
+    const { useStore } = await loadStore()
+    const { useToastStore } = await import('./lib/toast')
+
+    await expect(
+      useStore.getState().renameNote('inbox/Untitled.md', 'Groceries', () => true)
+    ).rejects.toThrow('refused')
+    expect(useToastStore.getState().toasts).toEqual([])
   })
 
   it('does not rename when a dirty linked note could not be saved', async () => {
@@ -2109,7 +2572,7 @@ describe('deleteActivePermanently (#712)', () => {
     const { useStore } = await loadStore()
     const { getConfirmRequest, settleConfirmRequest } = await import('./lib/confirm-requests')
     const note = trashedNote()
-    useStore.setState({
+    useStore.setState({ vault: { root: '/test', name: 'Test' },
       notes: [note],
       selectedPath: TRASHED,
       activeNote: note,
@@ -2135,7 +2598,7 @@ describe('deleteActivePermanently (#712)', () => {
     const { useStore } = await loadStore()
     const { getConfirmRequest, settleConfirmRequest } = await import('./lib/confirm-requests')
     const note = trashedNote()
-    useStore.setState({ notes: [note], selectedPath: TRASHED, activeNote: note, noteContents: { [TRASHED]: note } })
+    useStore.setState({ vault: { root: '/test', name: 'Test' }, notes: [note], selectedPath: TRASHED, activeNote: note, noteContents: { [TRASHED]: note } })
 
     const p = useStore.getState().deleteActivePermanently()
     settleConfirmRequest(getConfirmRequest()!, false)
@@ -2153,7 +2616,7 @@ describe('deleteActivePermanently (#712)', () => {
     const { getConfirmRequest, settleConfirmRequest } = await import('./lib/confirm-requests')
     const { useToastStore } = await import('./lib/toast')
     const note = trashedNote()
-    useStore.setState({ notes: [note], selectedPath: TRASHED, activeNote: note, noteContents: { [TRASHED]: note } })
+    useStore.setState({ vault: { root: '/test', name: 'Test' }, notes: [note], selectedPath: TRASHED, activeNote: note, noteContents: { [TRASHED]: note } })
 
     const p = useStore.getState().deleteActivePermanently()
     settleConfirmRequest(getConfirmRequest()!, true)
@@ -2168,7 +2631,7 @@ describe('deleteActivePermanently (#712)', () => {
     const deleteNote = vi.fn().mockResolvedValue(undefined)
     installZen({ deleteNote })
     const { useStore } = await loadStore()
-    useStore.setState({ selectedPath: null, activeNote: null })
+    useStore.setState({ vault: { root: '/test', name: 'Test' }, selectedPath: null, activeNote: null })
     await useStore.getState().deleteActivePermanently()
     expect(deleteNote).not.toHaveBeenCalled()
   })
@@ -2207,7 +2670,7 @@ describe('renaming the open note while the watcher reports the move (#713)', () 
 
     // inotify: the move is an unlink of the old path and an add of the new
     // one, both delivered before the host has answered the rename.
-    await useStore.getState().applyChange({ kind: 'unlink', path: OLD, folder: 'inbox' })
+    await applyUnlink(useStore, OLD)
     await useStore.getState().applyChange({ kind: 'add', path: NEW, folder: 'inbox' })
     await useStore.getState().refreshNotes()
     expect(useStore.getState().selectedPath).toBe(OLD)
@@ -2231,7 +2694,8 @@ describe('renaming the open note while the watcher reports the move (#713)', () 
     useStore.setState({ notes: [oldNote] })
     await useStore.getState().selectNote(OLD)
 
-    await useStore.getState().applyChange({ kind: 'unlink', path: OLD, folder: 'inbox' })
+    vi.mocked(window.zen.readNote).mockRejectedValue(missing(OLD))
+    await applyUnlink(useStore, OLD)
 
     expect(JSON.stringify(useStore.getState().paneLayout)).not.toContain(OLD)
     expect(useStore.getState().noteContents[OLD]).toBeUndefined()
@@ -2249,7 +2713,286 @@ describe('renaming the open note while the watcher reports the move (#713)', () 
     await useStore.getState().renameActive('Taken')
     expect(useStore.getState().selectedPath).toBe(OLD)
 
-    await useStore.getState().applyChange({ kind: 'unlink', path: OLD, folder: 'inbox' })
+    vi.mocked(window.zen.readNote).mockRejectedValue(missing(OLD))
+    await applyUnlink(useStore, OLD)
     expect(JSON.stringify(useStore.getState().paneLayout)).not.toContain(OLD)
+  })
+})
+
+describe('an open note replaced from outside the app (#863)', () => {
+  const PLAN = 'inbox/Plan.md'
+  const OTHER = 'inbox/Other.md'
+
+  // The vault as files: another program deletes and rewrites them, and the
+  // app's own saves land here too.
+  function installDisk(files: Record<string, string>): Map<string, string> {
+    const disk = new Map(Object.entries(files))
+    installZen({
+      listNotes: vi.fn().mockImplementation(async () =>
+        [...disk].map(([path, body]) => makeNote(body, path))
+      ),
+      readNote: vi.fn().mockImplementation(async (path: string) => {
+        const body = disk.get(path)
+        if (body === undefined) throw missing(path)
+        return makeNote(body, path)
+      }),
+      writeNote: vi.fn().mockImplementation(async (path: string, body: string) => {
+        disk.set(path, body)
+      })
+    })
+    return disk
+  }
+
+  async function openNotes(disk: Map<string, string>, ...paths: string[]): Promise<LoadedStore> {
+    const { useStore } = await loadStore()
+    useStore.setState({ notes: [...disk].map(([path, body]) => makeNote(body, path)) })
+    for (const path of paths) await useStore.getState().selectNote(path)
+    return useStore
+  }
+
+  const tabs = (useStore: LoadedStore): string => JSON.stringify(useStore.getState().paneLayout)
+
+  it('keeps a note open when its file is written back, and takes the new text', async () => {
+    const disk = installDisk({ [PLAN]: '# Plan\n\nfirst' })
+    const useStore = await openNotes(disk, PLAN)
+
+    // git checkout, some sync clients: delete, then write the file back later
+    // than chokidar's 100 ms, so the watcher reports an unlink and an add.
+    disk.delete(PLAN)
+    await onFakeClock(2000, async () => {
+      const unlinked = useStore.getState().applyChange({ kind: 'unlink', path: PLAN, folder: 'inbox' })
+      await vi.advanceTimersByTimeAsync(400)
+      disk.set(PLAN, '# Plan\n\nrewritten')
+      await useStore.getState().applyChange({ kind: 'add', path: PLAN, folder: 'inbox' })
+      await unlinked
+    })
+
+    expect(useStore.getState().selectedPath).toBe(PLAN)
+    expect(useStore.getState().noteContents[PLAN]?.body).toBe('# Plan\n\nrewritten')
+  })
+
+  it('never closes over unsaved edits: the pending save writes the note back', async () => {
+    const disk = installDisk({ [PLAN]: '# Plan\n\nfirst' })
+    const useStore = await openNotes(disk, PLAN)
+
+    await onFakeClock(2000, async () => {
+      useStore.getState().updateNoteBody(PLAN, '# Plan\n\nfirst, and typed')
+      disk.delete(PLAN)
+      await useStore.getState().applyChange({ kind: 'unlink', path: PLAN, folder: 'inbox' })
+    })
+
+    expect(useStore.getState().selectedPath).toBe(PLAN)
+    expect(useStore.getState().noteContents[PLAN]?.body).toBe('# Plan\n\nfirst, and typed')
+    expect(disk.get(PLAN)).toBe('# Plan\n\nfirst, and typed')
+  })
+
+  it('closes a clean note whose file stays gone, once the wait is over', async () => {
+    const disk = installDisk({ [PLAN]: '# Plan\n\nfirst' })
+    const useStore = await openNotes(disk, PLAN)
+
+    disk.delete(PLAN)
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const unlinked = useStore.getState().applyChange({ kind: 'unlink', path: PLAN, folder: 'inbox' })
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(tabs(useStore)).toContain(PLAN)
+      await vi.advanceTimersByTimeAsync(1000)
+      await unlinked
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(tabs(useStore)).not.toContain(PLAN)
+    expect(useStore.getState().noteContents[PLAN]).toBeUndefined()
+  })
+
+  it('keeps a background tab with unsaved edits through a listing that missed its file', async () => {
+    const disk = installDisk({ [PLAN]: '# Plan\n\nfirst', [OTHER]: '# Other\n' })
+    const useStore = await openNotes(disk, PLAN, OTHER)
+    expect(useStore.getState().selectedPath).toBe(OTHER)
+
+    await onFakeClock(0, async () => {
+      useStore.getState().updateNoteBody(PLAN, '# Plan\n\nfirst, and typed')
+      disk.delete(PLAN)
+      await useStore.getState().refreshNotes()
+    })
+
+    expect(tabs(useStore)).toContain(PLAN)
+    expect(useStore.getState().noteContents[PLAN]?.body).toBe('# Plan\n\nfirst, and typed')
+    expect(useStore.getState().noteDirty[PLAN]).toBe(true)
+  })
+})
+
+describe('custom templates on the change feed (#723)', () => {
+  it('re-lists templates on a templates-scope event without touching the note tree', async () => {
+    const listTemplates = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        { sourcePath: '.zennotes/templates/adr.md', raw: '---\nname: Decision Record\n---\n# {{title}}\n' }
+      ])
+    const listNotes = vi.fn().mockResolvedValue([makeNote('- [ ] old task')])
+    installZen({ listTemplates, listNotes })
+
+    const { useStore } = await loadStore()
+    await useStore.getState().loadCustomTemplates()
+    expect(useStore.getState().customTemplates).toEqual([])
+    const notesListedBefore = listNotes.mock.calls.length
+
+    await useStore.getState().applyChange({
+      kind: 'change',
+      path: '.zennotes/templates/adr.md',
+      folder: 'inbox',
+      scope: 'templates'
+    })
+
+    expect(listTemplates).toHaveBeenCalledTimes(2)
+    expect(useStore.getState().customTemplates.map((t) => [t.id, t.name])).toEqual([
+      ['custom:adr', 'Decision Record']
+    ])
+    expect(listNotes.mock.calls.length).toBe(notesListedBefore)
+  })
+
+  it('re-lists templates after a change-feed gap', async () => {
+    const listTemplates = vi.fn().mockResolvedValue([
+      { sourcePath: '.zennotes/templates/weekly.md', raw: '---\nname: Weekly\n---\n' }
+    ])
+    installZen({ listTemplates })
+
+    const { useStore } = await loadStore()
+    await useStore.getState().applyChange({ kind: 'change', path: '', folder: 'inbox', scope: 'resync' })
+
+    expect(listTemplates).toHaveBeenCalled()
+    expect(useStore.getState().customTemplates.map((t) => t.name)).toEqual(['Weekly'])
+  })
+})
+
+describe('remote workspace capabilities after boot (#723)', () => {
+  it('re-reads the workspace info once getCurrentVault has connected the server', async () => {
+    const base = {
+      mode: 'remote',
+      baseUrl: 'http://127.0.0.1:7878',
+      authConfigured: false,
+      profileId: null,
+      bootError: null
+    }
+    // The first read happens before the main process connects; capabilities
+    // are unknown then. Only the second read, after the connection, has them.
+    const getRemoteWorkspaceInfo = vi
+      .fn()
+      .mockResolvedValueOnce({ ...base, capabilities: null })
+      .mockResolvedValue({ ...base, capabilities: { supportsCustomTemplates: true, supportsWatch: true } })
+    installZen({
+      onVaultChange: vi.fn(() => vi.fn()),
+      getAppInfo: vi.fn().mockReturnValue({ runtime: 'desktop' }),
+      getServerCapabilities: vi.fn().mockResolvedValue({}),
+      getCurrentVault: vi.fn().mockResolvedValue({ root: '/srv/vault', name: 'vault' }),
+      getRemoteWorkspaceInfo
+    })
+
+    const { useStore } = await loadStore()
+    await useStore.getState().init()
+
+    expect(getRemoteWorkspaceInfo).toHaveBeenCalledTimes(2)
+    expect(useStore.getState().workspaceMode).toBe('remote')
+    expect(useStore.getState().remoteWorkspaceInfo?.capabilities).toEqual({
+      supportsCustomTemplates: true,
+      supportsWatch: true
+    })
+  })
+})
+
+describe('kanban folder root (#730)', () => {
+  it('normalizes a typed root to a clean posix path and clears junk', async () => {
+    const { normalizeKanbanFolderRoot, viewPrefsFromVault } = await import('./store')
+    expect(normalizeKanbanFolderRoot('  /Projects/  ')).toBe('Projects')
+    expect(normalizeKanbanFolderRoot('Projects\\Client work\\')).toBe('Projects/Client work')
+    expect(normalizeKanbanFolderRoot('./Projects/../x')).toBe('Projects/x')
+    expect(normalizeKanbanFolderRoot('')).toBe('')
+    expect(normalizeKanbanFolderRoot(42)).toBe('')
+    expect(viewPrefsFromVault({ view: { kanbanFolderRoot: ' Areas/ ' } } as never)).toMatchObject({ kanbanFolderRoot: 'Areas' })
+    expect(viewPrefsFromVault({ view: {} } as never)).not.toHaveProperty('kanbanFolderRoot')
+  })
+
+  it('setKanbanFolderRoot stores the normalized root', async () => {
+    const { useStore } = await import('./store')
+    useStore.getState().setKanbanFolderRoot('/Projects/')
+    expect(useStore.getState().kanbanFolderRoot).toBe('Projects')
+    useStore.getState().setKanbanFolderRoot('')
+    expect(useStore.getState().kanbanFolderRoot).toBe('')
+  })
+})
+
+describe('ignored keys (#732)', () => {
+  it('normalizes the list and edits it by name', async () => {
+    const { useStore } = await import('./store')
+    useStore.getState().setIgnoredKeys([' KanaMode ', 'kanamode', 'F24'])
+    expect(useStore.getState().ignoredKeys).toEqual(['KanaMode', 'F24'])
+    useStore.getState().addIgnoredKey('Lang1')
+    expect(useStore.getState().ignoredKeys).toEqual(['KanaMode', 'F24', 'Lang1'])
+    useStore.getState().removeIgnoredKey('f24')
+    expect(useStore.getState().ignoredKeys).toEqual(['KanaMode', 'Lang1'])
+    useStore.getState().setIgnoredKeys([])
+    expect(useStore.getState().ignoredKeys).toEqual([])
+  })
+})
+
+
+describe('file-task lifecycle coordination', () => {
+  it('trashes a file task outside the inline-task queue and keeps it on failure', async () => {
+    const source = makeNote('---\ntags: [task]\n---\nDraft.\n')
+    const moveToTrash=vi.fn().mockRejectedValueOnce(new Error('permission denied')).mockResolvedValue({...source,path:'trash/Note.md',folder:'trash'})
+    installZen({moveToTrash,listNotes:vi.fn().mockResolvedValue([{...source,path:'trash/Note.md',folder:'trash'}])})
+    const {useStore}=await loadStore()
+    const {getConfirmRequest,settleConfirmRequest}=await import('./lib/confirm-requests')
+    const task:VaultTask={...makeTask('Note',-1),id:'inbox/Note.md#file',taskIndex:-1,kind:'file',rawText:''}
+    useStore.setState({vault:{root:'/test',name:'Test'},notes:[source],noteContents:{[source.path]:source},vaultTasks:[task]})
+    const failed=useStore.getState().deleteTaskFromList(task)
+    settleConfirmRequest(getConfirmRequest()!,true)
+    await failed
+    expect(moveToTrash).toHaveBeenCalledTimes(1)
+    expect(useStore.getState().vaultTasks).toEqual([task])
+    expect(useStore.getState().noteContents[source.path]).toBeDefined()
+    const deleting=useStore.getState().deleteTaskFromList(task)
+    settleConfirmRequest(getConfirmRequest()!,true)
+    await deleting
+    expect(moveToTrash).toHaveBeenCalledTimes(2)
+    expect(useStore.getState().noteContents[source.path]).toBeUndefined()
+  })
+})
+
+describe('createAndOpen with tags (#826 follow-up)', () => {
+  it('writes a tag line under the heading, using the title the vault settled on', async () => {
+    const createNote = vi.fn().mockResolvedValue(makeNote('# Runbook 2\n\n', 'inbox/Runbook 2.md'))
+    const writeNote = vi.fn().mockResolvedValue(undefined)
+    installZen({
+      createNote,
+      writeNote,
+      listNotes: vi.fn().mockResolvedValue([makeNote('# Runbook 2\n\n', 'inbox/Runbook 2.md')]),
+      readNote: vi.fn().mockResolvedValue(makeNote('# Runbook 2\n\n#ops #prod\n\n', 'inbox/Runbook 2.md'))
+    })
+    const { useStore } = await loadStore()
+
+    await useStore.getState().createAndOpen('inbox', '', { title: 'Runbook', tags: ['ops', 'prod'] })
+
+    expect(createNote).toHaveBeenCalledWith('inbox', 'Runbook', '')
+    expect(writeNote).toHaveBeenCalledTimes(1)
+    expect(writeNote).toHaveBeenCalledWith('inbox/Runbook 2.md', '# Runbook 2\n\n#ops #prod\n\n')
+    expect(useStore.getState().selectedPath).toBe('inbox/Runbook 2.md')
+  })
+
+  it('leaves the body the vault wrote when there are no tags', async () => {
+    const writeNote = vi.fn().mockResolvedValue(undefined)
+    installZen({
+      createNote: vi.fn().mockResolvedValue(makeNote('# T\n\n', 'inbox/T.md')),
+      writeNote,
+      listNotes: vi.fn().mockResolvedValue([makeNote('# T\n\n', 'inbox/T.md')]),
+      readNote: vi.fn().mockResolvedValue(makeNote('# T\n\n', 'inbox/T.md'))
+    })
+    const { useStore } = await loadStore()
+
+    await useStore.getState().createAndOpen('inbox', '', { title: 'T', tags: [] })
+    await useStore.getState().createAndOpen('inbox', '', { title: 'T' })
+
+    expect(writeNote).not.toHaveBeenCalled()
   })
 })

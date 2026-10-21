@@ -9,8 +9,12 @@ use crate::ipc::types::VaultInfo;
 pub const FOLDERS: [&str; 4] = ["inbox", "quick", "archive", "trash"];
 pub const INTERNAL_VAULT_DIR: &str = ".zennotes";
 pub const VAULT_SETTINGS_FILE: &str = "vault.json";
-pub const PRIMARY_ATTACHMENTS_DIR: &str = "attachements";
-pub const LEGACY_ATTACHMENTS_DIRS: [&str; 1] = ["_assets"];
+/// Assets are unified under a top-level `assets/` folder (upstream #185,
+/// v2.4). `attachements` / `_assets` are recognized legacy dirs: read, and
+/// migrated into `assets/` on open, never the import target.
+pub const ASSETS_DIR: &str = "assets";
+pub const LEGACY_ATTACHMENTS_DIRS: [&str; 2] = ["attachements", "_assets"];
+pub const ATTACHMENTS_DIRS: [&str; 3] = [ASSETS_DIR, "attachements", "_assets"];
 
 pub fn is_system_folder(name: &str) -> bool {
     FOLDERS.contains(&name)
@@ -19,10 +23,7 @@ pub fn is_system_folder(name: &str) -> bool {
 /// Names that may not be top-level note folders (system folders + attachment
 /// dirs + the internal `.zennotes` dir). Mirrors `RESERVED_ROOT_NAMES`.
 pub fn is_reserved_root_name(name: &str) -> bool {
-    is_system_folder(name)
-        || name == PRIMARY_ATTACHMENTS_DIR
-        || LEGACY_ATTACHMENTS_DIRS.contains(&name)
-        || name == INTERNAL_VAULT_DIR
+    is_system_folder(name) || ATTACHMENTS_DIRS.contains(&name) || name == INTERNAL_VAULT_DIR
 }
 
 /// Entries hidden when the vault root itself is the primary notes folder
@@ -31,8 +32,7 @@ pub fn should_hide_primary_root_entry(name: &str) -> bool {
     name == "quick"
         || name == "archive"
         || name == "trash"
-        || name == PRIMARY_ATTACHMENTS_DIR
-        || LEGACY_ATTACHMENTS_DIRS.contains(&name)
+        || ATTACHMENTS_DIRS.contains(&name)
         || name == INTERNAL_VAULT_DIR
 }
 
@@ -150,6 +150,10 @@ pub fn ensure_vault_layout(root: &Path) -> std::io::Result<()> {
         if !welcome_path.exists() {
             fs::write(&welcome_path, WELCOME_NOTE)?;
         }
+    } else {
+        // One-time and idempotent: loose root attachments and the legacy
+        // attachment dirs move into `assets/` (upstream `migrateLooseAssets`).
+        crate::vault::assets::migrate_loose_assets(root);
     }
     Ok(())
 }

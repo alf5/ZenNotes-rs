@@ -1,5 +1,7 @@
 import { unified } from 'unified'
 import DOMPurify from 'dompurify'
+import { classifyApplicationLink } from '@shared/application-links'
+import { remarkSingleDashParagraph } from '@shared/single-dash-underline'
 import remarkParse from 'remark-parse'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
@@ -10,7 +12,7 @@ import rehypeKatex from 'rehype-katex'
 import rehypeHighlight from 'rehype-highlight'
 import rehypeStringify from 'rehype-stringify'
 import { visit, SKIP } from 'unist-util-visit'
-import type { Root as MdRoot } from 'mdast'
+import type { ListItem, Root as MdRoot } from 'mdast'
 import type { Root as HastRoot, Element as HastElement } from 'hast'
 import type { VFile } from 'vfile'
 import { recordRendererPerf } from './perf'
@@ -46,6 +48,7 @@ const ALLOWED_RENDERED_URI_RE =
 const ALLOWED_RENDERED_DATA_ATTRS = [
   'data-bookmark-url',
   'data-callout',
+  'data-callout-fold',
   'data-embed-src',
   'data-embed-url',
   'data-embed-height',
@@ -71,11 +74,19 @@ let sanitizerHooksInstalled = false
 
 function ensureSanitizerHooks(): void {
   if (sanitizerHooksInstalled) return
-  DOMPurify.addHook('uponSanitizeAttribute', (_node, data) => {
+  DOMPurify.addHook('uponSanitizeAttribute', (node, data) => {
     if (data.attrName !== 'href' && data.attrName !== 'src' && data.attrName !== 'xlink:href') {
       return
     }
     const value = data.attrValue?.trim()
+    // Application links remain clickable so the host can apply the user's
+    // enabled schemes. This exception is only for links, never resource URLs.
+    const application = value && node.nodeName === 'A' && data.attrName === 'href'
+      ? classifyApplicationLink(value) : null
+    if (application && !application.blocked) {
+      data.forceKeepAttr = true
+      return
+    }
     if (value && URI_SCHEME_RE.test(value) && !ALLOWED_RENDERED_URI_SCHEME_RE.test(value)) {
       data.keepAttr = false
     }
@@ -583,6 +594,11 @@ function remarkHighlight() {
  *     > body
  *
  * → `<div class="callout" data-callout="note">` with a `.callout-title` header.
+ *
+ * A fold marker after the type (`> [!note]-` collapsed, `> [!note]+`
+ * expanded) makes it a `<details>` with the title as its `<summary>`, so the
+ * whole title row toggles it and the browser's find opens it on a match
+ * (#853). Folding it hides the body only; the note never changes.
  */
 function remarkCallouts() {
   return (tree: MdRoot): void => {
@@ -597,9 +613,10 @@ function remarkCallouts() {
       // nodes included — a [link](x) or $math$ in the title used to be
       // orphaned into an uncolored body paragraph, because only this leading
       // text fragment was consulted for the title. (#549)
-      const marker = firstText.value.match(/^\[!(\w+)\](?:[ \t]+|(?=\n)|$)/)
+      const marker = firstText.value.match(/^\[!(\w+)\]([-+])?(?:[ \t]+|(?=\n)|$)/)
       if (!marker) return
       const type = marker[1].toLowerCase()
+      const marker2 = marker[2] as '-' | '+' | undefined
 
       // Split the paragraph's inline children into the title line and the
       // body. Explicit Markdown breaks arrive as `break` nodes, while ordinary
@@ -648,22 +665,27 @@ function remarkCallouts() {
       } else {
         node.children.shift()
       }
+      // A callout with nothing under its title has nothing to fold, and
+      // renders as a plain one, as the editor draws it with no chevron.
+      const fold = node.children.length > 0 ? marker2 : undefined
 
-      // Turn the blockquote into a styled div.
+      // Turn the blockquote into a styled div, or a <details> when it folds.
       node.data = {
         ...(node.data || {}),
-        hName: 'div',
+        hName: fold ? 'details' : 'div',
         hProperties: {
           className: ['callout'],
-          'data-callout': type
+          'data-callout': type,
+          ...(fold ? { 'data-callout-fold': fold === '-' ? 'collapsed' : 'expanded', open: fold === '+' } : {})
         }
       }
 
-      // Prepend a title paragraph that renders as `<div class="callout-title">`.
+      // Prepend a title paragraph that renders as `<div class="callout-title">`
+      // (the <summary> of a foldable callout).
       node.children.unshift({
         type: 'paragraph',
         data: {
-          hName: 'div',
+          hName: fold ? 'summary' : 'div',
           hProperties: { className: ['callout-title'] }
         },
         children: hasTitle ? titleChildren : [{ type: 'text', value: fallbackTitle }]
@@ -706,7 +728,7 @@ function rehypeMermaid() {
 }
 
 /**
- * Rehype plugin: replace fenced blocks tagged `tikz`, `jsxgraph`, and
+ * Rehype plugin: replace fenced blocks tagged `tikz`, `d2`, `jsxgraph`, and
  * `function-plot` with placeholder divs. Each placeholder keeps the raw
  * source in a `data-*-source` attribute so the runtime side (Preview.tsx)
  * can render and re-render on demand — the same pattern as
@@ -715,6 +737,8 @@ function rehypeMermaid() {
 function rehypeMathDiagrams() {
   const map: Record<string, { className: string; sourceAttr: string }> = {
     'language-tikz': { className: 'zen-tikz', sourceAttr: 'data-tikz-source' },
+    // D2 (d2lang.com) architecture and flow diagrams; drawn by `renderDiagrams`.
+    'language-d2': { className: 'zen-d2', sourceAttr: 'data-d2-source' },
     'language-jsxgraph': {
       className: 'zen-jsxgraph',
       sourceAttr: 'data-jsxgraph-source'
@@ -810,6 +834,13 @@ function rehypeCustomCodeLanguages() {
  * turn it into a <colgroup> so the preview and PDF export render the columns at
  * the widths set by the live-table resize handles. The comment node itself is
  * dropped by the sanitizer. Runs after rehypeRaw so the comment is a hast node.
+ *
+ * The table goes into a `.zen-table-scroll` wrapper that scrolls sideways
+ * when the columns add up to more than the reading width, as the editor's
+ * table does (#920). Squeezing the table to fit instead shrank every column
+ * and re-wrapped the cells the widths were set to keep on one line. The
+ * wrapper takes over the table's `data-source-line`, because scroll sync
+ * reads that stamp from the preview's direct children only.
  */
 function rehypeTableColWidths() {
   return (tree: HastRoot): void => {
@@ -840,8 +871,17 @@ function rehypeTableColWidths() {
         }))
       } as unknown as HastElement
       node.children = [colgroup, ...(node.children ?? [])] as HastElement['children']
-      const cls = (node.properties?.className as string[] | undefined) ?? []
-      node.properties = { ...(node.properties ?? {}), className: [...cls, 'zen-has-col-widths'] }
+      const { 'data-source-line': sourceLine, dataSourceLine, ...properties } = (node.properties ??
+        {}) as Record<string, unknown>
+      const cls = (properties.className as string[] | undefined) ?? []
+      node.properties = { ...properties, className: [...cls, 'zen-has-col-widths'] } as HastElement['properties']
+      const line = sourceLine ?? dataSourceLine
+      siblings[index] = {
+        type: 'element',
+        tagName: 'div',
+        properties: { className: ['zen-table-scroll'], ...(line != null ? { 'data-source-line': line } : {}) },
+        children: [node]
+      } as unknown as AnyNode
     })
   }
 }
@@ -854,14 +894,23 @@ function rehypeTableColWidths() {
  * Applied via `data.hProperties` so `remarkRehype` carries it onto the element.
  */
 function remarkSourceLines() {
+  const stamp = (node: MdRoot['children'][number] | ListItem): void => {
+    const line = node.position?.start?.line
+    if (line == null) return
+    const data = (node.data ??= {})
+    const hProperties = ((data.hProperties ??= {}) as Record<string, unknown>)
+    hProperties['data-source-line'] = line
+  }
   return (tree: MdRoot): void => {
-    for (const node of tree.children) {
-      const line = node.position?.start?.line
-      if (line == null) continue
-      const data = (node.data ??= {})
-      const hProperties = ((data.hProperties ??= {}) as Record<string, unknown>)
-      hProperties['data-source-line'] = line
-    }
+    for (const node of tree.children) stamp(node)
+    // A list is one top-level block, so a note that is mostly one long list
+    // resolved every double-click and every return from Preview to the list's
+    // first line (#953). Each item, nested ones included, carries its own
+    // line; readers that want blocks only (split scroll sync) still select
+    // direct children of the content root.
+    visit(tree, 'listItem', (node: ListItem) => {
+      stamp(node)
+    })
   }
 }
 
@@ -898,7 +947,11 @@ function remarkCurrencyGuard() {
       const start = node.position?.start?.offset
       const end = node.position?.end?.offset
       if (start == null || end == null) return
-      const token = source.slice(start, end)
+      // The raw source between the node's offsets. Inside a blockquote the
+      // continuation lines still carry their `> ` markers here, which belong
+      // to the quote, not the formula: a span demoted inside a callout used
+      // to come back as `$ > x $` (#748).
+      const token = dropQuoteMarkersAfterFirstLine(source.slice(start, end))
       if (STRICT_INLINE_MATH_RE.test(token)) return
       // `$$…$$` in a table cell: genuine display math, not currency. The
       // editor's table widget renders it in display mode, so swap the node's
@@ -988,6 +1041,7 @@ function remarkTypstMathPlaceholders() {
 function createProcessor(mathRenderer: 'katex' | 'typst') {
   const base = unified()
     .use(remarkParse)
+    .use(remarkSingleDashParagraph)
     .use(remarkFrontmatter, ['yaml', 'toml'])
     .use(remarkGfm)
     .use(remarkMath)
@@ -1105,6 +1159,28 @@ function escapeTableMathPipes(src: string): string {
   return changed ? out.join('\n') : src
 }
 
+/** The blockquote markers that open a line (`> `, `> > `) and what follows
+ *  them. A fence inside a callout carries the markers on every line, so the
+ *  normalizer looks past them and puts them back on whatever it emits. */
+const QUOTE_PREFIX_RE = /^((?:[ \t]{0,3}>[ \t]?)+)/
+
+function splitQuotePrefix(line: string): { prefix: string; depth: number; content: string } {
+  const match = line.match(QUOTE_PREFIX_RE)
+  if (!match) return { prefix: '', depth: 0, content: line }
+  const prefix = match[1]
+  return { prefix, depth: (prefix.match(/>/g) ?? []).length, content: line.slice(prefix.length) }
+}
+
+/** A raw source slice that starts mid-line: its first line has no marker
+ *  (that sits before the slice), the following lines do when the slice lives
+ *  in a blockquote. A paragraph line cannot start with `>` anywhere else, so
+ *  stripping markers from the continuation lines never touches prose. */
+function dropQuoteMarkersAfterFirstLine(text: string): string {
+  if (!text.includes('\n')) return text
+  const [first, ...rest] = text.split('\n')
+  return [first, ...rest.map((line) => splitQuotePrefix(line).content)].join('\n')
+}
+
 /**
  * remark-math only closes a `$$` block on a line containing nothing but the
  * closing fence, while the editor's live preview (cm-math-render) also accepts
@@ -1114,6 +1190,11 @@ function escapeTableMathPipes(src: string): string {
  * parses exactly what the editor renders. Fenced code is left untouched, and
  * anything the editor itself rejects (mid-line `$$`, empty or unclosed blocks)
  * passes through unchanged — canonical notes come back byte-identical.
+ *
+ * Fences inside a blockquote count as fences (#748): the quote markers are
+ * looked past when a line is read and put back on every line written, and a
+ * block only closes at its own quote depth, so a fence in a callout can never
+ * be paired with one outside it.
  */
 function normalizeBlockMathFences(src: string, loose = false): string {
   if (!src.includes('$$')) return src
@@ -1124,7 +1205,8 @@ function normalizeBlockMathFences(src: string, loose = false): string {
   let i = 0
   while (i < lines.length) {
     const raw = lines[i]
-    const trimmed = raw.trim()
+    const { prefix, depth, content } = splitQuotePrefix(raw)
+    const trimmed = content.trim()
     if (codeFence) {
       out.push(raw)
       if (trimmed.startsWith(codeFence)) codeFence = null
@@ -1143,12 +1225,12 @@ function normalizeBlockMathFences(src: string, loose = false): string {
     let indent: string | null = null
     let rest = ''
     let proseBefore = ''
-    const strictOpen = raw.match(/^( {0,3})\$\$(?!\$)(.*)$/)
+    const strictOpen = content.match(/^( {0,3})\$\$(?!\$)(.*)$/)
     if (strictOpen) {
       indent = strictOpen[1]
       rest = strictOpen[2]
     } else if (loose) {
-      const looseOpen = raw.match(/^( {0,3})(.+?)\s*\$\$(?!\$)\s*$/)
+      const looseOpen = content.match(/^( {0,3})(.+?)\s*\$\$(?!\$)\s*$/)
       if (looseOpen && !looseOpen[2].includes('$$')) {
         indent = looseOpen[1]
         proseBefore = looseOpen[2]
@@ -1166,7 +1248,7 @@ function normalizeBlockMathFences(src: string, loose = false): string {
       if (restTrimmed.endsWith('$$') && restTrimmed.indexOf('$$') === restTrimmed.length - 2) {
         const inner = restTrimmed.slice(0, -2)
         if (inner.trim() !== '') {
-          out.push(`${indent}$$`, inner, `${indent}$$`)
+          out.push(`${prefix}${indent}$$`, `${prefix}${inner}`, `${prefix}${indent}$$`)
           changed = true
           i++
           continue
@@ -1183,8 +1265,11 @@ function normalizeBlockMathFences(src: string, loose = false): string {
     let closeHasContent = false
     let closeTrailing = ''
     for (let k = i + 1; k < lines.length; k++) {
-      const t = lines[k].trim()
+      const line = splitQuotePrefix(lines[k])
+      const t = line.content.trim()
       if (!t.includes('$$')) continue
+      // A fence at another quote depth belongs to another block, or to none.
+      if (line.depth !== depth) break
       if (t === '$$') {
         close = k
       } else if (t.endsWith('$$') && t.indexOf('$$') === t.length - 2) {
@@ -1201,22 +1286,35 @@ function normalizeBlockMathFences(src: string, loose = false): string {
       }
       break
     }
-    const alreadyCanonical =
-      restTrimmed === '' && !closeHasContent && proseBefore === '' && closeTrailing === ''
-    if (close === -1 || alreadyCanonical) {
-      // Unclosed, editor-rejected, or already canonical: leave untouched.
+    if (close === -1) {
+      // Unclosed or editor-rejected: leave the line untouched.
       out.push(raw)
       i++
       continue
     }
+    const alreadyCanonical =
+      restTrimmed === '' && !closeHasContent && proseBefore === '' && closeTrailing === ''
+    if (alreadyCanonical) {
+      // Already the fence-on-its-own-line form: copy the block through and
+      // move past its closing fence. Re-scanning that fence as an opener
+      // paired it with the next `$$` in the note, and a callout's `> $$`
+      // then read as content hugging a fence: the rewrite left a bare `$$`
+      // outside the quote, and that block swallowed everything after it.
+      for (let k = i; k <= close; k++) out.push(lines[k])
+      i = close + 1
+      continue
+    }
+    // An empty quote line (`>`) keeps a blockquote open where a blank line
+    // would end it; outside a quote the prefix is empty and this is a blank.
+    const blank = prefix.trimEnd()
     if (proseBefore !== '') {
       // Prose leading the open fence becomes its own paragraph.
-      out.push(`${indent}${proseBefore}`, '')
+      out.push(`${prefix}${indent}${proseBefore}`, blank)
       changed = true
     }
-    out.push(`${indent}$$`)
+    out.push(`${prefix}${indent}$$`)
     if (restTrimmed !== '') {
-      out.push(rest)
+      out.push(`${prefix}${rest}`)
       changed = true
     }
     for (let k = i + 1; k < close; k++) out.push(lines[k])
@@ -1225,13 +1323,13 @@ function normalizeBlockMathFences(src: string, loose = false): string {
       const rawClose = lines[close]
       const idx = rawClose.lastIndexOf('$$')
       const beforeDollar = rawClose.slice(0, idx)
-      if (beforeDollar.trim() !== '') out.push(beforeDollar)
-      out.push(`${indent}$$`, '', `${indent}${closeTrailing}`)
+      if (splitQuotePrefix(beforeDollar).content.trim() !== '') out.push(beforeDollar)
+      out.push(`${prefix}${indent}$$`, blank, `${prefix}${indent}${closeTrailing}`)
       changed = true
     } else if (closeHasContent) {
       const rawClose = lines[close]
       const idx = rawClose.lastIndexOf('$$')
-      out.push(rawClose.slice(0, idx), `${indent}$$`)
+      out.push(rawClose.slice(0, idx), `${prefix}${indent}$$`)
       changed = true
     } else {
       out.push(lines[close])

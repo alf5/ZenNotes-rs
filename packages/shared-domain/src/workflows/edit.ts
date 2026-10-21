@@ -35,7 +35,7 @@
 
 import type { ArgValue, Workflow, WorkflowStatement, WorkflowStep, WorkflowTrigger } from './types'
 import type { NodeDef, ParamSpec } from './nodes'
-import { RENDER_STYLES, isCompareOp, nodeDef } from './nodes'
+import { RENDER_STYLES, isCompareOp, joinTagList, nodeDef } from './nodes'
 import { parseWorkflow } from './parse'
 import { serializeWorkflow } from './serialize'
 
@@ -554,6 +554,17 @@ function canonicalArg(spec: ParamSpec, value: ArgValue): ArgValue | null {
       // name. Accepting either spelling means a paste from the tag sidebar works.
       const bare = text.startsWith('#') ? text.slice(1) : text
       return TAG_VALUE_RE.test(bare) ? bare : null
+    }
+    case 'tags': {
+      // A list from the inspector (`book, article`) or pasted from the file
+      // (`#book, #article`), stored the way `bindParams` stores it. Empty
+      // entries are a list still being typed, not a mistake.
+      const names = text
+        .split(',')
+        .map((piece) => piece.trim().replace(/^#/, ''))
+        .filter(Boolean)
+      if (names.length === 0 || names.some((name) => !TAG_VALUE_RE.test(name))) return null
+      return joinTagList(names)
     }
     case 'compare-op':
       return isCompareOp(text) ? text : null

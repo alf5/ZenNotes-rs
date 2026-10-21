@@ -1,6 +1,6 @@
 [package]
 name = "zennotes-rs"
-version = "2.45.0"
+version = "2.73.0"
 description = "ZenNotes-rs desktop — a Tauri port of ZenNotes"
 authors = ["ZenNotes-rs"]
 edition = "2021"
@@ -14,7 +14,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-opener = "2"
@@ -31,7 +31,14 @@ url = "2"
 ureq = "2"
 font-kit = "0.14"
 base64 = "0.22"
+sha2 = "0.10"
+toml = "0.8"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+
+# Probes for the appindicator library before building a tray icon, which
+# would otherwise panic (and, with panic = "abort", exit) without one.
+[target.'cfg(target_os = "linux")'.dependencies]
+libloading = "0.7"
 
 [dev-dependencies]
 tempfile = "3"

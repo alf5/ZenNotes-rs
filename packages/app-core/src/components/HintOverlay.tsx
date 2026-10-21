@@ -1,19 +1,33 @@
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
+import {
+  followEditorLinkHint,
+  visibleEditorLinkHints,
+  type HintRect
+} from '../lib/editor-link-hints'
 import { generateHintLabels } from '../lib/vim-nav'
 
+interface HintCandidate {
+  rect: HintRect
+  /** Labels are handed out in document order of this node. */
+  anchor: Node
+  /** Follows the target; returns the element it clicked, when it was one. */
+  activate: () => HTMLElement | undefined
+}
+
 interface HintTarget {
-  element: HTMLElement
   label: string
-  rect: DOMRect
   left: number
   top: number
+  activate: () => HTMLElement | undefined
 }
 
 function getVisibleInteractiveElements(): HTMLElement[] {
   const selectors = [
     'button:not([disabled])',
     'a[href]',
+    // A <details> toggle, such as a foldable callout's title in Preview (#853).
+    'summary',
     '[role="button"]',
     '[role="link"]',
     'input:not([disabled])',
@@ -46,6 +60,38 @@ function getVisibleInteractiveElements(): HTMLElement[] {
   return visible
 }
 
+function documentOrder(a: Node, b: Node): number {
+  if (a === b) return 0
+  return a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1
+}
+
+function getHintCandidates(): HintCandidate[] {
+  const candidates: HintCandidate[] = getVisibleInteractiveElements().map((element) => ({
+    rect: element.getBoundingClientRect(),
+    anchor: element,
+    activate: () => {
+      element.click()
+      element.focus()
+      return element
+    }
+  }))
+  // The Edit view draws its links as text, not elements (#894). Each joins the
+  // page's targets where it is drawn, so labels run through a note top to
+  // bottom as they do over Preview's links; the sort is stable, so links that
+  // share a text node keep their order.
+  for (const link of visibleEditorLinkHints()) {
+    candidates.push({
+      rect: link.rect,
+      anchor: link.anchor,
+      activate: () => {
+        followEditorLinkHint(link)
+        return undefined
+      }
+    })
+  }
+  return candidates.sort((a, b) => documentOrder(a.anchor, b.anchor))
+}
+
 function overlaps(
   a: { left: number; top: number; width: number; height: number },
   b: { left: number; top: number; width: number; height: number }
@@ -63,7 +109,7 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 function getHintPlacement(
-  rect: DOMRect,
+  rect: HintRect,
   label: string,
   placed: Array<{ left: number; top: number; width: number; height: number }>
 ): { left: number; top: number } {
@@ -116,23 +162,21 @@ export function HintOverlay({
   const [buffer, setBuffer] = useState('')
 
   const targets = useMemo<HintTarget[]>(() => {
-    const elements = getVisibleInteractiveElements()
-    const labels = generateHintLabels(elements.length)
+    const candidates = getHintCandidates()
+    const labels = generateHintLabels(candidates.length)
     const placed: Array<{ left: number; top: number; width: number; height: number }> = []
 
-    return elements.map((element, i) => {
+    return candidates.map((candidate, i) => {
       const label = labels[i]
-      const rect = element.getBoundingClientRect()
-      const position = getHintPlacement(rect, label, placed)
+      const position = getHintPlacement(candidate.rect, label, placed)
       placed.push({
         ...position,
         width: Math.max(18, label.length * 8 + 10),
         height: 18
       })
       return {
-        element,
         label,
-        rect,
+        activate: candidate.activate,
         ...position
       }
     })
@@ -150,9 +194,7 @@ export function HintOverlay({
       const target = matching[0]
       // Small delay so the user sees the match before it fires
       const t = setTimeout(() => {
-        target.element.click()
-        target.element.focus()
-        onActivate(target.element)
+        onActivate(target.activate())
       }, 50)
       return () => clearTimeout(t)
     }

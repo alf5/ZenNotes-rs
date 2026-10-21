@@ -35,7 +35,7 @@
 import { NODE_DEFS, nodeDef, unquote } from './nodes'
 import type { NodeDef, ParamSpec } from './nodes'
 import { parseWorkflow } from './parse'
-import { serializeTrigger, serializeWorkflow } from './serialize'
+import { serializeTrigger, serializeWorkflow, tagListText } from './serialize'
 import { validateWorkflow } from './validate'
 import type { ArgValue, Diagnostic, Workflow } from './types'
 
@@ -93,6 +93,7 @@ function formatArg(spec: ParamSpec, value: ArgValue | undefined): string {
   if (text === '') return ''
   // Tags are stored without their `#`; every surface that shows one puts it back.
   if (spec.type === 'tag') return `#${text}`
+  if (spec.type === 'tags') return tagListText(text)
   if (QUOTED_TYPES.has(spec.type)) return `"${unquote(text)}"`
   return text
 }

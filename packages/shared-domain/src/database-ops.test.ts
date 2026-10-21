@@ -88,6 +88,37 @@ describe('createDatabaseOps', () => {
     expect(second.path).toBe('inbox/Log 2.base/data.csv')
   })
 
+  it('seeds a new database with a converted table and writes the same files the desktop does (#832)', async () => {
+    const vault = memVault()
+    const ops = createDatabaseOps(vault.io)
+    const doc = await ops.createDatabase('inbox', 'Work', 'Roadmap', {
+      headers: ['Item', 'Done', 'Estimate'],
+      rows: [
+        ['Write "spec", v1', 'yes', '3'],
+        ['Ship', 'no', '1']
+      ],
+      columnWidths: [240, null, null]
+    })
+    expect(doc.path).toBe('inbox/Work/Roadmap.base/data.csv')
+    expect(doc.fields.map((f) => [f.name, f.type])).toEqual([
+      ['id', 'text'],
+      ['Item', 'text'],
+      ['Done', 'checkbox'],
+      ['Estimate', 'number']
+    ])
+    expect(doc.fields[1].width).toBe(240)
+    const lines = vault.files.get(doc.path)!.trimEnd().split('\n')
+    expect(lines[0]).toBe('id,Item,Done,Estimate')
+    expect(lines[1]).toBe(`${doc.rows[0].id},"Write ""spec"", v1",yes,3`)
+    expect(lines[2]).toBe(`${doc.rows[1].id},Ship,no,1`)
+    const sidecar = JSON.parse(vault.files.get('inbox/Work/Roadmap.base/schema.json')!)
+    expect(sidecar.fields).toEqual(doc.fields)
+    expect(sidecar.views[0].hiddenFieldIds).toEqual([doc.idFieldId])
+
+    const reopened = await ops.openDatabase(doc.path)
+    expect(reopened.rows).toEqual(doc.rows)
+  })
+
   it('adopts a bare CSV: infers a schema, persists the sidecar, canonicalizes ids', async () => {
     const vault = memVault()
     vault.files.set('inbox/Books.base/data.csv', 'Title,Rating\nDune,5\nNeuromancer,4\n')
@@ -162,6 +193,30 @@ describe('createDatabaseOps', () => {
     expect(vault.files.has('inbox/Work/Old Name.base/data.csv')).toBe(false)
   })
 
+
+  it('returns the canonical directory supplied by the host after a rename', async () => {
+    const vault = memVault({ primaryNotesAtRoot: true })
+    const rename = vault.io.renameFolder
+    vault.io.renameFolder = (folder, from) => rename(folder, from, 'Canonical.base')
+    const ops = createDatabaseOps(vault.io)
+    const doc = await ops.createDatabase('inbox', '', 'Original')
+    expect(await ops.renameDatabase(doc.path, 'Requested')).toBe('Canonical.base/data.csv')
+    expect(vault.files.has('Canonical.base/data.csv')).toBe(true)
+  })
+
+
+  it.each(['People', 'people'])('does not overwrite a partial database folder when creating %s', async (title) => {
+    const vault = memVault()
+    vault.folders.push({ folder: 'inbox', subpath: 'People.base' })
+    vault.files.set('inbox/People.base/schema.json', 'keep original schema')
+    vault.files.set('inbox/People.base/Record.md', 'keep record')
+    const created = await createDatabaseOps(vault.io).createDatabase('inbox', '', title)
+    expect(created.path).toBe(`inbox/${title} 2.base/data.csv`)
+    expect(vault.files.get('inbox/People.base/schema.json')).toBe('keep original schema')
+    expect(vault.files.get('inbox/People.base/Record.md')).toBe('keep record')
+    expect(vault.files.has('inbox/People.base/data.csv')).toBe(false)
+  })
+
   it('respects primaryNotesLocation root for inbox paths', async () => {
     const vault = memVault({ primaryNotesAtRoot: true })
     const ops = createDatabaseOps(vault.io)
@@ -218,13 +273,14 @@ describe('createDatabaseOps with remapped system folders', () => {
   // With archive remapped away, a directory literally named `archive/` is an
   // ordinary user folder inside the primary area.
   it('treats a literal archive/ as inbox content once archive has moved', async () => {
-    const vault = memVault({ systemFolderPaths: remapped })
+    const vault = memVault({ primaryNotesAtRoot: true, systemFolderPaths: remapped })
     const ops = createDatabaseOps(vault.io)
     vault.files.set('archive/Notes.base/data.csv', 'Title\nOne\n')
     vault.folders.push({ folder: 'inbox', subpath: 'archive/Notes.base' })
 
     const renamed = await ops.renameDatabase('archive/Notes.base/data.csv', 'Renamed')
     expect(renamed).toBe('archive/Renamed.base/data.csv')
+    expect(vault.files.has(renamed)).toBe(true)
   })
 })
 

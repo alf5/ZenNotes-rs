@@ -3,8 +3,14 @@ import type {
   CloudAccountConnectResult,
   CloudAccountStatus
 } from '@zennotes/bridge-contract/cloud-sync'
+import {
+  CLOUD_SIGN_IN_EXPIRED_MESSAGE,
+  CLOUD_SIGN_IN_UNEXPECTED_MESSAGE,
+  cloudSignInExchangeError
+} from './cloud-error-copy'
 
 const AUTH_LIFETIME_MS = 5 * 60 * 1000
+const REVOKE_TIMEOUT_MS = 5_000
 
 export interface CloudAuthPending {
   base_url: string
@@ -53,6 +59,10 @@ export interface CloudAuthFlowDependencies {
   storage: CloudAuthStorage
   openExternal(url: string): Promise<void>
   exchange(baseUrl: string, request: CloudAuthExchangeRequest): Promise<unknown>
+  /** Revoke this device and every token it holds on the service
+   *  (`DELETE /api/v1/devices/current`, authenticated with `token`). Logout
+   *  calls it before deleting the credential; see `revokeDevice`. */
+  revoke?(baseUrl: string, token: string): Promise<void>
   now?: () => Date
   randomState?: () => string
   randomVerifier?: () => string
@@ -134,19 +144,24 @@ export class CloudAuthFlow {
   async complete(callback: CloudAuthCallback): Promise<CloudAccountStatus> {
     const pending = await this.pending()
     if (!pending || !safeEquals(callback.state, pending.state)) {
-      throw new Error('This ZenNotes Cloud sign-in request is invalid or has expired.')
+      throw new Error(CLOUD_SIGN_IN_EXPIRED_MESSAGE)
     }
 
-    const response = await this.dependencies.exchange(pending.base_url, {
-      code: callback.code,
-      state: callback.state,
-      code_verifier: pending.code_verifier,
-      device_name: this.dependencies.deviceName,
-      platform: this.dependencies.platform,
-      app_version: this.dependencies.appVersion
-    })
+    let response: unknown
+    try {
+      response = await this.dependencies.exchange(pending.base_url, {
+        code: callback.code,
+        state: callback.state,
+        code_verifier: pending.code_verifier,
+        device_name: this.dependencies.deviceName,
+        platform: this.dependencies.platform,
+        app_version: this.dependencies.appVersion
+      })
+    } catch (error) {
+      throw cloudSignInExchangeError(error)
+    }
     if (!isExchangeResponse(response, this.dependencies.platform)) {
-      throw new Error('ZenNotes Cloud returned an invalid sign-in response.')
+      throw new Error(CLOUD_SIGN_IN_UNEXPECTED_MESSAGE)
     }
 
     const account: CloudAccount = {
@@ -175,11 +190,48 @@ export class CloudAuthFlow {
   }
 
   async logout(): Promise<CloudAccountStatus> {
+    await this.revokeDevice()
     await Promise.all([
       this.dependencies.storage.deleteCredential(),
       this.dependencies.storage.deletePending()
     ])
     return { state: 'disconnected', account: null }
+  }
+
+  /**
+   * Ask the service to revoke this device while the credential still exists
+   * to ask with; once it is deleted, only Connected apps on the website can
+   * end the token. Signing out never depends on the answer: a failure, or a
+   * service that has not answered within a few seconds, still signs out, and
+   * the device then stays listed on the website until it is removed there.
+   * The token goes only to an origin `connect` would accept.
+   */
+  private async revokeDevice(): Promise<void> {
+    const revoke = this.dependencies.revoke
+    if (!revoke) return
+
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      const credential = await this.credential()
+      if (!credential) return
+      const baseUrl = normalizeCloudBaseUrl(credential.base_url, {
+        allowInsecureLoopback: this.dependencies.allowInsecureLoopback,
+        allowedInsecureOrigins: this.dependencies.allowedInsecureOrigins
+      })
+      const request = Promise.resolve()
+        .then(() => revoke(baseUrl, credential.token))
+        .catch(() => undefined)
+      await Promise.race([
+        request,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, REVOKE_TIMEOUT_MS)
+        })
+      ])
+    } catch {
+      // An unreadable credential or a refused origin still signs out.
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+    }
   }
 
   private async pending(): Promise<CloudAuthPending | null> {

@@ -16,3 +16,14 @@ export function isAppOverlayOpen(): boolean {
     document.querySelector('[data-cloud-conflict-dialog]')
   )
 }
+
+/**
+ * isAppOverlayOpen, plus every dialog the shared Modal shell draws (palettes,
+ * pickers) and Settings: both mark their panel aria-modal. For views whose
+ * single-key shortcuts must not act behind any of them. The close shortcut
+ * keeps its own rule (close-shortcut.ts), since Mod+W closes Settings itself.
+ */
+export function isOverlayOrDialogOpen(): boolean {
+  if (typeof document === 'undefined') return false
+  return isAppOverlayOpen() || document.querySelector('[aria-modal="true"]') !== null
+}

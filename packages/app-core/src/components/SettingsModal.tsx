@@ -21,13 +21,16 @@ import {
 import type { VimWrappedLineMotionMode } from "@shared/app-config";
 import { HARPER_DIALECTS } from "@shared/harper-settings";
 import { harperSupported } from "../lib/harper-runtime";
+import { setKeepRunningInTray, useTrayStore } from "../lib/tray-runtime";
 import type {
   AppUpdateState,
   CliInstallStatus,
+  CliUpdateState,
   NoteFolder,
   RaycastExtensionStatus,
   RemoteWorkspaceProfile,
   RemoteWorkspaceProfileInput,
+  VaultSettings,
   VaultTextSearchBackendPreference,
   VaultTextSearchCapabilities,
   VaultTextSearchToolPaths,
@@ -38,6 +41,7 @@ import {
   type McpClientStatus,
   type McpInstructionsPayload,
   type McpServerRuntime,
+  type McpServerTokenState,
 } from "@shared/mcp-clients";
 import { normalizeTasksExcludedFolder } from "@shared/tasks-excluded-folders";
 import {
@@ -46,6 +50,7 @@ import {
   resolveTypstPreambleFolder,
 } from "@shared/typst-preamble-folder";
 import { useStore, refreshCustomThemes, refreshOverrides } from "../store";
+import { vaultFolderName } from "../lib/rename-vault";
 import {
   WORKFLOW_PRESETS,
   hiddenPresetsInOrder,
@@ -65,8 +70,12 @@ import {
   getKeymapDefinitionsByGroup,
   getKeymapDisplay,
   isMacPlatform,
+  isUnboundBinding,
+  keymapAvailableOnHost,
   sequenceTokenFromEvent,
   shortcutBindingFromEvent,
+  UNBOUND_BINDING,
+  UNBOUND_LABEL,
 } from "../lib/keymaps";
 import {
   resolveAuto,
@@ -112,6 +121,7 @@ import {
   normalizeMonthlyNoteLocale,
   normalizeMonthlyNoteTitlePattern,
   normalizeMonthlyNotesDirectory,
+  specificFolderDestination,
 } from "../lib/vault-layout";
 import { BUILTIN_TEMPLATES } from "@shared/builtin-templates";
 import { composeTemplateFile, mergeTemplates } from "@shared/template-files";
@@ -122,17 +132,34 @@ import {
   type SettingsSearchCategory,
 } from "../lib/settings-search";
 import { useAppUpdateState } from "../lib/app-update-state";
-import { getZenBridge } from "@zennotes/bridge-contract/bridge";
+import { buildVersionReport } from "../lib/version-report";
+import { writeClipboardText } from "../lib/clipboard-text";
+import {
+  getZenBridge,
+  type ZenAppInfo,
+} from "@zennotes/bridge-contract/bridge";
 import companyLogo from "../assets/lumary-labs-logo.svg";
 import { confirmApp } from "../lib/confirm-requests";
 import { promptApp } from "../lib/prompt-requests";
 import { isImeComposing } from "../lib/ime";
+import {
+  isSettingsFindKey,
+  settingsSearchFieldAction,
+  settingsSearchStep,
+} from "../lib/settings-search-keys";
 import { RemoteWorkspaceProfileModal } from "./RemoteWorkspaceProfileModal";
 import { Button } from "./ui/Button";
+import { trapDialogTab, useDialogFocus } from "./ui/Modal";
+import { isTouchPrimaryDevice } from "../lib/cm-vim-ime-guard";
+import {
+  ignoredKeyTokenFromEvent,
+  setIgnoredKeysRecorderActive,
+} from "../lib/ignored-keys";
 import { CustomCodeLanguagesSettings } from "./CustomCodeLanguagesSettings";
 import { TextReplacementsSettings } from "./TextReplacementsSettings";
 import { CloudSettings } from "./CloudSettings";
 import { consumeSettingsTarget } from "../lib/settings-navigation";
+import { normalizeApplicationSchemes } from "@shared/application-links";
 
 type SettingsCategoryId =
   | "appearance"
@@ -289,6 +316,7 @@ function settingsSearchTargetProps(settingId: string | undefined): {
   return settingId ? { "data-settings-search-id": settingId } : {};
 }
 
+
 function findSettingsSearchTarget(
   root: HTMLElement,
   targetId: string,
@@ -307,6 +335,15 @@ function clearSettingsSearchHighlights(root: HTMLElement): void {
     .forEach((element) => {
       delete element.dataset.settingsSearchHighlight;
     });
+}
+
+/** Where a `Specific folder` row's files really land, for its description. */
+function specificFolderDestinationLabel(
+  folder: string | undefined,
+  settings: VaultSettings,
+): string {
+  const dir = specificFolderDestination(folder, settings);
+  return dir ? `\`${dir}/\`` : "the vault root";
 }
 
 function resolveVaultTextSearchBackend(
@@ -346,6 +383,10 @@ function formatUpdatePhaseLabel(phase: AppUpdateState["phase"]): string {
       return "Downloading";
     case "downloaded":
       return "Ready to install";
+    case "installing":
+      return "Installing";
+    case "offline":
+      return "Waiting for network";
     case "error":
       return "Update error";
     case "idle":
@@ -361,9 +402,12 @@ function updatePhaseBadgeClass(phase: AppUpdateState["phase"]): string {
       return "border-accent/30 bg-accent/10 text-accent";
     case "checking":
     case "downloading":
+    case "installing":
       return "border-paper-300/70 bg-paper-100/85 text-ink-700";
     case "error":
       return "border-red-400/25 bg-red-500/10 text-red-700";
+    case "offline":
+      return "border-amber-500/30 bg-amber-500/10 text-amber-700";
     case "not-available":
       return "border-emerald-400/25 bg-emerald-500/10 text-emerald-700";
     case "unsupported":
@@ -410,6 +454,181 @@ function formatReleaseNotesForDisplay(notes: string | null): string | null {
   } catch {
     return trimmed;
   }
+}
+
+/**
+ * The About page's update card. It owns the updater subscription so the
+ * once-a-second progress broadcast of a download re-renders this card and not
+ * the whole Settings dialog (#868).
+ */
+function AppUpdatesCard({ homepage }: { homepage?: string }): JSX.Element {
+  const appUpdateState = useAppUpdateState();
+
+  const triggerUpdateCheck = useCallback(() => {
+    void window.zen.checkForAppUpdates().then(
+      (state) => {
+        if (state.phase === "available") {
+          window.alert(
+            state.installable
+              ? `ZenNotes ${state.availableVersion ?? ""} is available. Use “Download Update” to fetch it.`
+              : state.message,
+          );
+          return;
+        }
+        if (state.phase === "not-available") {
+          window.alert(state.message);
+          return;
+        }
+        if (
+          state.phase === "unsupported" ||
+          state.phase === "offline" ||
+          state.phase === "error"
+        ) {
+          window.alert(state.message);
+        }
+      },
+      (error) => {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Could not check for updates.";
+        window.alert(message);
+      },
+    );
+  }, []);
+
+  const triggerUpdateDownload = useCallback(() => {
+    void window.zen.downloadAppUpdate();
+  }, []);
+
+  const triggerUpdateInstall = useCallback(() => {
+    void window.zen.installAppUpdate();
+  }, []);
+
+  const displayedReleaseNotes = useMemo(
+    () => formatReleaseNotesForDisplay(appUpdateState?.releaseNotes ?? null),
+    [appUpdateState?.releaseNotes],
+  );
+
+  return (
+    <div
+      className="mx-auto mt-5 max-w-[44rem] rounded-2xl border border-paper-300/65 bg-paper-50/65 p-4 text-left shadow-[0_10px_30px_rgba(15,23,42,0.04)]"
+      {...settingsSearchTargetProps("updates")}
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-xs font-medium uppercase tracking-[0.16em] text-ink-500">
+            Updates
+          </div>
+          <div className="mt-1 flex flex-wrap items-center gap-2">
+            <span
+              className={[
+                "rounded-full border px-2.5 py-1 text-xs font-medium",
+                updatePhaseBadgeClass(appUpdateState?.phase ?? "idle"),
+              ].join(" ")}
+            >
+              {formatUpdatePhaseLabel(appUpdateState?.phase ?? "idle")}
+            </span>
+            {appUpdateState?.availableVersion && (
+              <span className="text-xs text-ink-500">
+                Latest: v{appUpdateState.availableVersion}
+              </span>
+            )}
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {appUpdateState?.phase === "available" &&
+          appUpdateState.installable ? (
+            <button
+              onClick={triggerUpdateDownload}
+              className="rounded-xl border border-accent/30 bg-accent/10 px-3.5 py-2 text-xs font-medium text-accent transition-colors hover:bg-accent/15"
+            >
+              Download Update
+            </button>
+          ) : appUpdateState?.phase === "downloaded" ? (
+            <button
+              onClick={triggerUpdateInstall}
+              className="rounded-xl border border-accent/30 bg-accent/10 px-3.5 py-2 text-xs font-medium text-accent transition-colors hover:bg-accent/15"
+            >
+              Install and Relaunch
+            </button>
+          ) : (
+            <button
+              onClick={triggerUpdateCheck}
+              disabled={
+                appUpdateState?.phase === "checking" ||
+                appUpdateState?.phase === "downloading" ||
+                appUpdateState?.phase === "installing"
+              }
+              className={[
+                "rounded-xl border px-3.5 py-2 text-xs font-medium transition-colors",
+                appUpdateState?.phase === "checking" ||
+                appUpdateState?.phase === "downloading" ||
+                appUpdateState?.phase === "installing"
+                  ? "cursor-not-allowed border-paper-300/60 bg-paper-100/45 text-ink-400"
+                  : "border-paper-300/70 bg-paper-100/80 text-ink-800 hover:bg-paper-200",
+              ].join(" ")}
+            >
+              Check for Updates
+            </button>
+          )}
+          <a
+            href={
+              homepage ?? "https://github.com/ZenNotes/zennotes/releases/latest"
+            }
+            target="_blank"
+            rel="noreferrer"
+            className="rounded-xl border border-paper-300/70 bg-paper-100/80 px-3.5 py-2 text-xs font-medium text-ink-700 transition-colors hover:bg-paper-200"
+          >
+            View Release
+          </a>
+        </div>
+      </div>
+      <p className="mt-3 text-sm leading-6 text-ink-600">
+        {appUpdateState?.message ??
+          "Check GitHub releases for a newer ZenNotes build."}
+      </p>
+      {appUpdateState?.phase === "downloading" && (
+        <div className="mt-3">
+          <div className="h-2 overflow-hidden rounded-full bg-paper-200/90">
+            <div
+              className="h-full rounded-full bg-accent transition-[width] duration-200"
+              style={{
+                width: `${Math.max(0, Math.min(100, appUpdateState.progressPercent ?? 0))}%`,
+              }}
+            />
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-ink-500">
+            <span>{Math.round(appUpdateState.progressPercent ?? 0)}%</span>
+            {formatBytes(appUpdateState.transferredBytes) &&
+              formatBytes(appUpdateState.totalBytes) && (
+                <span>
+                  {formatBytes(appUpdateState.transferredBytes)} /{" "}
+                  {formatBytes(appUpdateState.totalBytes)}
+                </span>
+              )}
+            {formatBytes(appUpdateState.bytesPerSecond) && (
+              <span>{formatBytes(appUpdateState.bytesPerSecond)}/s</span>
+            )}
+          </div>
+        </div>
+      )}
+      {displayedReleaseNotes && (
+        <details className="mt-3 rounded-xl border border-paper-300/60 bg-paper-100/60 px-3 py-2.5">
+          <summary className="cursor-pointer text-xs font-medium uppercase tracking-[0.16em] text-ink-500">
+            Release notes
+          </summary>
+          <pre className="mt-2 whitespace-pre-wrap font-sans text-sm leading-6 text-ink-600">
+            {displayedReleaseNotes}
+          </pre>
+        </details>
+      )}
+      <div className="mt-3 text-xs leading-5 text-ink-500">
+        In-app updates use the published GitHub release feed. For general users,
+        that feed must be publicly reachable.
+      </div>
+    </div>
+  );
 }
 
 /** Read a `--z-*` token's current resolved value off <html> as #rrggbb, for
@@ -468,6 +687,9 @@ export function SettingsModal(): JSX.Element {
   const setRipgrepBinaryPath = useStore((s) => s.setRipgrepBinaryPath);
   const fzfBinaryPath = useStore((s) => s.fzfBinaryPath);
   const setFzfBinaryPath = useStore((s) => s.setFzfBinaryPath);
+  const externalApplicationSchemes = useStore((s) => s.externalApplicationSchemes);
+  const setExternalApplicationSchemes = useStore((s) => s.setExternalApplicationSchemes);
+  const [externalApplicationIssue, setExternalApplicationIssue] = useState<string | null>(null);
   const livePreview = useStore((s) => s.livePreview);
   const setLivePreview = useStore((s) => s.setLivePreview);
   const renderTablesInLivePreview = useStore(
@@ -479,6 +701,8 @@ export function SettingsModal(): JSX.Element {
   const completedTaskStyle = useStore((s) => s.completedTaskStyle);
   const setCompletedTaskStyle = useStore((s) => s.setCompletedTaskStyle);
   const showArchivedTasks = useStore((s) => s.showArchivedTasks);
+  const kanbanCardSort = useStore((s) => s.kanbanCardSort);
+  const setKanbanCardSort = useStore((s) => s.setKanbanCardSort);
   const setShowArchivedTasks = useStore((s) => s.setShowArchivedTasks);
   const mathRenderer = useStore((s) => s.mathRenderer);
   const mathFontScale = useStore((s) => s.mathFontScale);
@@ -495,6 +719,10 @@ export function SettingsModal(): JSX.Element {
   const keepViewModeAcrossNotes = useStore((s) => s.keepViewModeAcrossNotes);
   const defaultPaneMode = useStore((s) => s.defaultPaneMode);
   const setDefaultPaneMode = useStore((s) => s.setDefaultPaneMode);
+  const keepPanelsAcrossNotes = useStore((s) => s.keepPanelsAcrossNotes);
+  const setKeepPanelsAcrossNotes = useStore((s) => s.setKeepPanelsAcrossNotes);
+  const persistUndoHistory = useStore((s) => s.persistUndoHistory);
+  const setPersistUndoHistory = useStore((s) => s.setPersistUndoHistory);
   const setKeepViewModeAcrossNotes = useStore(
     (s) => s.setKeepViewModeAcrossNotes,
   );
@@ -526,6 +754,8 @@ export function SettingsModal(): JSX.Element {
   const setTabsEnabled = useStore((s) => s.setTabsEnabled);
   const workflowsEnabled = useStore((s) => s.workflowsEnabled);
   const setWorkflowsEnabled = useStore((s) => s.setWorkflowsEnabled);
+  const workflowEventTriggers = useStore((s) => s.workflowEventTriggers);
+  const setWorkflowEventTriggers = useStore((s) => s.setWorkflowEventTriggers);
   const atlasEnabled = useStore((s) => s.atlasEnabled);
   const setAtlasEnabled = useStore((s) => s.setAtlasEnabled);
   const hiddenWorkflowPresets = useStore((s) => s.hiddenWorkflowPresets);
@@ -550,6 +780,8 @@ export function SettingsModal(): JSX.Element {
   const setContentAlign = useStore((s) => s.setContentAlign);
   const vault = useStore((s) => s.vault);
   const workspaceMode = useStore((s) => s.workspaceMode);
+  const renameVault = useStore((s) => s.renameVault);
+  const vaultDisplayName = useStore((s) => s.vaultSettings.displayName ?? "");
   const remoteWorkspaceInfo = useStore((s) => s.remoteWorkspaceInfo);
   const remoteWorkspaceProfiles = useStore((s) => s.remoteWorkspaceProfiles);
   const vaultSettings = useStore((s) => s.vaultSettings);
@@ -594,11 +826,19 @@ export function SettingsModal(): JSX.Element {
       ),
     [customTemplates, hideBuiltinTemplates],
   );
+  // A local vault's templates are a host feature (the desktop has a disk, the
+  // web client asks its server); a remote vault's are the server's, advertised
+  // since 2.46 (#723). The store keeps remoteWorkspaceInfo fresh across
+  // connects and disconnects, so this re-renders with it.
   const supportsCustomTemplates =
-    zenBridge.getCapabilities().supportsCustomTemplates &&
-    workspaceMode !== "remote";
+    workspaceMode === "remote"
+      ? remoteWorkspaceInfo?.capabilities?.supportsCustomTemplates === true
+      : zenBridge.getCapabilities().supportsCustomTemplates === true;
   const supportsCustomCodeLanguages =
     !!zenBridge.getCapabilities().supportsCustomCodeLanguages;
+  // Undo history between launches needs somewhere machine-local that is not
+  // the vault, which only the desktop app has. (#793)
+  const supportsUndoFile = !!zenBridge.getCapabilities().supportsUndoFile;
   const [templateEditor, setTemplateEditor] = useState<{
     initialRaw?: string;
     sourcePath?: string;
@@ -695,6 +935,9 @@ export function SettingsModal(): JSX.Element {
   const systemFolderLabels = useStore((s) => s.systemFolderLabels);
   const setSystemFolderLabel = useStore((s) => s.setSystemFolderLabel);
   const darkSidebar = useStore((s) => s.darkSidebar);
+  const showWindowTitleBar = useStore((s) => s.showWindowTitleBar);
+  const keepRunningInTray = useTrayStore((s) => s.keepRunningInTray);
+  const setShowWindowTitleBar = useStore((s) => s.setShowWindowTitleBar);
   const setDarkSidebar = useStore((s) => s.setDarkSidebar);
   const showSidebarChevrons = useStore((s) => s.showSidebarChevrons);
   const setShowSidebarChevrons = useStore((s) => s.setShowSidebarChevrons);
@@ -702,7 +945,6 @@ export function SettingsModal(): JSX.Element {
   const setNestedTags = useStore((s) => s.setNestedTags);
   const pdfExportUseTheme = useStore((s) => s.pdfExportUseTheme);
   const setPdfExportUseTheme = useStore((s) => s.setPdfExportUseTheme);
-  const appUpdateState = useAppUpdateState();
   const [editingRemoteProfile, setEditingRemoteProfile] = useState<{
     mode: "create" | "edit";
     value?: RemoteWorkspaceProfileInput;
@@ -757,43 +999,6 @@ export function SettingsModal(): JSX.Element {
       cancelled = true;
     };
   }, [searchToolPaths]);
-
-  const triggerUpdateCheck = useCallback(() => {
-    void window.zen.checkForAppUpdates().then(
-      (state) => {
-        if (state.phase === "available") {
-          window.alert(
-            state.installable
-              ? `ZenNotes ${state.availableVersion ?? ""} is available. Use “Download Update” to fetch it.`
-              : state.message,
-          );
-          return;
-        }
-        if (state.phase === "not-available") {
-          window.alert(state.message);
-          return;
-        }
-        if (state.phase === "unsupported" || state.phase === "error") {
-          window.alert(state.message);
-        }
-      },
-      (error) => {
-        const message =
-          error instanceof Error
-            ? error.message
-            : "Could not check for updates.";
-        window.alert(message);
-      },
-    );
-  }, []);
-
-  const triggerUpdateDownload = useCallback(() => {
-    void window.zen.downloadAppUpdate();
-  }, []);
-
-  const triggerUpdateInstall = useCallback(() => {
-    void window.zen.installAppUpdate();
-  }, []);
 
   const currentRemoteProfileId =
     workspaceMode === "remote"
@@ -850,11 +1055,6 @@ export function SettingsModal(): JSX.Element {
       await deleteRemoteWorkspaceProfile(profile.id);
     },
     [deleteRemoteWorkspaceProfile],
-  );
-
-  const displayedReleaseNotes = useMemo(
-    () => formatReleaseNotesForDisplay(appUpdateState?.releaseNotes ?? null),
-    [appUpdateState?.releaseNotes],
   );
 
   // Family list — Apple is the default, followed by the other families.
@@ -1171,14 +1371,36 @@ export function SettingsModal(): JSX.Element {
   };
 
   const ref = useRef<HTMLDivElement | null>(null);
+  const navSearchRef = useRef<HTMLInputElement | null>(null);
+  const [initialSettingsTarget] = useState(consumeSettingsTarget);
+  // A Cloud surface (Review or Set up on the Cloud status, Space r, the
+  // palette) sends the person to This vault, which the Cloud page draws only
+  // once its account and link have loaded. This vault takes the keyboard
+  // then, once: coming back to the page later opens it at its top like any
+  // other page.
+  const opensOnCloudVault =
+    supportsCloudSync && initialSettingsTarget === "cloud";
+  const [cloudVaultReveal, setCloudVaultReveal] = useState(opensOnCloudVault);
+  const settleCloudVaultReveal = useCallback(() => setCloudVaultReveal(false), []);
+  // Settings draws its own backdrop and panel, so it never got the focus
+  // handling the shared Modal shell gives every other dialog: the keyboard
+  // stayed on the editor underneath and typing edited the note behind the
+  // open window. Opening lands on the settings search, the first thing a
+  // keyboard user reaches for. On a touch device a focused input would raise
+  // the on-screen keyboard over the panel, and opened for This vault the
+  // search is not what was asked for, so the panel holds focus instead.
+  useDialogFocus(
+    ref,
+    isTouchPrimaryDevice() || opensOnCloudVault ? ref : navSearchRef,
+  );
   const settingsSearchHighlightTimerRef = useRef<number | null>(null);
   const [activeCategory, setActiveCategory] = useState<SettingsCategoryId>(
-    () => consumeSettingsTarget() ?? "appearance",
+    () => initialSettingsTarget === "external-links" ? "editor" : initialSettingsTarget ?? "appearance",
   );
   // Per-category active sub-tab (dense categories split their content into sub-tabs).
   const [activeSubTabByCategory, setActiveSubTabByCategory] = useState<
     Partial<Record<SettingsCategoryId, string>>
-  >({});
+  >(() => initialSettingsTarget === "external-links" ? { editor: "links" } : {});
   const [activeSearchResultId, setActiveSearchResultId] = useState<
     string | null
   >(null);
@@ -1280,12 +1502,24 @@ export function SettingsModal(): JSX.Element {
   const wrappedLineMotionsTargetId = vimMode
     ? "wrapped-line-motions"
     : "vim-mode";
+  const vimYankToClipboardTargetId = vimMode
+    ? "vim-yank-to-clipboard"
+    : "vim-mode";
+  const vimBlockImeTargetId = vimMode
+    ? "vim-block-ime-in-normal-mode"
+    : "vim-mode";
   const leaderHintBehaviorTargetId =
     vimMode && whichKeyHints ? "leader-hint-behavior" : leaderKeyHintsTargetId;
   const leaderHintDurationTargetId =
     vimMode && whichKeyHints && whichKeyHintMode === "timed"
       ? "leader-hint-duration"
       : leaderHintBehaviorTargetId;
+  const dailyNotesTasksDueTargetId = vaultSettings.dailyNotes.enabled
+    ? "daily-notes-tasks-due-on-date"
+    : "enable-daily-notes";
+  const dailyNotesRolloverTargetId = vaultSettings.dailyNotes.enabled
+    ? "daily-notes-rollover"
+    : "enable-daily-notes";
 
   const categories: SettingsCategory[] = [
     {
@@ -1330,6 +1564,23 @@ export function SettingsModal(): JSX.Element {
             "Tint the sidebar one step darker than the canvas so the chrome reads as a separate surface.",
         },
         {
+          id: "window-title-bar",
+          title: appInfo.runtime === "desktop" ? "Window title bar" : "Title bar",
+          description:
+            appInfo.runtime === "desktop"
+              ? "Show the main window title and controls, or hide them to reclaim vertical space."
+              : "Show the bar with the open note's title, or hide it to reclaim vertical space.",
+          keywords: ["decorations", "frameless", "traffic lights", "tiling", "hyprland", "linux", "header"],
+        },
+        {
+          id: "keep-running-in-tray",
+          title: "Keep running in the tray",
+          description:
+            "Closing the last window hides it to the tray, so Cloud sync and the Quick capture hotkey keep working.",
+          keywords: ["tray", "system tray", "menu bar", "background", "close", "quit", "minimize", "hide", "tiling", "waybar"],
+          available: appInfo.runtime === "desktop",
+        },
+        {
           id: "sidebar-arrows",
           title: "Sidebar arrows",
           description:
@@ -1342,6 +1593,20 @@ export function SettingsModal(): JSX.Element {
           description:
             "Show /-separated tags as a collapsible tree in the sidebar and Tags view instead of a flat list.",
           keywords: ["hierarchical", "tree", "tags", "nested", "hierarchy"],
+        },
+        {
+          id: "pdf-export-use-theme",
+          title: "Use theme for PDF export",
+          description:
+            "Export PDFs in your current theme, snippets, and color tweaks, or in a clean light theme for printing.",
+          keywords: [
+            "pdf",
+            "export pdf",
+            "pdf theme",
+            "dark pdf",
+            "print",
+            "paper",
+          ],
         },
       ],
       content: (
@@ -1445,7 +1710,7 @@ export function SettingsModal(): JSX.Element {
                 </div>
                 {customThemes.length === 0 ? (
                   <p className="rounded-xl border border-dashed border-paper-300/70 px-3 py-3 text-xs leading-5 text-ink-500">
-                    Create a theme — or drop a folder with a{" "}
+                    Create a theme, or drop a folder with a{" "}
                     <span className="font-mono text-ink-700">
                       manifest.json
                     </span>{" "}
@@ -1561,7 +1826,7 @@ export function SettingsModal(): JSX.Element {
                   )}
                 </div>
                 <p className="mb-2.5 text-xs leading-5 text-ink-500">
-                  Adjust the active theme — colors and a few layout options —
+                  Adjust the active theme (colors and a few layout options)
                   with no CSS. These apply on top of whichever theme is
                   selected; reset any one with ↺.
                 </p>
@@ -1735,6 +2000,23 @@ export function SettingsModal(): JSX.Element {
             title="Chrome"
             description="Small visual adjustments that change how the shell feels."
           >
+            {appInfo.runtime === "desktop" ? (
+              <ToggleRow
+                label="Window title bar"
+                description="Show the main window’s title and controls. Turn off to reclaim vertical space. Drag blank space in the tab strip or the sidebar header to move the window, or use your window manager’s shortcuts."
+                value={showWindowTitleBar}
+                settingId="window-title-bar"
+                onChange={setShowWindowTitleBar}
+              />
+            ) : (
+              <ToggleRow
+                label="Title bar"
+                description="Show the bar with the open note’s title above the workspace. Turn off to reclaim vertical space."
+                value={showWindowTitleBar}
+                settingId="window-title-bar"
+                onChange={setShowWindowTitleBar}
+              />
+            )}
             <ToggleRow
               label="Dark sidebar"
               description="Tint the sidebar one step darker than the canvas so the chrome reads as a separate surface."
@@ -1757,6 +2039,21 @@ export function SettingsModal(): JSX.Element {
               onChange={setNestedTags}
             />
           </Section>
+
+          {appInfo.runtime === "desktop" && (
+            <Section
+              title="Window"
+              description="What closing the window does."
+            >
+              <ToggleRow
+                label="Keep running in the tray"
+                description={keepRunningInTrayDescription(zenBridge.platformSync())}
+                value={keepRunningInTray}
+                settingId="keep-running-in-tray"
+                onChange={(next) => void setKeepRunningInTray(next)}
+              />
+            </Section>
+          )}
 
           <Section
             title="PDF export"
@@ -1799,6 +2096,13 @@ export function SettingsModal(): JSX.Element {
       ],
       searchItems: [
         {
+          id: "external-application-links",
+          title: "External application links",
+          description: "Open links in enabled applications such as Zotero, Obsidian, and VS Code.",
+          keywords: ["uri", "scheme", "protocol", "zotero", "obsidian", "vscode", "external"],
+          available: appInfo.runtime === "desktop",
+        },
+        {
           id: "vim-mode",
           title: "Vim mode",
           description: "First-class Vim motions in the markdown editor.",
@@ -1818,6 +2122,40 @@ export function SettingsModal(): JSX.Element {
           description:
             "Map a key sequence like jk or jj to Escape in insert mode.",
           keywords: ["vim", "jk", "jj", "escape", "insert mode", "esc"],
+        },
+        {
+          id: "vim-yank-to-clipboard",
+          title: "Sync clipboard with Vim registers",
+          description:
+            "Yank, delete, and change to the system clipboard, and paste from it with p / P.",
+          keywords: [
+            "vim",
+            "yank",
+            "copy",
+            "paste",
+            "system clipboard",
+            "clipboard=unnamed",
+            "unnamedplus",
+          ],
+          targetId: vimYankToClipboardTargetId,
+        },
+        {
+          id: "vim-block-ime-in-normal-mode",
+          title: "Keep the input method out of normal mode",
+          description:
+            "With a Korean, Chinese, or Japanese input method on, normal-mode keys stay Vim motions instead of composing text.",
+          keywords: [
+            "vim",
+            "ime",
+            "cjk",
+            "korean",
+            "chinese",
+            "japanese",
+            "hangul",
+            "pinyin",
+            "composition",
+          ],
+          targetId: vimBlockImeTargetId,
         },
         {
           id: "leader-key-hints",
@@ -1846,7 +2184,7 @@ export function SettingsModal(): JSX.Element {
         {
           id: "scroll-off",
           title: "Scroll offset",
-          description: "Vim scrolloff — lines kept above and below the cursor.",
+          description: "Vim scrolloff: lines kept above and below the cursor.",
           keywords: ["scroll", "scrolloff", "vim", "cursor", "margin"],
         },
         {
@@ -1887,6 +2225,24 @@ export function SettingsModal(): JSX.Element {
             "vim",
             "plain text",
             "source",
+          ],
+        },
+        {
+          id: "completed-task-style",
+          title: "Completed task style",
+          description:
+            "Strike through or gray out a checked task's text in the editor and preview, or both.",
+          keywords: [
+            "checkbox",
+            "done",
+            "completed tasks",
+            "checked",
+            "strikethrough",
+            "cross out",
+            "gray",
+            "grey",
+            "dim",
+            "todo",
           ],
         },
         {
@@ -1986,6 +2342,66 @@ export function SettingsModal(): JSX.Element {
             "loose",
           ],
         },
+        {
+          id: "default-view-mode",
+          title: "Default view mode",
+          description:
+            "The mode a note opens in before you pick one for it: Edit, Split, or Preview.",
+          keywords: [
+            "view mode",
+            "edit",
+            "split",
+            "preview",
+            "reading mode",
+            "read mode",
+            "open in preview",
+            "start in preview",
+          ],
+        },
+        {
+          id: "keep-view-mode",
+          title: "Keep view mode when switching notes",
+          description:
+            "Stay in the current Edit / Split / Preview mode when you open another note.",
+          keywords: ["view mode", "edit", "split", "preview", "sticky", "switch", "per note"],
+        },
+        {
+          id: "keep-panels",
+          title: "Keep panels when switching notes",
+          description:
+            "Connections, Outline, Comments and Calendar stay as you set them, or each note remembers its own.",
+          keywords: [
+            "panels",
+            "connections",
+            "outline",
+            "comments",
+            "calendar",
+            "sticky",
+            "per note",
+            "remember",
+            "switch",
+          ],
+        },
+        ...(supportsUndoFile
+          ? [
+              {
+                id: "persist-undo-history",
+                title: "Keep undo history after quitting",
+                description:
+                  "Undo still works on a note after you quit and reopen ZenNotes, like Vim's undofile.",
+                keywords: [
+                  "undofile",
+                  "undo",
+                  "redo",
+                  "history",
+                  "persistent",
+                  "restart",
+                  "quit",
+                  "vim",
+                ],
+              },
+            ]
+          : []),
         {
           id: "sync-title-heading-on-rename",
           title: "Sync title heading on rename",
@@ -2191,6 +2607,55 @@ export function SettingsModal(): JSX.Element {
             "run",
           ],
         },
+        {
+          id: "workflow-event-triggers",
+          title: "Event triggers",
+          description:
+            "Let active workflows run on their own when you create, save, move, or tag a note in this app.",
+          keywords: [
+            "workflow",
+            "workflows",
+            "trigger",
+            "automation",
+            "automatic",
+            "on save",
+            "note-saved",
+            "note-created",
+            "note-moved",
+            "tag-added",
+          ],
+        },
+        {
+          id: "workflow-tutorial",
+          title: "Guided tutorial",
+          description:
+            "A hands-on Workflows walkthrough on a practice folder, cleaned up when you finish.",
+          keywords: [
+            "workflow",
+            "workflows",
+            "walkthrough",
+            "learn",
+            "practice",
+            "onboarding",
+            "start tutorial",
+          ],
+        },
+        {
+          id: "workflow-hidden-recipes",
+          title: "Built-in recipes",
+          description:
+            "Hide or restore the shipped recipes in the recipe gallery behind New workflow.",
+          keywords: [
+            "workflow",
+            "workflows",
+            "recipe gallery",
+            "gallery",
+            "presets",
+            "hide recipes",
+            "restore recipes",
+            "new workflow",
+          ],
+        },
       ],
       subTabs: [
         {
@@ -2200,6 +2665,8 @@ export function SettingsModal(): JSX.Element {
             "vim-mode",
             "wrapped-line-motions",
             "vim-insert-escape",
+            "vim-yank-to-clipboard",
+            "vim-block-ime-in-normal-mode",
             "leader-key-hints",
             "leader-hint-behavior",
             "leader-hint-duration",
@@ -2259,7 +2726,7 @@ export function SettingsModal(): JSX.Element {
                     />
                     <SliderRow
                       label="Scroll offset"
-                      description="Vim scrolloff — lines kept above and below the cursor while scrolling. 0 disables it."
+                      description="Vim scrolloff: lines kept above and below the cursor while scrolling. 0 disables it."
                       value={editorScrollOff}
                       min={0}
                       max={20}
@@ -2381,14 +2848,52 @@ export function SettingsModal(): JSX.Element {
             </div>
           ),
         },
+        ...(appInfo.runtime === "desktop" ? [{
+          id: "links",
+          title: "Links",
+          searchIds: ["external-application-links"],
+          content: (
+            <Section title="Links" description="Open application links from your notes.">
+              <TextInputRow
+                label="External application links"
+                description="Enter application prefixes separated by commas, such as zotero, obsidian, or vscode. Enabled links open in the installed app. Saved in config.toml."
+                value={externalApplicationSchemes.join(", ")}
+                placeholder="zotero, obsidian, vscode"
+                settingId="external-application-links"
+                commitOnBlur
+                issue={externalApplicationIssue}
+                onChange={(value) => {
+                  const entries = (value ?? "").split(/[,\s]+/).filter(Boolean);
+                  const invalid = entries.find((entry) => normalizeApplicationSchemes([entry]).length === 0);
+                  if (invalid) {
+                    setExternalApplicationIssue(`“${invalid}” is not an available application prefix.`);
+                    return;
+                  }
+                  setExternalApplicationIssue(null);
+                  setExternalApplicationSchemes(normalizeApplicationSchemes(entries));
+                }}
+              />
+            </Section>
+          ),
+        }] : []),
         {
           id: "writing",
           title: "Writing",
           searchIds: [
             "live-preview",
             "render-tables",
+            "completed-task-style",
+            "math-renderer",
+            "math-font-scale",
+            "typst-tag-preambles",
+            "typst-preamble-folder",
             "harper-enabled",
             "harper-dialect",
+            "loose-math-delimiters",
+            "default-view-mode",
+            "keep-view-mode",
+            "keep-panels",
+            "persist-undo-history",
             "sync-title-heading-on-rename",
             "markdown-overrides",
             "heading-level-labels",
@@ -2403,6 +2908,8 @@ export function SettingsModal(): JSX.Element {
             "smooth-preview-scroll",
             "pdfs-in-edit-mode",
             "time-format",
+            "date-titled-quick-notes",
+            "quick-note-prefix",
           ],
           content: (
             <div className="space-y-6">
@@ -2428,7 +2935,7 @@ export function SettingsModal(): JSX.Element {
                 )}
                 <SegmentedRow
                   label="Completed task style"
-                  description="How a checked task's text looks in the editor and preview — strike it through, gray it out, or both. The checkbox always shows checked."
+                  description="How a checked task's text looks in the editor and preview: strike it through, gray it out, or both. The checkbox always shows checked."
                   value={completedTaskStyle}
                   settingId="completed-task-style"
                   options={[
@@ -2522,8 +3029,24 @@ export function SettingsModal(): JSX.Element {
                   onChange={setKeepViewModeAcrossNotes}
                 />
                 <ToggleRow
+                  label="Keep panels when switching notes"
+                  description="Connections, Outline, Comments and Calendar stay as you set them while you move between notes. Turn off and each note remembers its own panels, across restarts too, so a note you have not opened yet starts with none."
+                  value={keepPanelsAcrossNotes}
+                  settingId="keep-panels"
+                  onChange={setKeepPanelsAcrossNotes}
+                />
+                {supportsUndoFile && (
+                  <ToggleRow
+                    label="Keep undo history after quitting"
+                    description="Each note already keeps its undo history while ZenNotes is open. Turn this on and it also survives quitting, like Vim's undofile: reopen a note tomorrow and u / Mod+Z still steps back through your edits, as long as the note was not changed elsewhere in the meantime. The history is stored with the app on this computer, never in your vault, and it contains text you deleted. Turning this off erases it."
+                    value={persistUndoHistory}
+                    settingId="persist-undo-history"
+                    onChange={setPersistUndoHistory}
+                  />
+                )}
+                <ToggleRow
                   label="Sync title heading on rename"
-                  description="Renaming a note also rewrites its leading `# heading` to the new name, so the title line stops drifting from the filename. Only an existing top-level heading is rewritten — a note that opens with prose, a list, or a deeper heading is left alone, so deleting the `#` line opts that note out for good."
+                  description="Renaming a note also rewrites its leading `# heading` to the new name, so the title line stops drifting from the filename. Only an existing top-level heading is rewritten: a note that opens with prose, a list, or a deeper heading is left alone, so deleting the `#` line opts that note out for good."
                   value={syncTitleHeadingOnRename}
                   settingId="sync-title-heading-on-rename"
                   onChange={setSyncTitleHeadingOnRename}
@@ -2698,11 +3221,7 @@ export function SettingsModal(): JSX.Element {
         {
           id: "quick-capture",
           title: "Quick capture",
-          searchIds: [
-            "date-titled-quick-notes",
-            "quick-note-prefix",
-            "quick-capture-hotkey",
-          ],
+          searchIds: ["quick-capture-hotkey"],
           content: (
             <div className="space-y-6">
               <Section
@@ -2744,6 +3263,7 @@ export function SettingsModal(): JSX.Element {
             "The Workflows canvas, and whether it appears in the app at all.",
           searchIds: [
             "workflows-enabled",
+            "workflow-event-triggers",
             "workflow-hidden-recipes",
             "workflow-tutorial",
           ],
@@ -2760,11 +3280,18 @@ export function SettingsModal(): JSX.Element {
                   settingId="workflows-enabled"
                   onChange={setWorkflowsEnabled}
                 />
+                <ToggleRow
+                  label="Event triggers"
+                  description="Let an active workflow whose trigger is on note-created, note-saved, note-moved or tag-added run on its own when you make that change in this app. Each run sees only the note that changed, applies without a confirmation, and leaves a receipt with Undo. Off silences every event trigger on this device; a workflow of its own is silenced by trigger: manual or status: draft."
+                  value={workflowEventTriggers}
+                  settingId="workflow-event-triggers"
+                  onChange={setWorkflowEventTriggers}
+                />
                 <div
-                  className="flex items-center justify-between gap-5 px-5 py-4"
+                  className="flex flex-wrap items-center justify-between gap-x-5 gap-y-3 px-5 py-4"
                   {...settingsSearchTargetProps("workflow-tutorial")}
                 >
-                  <div className="min-w-0">
+                  <div className="min-w-0 flex-1 basis-56">
                     <div className="text-sm font-medium text-ink-900">
                       Guided tutorial
                     </div>
@@ -2797,10 +3324,10 @@ export function SettingsModal(): JSX.Element {
                         : `${hidden} of ${total} recipes are hidden from the recipe gallery, behind New workflow (press x on a recipe there to hide one at a time).`;
                   return (
                     <div
-                      className="flex items-center justify-between gap-5 px-5 py-4"
+                      className="flex flex-wrap items-center justify-between gap-x-5 gap-y-3 px-5 py-4"
                       {...settingsSearchTargetProps("workflow-hidden-recipes")}
                     >
-                      <div className="min-w-0">
+                      <div className="min-w-0 flex-1 basis-56">
                         <div className="text-sm font-medium text-ink-900">
                           Built-in recipes
                         </div>
@@ -2808,7 +3335,7 @@ export function SettingsModal(): JSX.Element {
                           {copy}
                         </div>
                       </div>
-                      <div className="flex shrink-0 items-center gap-2">
+                      <div className="flex max-w-full flex-wrap items-center gap-2">
                         <Button
                           size="sm"
                           disabled={hidden === total}
@@ -2843,6 +3370,24 @@ export function SettingsModal(): JSX.Element {
       description: "Remap global shortcuts, Vim bindings, and view navigation.",
       keywords: ["shortcuts", "bindings", "leader", "vim", "remap", "keyboard"],
       searchItems: [
+        {
+          id: "ignored-keys",
+          title: "Ignored keys",
+          description:
+            "Keys the app never sees, such as the no-op a Kanata or QMK tap-hold layer sends with every keystroke.",
+          keywords: [
+            "ignore",
+            "ignored",
+            "no-op",
+            "noop",
+            "kanata",
+            "qmk",
+            "zmk",
+            "tap-hold",
+            "home row",
+            "kanamode",
+          ],
+        },
         {
           id: "shortcut-editor",
           title: "Shortcut editor",
@@ -2905,6 +3450,38 @@ export function SettingsModal(): JSX.Element {
           ],
         },
         {
+          id: "kanban-folder-root",
+          title: "Folder board root",
+          description:
+            "Group the Tasks Kanban Folder board by the folders inside one folder, such as Projects, instead of each note's own folder.",
+          keywords: [
+            "kanban",
+            "folder",
+            "board",
+            "group",
+            "projects",
+            "root",
+            "column",
+            "directory",
+          ],
+        },
+        {
+          id: "kanban-card-sort",
+          title: "Kanban card order",
+          description:
+            "Order the cards in each Kanban column by hand or by due date.",
+          keywords: [
+            "kanban",
+            "sort",
+            "order",
+            "due",
+            "date",
+            "deadline",
+            "cards",
+            "manual",
+          ],
+        },
+        {
           id: "show-archived-tasks",
           title: "Show tasks from archived notes",
           description:
@@ -2917,6 +3494,23 @@ export function SettingsModal(): JSX.Element {
             "done",
             "history",
             "old",
+          ],
+        },
+        {
+          id: "tasks-task-folders",
+          title: "Task folders",
+          description:
+            "Collect tasks only from the folders you list and leave every other checkbox alone. Empty means the whole vault. Stored in the vault, honored by every runtime.",
+          keywords: [
+            "task folders",
+            "only",
+            "include",
+            "included",
+            "limit",
+            "restrict",
+            "checklist",
+            "folder",
+            "checkbox",
           ],
         },
         {
@@ -2940,9 +3534,31 @@ export function SettingsModal(): JSX.Element {
         <div className="space-y-6">
           <Section
             title="Kanban statuses"
-            description="Set up the columns for the Tasks Kanban Custom status board. Other @field boards (sprint, area, …) appear automatically as you tag tasks — no setup needed."
+            description="Set up the columns for the Tasks Kanban Custom status board. Other @field boards (sprint, area, …) appear automatically as you tag tasks, with no setup needed."
           >
             <KanbanStatusesRow settingId="kanban-statuses" />
+          </Section>
+          <Section
+            title="Folder board"
+            description="The Kanban Folder board gives every note folder its own column. Point it at one folder to make that folder's children the columns instead."
+          >
+            <KanbanFolderRootRow settingId="kanban-folder-root" />
+          </Section>
+          <Section
+            title="Card order"
+            description="How the cards inside each Kanban column are ordered, on every board."
+          >
+            <SegmentedRow
+              label="Kanban card order"
+              description="Manual keeps the order you drag cards into, saved per column. Due date sorts each column by due date, earliest first and undated cards last; your manual order is kept and comes back when you switch back. On the board: the Order menu, or s in Vim mode."
+              value={kanbanCardSort}
+              settingId="kanban-card-sort"
+              options={[
+                { value: "manual", label: "Manual" },
+                { value: "due", label: "Due date" },
+              ]}
+              onChange={(next) => setKanbanCardSort(next)}
+            />
           </Section>
           <Section
             title="Archived notes"
@@ -2958,9 +3574,16 @@ export function SettingsModal(): JSX.Element {
           </Section>
           <Section
             title="Checklists"
-            description="Not every checkbox is a task. Exclude whole folders here, or opt out a single note with tasks: false in its frontmatter (tasks: note keeps a #task note on the board while silencing its checklist)."
+            description="Not every checkbox is a task. Collect tasks only from your Task folders, exclude whole folders, or opt out a single note with tasks: false in its frontmatter (tasks: note keeps a #task note on the board while silencing its checklist)."
           >
-            <TasksExcludedFoldersRow settingId="tasks-excluded-folders" />
+            <TasksFolderListRow
+              list="includedFolders"
+              settingId="tasks-task-folders"
+            />
+            <TasksFolderListRow
+              list="excludedFolders"
+              settingId="tasks-excluded-folders"
+            />
           </Section>
           <button
             type="button"
@@ -3116,7 +3739,7 @@ export function SettingsModal(): JSX.Element {
               description="Maximum width for preview and split-preview content."
               value={previewMaxWidth}
               min={640}
-              max={1400}
+              max={1600}
               step={20}
               unit="px"
               settingId="reading-width"
@@ -3204,10 +3827,25 @@ export function SettingsModal(): JSX.Element {
                 keywords: ["subscription", "entitlement", "features"],
               },
               {
+                id: "cloud-encryption",
+                title: "End-to-end encryption",
+                description:
+                  "Encrypt Cloud vaults with a passphrase only you know, and unlock this device.",
+                keywords: [
+                  "encryption",
+                  "e2ee",
+                  "passphrase",
+                  "recovery key",
+                  "unlock",
+                  "privacy",
+                  "security",
+                ],
+              },
+              {
                 id: "cloud-vault",
                 title: "Cloud vault link",
                 description: "Link this local vault and run a manual sync.",
-                keywords: ["sync", "link", "create", "conflict"],
+                keywords: ["sync", "link", "create", "conflict", "encrypt"],
               },
             ],
             content: (
@@ -3219,6 +3857,8 @@ export function SettingsModal(): JSX.Element {
                     vault.temporary !== true
                   }
                   localVaultName={vault?.name ?? "My notes"}
+                  revealVault={cloudVaultReveal}
+                  onVaultRevealed={settleCloudVaultReveal}
                 />
               </div>
             ),
@@ -3240,6 +3880,13 @@ export function SettingsModal(): JSX.Element {
           keywords: ["folder", "root", "location", "open vault", "change"],
         },
         {
+          id: "vault-name",
+          title: "Vault name",
+          description:
+            "What the sidebar and the vault switcher call this vault; the folder keeps its own name.",
+          keywords: ["vault name", "display name", "rename vault", "rename", "title", "label", "switcher"],
+        },
+        {
           id: "saved-remote-workspaces",
           title: "Saved Remote Workspaces",
           description:
@@ -3253,6 +3900,47 @@ export function SettingsModal(): JSX.Element {
           description:
             "Choose whether ZenNotes treats `inbox/` as the main notes area or uses the vault root directly.",
           keywords: ["primary notes", "inbox", "vault root"],
+        },
+        {
+          id: "drawings-location",
+          title: "Default drawings location",
+          description:
+            "Where new Excalidraw drawings are created: your primary notes area, the active note's folder, or a folder you name.",
+          keywords: [
+            "drawings",
+            "drawing folder",
+            "drawings folder",
+            "excalidraw",
+            "new drawing",
+          ],
+        },
+        {
+          id: "databases-location",
+          title: "Default databases location",
+          description:
+            "Where new databases are created: your primary notes area, the active note's folder, or a folder you name.",
+          keywords: [
+            "databases",
+            "database folder",
+            "databases folder",
+            "database location",
+            "new database",
+          ],
+        },
+        {
+          id: "tasks-location",
+          title: "Default tasks location",
+          description:
+            "Where new task files are created: your primary notes area, the active note's folder, or a folder you name.",
+          keywords: [
+            "tasks",
+            "task folder",
+            "tasks folder",
+            "task location",
+            "task files",
+            "new task",
+            "todos",
+          ],
         },
         {
           id: "view-settings-scope",
@@ -3337,6 +4025,38 @@ export function SettingsModal(): JSX.Element {
           title: "Daily note template",
           description: "Template applied when a daily note is created.",
           keywords: ["daily notes", "template"],
+        },
+        {
+          id: "daily-notes-tasks-due-on-date",
+          title: "Tasks are due on the note's date",
+          description:
+            "A task written in a daily note shows on the calendar for that day, without typing a due date.",
+          keywords: [
+            "daily notes",
+            "tasks",
+            "due date",
+            "calendar",
+            "deadline",
+            "schedule",
+          ],
+          targetId: dailyNotesTasksDueTargetId,
+        },
+        {
+          id: "daily-notes-rollover",
+          title: "Roll over unfinished tasks to today",
+          description:
+            "When today's daily note opens, move every unchecked task from past daily notes into it.",
+          keywords: [
+            "daily notes",
+            "rollover",
+            "carry over",
+            "carry forward",
+            "incomplete",
+            "move tasks",
+            "migrate",
+            "todos",
+          ],
+          targetId: dailyNotesRolloverTargetId,
         },
         {
           id: "enable-weekly-notes",
@@ -3558,24 +4278,80 @@ export function SettingsModal(): JSX.Element {
           description: "Display name for the vault-wide Tasks view.",
           keywords: ["system folders", "tasks", "todos", "goals", "rename"],
         },
+        {
+          id: "inbox-path",
+          title: "Inbox path",
+          description:
+            "The top-level folder that holds the main notes area. Empty uses `inbox`.",
+          keywords: [
+            "system folders",
+            "folder path",
+            "inbox folder",
+            "directory",
+            "on disk",
+          ],
+        },
+        {
+          id: "quick-path",
+          title: "Quick Notes path",
+          description:
+            "The top-level folder that holds Quick Notes. Empty uses `quick`.",
+          keywords: [
+            "system folders",
+            "folder path",
+            "quick notes folder",
+            "directory",
+            "on disk",
+          ],
+        },
+        {
+          id: "archive-path",
+          title: "Archive path",
+          description:
+            "The top-level folder that holds archived notes. Empty uses `archive`.",
+          keywords: [
+            "system folders",
+            "folder path",
+            "archive folder",
+            "directory",
+            "on disk",
+          ],
+        },
+        {
+          id: "trash-path",
+          title: "Trash path",
+          description:
+            "The top-level folder that holds deleted notes. Empty uses `trash`.",
+          keywords: [
+            "system folders",
+            "folder path",
+            "trash folder",
+            "directory",
+            "on disk",
+          ],
+        },
       ],
       subTabs: [
         {
           id: "location",
           title: "Location",
           description: "Where this vault lives, plus saved remote connections.",
-          searchIds: ["vault-location", "saved-remote-workspaces"],
+          searchIds: ["vault-location", "vault-name", "saved-remote-workspaces"],
           content: (
             <div className="space-y-6">
               <Section
                 title="Location"
                 description="ZenNotes reads markdown directly from the selected vault folder."
               >
+                {/* The buttons are one group that wraps under the label when
+                    the row is too narrow (#871). On one unwrapping line, the
+                    four remote-mode buttons squeezed the label to nothing and
+                    ran past the card's edge. */}
                 <div
-                  className="flex items-center justify-between gap-4 px-5 py-5"
+                  className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3 px-5 py-5"
                   {...settingsSearchTargetProps("vault-location")}
                 >
-                  <div className="min-w-0">
+                  <div className="min-w-0 flex-1 basis-56">
                     <div className="text-sm font-medium text-ink-900">
                       {workspaceMode === "remote"
                         ? "Remote workspace"
@@ -3591,43 +4367,59 @@ export function SettingsModal(): JSX.Element {
                         </div>
                       )}
                   </div>
-                  <button
-                    onClick={() =>
-                      void (workspaceMode === "remote"
-                        ? changeRemoteWorkspaceVaultPath()
-                        : openVaultPicker())
-                    }
-                    className="shrink-0 rounded-xl border border-paper-300/70 bg-paper-100/80 px-3.5 py-2 text-xs font-medium text-ink-800 transition-colors hover:bg-paper-200"
-                  >
-                    {workspaceMode === "remote"
-                      ? "Change Remote Vault…"
-                      : "Change…"}
-                  </button>
-                  {workspaceMode === "remote" && (
+                  <div className="flex flex-wrap items-center gap-2">
                     <button
-                      onClick={() => void disconnectRemoteWorkspace()}
+                      onClick={() =>
+                        void (workspaceMode === "remote"
+                          ? changeRemoteWorkspaceVaultPath()
+                          : openVaultPicker())
+                      }
                       className="shrink-0 rounded-xl border border-paper-300/70 bg-paper-100/80 px-3.5 py-2 text-xs font-medium text-ink-800 transition-colors hover:bg-paper-200"
                     >
-                      Return to Local Vault
+                      {workspaceMode === "remote"
+                        ? "Change Remote Vault…"
+                        : "Change…"}
                     </button>
-                  )}
-                  {workspaceMode === "remote" && (
-                    <button
-                      onClick={() => void openVaultPicker()}
-                      className="shrink-0 rounded-xl border border-paper-300/70 bg-paper-100/80 px-3.5 py-2 text-xs font-medium text-ink-800 transition-colors hover:bg-paper-200"
-                    >
-                      Open Local Vault…
-                    </button>
-                  )}
-                  {supportsRemoteWorkspace && (
-                    <button
-                      onClick={() => void connectRemoteWorkspace()}
-                      className="shrink-0 rounded-xl border border-paper-300/70 bg-paper-100/80 px-3.5 py-2 text-xs font-medium text-ink-800 transition-colors hover:bg-paper-200"
-                    >
-                      Quick Connect…
-                    </button>
-                  )}
+                    {workspaceMode === "remote" && (
+                      <button
+                        onClick={() => void disconnectRemoteWorkspace()}
+                        className="shrink-0 rounded-xl border border-paper-300/70 bg-paper-100/80 px-3.5 py-2 text-xs font-medium text-ink-800 transition-colors hover:bg-paper-200"
+                      >
+                        Return to Local Vault
+                      </button>
+                    )}
+                    {workspaceMode === "remote" && (
+                      <button
+                        onClick={() => void openVaultPicker()}
+                        className="shrink-0 rounded-xl border border-paper-300/70 bg-paper-100/80 px-3.5 py-2 text-xs font-medium text-ink-800 transition-colors hover:bg-paper-200"
+                      >
+                        Open Local Vault…
+                      </button>
+                    )}
+                    {supportsRemoteWorkspace && (
+                      <button
+                        onClick={() => void connectRemoteWorkspace()}
+                        className="shrink-0 rounded-xl border border-paper-300/70 bg-paper-100/80 px-3.5 py-2 text-xs font-medium text-ink-800 transition-colors hover:bg-paper-200"
+                      >
+                        Quick Connect…
+                      </button>
+                    )}
+                  </div>
                 </div>
+                {/* Local vaults only (#692): a temporary folder session writes
+                    nothing into its folder, and a remote workspace's settings
+                    belong to the server. */}
+                {workspaceMode !== "remote" && vault && !vault.temporary && (
+                  <TextInputRow
+                    label="Vault name"
+                    description={`What the sidebar, the vault switcher and the title bar call this vault. The folder stays ${vaultFolderName(vault)} on disk; leave the field empty to use that name.`}
+                    value={vaultDisplayName}
+                    placeholder={vaultFolderName(vault)}
+                    settingId="vault-name"
+                    commitOnBlur
+                    onChange={(next) => void renameVault(next)}
+                  />
+                )}
               </Section>
 
               {supportsRemoteWorkspace && (
@@ -3637,8 +4429,10 @@ export function SettingsModal(): JSX.Element {
                   settingId="saved-remote-workspaces"
                 >
                   <div className="space-y-3 px-5 py-5">
-                    <div className="flex items-center justify-between gap-4">
-                      <div className="text-xs text-ink-500">
+                    {/* New Remote wraps under the intro on a narrow card
+                        instead of squeezing it to a word per line. */}
+                    <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
+                      <div className="min-w-0 flex-1 basis-56 text-xs text-ink-500">
                         Saved connections can point at different servers or
                         different vaults on the same server.
                       </div>
@@ -3734,8 +4528,14 @@ export function SettingsModal(): JSX.Element {
           id: "notes",
           title: "Notes",
           description:
-            "How primary notes, new drawings and databases, and view preferences are organized.",
-          searchIds: ["primary-notes-location", "view-settings-scope"],
+            "Where primary notes live, where new drawings, databases, and tasks are created, and how view preferences apply.",
+          searchIds: [
+            "primary-notes-location",
+            "drawings-location",
+            "databases-location",
+            "tasks-location",
+            "view-settings-scope",
+          ],
           content: (
             <div className="space-y-6">
               <Section
@@ -3765,7 +4565,7 @@ export function SettingsModal(): JSX.Element {
               >
                 <SegmentedRow
                   label="Default drawings location"
-                  description="`Primary location` uses your primary notes area, `Active note's folder` puts it beside the note you're viewing, `Specific folder` uses a subfolder you choose."
+                  description="`Primary location` uses your primary notes area, `Active note's folder` puts it beside the note you're viewing, `Specific folder` uses a folder you name inside your primary notes area."
                   value={vaultSettings.drawingsLocation?.mode ?? "primary"}
                   settingId="drawings-location"
                   options={[
@@ -3786,7 +4586,7 @@ export function SettingsModal(): JSX.Element {
                 {vaultSettings.drawingsLocation?.mode === "folder" && (
                   <TextInputRow
                     label="Drawings folder"
-                    description="Vault-relative subfolder for new drawings, e.g. `assets/drawings`."
+                    description={`A folder inside your primary notes area, e.g. \`assets/drawings\`. New drawings go to ${specificFolderDestinationLabel(vaultSettings.drawingsLocation?.folder, vaultSettings)}.`}
                     value={vaultSettings.drawingsLocation?.folder ?? ""}
                     placeholder="assets/drawings"
                     settingId="drawings-folder"
@@ -3825,7 +4625,7 @@ export function SettingsModal(): JSX.Element {
                 {vaultSettings.databasesLocation?.mode === "folder" && (
                   <TextInputRow
                     label="Databases folder"
-                    description="Vault-relative subfolder for new databases, e.g. `assets/databases`."
+                    description={`A folder inside your primary notes area, e.g. \`assets/databases\`. New databases go to ${specificFolderDestinationLabel(vaultSettings.databasesLocation?.folder, vaultSettings)}.`}
                     value={vaultSettings.databasesLocation?.folder ?? ""}
                     placeholder="assets/databases"
                     settingId="databases-folder"
@@ -3861,7 +4661,7 @@ export function SettingsModal(): JSX.Element {
                 {vaultSettings.tasksLocation?.mode === "folder" && (
                   <TextInputRow
                     label="Tasks folder"
-                    description="Vault-relative subfolder for new task files, e.g. `Tasks` or `Projects/Inbox`."
+                    description={`A folder inside your primary notes area, e.g. \`Tasks\` or \`Projects/Inbox\`. New task files go to ${specificFolderDestinationLabel(vaultSettings.tasksLocation?.folder, vaultSettings)}.`}
                     value={vaultSettings.tasksLocation?.folder ?? ""}
                     placeholder="Tasks"
                     settingId="tasks-folder"
@@ -3910,6 +4710,8 @@ export function SettingsModal(): JSX.Element {
             "daily-note-pattern-reset",
             "open-todays-daily-note",
             "daily-notes-template",
+            "daily-notes-tasks-due-on-date",
+            "daily-notes-rollover",
             "enable-weekly-notes",
             "weekly-notes-directory",
             "weekly-note-title-pattern",
@@ -4057,7 +4859,7 @@ export function SettingsModal(): JSX.Element {
                     />
                     <ToggleRow
                       label="Tasks are due on the note's date"
-                      description="A task written inside a daily note appears on the calendar for that day automatically — no need to type a due date. An explicit `due:YYYY-MM-DD` still wins."
+                      description="A task written inside a daily note appears on the calendar for that day automatically, without typing a due date. An explicit `due:YYYY-MM-DD` still wins."
                       value={
                         vaultSettings.dailyNotes.tasksDueOnNoteDate !== false
                       }
@@ -4091,10 +4893,10 @@ export function SettingsModal(): JSX.Element {
                       }
                     />
                     <div
-                      className="flex items-center justify-between gap-4 px-5 py-4"
+                      className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3 px-5 py-4"
                       {...settingsSearchTargetProps("open-todays-daily-note")}
                     >
-                      <div className="min-w-0">
+                      <div className="min-w-0 flex-1 basis-56">
                         <div className="text-sm font-medium text-ink-900">
                           Open today's daily note
                         </div>
@@ -4245,10 +5047,10 @@ export function SettingsModal(): JSX.Element {
                       }
                     />
                     <div
-                      className="flex items-center justify-between gap-4 px-5 py-4"
+                      className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3 px-5 py-4"
                       {...settingsSearchTargetProps("open-this-week-note")}
                     >
-                      <div className="min-w-0">
+                      <div className="min-w-0 flex-1 basis-56">
                         <div className="text-sm font-medium text-ink-900">
                           Open this week's note
                         </div>
@@ -4430,10 +5232,10 @@ export function SettingsModal(): JSX.Element {
                       }
                     />
                     <div
-                      className="flex items-center justify-between gap-4 px-5 py-4"
+                      className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3 px-5 py-4"
                       {...settingsSearchTargetProps("open-this-month-note")}
                     >
-                      <div className="min-w-0">
+                      <div className="min-w-0 flex-1 basis-56">
                         <div className="text-sm font-medium text-ink-900">
                           Open this month's note
                         </div>
@@ -4460,7 +5262,7 @@ export function SettingsModal(): JSX.Element {
           id: "folders",
           title: "Folders",
           description:
-            "Rename the built-in folders and the Tasks view as they appear in the UI.",
+            "Rename the built-in folders and the Tasks view as they appear in the UI, and choose which folder on disk each system folder uses.",
           searchIds: [
             "inbox-label",
             "quick-notes-label",
@@ -4468,7 +5270,7 @@ export function SettingsModal(): JSX.Element {
             "trash-label",
             "tasks-label",
             "inbox-path",
-            "quick-notes-path",
+            "quick-path",
             "archive-path",
             "trash-path",
           ],
@@ -4476,7 +5278,7 @@ export function SettingsModal(): JSX.Element {
             <div className="space-y-6">
               <Section
                 title="System Folders"
-                description="Customize how the built-in folders and the Tasks view are named in the UI. This changes labels only — the internal folder ids stay `inbox`, `quick`, `archive`, and `trash`, even when primary notes live at the vault root."
+                description="Customize how the built-in folders and the Tasks view are named in the UI. This changes labels only: the internal folder ids stay `inbox`, `quick`, `archive`, and `trash`, even when primary notes live at the vault root."
               >
                 <TextInputRow
                   label="Inbox label"
@@ -4512,7 +5314,7 @@ export function SettingsModal(): JSX.Element {
                 />
                 <TextInputRow
                   label="Tasks label"
-                  description="Display name for the vault-wide Tasks view — sidebar, tab, title bar, and command palette."
+                  description="Display name for the vault-wide Tasks view in the sidebar, tab, title bar, and command palette."
                   value={systemFolderLabels.tasks ?? ""}
                   placeholder={DEFAULT_SYSTEM_FOLDER_LABELS.tasks}
                   settingId="tasks-label"
@@ -4650,10 +5452,10 @@ export function SettingsModal(): JSX.Element {
           >
             {supportsCustomTemplates ? (
               <div
-                className="flex items-center justify-between gap-4 px-5 py-4"
+                className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3 px-5 py-4"
                 {...settingsSearchTargetProps("templates-new")}
               >
-                <div className="min-w-0">
+                <div className="min-w-0 flex-1 basis-56">
                   <div className="text-sm font-medium text-ink-900">
                     Create a custom template
                   </div>
@@ -4672,12 +5474,16 @@ export function SettingsModal(): JSX.Element {
               </div>
             ) : (
               <InlineNote>
-                Custom templates require a local vault. Built-in templates still
-                work here.
+                Custom templates need ZenNotes server 2.46 or later. Update the
+                server and{" "}
+                {workspaceMode === "remote"
+                  ? "reconnect this workspace"
+                  : "reload"}
+                ; built-in templates still work here.
               </InlineNote>
             )}
-            <div className="flex items-center justify-between gap-4 border-t border-paper-300/40 px-5 py-4">
-              <div className="min-w-0">
+            <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3 border-t border-paper-300/40 px-5 py-4">
+              <div className="min-w-0 flex-1 basis-56">
                 <div className="text-sm font-medium text-ink-900">
                   {hideBuiltinTemplates
                     ? "Built-in templates are hidden"
@@ -4685,7 +5491,7 @@ export function SettingsModal(): JSX.Element {
                 </div>
                 <div className="mt-1 text-xs leading-5 text-ink-500">
                   {hideBuiltinTemplates
-                    ? "The shipped templates are hidden from the picker and palette — your custom ones still show. Restore them anytime."
+                    ? "The shipped templates are hidden from the picker and palette. Your custom ones still show. Restore them anytime."
                     : "Hide every shipped template from the picker and palette. Your custom templates are unaffected."}
                 </div>
               </div>
@@ -4703,18 +5509,18 @@ export function SettingsModal(): JSX.Element {
             {allTemplates.map((template) => (
               <div
                 key={template.id}
-                className="flex items-center justify-between gap-4 px-5 py-3"
+                className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3 px-5 py-3"
               >
-                <div className="min-w-0">
+                <div className="min-w-0 flex-1 basis-56">
                   <div className="text-sm font-medium text-ink-900">
                     {template.name}
                   </div>
                   <div className="mt-0.5 truncate text-xs text-ink-500">
                     {template.category}
-                    {template.description ? ` — ${template.description}` : ""}
+                    {template.description ? ` · ${template.description}` : ""}
                   </div>
                 </div>
-                <div className="flex shrink-0 items-center gap-2">
+                <div className="flex max-w-full flex-wrap items-center gap-2">
                   {template.builtin && (
                     <span className="rounded-md bg-paper-200 px-2 py-1 text-xs uppercase tracking-wide text-ink-400">
                       Built-in
@@ -4770,6 +5576,7 @@ export function SettingsModal(): JSX.Element {
         "claude",
         "claude code",
         "claude desktop",
+        "code tab",
         "codex",
         "anthropic",
         "openai",
@@ -4796,6 +5603,39 @@ export function SettingsModal(): JSX.Element {
             "client",
             "install",
             "uninstall",
+          ],
+        },
+        {
+          id: "mcp-server-token",
+          title: "MCP server token",
+          description:
+            "Let assistants use the auth token of the ZenNotes Server this vault is on.",
+          keywords: [
+            "token",
+            "auth",
+            "server",
+            "remote",
+            "credentials",
+            "zn connect",
+            "share",
+            "assistant",
+          ],
+        },
+        {
+          id: "review-agent-edits",
+          title: "Review agent edits",
+          description:
+            "Keep what a note said before an assistant edits it through MCP, so you can accept or reject each change.",
+          keywords: [
+            "review",
+            "agent",
+            "assistant",
+            "ai",
+            "changes",
+            "diff",
+            "accept",
+            "reject",
+            "mcp",
           ],
         },
         {
@@ -4844,6 +5684,20 @@ export function SettingsModal(): JSX.Element {
           ],
         },
         {
+          id: "cli-updates",
+          title: "zn updates",
+          description:
+            "The installed `zn` version, the version this ZenNotes ships, and Check for updates.",
+          keywords: ["cli", "zn", "update", "upgrade", "version", "release", "check"],
+        },
+        {
+          id: "cli-auto-update",
+          title: "Update zn automatically",
+          description:
+            "ZenNotes installs new `zn` releases itself after checking their signature.",
+          keywords: ["cli", "zn", "update", "upgrade", "version", "release", "automatic"],
+        },
+        {
           id: "cli-quick-reference",
           title: "CLI quick reference",
           description: "A handful of the most useful `zn` commands.",
@@ -4869,8 +5723,18 @@ export function SettingsModal(): JSX.Element {
         {
           id: "zen-notes-version",
           title: "ZenNotes version",
-          description: "App identity, current version, and product details.",
-          keywords: ["about", "version", "identity"],
+          description:
+            "App identity, current version, and the details to paste into a bug report.",
+          keywords: [
+            "about",
+            "version",
+            "identity",
+            "bug report",
+            "electron",
+            "os",
+            "install",
+            "copy details",
+          ],
         },
         {
           id: "updates",
@@ -4883,6 +5747,22 @@ export function SettingsModal(): JSX.Element {
           title: "Lumary Labs",
           description: "Company and product details.",
           keywords: ["company", "lumary", "logo"],
+        },
+        {
+          id: "usage-count",
+          title: "Count this copy anonymously",
+          description:
+            "Once per install and per update, tell zennotes.org the version, system and install type, with no identifier.",
+          keywords: [
+            "privacy",
+            "anonymous",
+            "count",
+            "usage",
+            "telemetry",
+            "analytics",
+            "statistics",
+          ],
+          available: appInfo.runtime === "desktop",
         },
         {
           id: "config-file",
@@ -4913,130 +5793,8 @@ export function SettingsModal(): JSX.Element {
                     v{appInfo.version}
                   </span>
                 </div>
-                <div
-                  className="mx-auto mt-5 max-w-[44rem] rounded-2xl border border-paper-300/65 bg-paper-50/65 p-4 text-left shadow-[0_10px_30px_rgba(15,23,42,0.04)]"
-                  {...settingsSearchTargetProps("updates")}
-                >
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="text-xs font-medium uppercase tracking-[0.16em] text-ink-500">
-                        Updates
-                      </div>
-                      <div className="mt-1 flex flex-wrap items-center gap-2">
-                        <span
-                          className={[
-                            "rounded-full border px-2.5 py-1 text-xs font-medium",
-                            updatePhaseBadgeClass(
-                              appUpdateState?.phase ?? "idle",
-                            ),
-                          ].join(" ")}
-                        >
-                          {formatUpdatePhaseLabel(
-                            appUpdateState?.phase ?? "idle",
-                          )}
-                        </span>
-                        {appUpdateState?.availableVersion && (
-                          <span className="text-xs text-ink-500">
-                            Latest: v{appUpdateState.availableVersion}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                    <div className="flex flex-wrap items-center justify-end gap-2">
-                      {appUpdateState?.phase === "available" &&
-                      appUpdateState.installable ? (
-                        <button
-                          onClick={triggerUpdateDownload}
-                          className="rounded-xl border border-accent/30 bg-accent/10 px-3.5 py-2 text-xs font-medium text-accent transition-colors hover:bg-accent/15"
-                        >
-                          Download Update
-                        </button>
-                      ) : appUpdateState?.phase === "downloaded" ? (
-                        <button
-                          onClick={triggerUpdateInstall}
-                          className="rounded-xl border border-accent/30 bg-accent/10 px-3.5 py-2 text-xs font-medium text-accent transition-colors hover:bg-accent/15"
-                        >
-                          Install and Relaunch
-                        </button>
-                      ) : (
-                        <button
-                          onClick={triggerUpdateCheck}
-                          disabled={
-                            appUpdateState?.phase === "checking" ||
-                            appUpdateState?.phase === "downloading"
-                          }
-                          className={[
-                            "rounded-xl border px-3.5 py-2 text-xs font-medium transition-colors",
-                            appUpdateState?.phase === "checking" ||
-                            appUpdateState?.phase === "downloading"
-                              ? "cursor-not-allowed border-paper-300/60 bg-paper-100/45 text-ink-400"
-                              : "border-paper-300/70 bg-paper-100/80 text-ink-800 hover:bg-paper-200",
-                          ].join(" ")}
-                        >
-                          Check for Updates
-                        </button>
-                      )}
-                      <a
-                        href={
-                          appInfo.homepage ??
-                          "https://github.com/ZenNotes/zennotes/releases/latest"
-                        }
-                        target="_blank"
-                        rel="noreferrer"
-                        className="rounded-xl border border-paper-300/70 bg-paper-100/80 px-3.5 py-2 text-xs font-medium text-ink-700 transition-colors hover:bg-paper-200"
-                      >
-                        View Release
-                      </a>
-                    </div>
-                  </div>
-                  <p className="mt-3 text-sm leading-6 text-ink-600">
-                    {appUpdateState?.message ??
-                      "Check GitHub releases for a newer ZenNotes build."}
-                  </p>
-                  {appUpdateState?.phase === "downloading" && (
-                    <div className="mt-3">
-                      <div className="h-2 overflow-hidden rounded-full bg-paper-200/90">
-                        <div
-                          className="h-full rounded-full bg-accent transition-[width] duration-200"
-                          style={{
-                            width: `${Math.max(0, Math.min(100, appUpdateState.progressPercent ?? 0))}%`,
-                          }}
-                        />
-                      </div>
-                      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-ink-500">
-                        <span>
-                          {Math.round(appUpdateState.progressPercent ?? 0)}%
-                        </span>
-                        {formatBytes(appUpdateState.transferredBytes) &&
-                          formatBytes(appUpdateState.totalBytes) && (
-                            <span>
-                              {formatBytes(appUpdateState.transferredBytes)} /{" "}
-                              {formatBytes(appUpdateState.totalBytes)}
-                            </span>
-                          )}
-                        {formatBytes(appUpdateState.bytesPerSecond) && (
-                          <span>
-                            {formatBytes(appUpdateState.bytesPerSecond)}/s
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  )}
-                  {displayedReleaseNotes && (
-                    <details className="mt-3 rounded-xl border border-paper-300/60 bg-paper-100/60 px-3 py-2.5">
-                      <summary className="cursor-pointer text-xs font-medium uppercase tracking-[0.16em] text-ink-500">
-                        Release notes
-                      </summary>
-                      <pre className="mt-2 whitespace-pre-wrap font-sans text-sm leading-6 text-ink-600">
-                        {displayedReleaseNotes}
-                      </pre>
-                    </details>
-                  )}
-                  <div className="mt-3 text-xs leading-5 text-ink-500">
-                    In-app updates use the published GitHub release feed. For
-                    general users, that feed must be publicly reachable.
-                  </div>
-                </div>
+                <VersionDetails appInfo={appInfo} />
+                <AppUpdatesCard homepage={appInfo.homepage} />
                 <p className="mx-auto mt-2 max-w-[44rem] text-center">
                   {appInfo.description}. Visit{" "}
                   <a
@@ -5081,6 +5839,7 @@ export function SettingsModal(): JSX.Element {
               </div>
             </div>
           </Section>
+          {appInfo.runtime === "desktop" && <UsageCountSetting />}
           {appInfo.runtime === "desktop" && <ConfigFileSection />}
         </div>
       ),
@@ -5095,6 +5854,40 @@ export function SettingsModal(): JSX.Element {
     searchResults[0] ??
     null;
   const visibleCategory = visibleSearchResult?.category ?? null;
+
+  // What a click on a search result does, shared with the keyboard. (#108)
+  const openSearchResult = (result: (typeof searchResults)[number]): void => {
+    setActiveCategory(result.category.id);
+    setActiveSearchResultId(result.id);
+    if (result.type === "setting") {
+      // If the target lives on a sub-tab, open that sub-tab first
+      // so the element is mounted before we scroll to it.
+      const subTabId = result.category.subTabs?.find(
+        (tab) => tab.searchIds?.includes(result.targetId),
+      )?.id;
+      if (subTabId) {
+        setActiveSubTabByCategory((prev) => ({
+          ...prev,
+          [result.category.id]: subTabId,
+        }));
+      }
+      jumpToSettingsSearchTarget(result.targetId);
+    }
+  };
+  const onSearchFieldKeyDown = (
+    e: React.KeyboardEvent<HTMLInputElement>,
+  ): void => {
+    if (isImeComposing(e)) return;
+    const action = settingsSearchFieldAction(e);
+    if (!action) return;
+    const current = searchResults.findIndex(
+      (result) => result.id === visibleSearchResult?.id,
+    );
+    const target = searchResults[settingsSearchStep(action, current, searchResults.length)];
+    if (!target) return;
+    e.preventDefault();
+    openSearchResult(target);
+  };
 
   // When the visible search result is a setting that lives on a sub-tab, open
   // that sub-tab so the matched control is actually shown — not only when the
@@ -5118,6 +5911,14 @@ export function SettingsModal(): JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visibleSettingResultId]);
 
+  // Walking the results from the search field can pick a row the list has
+  // scrolled away from; keep the picked row on screen.
+  const selectedResultRef = useRef<HTMLButtonElement>(null);
+  const selectedResultId = visibleSearchResult?.id ?? null;
+  useEffect(() => {
+    selectedResultRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [selectedResultId]);
+
   // Header summary follows the active sub-tab so it describes what's actually on
   // screen, instead of always showing the category's first-sub-tab blurb.
   const activeSubTabForHeader = visibleCategory?.subTabs?.find(
@@ -5139,8 +5940,36 @@ export function SettingsModal(): JSX.Element {
       >
         <div
           ref={ref}
-          className="grid h-[min(92vh,980px)] w-[min(1120px,96vw)] grid-cols-[252px_minmax(0,1fr)] overflow-hidden rounded-3xl border border-paper-300/70 bg-paper-100 shadow-float"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Settings"
+          // Tells Settings apart from the dialogs that can open over it: the
+          // close shortcut closes Settings only when nothing sits on top.
+          data-settings-dialog=""
+          tabIndex={-1}
+          // The page another surface asked for (Review on the status bar).
+          // The phone shells page this dialog list-first and read it to open
+          // on that page instead of making the person find it again.
+          data-settings-target={initialSettingsTarget ?? undefined}
+          className="grid h-[min(92vh,980px)] w-[min(1120px,96vw)] grid-cols-[252px_minmax(0,1fr)] overflow-hidden rounded-3xl border border-paper-300/70 bg-paper-100 shadow-float outline-none"
           onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => {
+            trapDialogTab(e, ref.current);
+            // Handled here, not on the window: the shortcut recorders capture
+            // keys at the window and must win while they are recording.
+            const target = e.target as HTMLElement;
+            const typing =
+              target.isContentEditable ||
+              /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName);
+            if (
+              !isSettingsFindKey(e, { vimMode, mac: isMacPlatform(), typing })
+            )
+              return;
+            e.preventDefault();
+            e.stopPropagation();
+            navSearchRef.current?.focus();
+            navSearchRef.current?.select();
+          }}
         >
           <aside className="flex min-h-0 flex-col border-r border-paper-300/60 bg-[linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.01))]">
             <div className="border-b border-paper-300/55 px-4 py-4">
@@ -5150,8 +5979,10 @@ export function SettingsModal(): JSX.Element {
               <div className="mt-3">
                 <label className="relative block">
                   <input
+                    ref={navSearchRef}
                     value={navQuery}
                     onChange={(e) => setNavQuery(e.target.value)}
+                    onKeyDown={onSearchFieldKeyDown}
                     placeholder="Search settings…"
                     className="w-full rounded-xl border border-paper-300/70 bg-paper-50/75 px-3 py-2.5 pl-9 text-sm text-ink-900 outline-none placeholder:text-ink-400 focus:border-accent/45"
                   />
@@ -5227,25 +6058,13 @@ export function SettingsModal(): JSX.Element {
                     return (
                       <button
                         key={result.id}
+                        ref={selected ? selectedResultRef : undefined}
                         type="button"
-                        onClick={() => {
-                          setActiveCategory(result.category.id);
-                          setActiveSearchResultId(result.id);
-                          if (result.type === "setting") {
-                            // If the target lives on a sub-tab, open that sub-tab first
-                            // so the element is mounted before we scroll to it.
-                            const subTabId = result.category.subTabs?.find(
-                              (tab) => tab.searchIds?.includes(result.targetId),
-                            )?.id;
-                            if (subTabId) {
-                              setActiveSubTabByCategory((prev) => ({
-                                ...prev,
-                                [result.category.id]: subTabId,
-                              }));
-                            }
-                            jumpToSettingsSearchTarget(result.targetId);
-                          }
-                        }}
+                        // The phone shells hide whole sections (MCP, CLI,
+                        // and Keymap on a phone); this lets them hide the
+                        // search results that would open one.
+                        data-settings-result-category={result.category.id}
+                        onClick={() => openSearchResult(result)}
                         className={[
                           "w-full rounded-xl px-3 py-2.5 text-left transition-colors",
                           selected
@@ -5283,7 +6102,7 @@ export function SettingsModal(): JSX.Element {
             </div>
           </aside>
 
-          <div className="flex min-h-0 flex-col">
+          <div className="flex min-h-0 min-w-0 flex-col">
             <div className="flex items-start justify-between gap-4 border-b border-paper-300/60 px-7 py-5">
               <div>
                 <div className="text-xs font-medium uppercase tracking-[0.22em] text-ink-500">
@@ -5384,9 +6203,11 @@ function KeymapSettings({
 
   const groups = useMemo(() => {
     const q = query.trim().toLowerCase();
+    const capabilities = getZenBridge().getCapabilities();
     return getKeymapDefinitionsByGroup()
       .map((group) => {
         const items = group.items.filter((definition) => {
+          if (!keymapAvailableOnHost(definition.id, capabilities)) return false;
           if (
             definition.vimOnly &&
             !vimMode &&
@@ -5396,10 +6217,12 @@ function KeymapSettings({
             // before turning Vim mode back on, but still let the filter work.
           }
           if (!q) return true;
+          const display =
+            getKeymapDisplay(overrides, definition.id) || UNBOUND_LABEL;
           return (
             definition.title.toLowerCase().includes(q) ||
             definition.description.toLowerCase().includes(q) ||
-            getKeymapDisplay(overrides, definition.id).toLowerCase().includes(q)
+            display.toLowerCase().includes(q)
           );
         });
         return items.length > 0 ? { ...group, items } : null;
@@ -5415,7 +6238,8 @@ function KeymapSettings({
   const hasOverrides = Object.keys(overrides).length > 0;
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="flex h-full min-h-0 flex-col gap-4">
+      <IgnoredKeysRow settingId="ignored-keys" />
       <div className="flex min-h-0 flex-1 flex-col rounded-3xl border border-paper-300/60 bg-paper-50/45 shadow-[0_14px_36px_rgba(15,23,42,0.04)]">
         <div className="sticky top-0 z-10 rounded-t-[22px] border-b border-paper-300/55 bg-paper-50/95 px-5 py-4 backdrop-blur">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -5425,16 +6249,17 @@ function KeymapSettings({
               </div>
               <div className="mt-1 text-xs leading-5 text-ink-500">
                 Record a new key or sequence for the app’s keyboard-first
-                actions. Standard accessibility fallbacks like arrows, Enter,
-                and Escape still work.
+                actions, or unbind one so no key triggers it. Standard
+                accessibility fallbacks like arrows, Enter, and Escape still
+                work.
               </div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex max-w-full flex-wrap items-center gap-2">
               <input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Filter keymaps…"
-                className="w-72 rounded-xl border border-paper-300/70 bg-paper-100/80 px-4 py-2.5 text-sm text-ink-900 outline-none placeholder:text-ink-400 focus:border-accent/45"
+                className="w-72 max-w-full rounded-xl border border-paper-300/70 bg-paper-100/80 px-4 py-2.5 text-sm text-ink-900 outline-none placeholder:text-ink-400 focus:border-accent/45"
               />
               <button
                 type="button"
@@ -5462,7 +6287,8 @@ function KeymapSettings({
               <div className="pb-4">
                 {group.items.map((definition) => {
                   const current = getKeymapBinding(overrides, definition.id);
-                  const custom = !!overrides[definition.id];
+                  const custom = overrides[definition.id] !== undefined;
+                  const unbound = isUnboundBinding(current);
                   const conflict = findKeymapConflict(
                     overrides,
                     definition.id,
@@ -5471,12 +6297,14 @@ function KeymapSettings({
                   const inactive =
                     (definition.vimOnly && !vimMode) ||
                     (definition.nonVimOnly && vimMode);
+                  // The binding and its buttons wrap under the title on a
+                  // narrow pane instead of squeezing it to a word per line.
                   return (
                     <div
                       key={definition.id}
-                      className="flex items-center justify-between gap-4 px-5 py-4"
+                      className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3 px-5 py-4"
                     >
-                      <div className="min-w-0">
+                      <div className="min-w-0 flex-1 basis-56">
                         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                           <span className="text-sm font-medium text-ink-900">
                             {definition.title}
@@ -5494,7 +6322,7 @@ function KeymapSettings({
                           {conflict && (
                             <span
                               className="rounded-full border border-danger/35 bg-danger/10 px-2 py-0.5 text-2xs font-medium uppercase tracking-[0.14em] text-danger"
-                              title={`Also bound to “${conflict.title}”. Two global shortcuts on one key means one is ignored — reassign one to resolve.`}
+                              title={`Also bound to “${conflict.title}”. Two global shortcuts on one key means one is ignored. Reassign one to resolve.`}
                             >
                               Conflicts with {conflict.title}
                             </span>
@@ -5504,9 +6332,18 @@ function KeymapSettings({
                           {definition.description}
                         </div>
                       </div>
-                      <div className="flex shrink-0 items-center gap-2">
-                        <span className="rounded-xl border border-paper-300/70 bg-paper-100/85 px-3 py-1.5 text-xs font-medium text-ink-900">
-                          {formatKeymapBinding(current, definition.kind)}
+                      <div className="flex max-w-full flex-wrap items-center gap-2">
+                        <span
+                          className={[
+                            "rounded-xl border px-3 py-1.5 text-xs font-medium",
+                            unbound
+                              ? "border-dashed border-paper-300/70 bg-paper-100/45 text-ink-500"
+                              : "border-paper-300/70 bg-paper-100/85 text-ink-900",
+                          ].join(" ")}
+                        >
+                          {unbound
+                            ? UNBOUND_LABEL
+                            : formatKeymapBinding(current, definition.kind)}
                         </span>
                         <button
                           type="button"
@@ -5514,6 +6351,22 @@ function KeymapSettings({
                           className="rounded-xl border border-paper-300/70 bg-paper-100/80 px-3 py-1.5 text-xs font-medium text-ink-800 transition-colors hover:bg-paper-200"
                         >
                           Change…
+                        </button>
+                        <button
+                          type="button"
+                          disabled={unbound}
+                          onClick={() =>
+                            onSetBinding(definition.id, UNBOUND_BINDING)
+                          }
+                          title="Remove the key entirely. Nothing triggers this action until it is rebound or reset."
+                          className={[
+                            "rounded-xl border px-3 py-1.5 text-xs font-medium transition-colors",
+                            unbound
+                              ? "cursor-not-allowed border-paper-300/60 bg-paper-100/45 text-ink-400"
+                              : "border-paper-300/70 bg-paper-100/80 text-ink-700 hover:bg-paper-200",
+                          ].join(" ")}
+                        >
+                          Unbind
                         </button>
                         <button
                           type="button"
@@ -5558,7 +6411,95 @@ function KeymapSettings({
             );
             setRecording(null);
           }}
+          onUnbind={() => {
+            onSetBinding(recording.id, UNBOUND_BINDING);
+            setRecording(null);
+          }}
         />
+      )}
+    </div>
+  );
+}
+
+function IgnoredKeysRow({ settingId }: { settingId?: string }): JSX.Element {
+  const ignoredKeys = useStore((s) => s.ignoredKeys);
+  const addIgnoredKey = useStore((s) => s.addIgnoredKey);
+  const removeIgnoredKey = useStore((s) => s.removeIgnoredKey);
+  const [recording, setRecording] = useState(false);
+
+  // Capture the next key. The window guard stands aside while this runs
+  // (setIgnoredKeysRecorderActive), since a key already on the list would
+  // otherwise never reach us; Escape cancels without recording anything.
+  useEffect(() => {
+    if (!recording) return;
+    setIgnoredKeysRecorderActive(true);
+    const onKey = (event: KeyboardEvent): void => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.key === "Escape") {
+        setRecording(false);
+        return;
+      }
+      if (["Shift", "Control", "Alt", "Meta"].includes(event.key)) return;
+      const token = ignoredKeyTokenFromEvent(event);
+      if (!token) return;
+      addIgnoredKey(token);
+      setRecording(false);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      setIgnoredKeysRecorderActive(false);
+    };
+  }, [recording, addIgnoredKey]);
+
+  return (
+    <div
+      className="rounded-3xl border border-paper-300/60 bg-paper-50/45 px-5 py-4 shadow-[0_14px_36px_rgba(15,23,42,0.04)]"
+      {...settingsSearchTargetProps(settingId)}
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-sm font-medium text-ink-900">Ignored keys</div>
+          <div className="mt-1 text-xs leading-5 text-ink-500">
+            Keys the app never sees. Remappers with tap-hold layers (Kanata,
+            QMK, ZMK) send a harmless extra key with every keystroke, on Linux
+            usually the Katakana/Hiragana key, which reads as KanaMode; each one
+            would otherwise reset a pending <code>jk</code>, <code>dd</code>,
+            leader chord or hint. Also <code>:ignorekey</code> in the editor, or{" "}
+            <code>ignored_keys</code> under <code>[editor]</code> in config.toml.
+          </div>
+        </div>
+        <Button
+          variant={recording ? "primary" : "secondary"}
+          size="sm"
+          data-ignored-keys-record
+          onClick={() => setRecording((r) => !r)}
+        >
+          {recording ? "Press the key… (Esc cancels)" : "Record a key"}
+        </Button>
+      </div>
+      {ignoredKeys.length > 0 && (
+        <div className="mt-3 flex flex-wrap items-center gap-1.5" data-ignored-keys>
+          {ignoredKeys.map((key) => (
+            <span
+              key={key}
+              data-ignored-key={key}
+              className="inline-flex items-center gap-1 rounded-full border border-paper-300/70 bg-paper-200/50 py-0.5 pl-2.5 pr-1 font-mono text-xs text-ink-800"
+            >
+              {key}
+              <button
+                type="button"
+                onClick={() => removeIgnoredKey(key)}
+                title={`Stop ignoring ${key}`}
+                aria-label={`Stop ignoring ${key}`}
+                className="rounded-full px-1 text-ink-400 transition-colors hover:bg-paper-300/70 hover:text-ink-800"
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
       )}
     </div>
   );
@@ -5570,12 +6511,14 @@ function KeymapRecorderModal({
   currentBinding,
   onClose,
   onSave,
+  onUnbind,
 }: {
   definition: KeymapDefinition;
   overrides: KeymapOverrides;
   currentBinding: string;
   onClose: () => void;
   onSave: (binding: string) => void;
+  onUnbind: () => void;
 }): JSX.Element {
   const [binding, setBinding] = useState(currentBinding);
   const mac = isMacPlatform();
@@ -5660,8 +6603,8 @@ function KeymapRecorderModal({
             </div>
             <div className="mt-2 text-xs leading-5 text-ink-500">
               {definition.kind === "shortcut"
-                ? `Press the shortcut you want. ${mac ? "Command" : "Ctrl"}-style chords are saved in the app’s cross-platform format.`
-                : `Press the sequence you want. Backspace removes the last token, and multi-step sequences stop at ${definition.maxTokens ?? 2} key${(definition.maxTokens ?? 2) === 1 ? "" : "s"}.`}
+                ? `Press the shortcut you want; Backspace clears it. ${mac ? "Command" : "Ctrl"}-style chords are saved in the app’s cross-platform format. Unbind leaves the action with no key at all.`
+                : `Press the sequence you want. Backspace removes the last token, and multi-step sequences stop at ${definition.maxTokens ?? 2} key${(definition.maxTokens ?? 2) === 1 ? "" : "s"}. Unbind leaves the action with no key at all.`}
             </div>
           </div>
           {conflict && (
@@ -5670,13 +6613,16 @@ function KeymapRecorderModal({
               <span>
                 Already used by{" "}
                 <strong className="font-semibold">{conflict.title}</strong>. Two
-                global shortcuts can’t share a key — reset or reassign that one
+                global shortcuts can’t share a key. Reset or reassign that one
                 first.
               </span>
             </div>
           )}
           <div className="mt-3 text-xs text-ink-500">
-            Current: {formatKeymapBinding(currentBinding, definition.kind)}
+            Current:{" "}
+            {isUnboundBinding(currentBinding)
+              ? UNBOUND_LABEL
+              : formatKeymapBinding(currentBinding, definition.kind)}
           </div>
           <div className="mt-1 text-xs text-ink-500">
             Default:{" "}
@@ -5689,10 +6635,17 @@ function KeymapRecorderModal({
         <div className="flex items-center justify-between gap-3 border-t border-paper-300/60 px-5 py-3">
           <button
             type="button"
-            onClick={() => setBinding("")}
-            className="rounded-md border border-paper-300 bg-paper-100 px-3 py-1.5 text-xs font-medium text-ink-700 transition-colors hover:bg-paper-200"
+            onClick={onUnbind}
+            disabled={isUnboundBinding(currentBinding)}
+            title="Save this action with no key at all."
+            className={[
+              "rounded-md border px-3 py-1.5 text-xs font-medium transition-colors",
+              isUnboundBinding(currentBinding)
+                ? "cursor-not-allowed border-paper-300/60 bg-paper-100/45 text-ink-400"
+                : "border-paper-300 bg-paper-100 text-ink-700 hover:bg-paper-200",
+            ].join(" ")}
           >
-            Clear
+            Unbind
           </button>
           <div className="flex items-center gap-2">
             <button
@@ -5759,11 +6712,20 @@ function CategorySubTabs({
   onSelect: (id: string) => void;
 }): JSX.Element {
   const active = tabs.find((tab) => tab.id === activeId) ?? tabs[0];
+  const tabListRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    tabListRef.current
+      ?.querySelector<HTMLElement>('[aria-selected="true"]')
+      ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [active.id]);
+
   return (
     <div className="space-y-6">
       <div
+        ref={tabListRef}
         role="tablist"
-        className="flex flex-wrap items-center gap-1 rounded-2xl border border-paper-300/60 bg-paper-50/45 p-1"
+        className="flex items-center justify-between gap-1 overflow-x-auto rounded-2xl border border-paper-300/60 bg-paper-50/45 p-1"
       >
         {tabs.map((tab) => {
           const selected = tab.id === active.id;
@@ -5775,7 +6737,7 @@ function CategorySubTabs({
               aria-selected={selected}
               onClick={() => onSelect(tab.id)}
               className={[
-                "rounded-xl px-3.5 py-1.5 text-sm font-medium transition-colors",
+                "shrink-0 whitespace-nowrap rounded-xl px-2 py-1.5 text-sm font-medium transition-colors",
                 selected
                   ? "bg-paper-200/90 text-ink-900 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.06)]"
                   : "text-ink-500 hover:bg-paper-200/50 hover:text-ink-800",
@@ -5794,6 +6756,53 @@ function CategorySubTabs({
 function InlineNote({ children }: { children: React.ReactNode }): JSX.Element {
   return (
     <div className="px-5 py-4 text-xs leading-5 text-ink-500">{children}</div>
+  );
+}
+
+/** The lines a bug report needs (OS, engine, install format, remote server),
+ *  the same ones `:version` prints in Vim mode, with a one-click copy (#814). */
+function VersionDetails({ appInfo }: { appInfo: ZenAppInfo }): JSX.Element {
+  const workspaceMode = useStore((s) => s.workspaceMode);
+  const remoteWorkspaceInfo = useStore((s) => s.remoteWorkspaceInfo);
+  const [copied, setCopied] = useState(false);
+  const lines = buildVersionReport({
+    app: appInfo,
+    remoteServer:
+      workspaceMode === "remote"
+        ? {
+            baseUrl: remoteWorkspaceInfo?.baseUrl ?? null,
+            version: remoteWorkspaceInfo?.capabilities?.version ?? null,
+          }
+        : null,
+  });
+  const text = lines.join("\n");
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), 1500);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+  return (
+    <div className="mx-auto mt-4 max-w-[44rem] text-left">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="text-xs font-medium uppercase tracking-[0.16em] text-ink-500">
+          Version details
+        </div>
+        <Button
+          variant="ghost"
+          aria-label="Copy version details"
+          onClick={() => setCopied(writeClipboardText(text))}
+        >
+          {copied ? "Copied" : "Copy details"}
+        </Button>
+      </div>
+      <pre className="mt-2 whitespace-pre-wrap break-words rounded-lg border border-paper-300/70 bg-paper-100/70 px-3 py-2 font-mono text-xs leading-5 text-ink-600">
+        {text}
+      </pre>
+      <p className="mt-2 text-xs leading-5 text-ink-500">
+        Paste these into a bug report. In Vim mode, <code>:version</code>{" "}
+        prints the same lines and <code>:version copy</code> copies them.
+      </p>
+    </div>
   );
 }
 
@@ -5822,7 +6831,7 @@ function ConfigFileSection(): JSX.Element {
   return (
     <Section
       title="Configuration file"
-      description="Your preferences — theme, editor, vim, keymaps, and more — are mirrored to a plain-text TOML file. Sync it across machines with git, stow, or chezmoi; edit it by hand and changes apply live."
+      description="Your preferences (theme, editor, vim, keymaps, and more) are mirrored to a plain-text TOML file. Sync it across machines with git, stow, or chezmoi; edit it by hand and changes apply live."
       settingId="config-file"
     >
       <div className="flex flex-col gap-3 px-5 py-4">
@@ -5919,15 +6928,26 @@ function DateNotePatternSupportRow({
         </code>
         .
       </div>
-      <dl className="mt-4 grid grid-cols-1 gap-x-5 gap-y-2 text-xs sm:grid-cols-2">
+      {/* Two columns only while the card itself has room for them, and the
+          meaning drops under its token when a column is too narrow. A
+          viewport breakpoint kept two columns in a tablet-width Settings
+          pane, where the meanings shrank to a word per line and ran past
+          the card. */}
+      <dl className="mt-4 flex flex-wrap gap-x-5 gap-y-2 text-xs">
         {DATE_NOTE_PATTERN_TOKENS.map((item) => (
           <div
             key={item.token}
-            className="grid grid-cols-[5rem_4.5rem_1fr] items-baseline gap-3"
+            className="flex min-w-0 flex-1 basis-72 flex-wrap items-baseline gap-x-3 gap-y-0.5"
           >
-            <dt className="font-mono text-ink-900">{item.token}</dt>
-            <dd className="font-mono text-ink-600">{item.output}</dd>
-            <dd className="text-ink-500">{item.meaning}</dd>
+            <dt className="w-20 shrink-0 font-mono text-ink-900">
+              {item.token}
+            </dt>
+            <dd className="w-[4.5rem] shrink-0 font-mono text-ink-600">
+              {item.output}
+            </dd>
+            <dd className="min-w-0 flex-1 basis-24 text-ink-500">
+              {item.meaning}
+            </dd>
           </div>
         ))}
       </dl>
@@ -5978,10 +6998,10 @@ function DateNotePatternResetRow({
         : DEFAULT_MONTHLY_NOTE_LOCALE;
   return (
     <div
-      className="flex items-center justify-between gap-4 px-5 py-4"
+      className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3 px-5 py-4"
       {...settingsSearchTargetProps(settingId)}
     >
-      <div className="min-w-0">
+      <div className="min-w-0 flex-1 basis-56">
         <div className="text-sm font-medium text-ink-900">
           Reset to defaults
         </div>
@@ -6211,12 +7231,16 @@ function TextInputRow({
     onChange(next ? next : null);
   };
 
+  // The field wraps under the label when the row is too narrow, as the Vault
+  // Location buttons do (#871). On one unwrapping line, a fixed-width field
+  // in a tablet-width or narrow-window Settings pane squeezed the label and
+  // description to one word per line.
   return (
     <div
-      className="flex items-center justify-between gap-5 px-5 py-4"
+      className="flex flex-wrap items-center justify-between gap-x-5 gap-y-3 px-5 py-4"
       {...settingsSearchTargetProps(settingId)}
     >
-      <div className="min-w-0 flex-1">
+      <div className="min-w-0 flex-1 basis-56">
         <div className="text-sm font-medium text-ink-900">{label}</div>
         {description && (
           <div className="mt-1 text-xs leading-5 text-ink-500">
@@ -6256,7 +7280,7 @@ function TextInputRow({
           }
         }}
         placeholder={placeholder}
-        className="w-[23rem] max-w-[50vw] shrink-0 rounded-xl border border-paper-300/70 bg-paper-100/80 px-3 py-2 text-sm text-ink-900 outline-none placeholder:text-ink-400 focus:border-accent/45"
+        className="w-[23rem] max-w-full shrink-0 rounded-xl border border-paper-300/70 bg-paper-100/80 px-3 py-2 text-sm text-ink-900 outline-none placeholder:text-ink-400 focus:border-accent/45"
       />
     </div>
   );
@@ -6284,7 +7308,7 @@ function TemplateSelectRow({
   const triggerLabel = missing
     ? "[Missing template]"
     : selected
-      ? `${selected.category} — ${selected.name}`
+      ? `${selected.category} · ${selected.name}`
       : "None (blank note)";
 
   // Custom dropdown (not a native <select>): native popups don't reliably
@@ -6391,12 +7415,13 @@ function TemplateSelectRow({
     }
   };
 
+  // Wraps the picker under the label on a narrow row, like TextInputRow.
   return (
     <div
-      className="flex items-center justify-between gap-5 px-5 py-4"
+      className="flex flex-wrap items-center justify-between gap-x-5 gap-y-3 px-5 py-4"
       {...settingsSearchTargetProps(settingId)}
     >
-      <div className="min-w-0">
+      <div className="min-w-0 flex-1 basis-56">
         <div className="text-sm font-medium text-ink-900">{label}</div>
         {description && (
           <div className="mt-1 text-xs leading-5 text-ink-500">
@@ -6411,7 +7436,7 @@ function TemplateSelectRow({
         aria-expanded={open}
         onClick={() => setOpen((o) => !o)}
         onKeyDown={onTriggerKeyDown}
-        className="flex w-[23rem] max-w-[50vw] shrink-0 items-center justify-between gap-2 rounded-xl border border-paper-300/70 bg-paper-100/80 px-3 py-2 text-left text-sm text-ink-900 outline-none transition-colors hover:bg-paper-200 focus:border-accent/45"
+        className="flex w-[23rem] max-w-full shrink-0 items-center justify-between gap-2 rounded-xl border border-paper-300/70 bg-paper-100/80 px-3 py-2 text-left text-sm text-ink-900 outline-none transition-colors hover:bg-paper-200 focus:border-accent/45"
       >
         <span className={`truncate ${missing ? "text-ink-500" : ""}`}>
           {triggerLabel}
@@ -6451,7 +7476,7 @@ function TemplateSelectRow({
               {items.map((tpl, idx) => {
                 const isSelected = tpl ? tpl.id === value : !value && !missing;
                 const text = tpl
-                  ? `${tpl.category} — ${tpl.name}`
+                  ? `${tpl.category} · ${tpl.name}`
                   : "None (blank note)";
                 return (
                   <button
@@ -6613,12 +7638,13 @@ function FontRow({
     }
   };
 
+  // Wraps the picker under the label on a narrow row, like SegmentedRow.
   return (
     <div
-      className="flex items-center justify-between gap-5 px-5 py-4"
+      className="flex flex-wrap items-center justify-between gap-x-5 gap-y-3 px-5 py-4"
       {...settingsSearchTargetProps(settingId)}
     >
-      <div className="min-w-0">
+      <div className="min-w-0 flex-1 basis-56">
         <div className="text-sm font-medium text-ink-900">{label}</div>
         {description && (
           <div className="mt-1 text-xs leading-5 text-ink-500">
@@ -6630,7 +7656,7 @@ function FontRow({
         ref={buttonRef}
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="flex w-[236px] shrink-0 items-center justify-between gap-2 rounded-xl border border-paper-300/70 bg-paper-100/80 px-3.5 py-2 text-left text-sm text-ink-900 transition-colors hover:bg-paper-200"
+        className="flex w-[236px] max-w-full shrink-0 items-center justify-between gap-2 rounded-xl border border-paper-300/70 bg-paper-100/80 px-3.5 py-2 text-left text-sm text-ink-900 transition-colors hover:bg-paper-200"
       >
         <span
           className="truncate"
@@ -6764,12 +7790,14 @@ function SliderRow({
 }): JSX.Element {
   const display =
     (format ? format(value) : String(value)) + (unit && !format ? unit : "");
+  // Wraps the slider under the label on a narrow row, like SegmentedRow; the
+  // track gives way before the value does when a row of its own is too narrow.
   return (
     <div
-      className="flex items-center justify-between gap-5 px-5 py-4"
+      className="flex flex-wrap items-center justify-between gap-x-5 gap-y-3 px-5 py-4"
       {...settingsSearchTargetProps(settingId)}
     >
-      <div className="min-w-0">
+      <div className="min-w-0 flex-1 basis-56">
         <div className="text-sm font-medium text-ink-900">{label}</div>
         {description && (
           <div className="mt-1 text-xs leading-5 text-ink-500">
@@ -6777,7 +7805,7 @@ function SliderRow({
           </div>
         )}
       </div>
-      <div className="flex shrink-0 items-center gap-3">
+      <div className="flex max-w-full shrink-0 items-center gap-3">
         <input
           type="range"
           min={min}
@@ -6785,7 +7813,7 @@ function SliderRow({
           step={step}
           value={value}
           onChange={(e) => onChange(Number(e.target.value))}
-          className="zen-slider h-1 w-[140px] cursor-pointer appearance-none rounded-full"
+          className="zen-slider h-1 w-[140px] min-w-0 cursor-pointer appearance-none rounded-full"
         />
         <div className="min-w-[54px] text-right text-sm tabular-nums text-ink-800">
           {display}
@@ -6854,6 +7882,21 @@ function NumberRow({
   );
 }
 
+/** The tray setting's description, in the platform's own words: macOS keeps
+ *  the app alive without windows anyway and calls the tray the menu bar, while
+ *  Linux and Windows quit on close and have no Ctrl+Q of their own. */
+function keepRunningInTrayDescription(platform: string): string {
+  const mac = platform === "darwin";
+  return [
+    `Closing the last window hides it instead of ${mac ? "closing it" : "quitting"}, and a ZenNotes icon in the ${mac ? "menu bar" : "system tray"} brings it back.`,
+    "Cloud sync and the Quick capture hotkey keep working meanwhile, and the icon shows the sync state.",
+    mac
+      ? "Quit from the icon's menu or with Cmd+Q."
+      : "Quit from the icon's menu, or with Quit ZenNotes in the command palette.",
+    "If your desktop has no tray, open ZenNotes again to bring the window back.",
+  ].join(" ");
+}
+
 function ToggleRow({
   label,
   description,
@@ -6915,6 +7958,54 @@ function slugifyStatus(name: string): string {
 /** Settings editor for the custom-status Kanban columns. Add, rename, reorder,
  *  and remove columns without touching config.toml by hand; changes are written
  *  straight back to the config file (and the per-vault view override). (#354) */
+function KanbanFolderRootRow({ settingId }: { settingId?: string }): JSX.Element {
+  const root = useStore((s) => s.kanbanFolderRoot);
+  const setKanbanFolderRoot = useStore((s) => s.setKanbanFolderRoot);
+  const [draft, setDraft] = useState(root);
+  useEffect(() => {
+    setDraft(root);
+  }, [root]);
+  const commit = (): void => {
+    setKanbanFolderRoot(draft);
+  };
+  return (
+    <div className="px-5 py-4" {...settingsSearchTargetProps(settingId)}>
+      <div className="text-sm font-medium text-ink-900">Group by the folders inside</div>
+      <div className="mt-1 text-xs leading-5 text-ink-500">
+        A folder path relative to your notes, such as <code>Projects</code>: its
+        subfolders become the columns, deeper notes roll up to their subfolder,
+        and notes outside it share an “Other folders” column. Leave it empty for
+        one column per note folder. On the board, <code>:folderroot Projects</code>{" "}
+        does the same; <code>kanban_folder_root</code> in config.toml is the
+        file-level key.
+      </div>
+      <div className="mt-3 flex items-center gap-2">
+        <input
+          type="text"
+          value={draft}
+          placeholder="Projects"
+          spellCheck={false}
+          autoComplete="off"
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              commit();
+            }
+          }}
+          className="w-64 rounded-md border border-paper-300 bg-paper-50 px-2.5 py-1.5 text-sm text-ink-900 outline-none focus:border-accent"
+        />
+        {root && (
+          <Button variant="secondary" size="sm" onClick={() => setKanbanFolderRoot("")}>
+            Clear
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function KanbanStatusesRow({ settingId }: { settingId?: string }): JSX.Element {
   const statuses = useStore((s) => s.kanbanStatuses);
   const setKanbanStatuses = useStore((s) => s.setKanbanStatuses);
@@ -7040,60 +8131,85 @@ function KanbanStatusesRow({ settingId }: { settingId?: string }): JSX.Element {
   );
 }
 
-const NO_EXCLUDED_FOLDERS: string[] = [];
+const NO_TASKS_FOLDERS: string[] = [];
 
-/** Settings editor for the vault's `tasks.excludedFolders` list (#458). The
- *  sidebar folder context menu ("Exclude from Tasks") is the primary way in;
- *  this list is where entries are reviewed, removed, or typed by hand. Saved
- *  to vault.json, so it travels with the vault and applies to every runtime. */
-function TasksExcludedFoldersRow({
+/** Settings editor for one of the vault's two Tasks folder lists: the Task
+ *  folders that narrow Tasks to themselves (`tasks.includedFolders`, #962) and
+ *  the folders kept out (`tasks.excludedFolders`, #458). The sidebar folder
+ *  context menu is the primary way in; this list is where entries are
+ *  reviewed, removed, or typed by hand. Saved to vault.json, so it travels with
+ *  the vault and applies to every runtime. */
+function TasksFolderListRow({
+  list,
   settingId,
 }: {
+  list: "includedFolders" | "excludedFolders";
   settingId?: string;
 }): JSX.Element {
-  const excluded = useStore(
-    (s) => s.vaultSettings.tasks?.excludedFolders ?? NO_EXCLUDED_FOLDERS,
+  const folders = useStore(
+    (s) => s.vaultSettings.tasks?.[list] ?? NO_TASKS_FOLDERS,
   );
-  const toggleTasksExcludedFolder = useStore(
-    (s) => s.toggleTasksExcludedFolder,
+  const toggle = useStore((s) =>
+    list === "includedFolders"
+      ? s.toggleTasksIncludedFolder
+      : s.toggleTasksExcludedFolder,
   );
   const [draft, setDraft] = useState("");
+  const included = list === "includedFolders";
 
   const addDraft = (): void => {
     const cleaned = normalizeTasksExcludedFolder(draft);
-    if (!cleaned || excluded.includes(cleaned)) return;
+    if (!cleaned || folders.includes(cleaned)) return;
     setDraft("");
-    void toggleTasksExcludedFolder(cleaned);
+    void toggle(cleaned);
   };
 
   return (
     <div className="px-5 py-4" {...settingsSearchTargetProps(settingId)}>
       <div className="text-sm font-medium text-ink-900">
-        Folders excluded from Tasks
+        {included ? "Task folders" : "Folders excluded from Tasks"}
       </div>
       <div className="mt-1 text-xs leading-5 text-ink-500">
-        Notes in these folders never feed the Tasks list, boards, or calendars
-        (their checkboxes stay plain checkboxes). Right-click a folder in the
-        sidebar and choose “Exclude from Tasks”, or add its vault path here.
+        {included ? (
+          <>
+            When this lists folders, only the notes inside them feed the Tasks
+            list, boards, and calendars, and every other checkbox stays a plain
+            checkbox. Leave it empty to collect tasks from the whole vault.
+            Right-click a folder in the sidebar and choose “Use as Task
+            Folder”, or add its vault path here.
+          </>
+        ) : (
+          <>
+            Notes in these folders never feed the Tasks list, boards, or
+            calendars (their checkboxes stay plain checkboxes), even inside a
+            Task folder. Right-click a folder in the sidebar and choose
+            “Exclude from Tasks”, or add its vault path here.
+          </>
+        )}{" "}
         Saved in the vault itself, so the CLI, MCP, and the self-hosted server
         respect it too.
       </div>
       <div className="mt-3 space-y-2">
-        {excluded.length === 0 && (
+        {folders.length === 0 && (
           <div className="rounded-md border border-dashed border-paper-300 px-3 py-2 text-xs text-ink-500">
-            No folders excluded. Reading lists and media backlogs are the usual
-            candidates.
+            {included
+              ? "No Task folders: tasks come from the whole vault."
+              : "No folders excluded. Reading lists and media backlogs are the usual candidates."}
           </div>
         )}
-        {excluded.map((relDir) => (
+        {folders.map((relDir) => (
           <div key={relDir} className="flex items-center gap-2">
             <div className="min-w-0 flex-1 truncate rounded-md border border-paper-300 bg-paper-100 px-2.5 py-1.5 font-mono text-xs text-ink-900">
               {relDir}
             </div>
             <button
               type="button"
-              onClick={() => void toggleTasksExcludedFolder(relDir)}
-              aria-label={`Include ${relDir} in Tasks again`}
+              onClick={() => void toggle(relDir)}
+              aria-label={
+                included
+                  ? `Stop using ${relDir} as a Task folder`
+                  : `Include ${relDir} in Tasks again`
+              }
               className="rounded-md px-2 py-1 text-xs text-ink-500 hover:bg-rose-500/15 hover:text-rose-400"
             >
               Remove
@@ -7111,8 +8227,16 @@ function TasksExcludedFoldersRow({
               addDraft();
             }
           }}
-          placeholder="Folder path, e.g. inbox/Books"
-          aria-label="Folder path to exclude from Tasks"
+          placeholder={
+            included
+              ? "Folder path, e.g. Tasks"
+              : "Folder path, e.g. inbox/Books"
+          }
+          aria-label={
+            included
+              ? "Folder path to use as a Task folder"
+              : "Folder path to exclude from Tasks"
+          }
           className="min-w-0 flex-1 rounded-md border border-paper-300 bg-paper-100 px-2.5 py-1.5 text-sm text-ink-900 outline-none focus:border-accent/60"
         />
         <button
@@ -7120,7 +8244,7 @@ function TasksExcludedFoldersRow({
           onClick={addDraft}
           className="shrink-0 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:opacity-90"
         >
-          Exclude folder
+          {included ? "Add Task folder" : "Exclude folder"}
         </button>
       </div>
     </div>
@@ -7219,12 +8343,17 @@ function SegmentedRow<T extends string>({
   settingId?: string;
   onChange: (next: T) => void;
 }): JSX.Element {
+  // The options wrap under the label when the row is too narrow, as the
+  // Vault Location buttons do (#871), and wrap within themselves when even
+  // a row of their own is too narrow. On one unwrapping line, three long
+  // options in a tablet-width or minimum-width Settings pane squeezed the
+  // label and description to one word per line, and ran past the card.
   return (
     <div
-      className="flex items-center justify-between gap-5 px-5 py-4"
+      className="flex flex-wrap items-center justify-between gap-x-5 gap-y-3 px-5 py-4"
       {...settingsSearchTargetProps(settingId)}
     >
-      <div className="min-w-0">
+      <div className="min-w-0 flex-1 basis-56">
         <div className="text-sm font-medium text-ink-900">{label}</div>
         {description && (
           <div className="mt-1 text-xs leading-5 text-ink-500">
@@ -7232,7 +8361,7 @@ function SegmentedRow<T extends string>({
           </div>
         )}
       </div>
-      <div className="inline-flex shrink-0 rounded-xl border border-paper-300/70 bg-paper-100/75 p-1">
+      <div className="inline-flex max-w-full shrink-0 flex-wrap rounded-xl border border-paper-300/70 bg-paper-100/75 p-1">
         {options.map((option) => (
           <button
             key={option.value}
@@ -7272,11 +8401,11 @@ function CliSettings(): JSX.Element {
     void refresh();
   }, [refresh]);
 
-  const onInstall = async (): Promise<void> => {
+  const onInstall = async (repairToken?: string): Promise<void> => {
     setBusy(true);
     setError(null);
     try {
-      await window.zen.cliInstall();
+      await window.zen.cliInstall(repairToken ? { repairToken } : undefined);
       await refresh();
     } catch (err) {
       setError((err as Error).message);
@@ -7334,11 +8463,13 @@ function CliSettings(): JSX.Element {
 
   const installed = status.installedAt != null;
   const ours = status.installedByThisApp;
-  const chip = installed
-    ? ours
-      ? { label: "Installed", tone: "ok" as const }
-      : { label: "External install", tone: "warn" as const }
-    : { label: "Not installed", tone: "off" as const };
+  const chip = status.repair
+    ? { label: "Needs repair", tone: "warn" as const }
+    : installed
+      ? ours
+        ? { label: "Installed", tone: "ok" as const }
+        : { label: "External install", tone: "warn" as const }
+      : { label: "Not installed", tone: "off" as const };
 
   const isUnavailable = !status.available;
 
@@ -7346,14 +8477,18 @@ function CliSettings(): JSX.Element {
     <div className="space-y-6">
       <Section
         title="Command-Line Tool"
-        description="The `zn` CLI talks to your vault directly from any terminal — perfect for scripts, cron jobs, editor plugins, shell pipelines, MCP, and launcher integrations like Raycast. Once installed, try `zn --help` or pipe text in: `pbpaste | zn capture`."
+        description={
+          status.runtime === "go"
+            ? "Use zn for scripts, note capture, and MCP. Run zn tui to open ZenNotes in your terminal. Your existing commands keep working."
+            : "Use zn to capture, search, and edit notes from your terminal, scripts, and MCP clients. Run zn --help to get started."
+        }
         settingId="zen-command-line-tool"
       >
         <div className="flex flex-col gap-3 px-5 py-4">
           <div className="flex items-start justify-between gap-4">
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                <span className="text-sm font-medium text-ink-900">zen</span>
+                <span className="text-sm font-medium text-ink-900">zn</span>
                 <span
                   className={[
                     "rounded-full border px-2 py-0.5 text-2xs font-medium uppercase tracking-[0.14em]",
@@ -7364,14 +8499,53 @@ function CliSettings(): JSX.Element {
                 </span>
               </div>
               <div className="mt-1 text-xs leading-5 text-ink-500">
-                {installed && ours
-                  ? `Active. Run \`zn --help\` from any terminal.`
-                  : installed && !ours
-                    ? `An unmanaged \`zen\` already exists at this path. Remove it before installing if you want ZenNotes to take over.`
-                    : status.requiresSudo
-                      ? `Symlinks ${status.defaultTarget} to ZenNotes' bundled wrapper. macOS will prompt for admin once because no user-writable directory was found on your PATH.`
-                      : `Symlinks ${status.defaultTarget} to ZenNotes' bundled wrapper.`}
+                {status.repair
+                  ? "This shortcut points to an app location that no longer exists. Review the replacement below, then repair it in place."
+                  : installed && ours
+                    ? status.runtime === "go"
+                      ? `Active. Run \`zn tui\` to open the terminal app, or \`zn --help\` for commands.`
+                      : `Active. Run \`zn --help\` from any terminal.`
+                    : installed && !ours
+                      ? `This installation is managed outside ZenNotes. Keep using its installer or package manager for updates.`
+                      : status.requiresSudo
+                        ? `Installs zn at ${status.defaultTarget}. Administrator access is needed because no user-writable directory was found on your PATH.`
+                        : `Installs zn at ${status.defaultTarget}.`}
               </div>
+              {status.repair && (
+                <div className="mt-2 space-y-1 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs leading-5 text-ink-700">
+                  <div className="font-medium">Repair this shortcut</div>
+                  <div>
+                    Previous target:{" "}
+                    <code className="break-all font-mono">
+                      {status.repair.oldTarget}
+                    </code>
+                  </div>
+                  <div>
+                    New target:{" "}
+                    <code className="break-all font-mono">
+                      {status.repair.newTarget}
+                    </code>
+                  </div>
+                  <div className="text-ink-500">
+                    The previous target will be saved in{" "}
+                    <code className="break-all font-mono">
+                      {status.repair.backupPath}
+                    </code>
+                    .
+                  </div>
+                </div>
+              )}
+              {status.runtimeVersion && ours && (
+                <div className="mt-1 text-xs text-ink-500">
+                  Installed version: {status.runtimeVersion}
+                </div>
+              )}
+              {status.runtimeError && (
+                <div className="mt-1.5 text-xs leading-5 text-amber-500">
+                  {status.runtimeError}
+                  {installed ? " Your existing CLI remains available." : ""}
+                </div>
+              )}
               {status.reason && (
                 <div className="mt-1.5 text-xs leading-5 text-amber-500">
                   {status.reason}
@@ -7385,7 +8559,7 @@ function CliSettings(): JSX.Element {
                   </div>
                   <div className="mt-1 text-ink-500">
                     After install, run this once so your shell can find{" "}
-                    <code className="font-mono">zen</code>:
+                    <code className="font-mono">zn</code>:
                   </div>
                   <div className="mt-1.5 flex items-center gap-2">
                     <code className="min-w-0 flex-1 break-all rounded-md bg-paper-100/80 px-2 py-1 font-mono text-xs text-ink-900">
@@ -7403,7 +8577,25 @@ function CliSettings(): JSX.Element {
               )}
             </div>
             <div className="flex shrink-0 items-center gap-2">
-              {installed ? (
+              {status.repair && (
+                <Button
+                  size="sm"
+                  onClick={() => void onInstall(status.repair?.token)}
+                  disabled={busy || isUnavailable}
+                >
+                  {busy ? "Repairing…" : "Repair shortcut"}
+                </Button>
+              )}
+              {installed && ours && status.runtimeError && (
+                <Button
+                  size="sm"
+                  onClick={() => void onInstall()}
+                  disabled={busy}
+                >
+                  Repair
+                </Button>
+              )}
+              {installed && !status.repair ? (
                 <button
                   type="button"
                   onClick={() => void onUninstall()}
@@ -7417,7 +8609,7 @@ function CliSettings(): JSX.Element {
                 >
                   {busy ? "Working…" : "Uninstall"}
                 </button>
-              ) : (
+              ) : !installed ? (
                 <Button
                   variant="primary"
                   size="sm"
@@ -7426,9 +8618,14 @@ function CliSettings(): JSX.Element {
                 >
                   {busy ? "Installing…" : "Install"}
                 </Button>
-              )}
+              ) : null}
             </div>
           </div>
+          {error && (
+            <div role="alert" className="text-xs text-ink-900">
+              Something went wrong: {error}
+            </div>
+          )}
           <div className="flex items-center gap-2 border-t border-paper-300/45 pt-2 text-xs text-ink-500">
             <span className="text-2xs font-medium uppercase tracking-[0.14em] text-ink-400">
               Path
@@ -7449,8 +8646,10 @@ function CliSettings(): JSX.Element {
         </div>
       </Section>
 
+      {status.runtime === "go" && installed && ours && <CliUpdatesSection />}
+
       <RaycastExtensionSettings
-        cliInstalled={installed}
+        cliInstalled={installed && !status.repair}
         copyToClipboard={copyToClipboard}
       />
 
@@ -7460,22 +8659,133 @@ function CliSettings(): JSX.Element {
         settingId="cli-quick-reference"
       >
         <div className="space-y-2 px-5 py-4 font-mono text-xs leading-6 text-ink-800">
-          <div>zen list --tag idea</div>
-          <div>zen read "inbox/Project.md"</div>
-          <div>zen read --path "hellointerview/system design.md"</div>
+          {status.runtime === "go" && <div>zn tui</div>}
+          <div>zn list --tag idea</div>
+          <div>zn read "inbox/Project.md"</div>
+          <div>zn read --path "hellointerview/system design.md"</div>
           <div>echo "hello" | zn capture</div>
-          <div>zen append daily.md --body "- talked to alice"</div>
-          <div>zen search "deadline" --json | jq .</div>
-          <div>zen mcp # used by Claude Code/Desktop/Codex</div>
+          <div>zn append daily.md --body "- talked to alice"</div>
+          <div>zn search "deadline" --json | jq .</div>
+          <div>zn mcp # used by Claude Code/Desktop/Codex</div>
         </div>
       </Section>
 
-      {error && (
-        <InlineNote>
-          <span className="text-ink-900">Something went wrong:</span> {error}
-        </InlineNote>
-      )}
     </div>
+  );
+}
+
+/**
+ * The desktop-managed zn updates itself from signed ZenNotes/tui releases, so
+ * a CLI fix ships without a ZenNotes release. This shows which version runs,
+ * which one this build carries as its floor, and the result of the last check.
+ */
+function CliUpdatesSection(): JSX.Element | null {
+  const [update, setUpdate] = useState<CliUpdateState | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void window.zen
+      .cliUpdateGetState?.()
+      .then((next) => {
+        if (!cancelled) setUpdate(next);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // A scheduled check can start or finish while this page is open.
+  useEffect(() => window.zen.onCliUpdateState?.((next) => setUpdate(next)), []);
+
+  if (!update?.supported || !window.zen.cliUpdateCheck) return null;
+
+  const check = async (install: boolean): Promise<void> => {
+    setBusy(true);
+    try {
+      const next = await window.zen.cliUpdateCheck?.({ install });
+      if (next) setUpdate(next);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const setAutoUpdate = async (enabled: boolean): Promise<void> => {
+    const next = await window.zen.cliSetAutoUpdate?.(enabled);
+    if (next) setUpdate(next);
+  };
+
+  const checking = busy || update.phase === "checking";
+  const ahead =
+    update.bundledVersion != null &&
+    update.installedVersion != null &&
+    update.bundledVersion !== update.installedVersion;
+
+  return (
+    <Section
+      title="Updates"
+      description="ZenNotes installs new zn releases itself, so the command-line tool no longer waits for a ZenNotes update. Every release is checked against its signature before it runs."
+      settingId="cli-updates"
+    >
+      <ToggleRow
+        label="Update zn automatically"
+        description="Checks once a day and installs newer releases. When off, ZenNotes still checks and offers the update here."
+        value={update.autoUpdate}
+        settingId="cli-auto-update"
+        onChange={(next) => void setAutoUpdate(next)}
+      />
+      <div className="flex items-start justify-between gap-4 px-5 py-4">
+        <div className="min-w-0 text-xs leading-5 text-ink-500">
+          <div
+            className="text-sm font-medium text-ink-900"
+            data-cli-update-installed
+          >
+            zn {update.installedVersion ?? "not set up yet"}
+          </div>
+          {ahead && (
+            <div>This copy of ZenNotes ships zn {update.bundledVersion}.</div>
+          )}
+          {update.message && (
+            <div
+              data-cli-update-message
+              className={update.phase === "error" ? "text-amber-500" : undefined}
+            >
+              {update.message}
+            </div>
+          )}
+          {update.lastCheckedAt != null && (
+            <div>
+              Last checked{" "}
+              {new Date(update.lastCheckedAt).toLocaleString(undefined, {
+                dateStyle: "medium",
+                timeStyle: "short",
+              })}
+            </div>
+          )}
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          {update.phase === "available" && !update.autoUpdate && (
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={() => void check(true)}
+              disabled={checking}
+            >
+              Install zn {update.availableVersion}
+            </Button>
+          )}
+          <Button
+            size="sm"
+            onClick={() => void check(update.autoUpdate)}
+            disabled={checking}
+            data-cli-update-check
+          >
+            {checking ? "Checking…" : "Check for updates"}
+          </Button>
+        </div>
+      </div>
+    </Section>
   );
 }
 
@@ -7710,7 +9020,7 @@ function McpSettings(): JSX.Element {
 
   const commandPreview = runtime
     ? `${runtime.command} ${runtime.args.map((a) => (a.includes(" ") ? `"${a}"` : a)).join(" ")}`
-    : "—";
+    : "Checking…";
   const entryMissing = runtime !== null && runtime.entryPath == null;
 
   const serverStatusLabel =
@@ -7837,8 +9147,212 @@ function McpSettings(): JSX.Element {
         )}
       </Section>
 
+      <McpServerTokenSetting />
+
+      <AgentEditReviewSetting />
+
       <McpInstructionsEditor />
     </div>
+  );
+}
+
+function UsageCountSetting(): JSX.Element {
+  const usageCount = useStore((s) => s.usageCount);
+  const setUsageCount = useStore((s) => s.setUsageCount);
+  return (
+    <Section title="Privacy" settingId="usage-count">
+      <ToggleRow
+        label="Count this copy anonymously"
+        description="Once when ZenNotes is installed and once per update, send zennotes.org the version, operating system, architecture and install type, so we know how many copies are in use. No identifier and nothing about your notes, vaults or account; only daily totals are kept."
+        value={usageCount}
+        onChange={setUsageCount}
+      />
+    </Section>
+  );
+}
+
+const NO_SERVER_TOKEN: McpServerTokenState = { kind: "none", reason: "local" };
+
+/**
+ * Settings → MCP → Server token (#830): lets assistants use the token of the
+ * ZenNotes Server the app is on, without a terminal. Main reads the server and
+ * the token from its own config and reports only the state of zn's token
+ * file, so the token never reaches this page.
+ */
+function McpServerTokenSetting(): JSX.Element {
+  const [state, setState] = useState<McpServerTokenState | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // The section is about the server the app is on: ask again when it changes.
+  const serverUrl = useStore((s) => s.remoteWorkspaceInfo?.baseUrl ?? null);
+
+  const refresh = useCallback(async (): Promise<void> => {
+    try {
+      // Desktop only: a bridge without it has no assistants to hand a token to.
+      setState((await window.zen.mcpGetServerTokenState?.()) ?? NO_SERVER_TOKEN);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh, serverUrl]);
+
+  const run = async (
+    action: () => Promise<McpServerTokenState>,
+  ): Promise<void> => {
+    setBusy(true);
+    try {
+      setState(await action());
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const code = (text: string): JSX.Element => (
+    <code className="break-all font-mono text-ink-800">{text}</code>
+  );
+
+  let body: JSX.Element;
+  if (state == null) {
+    body = <InlineNote>{"Checking\u2026"}</InlineNote>;
+  } else if (state.kind === "none") {
+    body = (
+      <InlineNote>
+        {state.reason === "local"
+          ? "For a vault on a ZenNotes Server that requires an auth token. Assistants can\u2019t read the copy ZenNotes keeps in your system\u2019s secure storage, so this is where you let them use it."
+          : "This vault\u2019s ZenNotes Server needs no auth token, so assistants reach it as they are."}
+      </InlineNote>
+    );
+  } else {
+    let summary: JSX.Element;
+    let detail: React.ReactNode;
+    let action: JSX.Element;
+    if (state.kind === "missing") {
+      summary = (
+        <>
+          Assistants can{"\u2019"}t reach {code(state.serverUrl)} yet. The
+          server needs an auth token, and ZenNotes keeps its copy in your
+          system{"\u2019"}s secure storage, where they can{"\u2019"}t read it.
+        </>
+      );
+      detail = (
+        <>
+          Let assistants use it saves the token to{" "}
+          {code(state.credentialsPath)}, the file {code("zn connect")} writes,
+          where any program running as you can read it.
+        </>
+      );
+      action = (
+        <Button
+          variant="primary"
+          size="sm"
+          disabled={busy}
+          onClick={() =>
+            void run(async () => (await window.zen.mcpShareServerToken?.()) ?? NO_SERVER_TOKEN)
+          }
+        >
+          Let assistants use it
+        </Button>
+      );
+    } else if (state.kind === "shared") {
+      summary = (
+        <>
+          Assistants can reach {code(state.serverUrl)}: its auth token is
+          saved in {code(state.credentialsPath)}, where zn reads it too.
+        </>
+      );
+      detail =
+        "Stop sharing removes it from that file. Forgetting the server in Settings \u2192 Vault removes it too, and a new token you save for the server in ZenNotes replaces it.";
+      action = (
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={busy}
+          onClick={() =>
+            void run(async () => (await window.zen.mcpRemoveServerToken?.()) ?? NO_SERVER_TOKEN)
+          }
+        >
+          Stop sharing
+        </Button>
+      );
+    } else if (state.kind === "different") {
+      summary = (
+        <>
+          {code(state.credentialsPath)} holds a different auth token for{" "}
+          {code(state.serverUrl)}, saved by {code("zn connect")} or before the
+          server{"\u2019"}s token changed.
+        </>
+      );
+      detail =
+        "If assistants are turned away, replace it with the token ZenNotes connects with. zn reads the same file.";
+      action = (
+        <Button
+          variant="primary"
+          size="sm"
+          disabled={busy}
+          onClick={() =>
+            void run(async () => (await window.zen.mcpShareServerToken?.()) ?? NO_SERVER_TOKEN)
+          }
+        >
+          Replace it
+        </Button>
+      );
+    } else {
+      summary = <>{state.message}</>;
+      detail =
+        "ZenNotes won\u2019t write to it, so the tokens it holds stay safe.";
+      action = (
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={busy}
+          onClick={() => void refresh()}
+        >
+          Check again
+        </Button>
+      );
+    }
+    body = (
+      <div className="flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0 space-y-1.5 text-xs leading-5">
+          <p className="text-ink-700">{summary}</p>
+          <p className="text-ink-500">{detail}</p>
+        </div>
+        <div className="shrink-0">{action}</div>
+      </div>
+    );
+  }
+
+  return (
+    <Section title="Server token" settingId="mcp-server-token">
+      {body}
+      {error && (
+        <InlineNote>
+          <span className="text-ink-900">Something went wrong:</span> {error}
+        </InlineNote>
+      )}
+    </Section>
+  );
+}
+
+function AgentEditReviewSetting(): JSX.Element {
+  const reviewAgentEdits = useStore((s) => s.reviewAgentEdits);
+  const setReviewAgentEdits = useStore((s) => s.setReviewAgentEdits);
+  return (
+    <Section title="Agent edits" settingId="review-agent-edits">
+      <ToggleRow
+        label="Review agent edits"
+        description="When an assistant edits a note through MCP, keep what the note said before, so the note offers Review changes: each change shown inline with Accept and Reject. The copy is deleted once you have decided every change. Edits to notes in a vault on a self-hosted server are not kept yet."
+        value={reviewAgentEdits}
+        onChange={setReviewAgentEdits}
+      />
+    </Section>
   );
 }
 
@@ -7962,7 +9476,7 @@ function McpInstructionsEditor(): JSX.Element {
           <span>
             Saved at:{" "}
             <code className="font-mono text-xs text-ink-600">
-              {payload?.filePath ?? "—"}
+              {payload?.filePath ?? "Loading…"}
             </code>
           </span>
           <span>

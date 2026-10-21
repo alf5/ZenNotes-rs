@@ -527,8 +527,8 @@ mod tests {
     #[test]
     fn builtin_search_finds_lines_with_offsets() {
         let v = vault();
-        crud::write_note(v.path(), "inbox/A.md", "first line\nhello needle here\nlast").unwrap();
-        crud::write_note(v.path(), "trash/T.md", "needle in trash").unwrap();
+        crud::write_note(v.path(), "inbox/A.md", "first line\nhello needle here\nlast", false).unwrap();
+        crud::write_note(v.path(), "trash/T.md", "needle in trash", false).unwrap();
         let paths = ToolPaths { ripgrep: None, fzf: None };
         let results = search_vault_text(v.path(), "needle", "builtin", &paths);
         assert!(results.iter().any(|m| m.path == "inbox/A.md" && m.line_number == 2));

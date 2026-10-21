@@ -137,7 +137,7 @@ export function DatabaseBoardView({ csvPath, doc, view }: Props): JSX.Element {
                   >
                     <div className="flex items-start justify-between gap-1">
                       <div className="min-w-0 flex-1 truncate text-sm text-ink-900">
-                        {titleField ? row.cells[titleField.id] || '—' : '—'}
+                        {titleField ? row.cells[titleField.id] || 'Untitled' : 'Untitled'}
                       </div>
                       <IconButton
                         size="sm"

@@ -33,6 +33,7 @@ export function NoteHoverPreview({
   const activeNote = useStore((s) => s.activeNote)
   const vault = useStore((s) => s.vault)
   const assetFiles = useStore((s) => s.assetFiles)
+  const assetFilesListed = useStore((s) => s.assetFilesListed)
   const customCodeLanguagesRevision = useStore((s) => s.customCodeLanguagesRevision)
   const focusedPanel = useStore((s) => s.focusedPanel)
   const setFocusedPanel = useStore((s) => s.setFocusedPanel)
@@ -90,7 +91,7 @@ export function NoteHoverPreview({
         void openNoteInTab(assetTabPath(path))
       }
     })
-  }, [assetFilesKey, content?.path, html, openNoteInTab, vault?.root])
+  }, [assetFilesKey, assetFilesListed, content?.path, html, openNoteInTab, vault?.root])
 
   useEffect(() => {
     const root = articleRef.current

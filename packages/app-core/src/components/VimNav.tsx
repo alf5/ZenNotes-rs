@@ -35,9 +35,11 @@ import {
   getSequenceTokens,
   matchesSequenceToken,
   matchesShortcutBinding,
+  UNBOUND_BINDING,
   sequenceTokenFromEvent
 } from '../lib/keymaps'
 import { toggleWrap, wrapLink } from '../lib/cm-format'
+import { convertTableToDatabase } from '../lib/table-to-database'
 import {
   ZEN_OPEN_EDITOR_CONTEXT_MENU_EVENT,
   dispatchKeyboardContextMenu,
@@ -47,11 +49,14 @@ import { getBufferNavigationTarget } from '../lib/buffer-navigation'
 import { focusEditorNormalMode } from '../lib/editor-focus'
 import { atlasHoldsKeyboard } from '../lib/atlas'
 import {
-  hasResolvableCloudConflicts,
-  openCloudConflictReview,
+  hasCloudVaultRemovalNotice,
+  hasPendingCloudReview,
+  openPendingCloudReview,
   resolvableCloudConflictCount,
   useCloudSyncStatusStore
 } from '../lib/cloud-auto-sync'
+import { requestSettingsTarget } from '../lib/settings-navigation'
+import { hideWindowToTray, useTrayStore } from '../lib/tray-runtime'
 import { EXCALIDRAW_SURFACE, SELF_KEYED_SURFACES } from '../lib/self-keyed-surfaces'
 import { isWorkspaceVirtualTabPath } from '../lib/workspace-tabs'
 import {
@@ -200,6 +205,7 @@ export function VimNav(): JSX.Element | null {
     setHint(false)
     focusEditor()
   }, [focusEditor, setHint])
+  const keepRunningInTray = useTrayStore((s) => s.keepRunningInTray)
   // The calendar toggle only works when the active pane holds a note (it can't
   // render in the note-less Tasks/Tags views), so its leader hint is hidden
   // there rather than shown as a dead key. (#413)
@@ -207,8 +213,9 @@ export function VimNav(): JSX.Element | null {
     isCalendarToggleAvailable(s.vaultSettings, s.activeNote)
   )
   const cloudConflictsWaiting = useCloudSyncStatusStore(
-    (s) => resolvableCloudConflictCount(s.lastSummary) > 0
+    (s) => resolvableCloudConflictCount(s.lastSummary) > 0 || s.settingsConflict !== null
   )
+  const cloudVaultRemoved = useCloudSyncStatusStore(hasCloudVaultRemovalNotice)
   const whichKeyHintsPref = useStore((s) => s.whichKeyHints)
   const whichKeyHintMode = useStore((s) => s.whichKeyHintMode)
   const whichKeyHintTimeoutMs = useStore((s) => s.whichKeyHintTimeoutMs)
@@ -256,6 +263,11 @@ export function VimNav(): JSX.Element | null {
         keyLabel: getKeymapDisplay(keymapOverrides, 'vim.leaderToggleFavorite'),
         label: 'Toggle favorite',
         detail: 'Add or remove the active note from Favorites.'
+      },
+      {
+        keyLabel: getKeymapDisplay(keymapOverrides, 'vim.leaderTableToDatabase'),
+        label: 'Table to database',
+        detail: 'Turn the table under the cursor into a database, linked from the note.'
       }
       ]
     }
@@ -284,10 +296,18 @@ export function VimNav(): JSX.Element | null {
             {
               keyLabel: getKeymapDisplay(keymapOverrides, 'vim.leaderCloudConflicts'),
               label: 'Review Cloud conflicts',
-              detail: 'Open the queue of files waiting on a sync decision.'
+              detail: 'Open the files waiting on a sync decision, or the vault settings question.'
             }
           ]
-        : []),
+        : cloudVaultRemoved
+          ? [
+              {
+                keyLabel: getKeymapDisplay(keymapOverrides, 'vim.leaderCloudConflicts'),
+                label: 'Review Cloud vault',
+                detail: 'This vault stopped syncing because its Cloud vault is gone. Opens Settings → Cloud.'
+              }
+            ]
+          : []),
       {
         keyLabel: getKeymapDisplay(keymapOverrides, 'vim.leaderOpenBuffers'),
         label: 'Open buffers',
@@ -301,7 +321,7 @@ export function VimNav(): JSX.Element | null {
       {
         keyLabel: getKeymapDisplay(keymapOverrides, 'vim.leaderSearchGroup'),
         label: 'Search…',
-        detail: 'Open the search group — then `t` for vault text search.'
+        detail: 'Open the search group, then `t` for vault text search.'
       },
       {
         keyLabel: getKeymapDisplay(keymapOverrides, 'vim.hintMode'),
@@ -332,6 +352,15 @@ export function VimNav(): JSX.Element | null {
         label: 'Quick capture',
         detail: 'Open the floating capture window.'
       },
+      ...(keepRunningInTray
+        ? [
+            {
+              keyLabel: getKeymapDisplay(keymapOverrides, 'vim.leaderHideToTray'),
+              label: 'Hide to tray',
+              detail: 'Hide this window. ZenNotes keeps running, and its tray icon brings the window back.'
+            }
+          ]
+        : []),
       {
         keyLabel: getKeymapDisplay(keymapOverrides, 'vim.leaderTemplatePicker'),
         label: 'New from template',
@@ -375,7 +404,8 @@ export function VimNav(): JSX.Element | null {
       })
     }
     return items
-  })()
+    // An unbound leader action has no key to press, so it leaves the hints.
+  })().filter((item) => !!item.keyLabel)
 
   useEffect(() => {
     if (vimMode) return
@@ -397,14 +427,19 @@ export function VimNav(): JSX.Element | null {
     const handler = (e: KeyboardEvent): void => {
       const state = useStore.getState()
       const overrides = state.keymapOverrides
-      const leaderToken = getSequenceTokens(overrides, 'vim.leaderPrefix')[0] ?? 'Space'
-      const panePrefixToken = getSequenceTokens(overrides, 'vim.panePrefix')[0] ?? 'Ctrl+W'
+      // An unbound prefix has no token. The empty string never equals a token
+      // read off an event, so every comparison below stays false instead of
+      // quietly reviving the shipped default.
+      const leaderToken = getSequenceTokens(overrides, 'vim.leaderPrefix')[0] ?? UNBOUND_BINDING
+      const panePrefixToken =
+        getSequenceTokens(overrides, 'vim.panePrefix')[0] ?? UNBOUND_BINDING
 
       // Skip when modals / overlays are open
       if (
         state.searchOpen ||
         state.vaultTextSearchOpen ||
         state.settingsOpen ||
+        state.whatsNewOpen ||
         state.commandPaletteOpen ||
         state.bufferPaletteOpen
       ) return
@@ -419,7 +454,12 @@ export function VimNav(): JSX.Element | null {
         // the INPUT/TEXTAREA escape below does not cover it: without this
         // marker, Space armed the leader instead of pressing the focused
         // button and leader chords fired underneath the dialog.
-        document.querySelector('[data-workflow-import]')
+        document.querySelector('[data-workflow-import]') ||
+        // Every other dialog the shared Modal shell draws. Routing below
+        // follows the store's focused panel, not DOM focus, so with the
+        // sidebar focused, j/k moved its cursor behind the icon and color
+        // pickers and l opened the row, pulling focus out of the dialog (#960).
+        document.querySelector('[aria-modal="true"]')
       ) return
 
       // Hint mode — handled entirely by HintOverlay's own listener
@@ -784,7 +824,8 @@ export function VimNav(): JSX.Element | null {
           noteListOpen: state.noteListOpen,
           unifiedSidebar: state.unifiedSidebar,
           tasksViewOpen: isTasksViewActive(state),
-          atlasViewOpen: isAtlasViewActive(state)
+          atlasViewOpen: isAtlasViewActive(state),
+          tagsViewOpen: isTagsViewActive(state)
         })
         const direction =
           matchesSequenceToken(e, overrides, 'vim.paneFocusLeft') ||
@@ -933,16 +974,23 @@ export function VimNav(): JSX.Element | null {
           void state.openWorkflowsView()
           return
         }
-        // Skipped with an empty queue so the key falls through as an unbound
+        // Skipped while nothing waits so the key falls through as an unbound
         // leader press rather than opening an empty dialog.
         if (
-          hasResolvableCloudConflicts() &&
+          (hasPendingCloudReview() || hasCloudVaultRemovalNotice()) &&
           matchesSequenceToken(e, overrides, 'vim.leaderCloudConflicts')
         ) {
           e.preventDefault()
           e.stopImmediatePropagation()
           resetLeader()
-          openCloudConflictReview()
+          if (hasPendingCloudReview()) {
+            openPendingCloudReview(state.activeNote?.path)
+          } else {
+            // A Cloud vault that went away is answered in Settings → Cloud,
+            // where the status row's Review goes too.
+            requestSettingsTarget('cloud')
+            state.setSettingsOpen(true)
+          }
           return
         }
         if (matchesSequenceToken(e, overrides, 'vim.hintMode')) {
@@ -984,6 +1032,16 @@ export function VimNav(): JSX.Element | null {
           e.stopImmediatePropagation()
           resetLeader()
           void window.zen.toggleQuickCapture()
+          return
+        }
+        if (
+          useTrayStore.getState().keepRunningInTray &&
+          matchesSequenceToken(e, overrides, 'vim.leaderHideToTray')
+        ) {
+          e.preventDefault()
+          e.stopImmediatePropagation()
+          resetLeader()
+          void hideWindowToTray()
           return
         }
         if (matchesSequenceToken(e, overrides, 'vim.leaderTemplatePicker')) {
@@ -1062,6 +1120,13 @@ export function VimNav(): JSX.Element | null {
           e.stopImmediatePropagation()
           resetLeader()
           void state.toggleFavoriteActiveNote()
+          return
+        }
+        if (matchesSequenceToken(e, overrides, 'vim.leaderTableToDatabase') && editorNormalMode) {
+          e.preventDefault()
+          e.stopImmediatePropagation()
+          resetLeader()
+          if (state.editorViewRef) void convertTableToDatabase(state.editorViewRef)
           return
         }
         resetLeader()
@@ -1308,7 +1373,8 @@ export function VimNav(): JSX.Element | null {
     const onKeyUp = (e: KeyboardEvent): void => {
       if (excalidrawSpaceDownAt.current == null) return
       const leaderToken =
-        getSequenceTokens(useStore.getState().keymapOverrides, 'vim.leaderPrefix')[0] ?? 'Space'
+        getSequenceTokens(useStore.getState().keymapOverrides, 'vim.leaderPrefix')[0] ??
+        UNBOUND_BINDING
       if (sequenceTokenFromEvent(e) !== leaderToken) return
       const downAt = excalidrawSpaceDownAt.current
       excalidrawSpaceDownAt.current = null
@@ -1747,6 +1813,7 @@ export function VimNav(): JSX.Element | null {
       key === 'o' ||
       key === 'e' ||
       key === 'r' ||
+      key === 'a' ||
       key === 'd' ||
       key === 'n' ||
       key === '+' ||
@@ -1826,6 +1893,12 @@ export function VimNav(): JSX.Element | null {
     }
     if (key === 'r') {
       clickCommentAction(current, 'resolve')
+      return
+    }
+    // `a` answers in the thread (#738); the composer inside the card takes
+    // focus, so the next keys type the reply.
+    if (key === 'a') {
+      clickCommentAction(current, 'reply')
       return
     }
     if (key === 'd' || key === 'Backspace' || key === 'Delete') {
@@ -2277,7 +2350,7 @@ export function VimNav(): JSX.Element | null {
       })
       return
     }
-    if (type === 'missing') {
+    if (type === 'missing' || type === 'attachment') {
       el.click()
     }
   }
