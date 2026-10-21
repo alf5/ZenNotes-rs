@@ -4,38 +4,61 @@
   <img src="src-tauri/icons/128x128.png" alt="ZenNotes-rs app icon" width="128">
 </p>
 
-**ZenNotes-rs** is a desktop Markdown notes app — a port of **ZenNotes** (the original project's
+**ZenNotes-rs** is a desktop Markdown notes app: a port of **ZenNotes** (the original project's
 README is reproduced in full below) from **Electron** to **[Tauri v2](https://v2.tauri.app/) +
 Rust**. It reuses ZenNotes' React frontend unchanged and reimplements the Electron `main`
-process as a native Rust backend, so the app ships as a small (~6 MB) binary that uses the
-operating system's webview (WKWebView on macOS, WebKitGTK on Linux) instead of bundling
-Chromium.
+process as a native Rust backend, so the app runs on the operating system's webview (WKWebView
+on macOS, WebKitGTK on Linux, WebView2 on Windows) instead of bundling Chromium.
 
 ## How this was made
 
-This Electron → Tauri conversion was performed by **AI — Anthropic's Claude (Opus 4.8 Ultra)**
-running in **[Claude Code](https://www.anthropic.com/claude-code)**. The model planned the
-migration, ported the vault/file/search/tasks backend to Rust, authored the Tauri bridge that
-implements the existing `ZenBridge` contract, set up the GitHub Actions release pipeline, and
-produced the Arch Linux packaging — iterating against real builds and tests at each step.
+This Electron → Tauri conversion was performed by **AI: Anthropic's Claude** running in
+**[Claude Code](https://www.anthropic.com/claude-code)**. Claude Opus 4.8 planned the migration,
+ported the vault/file/search/tasks backend to Rust, authored the Tauri bridge that implements the
+existing `ZenBridge` contract, set up the GitHub Actions release pipeline, and produced the Arch
+Linux packaging, iterating against real builds and tests at each step. Each later catch-up with
+upstream was done the same way: v2.15 by Claude Fable 5, v2.45 by Claude Opus 5, and v2.73 by
+Claude Opus 5.5.
 
 ## What's different from upstream ZenNotes
 
 - **Runtime:** Tauri v2 + Rust backend (instead of Electron); the React/CodeMirror frontend is reused as-is.
-- **Binary:** installs as `zennotes-rs`.
-- **Downloads:** prebuilt bundles are on [GitHub Releases](https://github.com/alf5/ZenNotes-rs/releases/latest) — macOS `.dmg` (Apple Silicon + Intel) and Linux `.AppImage` / `.deb`.
+- **Binary:** installs as `zennotes-rs`. The 2.73 Linux `.deb`/`.rpm` packages are about 44 MB, most of it the frontend's own WebAssembly (Typst, Harper, D2) and Excalidraw.
+- **Downloads:** prebuilt bundles are on [GitHub Releases](https://github.com/alf5/ZenNotes-rs/releases/latest): macOS `.dmg` (Apple Silicon + Intel), Windows `-setup.exe` / `.msi`, and Linux `.AppImage` / `.deb`. The macOS and Windows builds come from CI; only Linux is tested by hand.
 - **Arch Linux:** a `makepkg`/AUR setup lives in [`packaging/arch/`](packaging/arch/) and builds from source against Arch's own `webkit2gtk-4.1` / `gtk3` packages.
-- **Scope:** desktop app only. The original's web/server/self-hosted modes — and some desktop peripherals (auto-updater, MCP install, Raycast, TikZ) — are not part of this port.
+- **Building from source:** see [BUILD.md](BUILD.md) for the build, the test suites, and the AppImage workarounds on rolling-release distros.
+- **Scope:** desktop app only. Not part of this port: the original's web/server/self-hosted modes, ZenNotes Cloud (sync, backups, publishing), the `zn` CLI and MCP server with their install flows, Raycast, the auto-updater, TikZ, and PDF/Word export. In Settings, their pages either do not appear or say they are not available in this build.
 - **Identity:** application id `com.zennotes-rs.app`, deep-link scheme `zennotes-rs://`.
 - **Upstream parity:** mirrored to ZenNotes **v2.73.0**. See [GAP-ANALYSIS.md](GAP-ANALYSIS.md) for what is and is not carried over.
+
+### Sharing a vault and settings with upstream ZenNotes
+
+ZenNotes-rs reads and writes the same files upstream ZenNotes does, so both apps can open the
+same vault:
+
+- **Notes and vault state:** notes stay plain Markdown, and the `.zennotes/` folder (vault
+  settings, comments, creation dates, workflows, templates, assistant edit records) uses
+  upstream's format. Renaming, moving or deleting a note carries its comments and creation date
+  the way upstream does. Attachments go in `assets/`, as upstream has done since 2.4; opening a
+  vault moves loose root attachments and the legacy `attachements/` folder there.
+- **Portable settings:** `~/.config/zennotes/config.toml` is shared with upstream and written
+  byte-for-byte the same way, so it can be synced with git, stow or chezmoi across both apps.
+- **Machine-local state** (the open and recent vaults, the tray setting, undo history) lives
+  under `com.zennotes-rs.app` and is not shared.
+
+One exception: custom on-disk folders for Inbox, Archive or Trash (set in upstream's vault
+settings) are not honoured by this port yet, so a vault that uses them should not be shared.
+
+On Linux, **Keep running in the tray** (Settings → Appearance → Window) needs an appindicator
+library such as `libayatana-appindicator`; without one, the setting stays off.
 
 Licensed **MIT** (see [LICENSE](LICENSE)), the same as the upstream project.
 
 ---
 
-> The remainder of this document is the **original ZenNotes README**, reproduced verbatim for
-> reference and attribution. Paths, commands, and links below refer to the upstream Electron
-> monorepo, not to this Tauri port.
+> The remainder of this document is the **original ZenNotes README** (as of upstream v2.73.0),
+> reproduced verbatim for reference and attribution. Paths, commands, and links below refer to
+> the upstream Electron monorepo, not to this Tauri port.
 
 ---
 
@@ -82,7 +105,10 @@ Or download the `.dmg` for your chip, open it, and drag **ZenNotes** to Applicat
 
 ### Windows
 
-Download and run `ZenNotes-<version>-win-x64.exe`.
+Download and run the installer for your PC:
+
+- Intel and AMD: `ZenNotes-<version>-win-x64.exe`
+- ARM (Snapdragon and other Windows on ARM): `ZenNotes-<version>-win-arm64.exe`
 
 ### Linux
 
@@ -330,7 +356,6 @@ ZenNotes now uses a single monorepo.
 apps/
   desktop/   Electron shell, preload, updater, packaging
   web/       Vite/PWA shell and HTTP bridge
-  server/    Go server for self-hosted and hosted deployments
 packages/
   app-core/        Shared React application and renderer logic
   bridge-contract/ Typed runtime contract between UI and host
@@ -386,6 +411,13 @@ make web-dev
 
 ### Go server
 
+The server lives in its own repository,
+[ZenNotes/znserver](https://github.com/ZenNotes/znserver). For browser work
+you do not need it checked out: `npm run dev:server` downloads the release
+pinned in `tooling/server-release.json`, verifies its checksum, and runs it.
+To work on the server itself, point `ZENNOTES_SERVER_DIR` at a znserver
+checkout and the same command runs it with `go run`.
+
 ```bash
 npm run dev:server
 ```
@@ -412,7 +444,7 @@ Important dev note:
 
 - the browser app and the Go server are separate processes in dev mode
 - frontend-only changes usually need only the web dev server
-- backend changes need the Go server restarted
+- backend changes happen in ZenNotes/znserver and need that server restarted
 - if the web client is newer than the running server, ZenNotes now shows a clearer error instead of raw 404 noise for newer API flows like the vault picker
 
 ## Root scripts
@@ -446,25 +478,28 @@ The root `Makefile` provides a simpler interface:
 | `make install`       | Install workspace dependencies                          |
 | `make desktop`       | Run the Electron app in dev mode                        |
 | `make web-dev`       | Run the web client                                      |
-| `make server-dev`    | Run the Go server                                       |
+| `make server-dev`    | Run the pinned Go server release (or a checkout)        |
 | `make web-stack`     | Run web + server together                               |
 | `make build`         | Build the full monorepo                                 |
 | `make desktop-build` | Build the Electron app                                  |
 | `make web-build`     | Build `apps/web`                                        |
-| `make server-build`  | Build `apps/server` with the latest embedded web bundle |
-| `make up`            | Build and start the self-hosted Docker stack            |
+| `make up`            | Start the self-hosted Docker stack from the published image |
 | `make down`          | Stop the Docker stack                                   |
 | `make restart`       | Restart the Docker stack                                |
 | `make logs`          | Follow Docker logs                                      |
 | `make status`        | Show Docker status                                      |
 | `make open`          | Open the self-hosted app in a browser                   |
-| `make rebuild`       | Force a full Docker rebuild                             |
-| `make nuke`          | Remove local Docker image/build output                  |
-| `make clean`         | Remove local web/server build output                    |
+| `make rebuild`       | Pull the newest image and restart                       |
+| `make nuke`          | Remove the Docker image, data, and build output         |
+| `make clean`         | Remove web build output and downloaded server binaries  |
 
 Run `make help` to print the same summary.
 
 ## Self-hosting with Docker
+
+The image, `adibhanna/zennotes`, is built and published from the server's own
+repository, [ZenNotes/znserver](https://github.com/ZenNotes/znserver). This
+repository only ships the Compose file and Makefile that run it.
 
 ### Start the self-hosted app
 
@@ -522,7 +557,7 @@ Useful variables:
 - `CONTENT_ROOT`: host folder used as the live vault root
 - `DATA`: host directory used for persisted server config
 - `PORT`: published host port
-- `IMAGE`: Docker image tag
+- `IMAGE`: Docker image to run (default `adibhanna/zennotes:latest`; pin with `IMAGE=adibhanna/zennotes:2.50.5`)
 - `ALLOW_INSECURE_NOAUTH`: disable the default auth requirement
 
 ### Docker browse model
