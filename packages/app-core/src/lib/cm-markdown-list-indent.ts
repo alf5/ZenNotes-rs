@@ -103,6 +103,33 @@ export function listGuideStyle(depth: number, width: number): string {
   )
 }
 
+/**
+ * The width in ch of each character of a list line's prefix, leading
+ * whitespace first, then the marker and its spaces (#952). The hanging indent
+ * and the guides are measured in ch, so with a monospace font the source
+ * already matches them; with a proportional font a space is about half a ch,
+ * and the bullet sat left of its guide and of its parent's wrapped text. Each
+ * character is boxed to at least its width (a tab to `tabWidth`, as the hanging
+ * indent counts it), so a monospace line renders exactly as before.
+ *
+ * Null for a line whose prefix is not pure whitespace (a list in a quote or a
+ * callout, where `>` has rendering of its own). A task's marker gets no cells:
+ * live preview hides its `- ` and draws a checkbox narrower than the six
+ * columns the hanging indent counts, a separate mismatch this does not touch.
+ */
+export function listPrefixCells(
+  lineText: string,
+  markerOffset: number,
+  tabWidth = DEFAULT_EDITOR_TAB_SIZE
+): number[] | null {
+  const indent = lineText.slice(0, markerOffset)
+  if (!/^[ \t]*$/.test(indent)) return null
+  const marker = lineText.slice(markerOffset).match(LIST_MARKER_FROM_OFFSET_RE)?.[0]
+  if (marker == null) return null
+  const boxed = /\[[ xX>/-]\]/.test(marker) ? indent : indent + marker
+  return [...boxed].map((ch) => (ch === '\t' ? tabWidth : 1))
+}
+
 interface ListLineFacts {
   markerOffset: number
   /** 1-based nesting level: ListItem ancestors of the marker. */
@@ -152,14 +179,31 @@ function computeDecorations(view: EditorView): DecorationSet {
       ]
         .filter(Boolean)
         .join('; ')
+      const cells = listPrefixCells(line.text, facts.markerOffset, width)
+      const boxedMarker = cells != null && cells.length > facts.markerOffset
       builder.add(
         line.from,
         line.from,
         Decoration.line({
-          class: 'cm-markdown-list-line',
+          class: boxedMarker ? 'cm-markdown-list-line cm-list-boxed-marker' : 'cm-markdown-list-line',
           attributes: { style }
         })
       )
+      // One box per character, not one for the run: the fold arrow is a
+      // widget anchored where the parser starts the item, often inside the
+      // indent, and a mark split around it gave each piece the full width; the
+      // bullet widget is not wrapped at all. The column keeps CodeMirror from
+      // merging neighbours back into one span.
+      for (const [col, cellCh] of (cells ?? []).entries()) {
+        builder.add(
+          line.from + col,
+          line.from + col + 1,
+          Decoration.mark({
+            class: 'cm-list-prefix-cell',
+            attributes: { style: `min-width: ${cellCh}ch`, 'data-list-col': String(col) }
+          })
+        )
+      }
     }
   }
 

@@ -1,10 +1,12 @@
+import { dropMutationsFor } from '../lib/task-column-mutations'
 /**
  * Kanban view for the Tasks tab.
  *
  * Columns are driven by the user's `kanbanGroupBy` choice:
  *   - 'status'  — Today / Upcoming / Waiting / Done   (mirrors list groups)
  *   - 'priority' — High / Med / Low / None
- *   - 'folder'  — Inbox / Quick / Archive            (read-only)
+ *   - 'folder'  one column per note folder (read-only); with a folder
+ *                root set, the children of that folder (#730)
  *
  * Drag-and-drop:
  *   - Status: drop changes `[ ]`/`[x]`, `@waiting`, and due-date tokens
@@ -27,16 +29,32 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import type { NoteFolder } from '@shared/ipc'
+import {
+  resolveFolderPath,
+  systemFolderForDirName,
+  type SystemFolderPaths
+} from '@shared/system-folder-paths'
+import { resolveSystemFolderLabels, type SystemFolderLabels } from '../lib/system-folder-labels'
+import { promptApp } from '../lib/prompt-requests'
 import type { VaultTask } from '@shared/tasks'
 import { groupTasks, isOverdue as isTaskOverdue, toIsoDateLocal } from '@shared/tasks'
-import { useStore, type KanbanGroupBy, type TaskMutation } from '../store'
+import {
+  normalizeKanbanFolderRoot,
+  useStore,
+  type KanbanCardSort,
+  type KanbanGroupBy,
+  type TaskMutation
+} from '../store'
 import { filterTasks } from '../lib/tasks-filter'
+import { isOverlayOrDialogOpen } from '../lib/overlay-open'
 import { ContextMenu, type ContextMenuItem } from './ContextMenu'
 import { buildTaskMenuItems } from '../lib/task-context-menu'
 import { ArrowUpRightIcon, PencilIcon } from './icons'
 import { InlineMarkdown } from '../lib/inline-markdown'
+import { CloudTaskConflictIndicator } from './CloudTaskConflictIndicator'
 import { TaskStateBox } from './TaskStateBox'
 import { isImeComposing } from '../lib/ime'
+import { createDragAutoScroller } from '../lib/drag-autoscroll'
 import {
   getSequenceTokens,
   sequenceTokenFromEvent,
@@ -70,79 +88,7 @@ function columnAccent(id: string): string | null {
   return COLUMN_ACCENTS[hash % COLUMN_ACCENTS.length]
 }
 
-/** Map a (groupBy, columnId) drop target to the task-line mutations
- *  that should land. Returns `null` when the drop has no defined
- *  semantics (e.g. when group-by is 'folder'). Returns `[]` when the
- *  task is already in the target column — caller can short-circuit. */
-export function dropMutationsFor(
-  groupBy: KanbanGroupBy,
-  columnId: string,
-  task: VaultTask,
-  today: Date
-): TaskMutation[] | null {
-  if (groupBy === 'status') {
-    const todayIso = toIsoDateLocal(today)
-    switch (columnId) {
-      case 'today':
-        // "Live" columns — make sure neither @waiting, [x] nor [/] keep the
-        // task glued to a different bucket.
-        return [
-          { kind: 'set-checked', checked: false },
-          { kind: 'set-waiting', waiting: false },
-          { kind: 'set-in-progress', inProgress: false },
-          { kind: 'set-due', due: todayIso }
-        ]
-      case 'upcoming': {
-        const tomorrow = new Date(today)
-        tomorrow.setDate(tomorrow.getDate() + 1)
-        return [
-          { kind: 'set-checked', checked: false },
-          { kind: 'set-waiting', waiting: false },
-          { kind: 'set-in-progress', inProgress: false },
-          {
-            kind: 'set-due',
-            due: task.due && task.due > todayIso ? task.due : toIsoDateLocal(tomorrow)
-          }
-        ]
-      }
-      case IN_PROGRESS_COLUMN_ID:
-        // Started work: `[/]`. The due date is left alone, so a card dragged
-        // back to Today or Upcoming keeps the date it had.
-        return [
-          { kind: 'set-checked', checked: false },
-          { kind: 'set-waiting', waiting: false },
-          { kind: 'set-in-progress', inProgress: true }
-        ]
-      case 'waiting':
-        // `[/]` survives underneath on purpose: clearing the wait returns the
-        // card to In progress, where it came from.
-        return [
-          { kind: 'set-checked', checked: false },
-          { kind: 'set-waiting', waiting: true }
-        ]
-      case 'done':
-        return [{ kind: 'set-checked', checked: true }]
-      default:
-        return null
-    }
-  }
-  if (groupBy === 'priority') {
-    if (columnId === 'high') return [{ kind: 'set-priority', priority: 'high' }]
-    if (columnId === 'med') return [{ kind: 'set-priority', priority: 'med' }]
-    if (columnId === 'low') return [{ kind: 'set-priority', priority: 'low' }]
-    if (columnId === 'none') return [{ kind: 'set-priority', priority: null }]
-    return null
-  }
-  if (groupBy.startsWith('field:')) {
-    // Drop sets the `@<key>:<value>` token; the No-<key> column clears it.
-    const key = groupBy.slice('field:'.length)
-    return [{ kind: 'set-field', key, value: columnId === NO_VALUE_COLUMN_ID ? null : columnId }]
-  }
-  // Folder grouping is read-only — moving the task across folders
-  // means moving the source note, which the user does explicitly via
-  // the sidebar.
-  return null
-}
+export { dropMutationsFor } from '../lib/task-column-mutations'
 
 export interface Column {
   id: string
@@ -154,6 +100,18 @@ export interface Column {
 
 /** Column id of the Status board's started-work bucket. */
 export const IN_PROGRESS_COLUMN_ID = 'in-progress'
+
+/** Due date first (cards without one last), then the note and the task's place
+ *  in it, so cards on the same day keep a stable, file-like order. Columns
+ *  are built in this order, and with cards ordered by due date (#889) every
+ *  column stays in it. */
+export function compareCardsByDue(a: VaultTask, b: VaultTask): number {
+  const ad = a.due ?? '9999-12-31'
+  const bd = b.due ?? '9999-12-31'
+  if (ad !== bd) return ad < bd ? -1 : 1
+  if (a.sourcePath !== b.sourcePath) return a.sourcePath < b.sourcePath ? -1 : 1
+  return a.taskIndex - b.taskIndex
+}
 
 export function statusColumns(tasks: VaultTask[], today: Date): Column[] {
   const groups = groupTasks(tasks, today)
@@ -208,30 +166,34 @@ export function completeStatusOrder(saved: string[], builtIds: string[]): string
   return result
 }
 
-function priorityColumns(tasks: VaultTask[]): Column[] {
+/** A board shows work that is still live. Besides done cards, the two other
+ *  closed states stay off it: a `[>]` forwarded record is the trail a task left
+ *  behind when it moved to another note (its live copy is the card), and a
+ *  `[-]` cancelled task was abandoned on purpose. The Status board drops both
+ *  through `groupTasks`; the field boards skip them explicitly; these two
+ *  boards only skipped done cards, so a task forwarded across three notes read
+ *  as three cards (#786). */
+function isBoardCard(task: VaultTask): boolean {
+  return !task.checked && !task.forwarded && !task.cancelled
+}
+
+export function priorityColumns(tasks: VaultTask[]): Column[] {
   const high: VaultTask[] = []
   const med: VaultTask[] = []
   const low: VaultTask[] = []
   const none: VaultTask[] = []
   for (const task of tasks) {
-    if (task.checked) continue
+    if (!isBoardCard(task)) continue
     if (task.priority === 'high') high.push(task)
     else if (task.priority === 'med') med.push(task)
     else if (task.priority === 'low') low.push(task)
     else none.push(task)
   }
   // Within each column, surface overdue/today first, then by due date.
-  const sortByDue = (a: VaultTask, b: VaultTask): number => {
-    const ad = a.due ?? '9999-12-31'
-    const bd = b.due ?? '9999-12-31'
-    if (ad !== bd) return ad < bd ? -1 : 1
-    if (a.sourcePath !== b.sourcePath) return a.sourcePath < b.sourcePath ? -1 : 1
-    return a.taskIndex - b.taskIndex
-  }
-  high.sort(sortByDue)
-  med.sort(sortByDue)
-  low.sort(sortByDue)
-  none.sort(sortByDue)
+  high.sort(compareCardsByDue)
+  med.sort(compareCardsByDue)
+  low.sort(compareCardsByDue)
+  none.sort(compareCardsByDue)
   return [
     { id: 'high', label: 'High', tasks: high },
     { id: 'med', label: 'Medium', tasks: med },
@@ -240,30 +202,123 @@ function priorityColumns(tasks: VaultTask[]): Column[] {
   ]
 }
 
-const FOLDER_ORDER: NoteFolder[] = ['inbox', 'quick', 'archive']
-const FOLDER_LABEL: Record<NoteFolder, string> = {
-  inbox: 'Inbox',
-  quick: 'Quick',
-  archive: 'Archive',
-  trash: 'Trash'
+const FOLDER_ORDER: NoteFolder[] = ['inbox', 'quick', 'archive', 'trash']
+
+/** What the folder board needs to know about the vault to place a note. */
+export interface FolderBoardLayout {
+  /** vault.json `systemFolderPaths`: the on-disk names of the system folders. */
+  systemFolderPaths?: SystemFolderPaths | null
+  /** Display names for the system folders (Settings, Sidebar). */
+  systemFolderLabels?: SystemFolderLabels | null
+  /** `kanbanFolderRoot`: group by the children of this folder; '' = each
+   *  note's own folder. Relative to the notes area, posix, no slashes at
+   *  the ends. */
+  folderRoot: string
 }
 
-function folderColumns(tasks: VaultTask[], showArchived: boolean): Column[] {
-  const map = new Map<NoteFolder, VaultTask[]>()
-  for (const task of tasks) {
-    if (task.checked) continue
-    const list = map.get(task.noteFolder)
-    if (list) list.push(task)
-    else map.set(task.noteFolder, [task])
+export const FOLDER_OTHER_LABEL = 'Other folders'
+
+/**
+ * Where a task's note lives, split into the system folder that owns it and
+ * the directory path under that folder ('' at its root). A note in the
+ * primary area of a root-mode vault has no system-folder prefix in its
+ * path, so the first segment is classified by name rather than assumed:
+ * `Projects/alpha/x.md` with noteFolder inbox is at `Projects/alpha` under
+ * the inbox, while `01 - Entry/Projects/x.md` in a vault whose inbox is
+ * remapped to `01 - Entry` strips that prefix first.
+ */
+export function noteLocationOf(
+  task: Pick<VaultTask, 'sourcePath' | 'noteFolder'>,
+  systemFolderPaths?: SystemFolderPaths | null
+): { folder: NoteFolder; dir: string; prefix: string } {
+  const segments = task.sourcePath.split('/')
+  segments.pop()
+  const first = segments[0]
+  const owner = first ? systemFolderForDirName(first, systemFolderPaths) : null
+  if (owner && owner === task.noteFolder) {
+    return { folder: task.noteFolder, dir: segments.slice(1).join('/'), prefix: first }
   }
-  // With archived tasks hidden (#540) the Archive column would only ever be
-  // empty, so it leaves the board instead of standing as a hollow promise.
-  const order = showArchived ? FOLDER_ORDER : FOLDER_ORDER.filter((f) => f !== 'archive')
-  return order.map((folder) => ({
-    id: folder,
-    label: FOLDER_LABEL[folder],
-    tasks: map.get(folder) ?? []
-  }))
+  return { folder: task.noteFolder, dir: segments.join('/'), prefix: '' }
+}
+
+function folderColumnLabel(
+  folder: NoteFolder,
+  dir: string,
+  labels: Record<string, string>
+): string {
+  if (!dir) return labels[folder]
+  return folder === 'inbox' ? dir : `${labels[folder]} / ${dir}`
+}
+
+export function folderColumns(
+  tasks: VaultTask[],
+  showArchived: boolean,
+  layout: FolderBoardLayout
+): Column[] {
+  const labels = resolveSystemFolderLabels(layout.systemFolderLabels)
+  const root = normalizeKanbanFolderRoot(layout.folderRoot)
+  const rootLower = root.toLowerCase()
+  const byId = new Map<string, { label: string; folder: NoteFolder; dir: string; tasks: VaultTask[] }>()
+  const other: VaultTask[] = []
+  const place = (id: string, label: string, folder: NoteFolder, dir: string, task: VaultTask): void => {
+    const entry = byId.get(id)
+    if (entry) entry.tasks.push(task)
+    else byId.set(id, { label, folder, dir, tasks: [task] })
+  }
+  for (const task of tasks) {
+    if (!isBoardCard(task)) continue
+    if (task.noteFolder === 'archive' && !showArchived) continue
+    const location = noteLocationOf(task, layout.systemFolderPaths)
+    const vaultDir = [location.prefix, location.dir].filter(Boolean).join('/')
+    if (!root) {
+      // Each note's own folder: the system folder's root as its label, a
+      // subfolder as its path.
+      const id = vaultDir || resolveFolderPath(location.folder, layout.systemFolderPaths)
+      place(id, folderColumnLabel(location.folder, location.dir, labels), location.folder, location.dir, task)
+      continue
+    }
+    // A root narrows the board to the primary area: the root's direct
+    // children are the columns, deeper notes roll up to their child, notes
+    // in the root itself get the root's column, and everything else (other
+    // system folders, folders beside the root) shares one trailing column.
+    if (location.folder !== 'inbox') {
+      other.push(task)
+      continue
+    }
+    const dirLower = location.dir.toLowerCase()
+    if (dirLower === rootLower) {
+      const id = [location.prefix, location.dir].filter(Boolean).join('/')
+      place(id, location.dir.split('/').pop() ?? location.dir, 'inbox', location.dir, task)
+      continue
+    }
+    if (dirLower.startsWith(rootLower + '/')) {
+      const child = location.dir.slice(root.length + 1).split('/')[0]
+      const childDir = `${location.dir.slice(0, root.length)}/${child}`
+      const id = [location.prefix, childDir].filter(Boolean).join('/')
+      place(id, child, 'inbox', childDir, task)
+      continue
+    }
+    other.push(task)
+  }
+
+  const folderRank = (folder: NoteFolder): number => FOLDER_ORDER.indexOf(folder)
+  const columns: Column[] = [...byId.entries()]
+    .sort(([, a], [, b]) => {
+      // System folder order first, a folder's root before its subfolders,
+      // then subfolders alphabetically.
+      if (a.folder !== b.folder) return folderRank(a.folder) - folderRank(b.folder)
+      if (!a.dir !== !b.dir) return a.dir ? 1 : -1
+      return a.dir.localeCompare(b.dir, undefined, { sensitivity: 'base', numeric: true })
+    })
+    .map(([id, entry]) => ({ id, label: entry.label, tasks: entry.tasks.sort(compareCardsByDue) }))
+  if (other.length > 0) {
+    columns.push({
+      id: NO_VALUE_COLUMN_ID,
+      label: FOLDER_OTHER_LABEL,
+      tasks: other.sort(compareCardsByDue)
+    })
+  }
+  return columns
 }
 
 /** Title-case a field value for its default column label; users can still
@@ -281,13 +336,23 @@ function fieldKeyOf(groupBy: KanbanGroupBy): string | null {
 /** Columns for a free-form `@<key>:<value>` field board. Configured values come
  *  first in order, then any value found on tasks but not configured (sorted, so
  *  nothing is hidden), then a trailing "No <key>" column. Completed and
- *  forwarded tasks are left off, matching the priority/folder boards. (#354) */
-function fieldColumns(tasks: VaultTask[], fieldKey: string, order: string[]): Column[] {
+ *  forwarded tasks are left off, matching the priority/folder boards. (#354)
+ *
+ *  One exception (#949): a task note whose value names a configured column
+ *  stays in it, done or cancelled. A task note's `status:` is its one state,
+ *  so `status: done` both closes it and names its column, and a `done` column
+ *  someone listed in `kanban_statuses` is a request to see that work. Only a
+ *  configured column counts: a discovered one would turn every finished note in
+ *  the vault into a column. Checkbox tasks keep the live-work rule, because
+ *  their box and their `@status:` are separate, and a status they inherit from
+ *  the note's frontmatter would pull every checked subtask into that column. */
+export function fieldColumns(tasks: VaultTask[], fieldKey: string, order: string[]): Column[] {
   const byValue = new Map<string, VaultTask[]>()
   const noValue: VaultTask[] = []
+  const configured = new Set(order)
   for (const task of tasks) {
-    if (task.checked || task.forwarded || task.cancelled) continue
     const value = task.fields?.[fieldKey]
+    if (!isBoardCard(task) && !(task.kind === 'file' && value && configured.has(value))) continue
     if (value) {
       const list = byValue.get(value)
       if (list) list.push(task)
@@ -314,23 +379,15 @@ function fieldColumns(tasks: VaultTask[], fieldKey: string, order: string[]): Co
     }
   }
 
-  const sortByDue = (a: VaultTask, b: VaultTask): number => {
-    const ad = a.due ?? '9999-12-31'
-    const bd = b.due ?? '9999-12-31'
-    if (ad !== bd) return ad < bd ? -1 : 1
-    if (a.sourcePath !== b.sourcePath) return a.sourcePath < b.sourcePath ? -1 : 1
-    return a.taskIndex - b.taskIndex
-  }
-
   const columns: Column[] = ordered.map((id) => ({
     id,
     label: prettifyFieldValue(id),
-    tasks: (byValue.get(id) ?? []).sort(sortByDue)
+    tasks: (byValue.get(id) ?? []).sort(compareCardsByDue)
   }))
   columns.push({
     id: NO_VALUE_COLUMN_ID,
     label: `No ${fieldKey}`,
-    tasks: noValue.sort(sortByDue)
+    tasks: noValue.sort(compareCardsByDue)
   })
   return columns
 }
@@ -340,10 +397,11 @@ function buildColumns(
   tasks: VaultTask[],
   today: Date,
   statuses: string[],
-  showArchived: boolean
+  showArchived: boolean,
+  folderLayout: FolderBoardLayout
 ): Column[] {
   if (groupBy === 'priority') return priorityColumns(tasks)
-  if (groupBy === 'folder') return folderColumns(tasks, showArchived)
+  if (groupBy === 'folder') return folderColumns(tasks, showArchived, folderLayout)
   const fieldKey = fieldKeyOf(groupBy)
   if (fieldKey) {
     // The status field keeps its friendly `kanban_statuses` order; other fields
@@ -472,6 +530,24 @@ export function applyColumnOrder(
   })
 }
 
+/** The cards inside each column: in the order they were dragged into, or by
+ *  due date (#889). Ordering by due date leaves the dragged arrangement saved,
+ *  so choosing Manual again brings it back. */
+export function orderCards(
+  groupBy: KanbanGroupBy,
+  columns: Column[],
+  cardSort: KanbanCardSort,
+  orderMap: Map<string, string[]>
+): Column[] {
+  if (cardSort === 'due') {
+    return columns.map((column) => ({
+      ...column,
+      tasks: [...column.tasks].sort(compareCardsByDue)
+    }))
+  }
+  return applyColumnOrder(groupBy, columns, orderMap)
+}
+
 /** Reorder built columns by the user's saved arrangement (`kanbanColumnOrder`).
  *  Columns not in the saved order keep their built position after the saved
  *  ones (stable), so newly-discovered values still appear. The No-value bucket
@@ -554,6 +630,9 @@ interface ActiveColumnDrag {
   pointerId: number
   startX: number
   startY: number
+  /** Latest pointer position, to re-aim when the board scrolls under a still pointer. */
+  pointerX: number
+  pointerY: number
   dragging: boolean
   /** Column the pointer is currently over, and which side to insert on. */
   targetId: string | null
@@ -566,6 +645,9 @@ interface ActivePointerDrag {
   sourceColumnId: string | null
   startX: number
   startY: number
+  /** Latest pointer position, to re-aim when the board scrolls under a still pointer. */
+  pointerX: number
+  pointerY: number
   offsetX: number
   offsetY: number
   width: number
@@ -588,6 +670,8 @@ const POINTER_DRAG_THRESHOLD = 5
 
 export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: Props): JSX.Element {
   const groupBy = useStore((s) => s.kanbanGroupBy)
+  const cardSort = useStore((s) => s.kanbanCardSort)
+  const setCardSort = useStore((s) => s.setKanbanCardSort)
   const setGroupBy = useStore((s) => s.setKanbanGroupBy)
   const kanbanColumnTitles = useStore((s) => s.kanbanColumnTitles)
   const setKanbanColumnTitle = useStore((s) => s.setKanbanColumnTitle)
@@ -596,6 +680,14 @@ export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: 
   const setKanbanCardOrder = useStore((s) => s.setKanbanCardOrder)
   const kanbanStatuses = useStore((s) => s.kanbanStatuses)
   const showArchivedTasks = useStore((s) => s.showArchivedTasks)
+  const kanbanFolderRoot = useStore((s) => s.kanbanFolderRoot)
+  const setKanbanFolderRoot = useStore((s) => s.setKanbanFolderRoot)
+  const systemFolderPaths = useStore((s) => s.vaultSettings.systemFolderPaths)
+  const systemFolderLabels = useStore((s) => s.systemFolderLabels)
+  const folderLayout = useMemo<FolderBoardLayout>(
+    () => ({ systemFolderPaths, systemFolderLabels, folderRoot: kanbanFolderRoot }),
+    [systemFolderPaths, systemFolderLabels, kanbanFolderRoot]
+  )
   const applyTaskMutation = useStore((s) => s.applyTaskMutation)
   const startTaskFromList = useStore((s) => s.startTaskFromList)
   const cancelTaskFromList = useStore((s) => s.cancelTaskFromList)
@@ -649,6 +741,23 @@ export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: 
   // #573: a pressed `g` waiting out the gt/gT window before cycling group-by.
   const groupByPendingRef = useRef(false)
   const groupByTimerRef = useRef<number | null>(null)
+  // Edge auto-scroll for both drags (#838): near the board's left or right edge
+  // the board scrolls sideways, and a card held near the top or bottom of a
+  // long column scrolls that column.
+  const [cardAutoScroll] = useState(() =>
+    createDragAutoScroller({
+      horizontal: () => boardRef.current,
+      vertical: (clientX, clientY) => {
+        const body = (
+          document.elementFromPoint(clientX, clientY) as HTMLElement | null
+        )?.closest<HTMLElement>('[data-kanban-column-body]')
+        return body && boardRef.current?.contains(body) ? body : null
+      }
+    })
+  )
+  const [columnAutoScroll] = useState(() =>
+    createDragAutoScroller({ horizontal: () => boardRef.current })
+  )
 
   const openTaskMenu = useCallback(
     (e: React.MouseEvent, task: VaultTask): void => {
@@ -686,9 +795,16 @@ export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: 
 
   const fullColumns = useMemo(
     () => {
-      const built = buildColumns(groupBy, displayTasks, today, kanbanStatuses, showArchivedTasks)
+      const built = buildColumns(
+        groupBy,
+        displayTasks,
+        today,
+        kanbanStatuses,
+        showArchivedTasks,
+        folderLayout
+      )
       const savedOrder = kanbanColumnOrder[groupBy] ?? []
-      const orderedColumns = applyColumnOrder(
+      const orderedColumns = orderCards(
         groupBy,
         arrangeColumns(
           built,
@@ -699,6 +815,7 @@ export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: 
               )
             : savedOrder
         ),
+        cardSort,
         columnOrderRef.current
       )
       return orderedColumns.map((column) => ({
@@ -707,6 +824,7 @@ export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: 
       }))
     },
     [
+      cardSort,
       columnOrderVersion,
       groupBy,
       displayTasks,
@@ -714,6 +832,7 @@ export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: 
       kanbanColumnTitles,
       kanbanStatuses,
       showArchivedTasks,
+      folderLayout,
       today
     ]
   )
@@ -769,6 +888,32 @@ export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: 
 
   const dndEnabled = groupBy !== 'folder'
 
+  // The folder board's root (#730): a prompt listing the folders that hold
+  // tasks, so the choice is one Enter away; an empty answer goes back to
+  // grouping by each note's own folder.
+  const pickFolderRoot = useCallback(async (): Promise<void> => {
+    const dirs = new Set<string>()
+    for (const task of latestTasksRef.current) {
+      const location = noteLocationOf(task, folderLayout.systemFolderPaths)
+      if (location.folder !== 'inbox' || !location.dir) continue
+      const parts = location.dir.split('/')
+      for (let i = 1; i <= parts.length; i += 1) dirs.add(parts.slice(0, i).join('/'))
+    }
+    const answer = await promptApp({
+      title: 'Group the folder board by',
+      description:
+        'The folders inside this one become the columns; deeper notes roll up to their folder, and notes outside it share an Other folders column. Leave empty to group by each note’s own folder.',
+      initialValue: kanbanFolderRoot,
+      placeholder: 'Projects',
+      okLabel: 'Apply',
+      allowEmptySubmit: true,
+      suggestions: [...dirs].sort().map((dir) => ({ value: dir })),
+      suggestionsHint: '↑↓ pick a folder · Enter apply · empty clears'
+    })
+    if (answer === null) return
+    setKanbanFolderRoot(answer)
+  }, [folderLayout.systemFolderPaths, kanbanFolderRoot, setKanbanFolderRoot])
+
   const beginColumnRename = useCallback((column: Column) => {
     setEditingColumnId(column.id)
     setEditingTitle(column.label)
@@ -822,6 +967,8 @@ export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: 
         pointerId: e.pointerId,
         startX: e.clientX,
         startY: e.clientY,
+        pointerX: e.clientX,
+        pointerY: e.clientY,
         dragging: false,
         targetId: null,
         insertAfter: false
@@ -840,12 +987,36 @@ export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: 
       const targetIdx = ids.indexOf(drag.targetId)
       if (targetIdx < 0) return
       ids.splice(drag.insertAfter ? targetIdx + 1 : targetIdx, 0, drag.columnId)
+      // The cursor moves with the dropped column, as it does for `<` / `>`, so
+      // the focus-follow scroll stays on the column that was just placed
+      // instead of chasing whichever column slid under the old cursor (#838).
+      setColIdx(ids.indexOf(drag.columnId))
       setKanbanColumnOrder(groupBy, ids)
     },
     [groupBy, setKanbanColumnOrder]
   )
 
   useEffect(() => {
+    const aimColumnDrag = (drag: ActiveColumnDrag): void => {
+      const columnEl = (
+        document.elementFromPoint(drag.pointerX, drag.pointerY) as HTMLElement | null
+      )?.closest<HTMLElement>('[data-kanban-column-id]')
+      const targetId = columnEl?.dataset.kanbanColumnId ?? null
+      if (!columnEl || !targetId || targetId === NO_VALUE_COLUMN_ID || targetId === drag.columnId) {
+        drag.targetId = null
+        setColumnDropTarget(null)
+        return
+      }
+      const rect = columnEl.getBoundingClientRect()
+      const after = drag.pointerX > rect.left + rect.width / 2
+      drag.targetId = targetId
+      drag.insertAfter = after
+      // Kept referentially stable while the aim holds: a scrolling board
+      // re-aims every frame, and a fresh object would re-render every frame.
+      setColumnDropTarget((current) =>
+        current?.id === targetId && current.after === after ? current : { id: targetId, after }
+      )
+    }
     const handleMove = (e: PointerEvent): void => {
       const drag = columnDragRef.current
       if (!drag || drag.pointerId !== e.pointerId) return
@@ -862,25 +1033,22 @@ export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: 
         document.body.style.userSelect = 'none'
       }
       e.preventDefault()
-      const columnEl = (document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null)?.closest<HTMLElement>(
-        '[data-kanban-column-id]'
-      )
-      const targetId = columnEl?.dataset.kanbanColumnId ?? null
-      if (!targetId || targetId === NO_VALUE_COLUMN_ID || targetId === drag.columnId) {
-        drag.targetId = null
-        setColumnDropTarget(null)
-        return
-      }
-      const rect = columnEl!.getBoundingClientRect()
-      const after = e.clientX > rect.left + rect.width / 2
-      drag.targetId = targetId
-      drag.insertAfter = after
-      setColumnDropTarget({ id: targetId, after })
+      drag.pointerX = e.clientX
+      drag.pointerY = e.clientY
+      aimColumnDrag(drag)
+      columnAutoScroll.update(e.clientX, e.clientY)
+    }
+    // The board scrolling under a still pointer (the edge auto-scroll, a
+    // wheel) moves a different column beneath it without any pointermove.
+    const handleScroll = (): void => {
+      const drag = columnDragRef.current
+      if (drag?.dragging) aimColumnDrag(drag)
     }
     const handleUp = (e: PointerEvent): void => {
       const drag = columnDragRef.current
       if (!drag || drag.pointerId !== e.pointerId) return
       columnDragRef.current = null
+      columnAutoScroll.stop()
       if (drag.dragging) {
         e.preventDefault()
         finishColumnDrag(drag)
@@ -894,19 +1062,24 @@ export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: 
       const drag = columnDragRef.current
       if (!drag || drag.pointerId !== e.pointerId) return
       columnDragRef.current = null
+      columnAutoScroll.stop()
       setDraggingColumnId(null)
       setColumnDropTarget(null)
       document.body.style.userSelect = ''
     }
+    const board = boardRef.current
     window.addEventListener('pointermove', handleMove, { passive: false })
     window.addEventListener('pointerup', handleUp, { passive: false })
     window.addEventListener('pointercancel', handleCancel)
+    board?.addEventListener('scroll', handleScroll, { capture: true, passive: true })
     return () => {
       window.removeEventListener('pointermove', handleMove)
       window.removeEventListener('pointerup', handleUp)
       window.removeEventListener('pointercancel', handleCancel)
+      board?.removeEventListener('scroll', handleScroll, { capture: true })
+      columnAutoScroll.stop()
     }
-  }, [finishColumnDrag])
+  }, [columnAutoScroll, finishColumnDrag])
 
   useEffect(() => {
     if (!editingColumnId) return
@@ -1001,7 +1174,10 @@ export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: 
 
   const placeTaskInColumnOrder = useCallback(
     (task: VaultTask, targetColumnId: string, targetIndex: number | null) => {
-      if (targetIndex == null) return
+      // Ordered by due date, a card lands in its date slot; writing the board's
+      // current (date) order here would overwrite the arrangement Manual
+      // brings back. (#889)
+      if (targetIndex == null || useStore.getState().kanbanCardSort === 'due') return
 
       const movingKey = taskIdentityKey(task)
       // The drop index counts the VISIBLE cards (the DOM the user aimed at),
@@ -1218,11 +1394,36 @@ export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: 
       const cards = Array.from(
         target.element.querySelectorAll<HTMLElement>('[data-kanban-task-id]')
       ).filter((card) => card.dataset.kanbanTaskId !== drag.task.id)
-      const insertionIndex = cards.findIndex((card) => {
-        const rect = card.getBoundingClientRect()
-        return clientY < rect.top + rect.height / 2
-      })
-      const boundedIndex = insertionIndex === -1 ? cards.length : insertionIndex
+      let boundedIndex: number
+      if (useStore.getState().kanbanCardSort === 'due') {
+        // Ordered by due date there is no place to choose: within its own
+        // column the card stays put, and in another it lands in its date
+        // slot, which the line shows (a Today or Upcoming drop can change the
+        // date first). (#889)
+        if (target.id === drag.sourceColumnId) {
+          hideDropIndicator()
+          return null
+        }
+        const dueMutation = mutations.find(
+          (mutation): mutation is Extract<TaskMutation, { kind: 'set-due' }> =>
+            mutation.kind === 'set-due'
+        )
+        const landing = {
+          ...drag.task,
+          due: dueMutation ? (dueMutation.due ?? undefined) : drag.task.due
+        }
+        const others = (
+          columnsRef.current.find((column) => column.id === target.id)?.tasks ?? []
+        ).filter((task) => task.id !== drag.task.id)
+        const slot = others.findIndex((task) => compareCardsByDue(landing, task) < 0)
+        boundedIndex = slot === -1 ? others.length : slot
+      } else {
+        const insertionIndex = cards.findIndex((card) => {
+          const rect = card.getBoundingClientRect()
+          return clientY < rect.top + rect.height / 2
+        })
+        boundedIndex = insertionIndex === -1 ? cards.length : insertionIndex
+      }
 
       let y: number
       if (boundedIndex < cards.length) {
@@ -1259,8 +1460,28 @@ export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: 
         columnId === drag.sourceColumnId
           ? []
           : dropMutationsFor(groupBy, columnId, drag.task, today)
-      if (mutations) {
-        moveTaskOnBoard(drag.task, mutations, columnId, insertionIndex)
+      if (!mutations) return
+      // The cursor lands on the dropped card, the way a click, a right-click
+      // and Shift+H/L already put it on theirs. It moves BEFORE the card does:
+      // the move flushes the board rebuild synchronously, and a rebuild under
+      // the old cursor scrolls the board back to it, a whole board away once
+      // an edge auto-scroll carried the card there (#838). The insertion index
+      // is exact for the visible column; a drop without one resolves below.
+      const movedKey = taskIdentityKey(drag.task)
+      const targetColIdx = columnsRef.current.findIndex((column) => column.id === columnId)
+      if (targetColIdx >= 0) {
+        const currentIdx = columnsRef.current[targetColIdx].tasks.findIndex(
+          (task) => taskIdentityKey(task) === movedKey
+        )
+        setColIdx(targetColIdx)
+        setCardIdx(insertionIndex ?? Math.max(0, currentIdx))
+      }
+      moveTaskOnBoard(drag.task, mutations, columnId, insertionIndex)
+      if (mutations.length > 0) {
+        // That flushed rebuild already ran, so the board knows where the card landed.
+        const next = cursorAfterCardMove(columnsRef.current, columnId, movedKey)
+        setColIdx(next.colIdx)
+        setCardIdx(next.cardIdx)
       }
     },
     [columnAtPoint, dndEnabled, groupBy, moveTaskOnBoard, today]
@@ -1280,6 +1501,8 @@ export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: 
         sourceColumnId,
         startX: e.clientX,
         startY: e.clientY,
+        pointerX: e.clientX,
+        pointerY: e.clientY,
         offsetX: e.clientX - rect.left,
         offsetY: e.clientY - rect.top,
         width: rect.width,
@@ -1293,6 +1516,20 @@ export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: 
   )
 
   useEffect(() => {
+    const aimPointerDrag = (drag: ActivePointerDrag): void => {
+      const target = columnAtPoint(drag.pointerX, drag.pointerY)
+      if (target?.id && dndEnabled) {
+        drag.lastColumnId = target.id
+        markDropTarget(target.id, target.element)
+        drag.lastInsertionIndex = updateDropIndicator(drag, target, drag.pointerY)
+      } else {
+        drag.lastColumnId = null
+        drag.lastInsertionIndex = null
+        clearDropTarget()
+        hideDropIndicator()
+      }
+    }
+
     const handlePointerMove = (e: PointerEvent): void => {
       const drag = pointerDragRef.current
       if (!drag || drag.pointerId !== e.pointerId) return
@@ -1318,17 +1555,18 @@ export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: 
 
       e.preventDefault()
       scheduleDragPreviewPosition(drag, e)
-      const target = columnAtPoint(e.clientX, e.clientY)
-      if (target?.id && dndEnabled) {
-        drag.lastColumnId = target.id
-        markDropTarget(target.id, target.element)
-        drag.lastInsertionIndex = updateDropIndicator(drag, target, e.clientY)
-      } else {
-        drag.lastColumnId = null
-        drag.lastInsertionIndex = null
-        clearDropTarget()
-        hideDropIndicator()
-      }
+      drag.pointerX = e.clientX
+      drag.pointerY = e.clientY
+      aimPointerDrag(drag)
+      cardAutoScroll.update(e.clientX, e.clientY)
+    }
+
+    // The board or a column scrolling under a still pointer (the edge
+    // auto-scroll, a wheel) slides other cards and columns beneath it with no
+    // pointermove, so the highlight and the insertion line would go stale.
+    const handleScroll = (): void => {
+      const drag = pointerDragRef.current
+      if (drag?.dragging) aimPointerDrag(drag)
     }
 
     const handlePointerUp = (e: PointerEvent): void => {
@@ -1336,6 +1574,7 @@ export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: 
       if (!drag || drag.pointerId !== e.pointerId) return
 
       pointerDragRef.current = null
+      cardAutoScroll.stop()
       if (drag.dragging) {
         e.preventDefault()
         setDraggingId(null)
@@ -1354,6 +1593,7 @@ export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: 
       const drag = pointerDragRef.current
       if (!drag || drag.pointerId !== e.pointerId) return
       pointerDragRef.current = null
+      cardAutoScroll.stop()
       setDraggingId(null)
       document.body.style.userSelect = ''
       clearDropTarget()
@@ -1361,18 +1601,23 @@ export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: 
       clearDragPreview()
     }
 
+    const board = boardRef.current
     window.addEventListener('pointermove', handlePointerMove, { passive: false })
     window.addEventListener('pointerup', handlePointerUp, { passive: false })
     window.addEventListener('pointercancel', handlePointerCancel, { passive: false })
+    board?.addEventListener('scroll', handleScroll, { capture: true, passive: true })
     return () => {
       window.removeEventListener('pointermove', handlePointerMove)
       window.removeEventListener('pointerup', handlePointerUp)
       window.removeEventListener('pointercancel', handlePointerCancel)
+      board?.removeEventListener('scroll', handleScroll, { capture: true })
+      cardAutoScroll.stop()
       document.body.style.userSelect = ''
       hideDropIndicator()
       clearDragPreview()
     }
   }, [
+    cardAutoScroll,
     clearDragPreview,
     clearDropTarget,
     columnAtPoint,
@@ -1392,6 +1637,24 @@ export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: 
     ? Math.min(cardIdx, Math.max(0, focusedColumn.tasks.length - 1))
     : 0
   const focusedTask = focusedColumn?.tasks[safeCardIdx]
+
+  // Switching the order keeps the cursor on its card, wherever the new order
+  // puts it: the rebuild is flushed first, the way a move is. (#889)
+  const chooseCardSort = useCallback(
+    (next: KanbanCardSort): void => {
+      if (useStore.getState().kanbanCardSort === next) return
+      flushSync(() => setCardSort(next))
+      if (!focusedColumn || !focusedTask) return
+      const cursor = cursorAfterCardMove(
+        columnsRef.current,
+        focusedColumn.id,
+        taskIdentityKey(focusedTask)
+      )
+      setColIdx(cursor.colIdx)
+      setCardIdx(cursor.cardIdx)
+    },
+    [focusedColumn, focusedTask, setCardSort]
+  )
 
   useEffect(() => {
     cardRef.current?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
@@ -1416,6 +1679,11 @@ export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: 
   // beat VimNav's global handler (which otherwise hijacks h/j/k/l).
   useEffect(() => {
     const handler = (e: KeyboardEvent): void => {
+      // A menu or dialog owns the keyboard while it is open. The card's own
+      // right-click menu filters as you type, and without this a filter like
+      // "prio" reached the board first: its `i` marked the card in progress.
+      // Settings and the palettes are dialogs too.
+      if (isOverlayOrDialogOpen()) return
       // While the Vim hint overlay is open it owns the keyboard; yield to it. (#151)
       if (document.querySelector('[data-vim-hint-overlay]')) return
       const active = document.activeElement as HTMLElement | null
@@ -1437,6 +1705,12 @@ export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: 
       }
 
       if (e.metaKey || e.ctrlKey || e.altKey) return
+      // With Vim off the single-character keys stay with the page, the rule
+      // every list in the app follows: arrows, Enter, Space and Escape are
+      // universal, the letters (and < > H L) are Vim's. The board kept them
+      // live for a while after the lists were gated; its hint line named
+      // h/l, j/k and x to people who never asked for them.
+      if (!vimMode && e.key.length === 1 && e.key !== ' ') return
 
       const consume = (): void => {
         e.preventDefault()
@@ -1483,6 +1757,10 @@ export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: 
             consume()
             moveFocusedCard(1)
           }
+          return
+        case 's':
+          consume()
+          chooseCardSort(useStore.getState().kanbanCardSort === 'due' ? 'manual' : 'due')
           return
         case '<':
           consume()
@@ -1540,6 +1818,7 @@ export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: 
     window.addEventListener('keydown', handler, true)
     return () => window.removeEventListener('keydown', handler, true)
   }, [
+    chooseCardSort,
     clearGroupByPending,
     columns.length,
     cycleGroupBy,
@@ -1569,11 +1848,45 @@ export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: 
               </option>
             ))}
           </select>
+          {groupBy === 'folder' && (
+            <button
+              type="button"
+              data-kanban-folder-root
+              onClick={() => void pickFolderRoot()}
+              title={
+                kanbanFolderRoot
+                  ? `Columns are the folders inside ${kanbanFolderRoot}. Click to change (:folderroot).`
+                  : 'Columns are each note’s own folder. Click to group by the folders inside one folder instead (:folderroot <path>).'
+              }
+              className="ml-1 rounded-md border border-paper-300/60 bg-paper-200/60 px-2 py-0.5 text-xs text-current/70 transition-colors hover:bg-paper-200 hover:text-current/90"
+            >
+              {kanbanFolderRoot ? `inside ${kanbanFolderRoot}` : 'each note’s folder'}
+            </button>
+          )}
+          <span className="ml-2">Order</span>
+          <select
+            data-kanban-card-sort
+            value={cardSort}
+            onChange={(e) => chooseCardSort(e.target.value as KanbanCardSort)}
+            title={
+              cardSort === 'due'
+                ? `Each column is sorted by due date, earliest first, undated cards last. Manual brings back the order you dragged cards into${vimMode ? ' (s)' : ''}.`
+                : `Cards keep the order you drag them into. Due date sorts each column by due date${vimMode ? ' (s)' : ''}.`
+            }
+            className="rounded-md border border-paper-300/60 bg-paper-200/60 px-2 py-0.5 text-xs text-current/85 outline-none focus:border-paper-400/70"
+          >
+            <option value="manual">Manual</option>
+            <option value="due">Due date</option>
+          </select>
         </div>
         <div className="text-xs text-current/40">
-          {dndEnabled
-            ? 'Drag or Shift+H·L move card · drag header or </> reorder columns · h/l · j/k · g group-by · x · Enter · right-click actions'
-            : 'Drag header or </> reorder columns · h/l column · j/k card · g group-by · x · Enter · right-click actions'}
+          {vimMode
+            ? dndEnabled
+              ? 'Drag or Shift+H·L move card · drag header or </> reorder columns · h/l · j/k · g group-by · s order · x · Enter · right-click actions'
+              : 'Drag header or </> reorder columns · h/l column · j/k card · g group-by · s order · x · Enter · right-click actions'
+            : dndEnabled
+              ? 'Drag to move a card · drag a header to reorder columns · ←/→ · ↑/↓ · Space · Enter · right-click actions'
+              : 'Drag a header to reorder columns · ←/→ column · ↑/↓ card · Space · Enter · right-click actions'}
         </div>
       </div>
 
@@ -1728,6 +2041,7 @@ export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: 
                           onToggle={() => onToggleTask(task)}
                           onPointerDown={(e) => beginPointerDrag(task, e)}
                           onContextMenu={openTaskMenu}
+                          toggleKey={vimMode ? 'x' : null}
                         />
                       )
                     })}
@@ -1740,7 +2054,7 @@ export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: 
       </div>
       {!dndEnabled && (
         <div className="shrink-0 border-t border-paper-300/45 px-3 py-1.5 text-xs text-current/40">
-          Folder grouping is read-only — move a task across folders by moving its source note in
+          Folder grouping is read-only: move a task across folders by moving its source note in
           the sidebar.
         </div>
       )}
@@ -1798,6 +2112,8 @@ interface CardProps {
   onPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void
   /** Right-click actions. Omitted on the drag preview, which is not a real card. */
   onContextMenu?: (e: React.MouseEvent, task: VaultTask) => void
+  /** The key the checkbox tooltip names; none with Vim mode off. */
+  toggleKey?: string | null
 }
 
 function formatDue(iso: string | undefined): string {
@@ -1820,7 +2136,8 @@ function TaskCard({
   shouldSuppressClick,
   onToggle,
   onPointerDown,
-  onContextMenu
+  onContextMenu,
+  toggleKey = null
 }: CardProps): JSX.Element {
   return (
     <div
@@ -1862,6 +2179,7 @@ function TaskCard({
           onToggle={onToggle}
           idleClassName="border border-paper-400/70 hover:bg-paper-200/80"
           stopPointerEvents
+          toggleKey={toggleKey}
         />
         {/* The card body stays focusable so clicks open the note and drags move it. */}
         <div
@@ -1908,6 +2226,7 @@ function TaskCard({
       </div>
       <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 pl-6 text-xs text-current/50">
         <span className="max-w-full truncate">{task.noteTitle}</span>
+        <CloudTaskConflictIndicator path={task.sourcePath} />
         {task.priority && (
           <span
             className={[

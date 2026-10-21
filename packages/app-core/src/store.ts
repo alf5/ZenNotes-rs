@@ -1,10 +1,17 @@
+import type { LocalVaultRelocation } from './lib/workspace-relocation'
+import { captureNavigationContext } from './lib/navigation-context'
+import { runWorkspaceTransition, workspaceGeneration, workspaceWritesBlocked, isWorkspaceTransitionPending } from './lib/workspace-transition'
+import { isNoteEditingLocked, lockNoteEditing } from './lib/note-lifecycle-lock'
 import { create } from 'zustand'
+import { rewriteWikilinksForRename } from '@shared/wikilink-rename'
+import { useToastStore } from './lib/toast'
 import type { EditorView } from '@codemirror/view'
 import {
   editorCursorPosition,
   type EditorCursorPosition
 } from './lib/editor-cursor-position'
 import { DEFAULT_VAULT_SETTINGS } from '@shared/ipc'
+import { normalizeVaultDisplayName, resolveVaultName, vaultFolderName } from '@shared/vault-display-name'
 import {
   DEFAULT_HARPER_DIALECT,
   isHarperDialect,
@@ -13,15 +20,21 @@ import {
   type HarperLintConfig,
   type HarperVaultState
 } from '@shared/harper-settings'
-import { resolveFolderPath } from '@shared/system-folder-paths'
-import { normalizeTasksExcludedFolder } from '@shared/tasks-excluded-folders'
+import {
+  normalizeTasksExcludedFolder,
+  normalizeTasksIncludedFolder,
+  rewriteTasksFoldersForRename
+} from '@shared/tasks-excluded-folders'
+import { toggleTasksFolder } from './lib/tasks-folder-lists'
 import { cloudSyncPathKey } from '@zennotes/shared-domain/cloud-sync'
 import { useCloudSyncStatusStore } from './lib/cloud-auto-sync'
 import type {
+  AgentEditSummary,
   AssetMeta,
   DateNotePatternSettings,
   DeletedAsset,
   FolderEntry,
+  ImportedAsset,
   LocalVaultEntry,
   NoteComment,
   NoteCommentInput,
@@ -50,7 +63,6 @@ import {
   TYPST_PREAMBLE_FOLDER,
   isTypstPreamblePath,
   preambleKeyFromTitle,
-  resolveTypstPreamble,
   resolveTypstPreambleFolder,
   type TypstPreambleNote
 } from './lib/typst-preamble'
@@ -63,10 +75,13 @@ import {
   taskFilePriorityValue,
   updateFrontmatterFields
 } from '@shared/frontmatter'
-import type { DatabaseDoc, DatabaseSidecar } from '@shared/databases'
+import type { DatabaseDoc, DatabaseSeed, DatabaseSidecar } from '@shared/databases'
 import {
   databaseTabPath,
+  csvPathFromDatabaseTab,
   formTitleFromCsvPath,
+  formDirFromCsvPath,
+  formDirContaining,
   isDatabaseInternalPath,
   isDatabaseTabPath,
   isDatabaseCsvPath
@@ -80,7 +95,7 @@ import { ATLAS_TAB_PATH, isAtlasTabPath } from '@shared/atlas-view'
 import { HELP_TAB_PATH, isHelpTabPath } from '@shared/help'
 import { ARCHIVE_TAB_PATH, isArchiveTabPath } from '@shared/archive'
 import { TRASH_TAB_PATH, isTrashTabPath } from '@shared/trash'
-import { ASSETS_VIEW_TAB_PATH, isAssetsViewTabPath } from '@shared/assets-view'
+import { ASSETS_VIEW_TAB_PATH } from '@shared/assets-view'
 import { QUICK_NOTES_TAB_PATH, isQuickNotesTabPath } from '@shared/quick-notes'
 import { isAssetTabPath, assetPathFromTab, assetTabPath } from './lib/asset-tabs'
 import {
@@ -116,15 +131,15 @@ import { customCodeLanguageRegistry } from './lib/custom-code-languages'
 import { formatMarkdown } from './lib/format-markdown'
 import { confirmDeletePermanently, confirmMoveToTrash } from './lib/confirm-trash'
 import { humanIpcError } from './lib/ipc-error'
-import { deleteNotePermanently, moveNoteToTrash } from './lib/trash-note'
-import { confirmApp } from './lib/confirm-requests'
+import { confirmApp, getConfirmRequest } from './lib/confirm-requests'
 import { pickServerDirectoryApp } from './lib/server-directory-picker-requests'
-import { promptApp } from './lib/prompt-requests'
+import { promptApp, getPromptRequest } from './lib/prompt-requests'
 import {
   buildNoteDestinationPrompt,
   buildTemplateDestinationPrompt,
   parseTemplateDestination
 } from './lib/move-note'
+import { composeNewNoteBody } from './lib/search-create'
 import type { KeymapId, KeymapOverrides } from './lib/keymaps'
 import { normalizeKeymapOverrides } from './lib/keymaps'
 import {
@@ -164,6 +179,7 @@ import {
   removeFolderIcons,
   normalizeVaultSettings,
   noteFolderSubpath,
+  vaultRelativeFolderPath,
   resolveCreateLocation,
   rewriteFavoriteNotePath,
   rewriteFavoritesForFolderRename,
@@ -186,6 +202,7 @@ import {
 } from '@shared/template-files'
 import { buildWorkflowIndex } from './lib/workflow-index'
 import type { WorkflowIndexEntry } from './lib/workflow-index'
+import { emitNoteEvent } from './lib/note-events'
 import {
   INITIAL_VISIBLE_NOTE_PREFETCH_BATCH_SIZE,
   selectInitialVisibleNotePrefetchPaths
@@ -205,7 +222,6 @@ import {
   leafWithoutTab,
   makeLeaf,
   mapLeaves,
-  replaceLeaf,
   rewritePathsInTree,
   preserveLayoutIfPruneEmptiesNoteTabs,
   splitLeaf,
@@ -222,22 +238,37 @@ import {
   type PaneMode,
   type PaneModesByPath
 } from './lib/pane-mode'
+import { appendPathRewrite, pathInScope, type PathRewrite } from './lib/path-rewrites'
+import {
+  panePanelsForPath,
+  panePanelsForSnapshot,
+  panePanelsFromSnapshot,
+  panePanelsWithPath,
+  prunePanePanels,
+  type PanePanelsByPath,
+  type PanePanelsSnapshot,
+  type PanePanelsState
+} from './lib/pane-panels'
 import {
   normalizeTextReplacements,
   type TextReplacements
 } from './lib/cm-text-replacements'
+import {
+  normalizeSavedTaskFilters,
+  renameSavedTaskFilter as renameSavedTaskFilterEntry,
+  savedTaskFilterQuery,
+  withSavedTaskFilter,
+  withoutSavedTaskFilter,
+  type SavedTaskFilters
+} from './lib/saved-task-filters'
+import { normalizeIgnoredKeys } from './lib/ignored-keys'
+import { normalizeApplicationSchemes } from '@shared/application-links'
 import { normalizeEditorTabSize } from './lib/editor-tab-size'
 import { recentNoteToggleTarget } from './lib/recent-note-toggle'
+import { whatsNewAtLaunch, whatsNewOnDemand, type WhatsNewView } from './lib/whats-new'
 
-export type NoteSortOrder =
-  | 'none'
-  | 'manual'
-  | 'updated-desc'
-  | 'updated-asc'
-  | 'created-desc'
-  | 'created-asc'
-  | 'name-asc'
-  | 'name-desc'
+import type { NoteSortOrder } from './lib/note-order'
+export type { NoteSortOrder } from './lib/note-order'
 
 /** Which column the Assets view sorts by, and in which direction. Stored as one
  *  `<column>-<dir>` string so it maps onto a single portable pref, the same
@@ -425,7 +456,8 @@ async function refreshVaultIndexes(): Promise<void> {
     state.refreshAssets(),
     state.loadCustomTemplates(),
     state.loadWorkflowIndex(),
-    state.refreshRootContentHidden()
+    state.refreshRootContentHidden(),
+    state.refreshAgentEdits()
   ])
   // A run the app died in the middle of left changes nobody was told about,
   // and this is the first moment anyone is back to be told. Dynamically
@@ -435,6 +467,13 @@ async function refreshVaultIndexes(): Promise<void> {
     .then((mod) => mod.announceInterruptedWorkflowRun())
     .catch(() => {
       /* a message that cannot be raised is not a vault that failed to open */
+    })
+  // The event triggers listen from here on: installed once (the module keeps
+  // its own listener across vaults), lazily for the same reason as above.
+  void import('./lib/workflow-events')
+    .then((mod) => mod.installWorkflowEventTriggers())
+    .catch(() => {
+      /* nothing about opening a vault waits on the triggers either */
     })
 }
 
@@ -500,6 +539,9 @@ interface Prefs {
   /** Key sequence that exits insert mode (maps to <Esc>), e.g. "jk".
    *  Empty disables it. */
   vimInsertEscape: string
+  /** Keys the app ignores entirely (#732): a remapper's tap-hold no-op, by DOM key or code. */
+  ignoredKeys: string[]
+  externalApplicationSchemes: string[]
   /** When true, Vim yank/delete/change also copy to the system clipboard and
    *  `p` / `P` paste from it (like `set clipboard=unnamed`). */
   vimYankToClipboard: boolean
@@ -555,6 +597,14 @@ interface Prefs {
   /** Keep the current view mode (Edit / Split / Preview) when switching notes
    *  instead of resolving each note's own last mode. Off = per-note (default). */
   keepViewModeAcrossNotes: boolean
+  /** Keep the right-hand panels (Connections, Outline, Comments, Calendar) as
+   *  they are when switching notes. On (default) = one sticky set per pane,
+   *  as always; off = each note remembers its own for the session. (#794) */
+  keepPanelsAcrossNotes: boolean
+  /** Keep each note's undo history between launches (Vim's `undofile`). Off by
+   *  default: the history holds fragments of deleted text and is written to
+   *  disk, in the app's own data folder. Desktop only. (#793) */
+  persistUndoHistory: boolean
   /** The mode a note opens in before the user has picked one for it: Edit
    *  (default), Split, or Preview for read-first workflows. (#543) */
   defaultPaneMode: PaneMode
@@ -562,6 +612,11 @@ interface Prefs {
    *  so the title line stops drifting from the filename. Never adds a heading
    *  to a note that has none. (#455) */
   syncTitleHeadingOnRename: boolean
+  /** Keep what a note said before an assistant edits it through MCP, so the
+   *  edit can be reviewed. The MCP server reads it from config.toml. */
+  reviewAgentEdits: boolean
+  /** Send the anonymous install/update count (desktop). Portable. */
+  usageCount: boolean
   /** Auto-close markdown delimiters while typing: `**`+Space → `**|**`,
    *  ```` ``` ````+Enter expands a fenced block. Off restores plain typing. */
   markdownSnippets: boolean
@@ -569,6 +624,8 @@ interface Prefs {
   textReplacementsEnabled: boolean
   /** Trigger to replacement mappings, such as `->` to `→`. */
   textReplacements: TextReplacements
+  /** Saved Tasks filters by name, the `[saved_filters]` table in config.toml (#731). */
+  savedTaskFilters: SavedTaskFilters
   /** Auto-insert matching `[]`, `()`, and `{}` delimiters while typing. */
   autoPairs: boolean
   /** Also auto-insert matching quotes outside Markdown code spans and blocks. */
@@ -615,6 +672,7 @@ interface Prefs {
   unifiedSidebar: boolean
   /** Tint the sidebar surface a step darker than the main canvas. */
   darkSidebar: boolean
+  showWindowTitleBar: boolean
   /** Show disclosure arrows for collapsible sidebar folders and sections. */
   showSidebarChevrons: boolean
   /** Keys of collapsed folders in the sidebar tree. */
@@ -674,6 +732,10 @@ interface Prefs {
    *  closes any tab already showing it. OFF by default, deliberately: it can
    *  rewrite notes in bulk, so it is a one-time opt-in under Settings. */
   workflowsEnabled: boolean
+  /** Whether active workflows whose `trigger:` names an event run on their
+   *  own for the edits made in this app. Kept apart from the master switch so
+   *  the canvas and manual runs can stay while nothing fires by itself. */
+  workflowEventTriggers: boolean
   atlasEnabled: boolean
   /** Built-in workflow recipes hidden from the gallery, by preset id. Unknown
    *  ids are kept rather than pruned, so hiding a preset survives the preset
@@ -696,6 +758,10 @@ interface Prefs {
   showArchivedTasks: boolean
   /** Column source used when the Tasks Kanban view is active. */
   kanbanGroupBy: KanbanGroupBy
+  /** How cards line up inside each Kanban column: `manual` replays the order
+   *  they were dragged into (due date until then), `due` always sorts them by
+   *  due date and leaves that arrangement untouched for later. (#889) */
+  kanbanCardSort: KanbanCardSort
   /** Display-only Kanban column title overrides. Keyed by `${groupBy}:${columnId}`. */
   kanbanColumnTitles: Record<string, string>
   /** Manual Kanban column arrangement per board. Keyed by groupBy → ordered
@@ -710,12 +776,18 @@ interface Prefs {
   /** Ordered status ids for the custom-status Kanban board (group-by "custom").
    *  Each id matches an inline `@status:<id>` task token. Config-driven. (#354) */
   kanbanStatuses: string[]
+  kanbanFolderRoot: string
   /** True once the user has dismissed the first-run onboarding wizard. */
   hasCompletedOnboarding: boolean
+  /** The version whose What’s New this device last showed, or on a fresh
+   *  install the version it started on (lib/whats-new.ts). Machine-local, not
+   *  portable: every copy of the app updates on its own. */
+  lastSeenWhatsNewVersion: string | null
 }
 
 export type TasksViewMode = 'list' | 'calendar' | 'kanban'
 export type KanbanGroupBy = 'status' | 'priority' | 'folder' | `field:${string}`
+export type KanbanCardSort = 'manual' | 'due'
 /** How the Tags view combines multiple selected tags: `all` = intersection
  *  (AND, narrows), `any` = union (OR, widens). */
 export type TagMatchMode = 'all' | 'any'
@@ -778,6 +850,8 @@ function normalizeKanbanColumnTitle(title: string): string | null {
 // prefix would otherwise fail the value grammar and get silently dropped. (#389)
 const STATIC_COLUMN_TITLE_KEY_RE = /^[a-z-]+:[A-Za-z0-9_-]+$/
 const FIELD_COLUMN_TITLE_KEY_RE = /^field:[a-z][a-z0-9_-]*:(?:__none__|[\p{L}\d][\p{L}\d/_-]*)$/u
+// Folder columns are keyed by the note directory (#730): any printable path.
+const FOLDER_COLUMN_TITLE_KEY_RE = /^folder:(?:__none__|[^\u0000-\u001f]{1,256})$/u
 
 function normalizeKanbanColumnTitles(raw: unknown): Record<string, string> {
   if (!raw || typeof raw !== 'object') return {}
@@ -789,7 +863,8 @@ function normalizeKanbanColumnTitles(raw: unknown): Record<string, string> {
       STATIC_COLUMN_TITLE_KEY_RE.test(key) &&
       STATIC_KANBAN_GROUP_BYS.some((group) => key.startsWith(`${group}:`))
     const isField = FIELD_COLUMN_TITLE_KEY_RE.test(key)
-    if (!isStatic && !isField) continue
+    const isFolder = FOLDER_COLUMN_TITLE_KEY_RE.test(key)
+    if (!isStatic && !isField && !isFolder) continue
     const normalized = normalizeKanbanColumnTitle(value)
     if (normalized) out[key] = normalized
   }
@@ -797,6 +872,7 @@ function normalizeKanbanColumnTitles(raw: unknown): Record<string, string> {
 }
 
 const MAX_KANBAN_ORDERED_COLUMNS = 64
+const MAX_KANBAN_COLUMN_ID_LENGTH = 256
 
 // Manual column arrangement per board: `{ "<groupBy>": ["<columnId>", ...] }`.
 // Column ids are validated loosely (the same tag-like slugs the boards use);
@@ -810,7 +886,8 @@ function normalizeKanbanColumnOrder(raw: unknown): Record<string, string[]> {
     const seen = new Set<string>()
     for (const entry of value) {
       if (typeof entry !== 'string') continue
-      const id = entry.trim().slice(0, MAX_KANBAN_STATUS_ID_LENGTH)
+      // Folder columns are directory paths (#730), longer than a status slug.
+      const id = entry.trim().slice(0, MAX_KANBAN_COLUMN_ID_LENGTH)
       if (!id || seen.has(id)) continue
       seen.add(id)
       ids.push(id)
@@ -841,7 +918,8 @@ export function normalizeKanbanCardOrder(raw: unknown): Record<string, string[]>
       STATIC_COLUMN_TITLE_KEY_RE.test(key) &&
       STATIC_KANBAN_GROUP_BYS.some((group) => key.startsWith(`${group}:`))
     const isField = FIELD_COLUMN_TITLE_KEY_RE.test(key)
-    if (!isStatic && !isField) continue
+    const isFolder = FOLDER_COLUMN_TITLE_KEY_RE.test(key)
+    if (!isStatic && !isField && !isFolder) continue
     const cards: string[] = []
     const seen = new Set<string>()
     for (const entry of value) {
@@ -872,6 +950,10 @@ export interface WorkflowRunRecord {
   undone: WorkflowUndoResult | null
   /** An undo that failed must not read as one that worked. */
   undoError: string | null
+  /** Where the run promised to move each note it moved, so an undo can carry
+   *  an open editor back the way the run carried it forward. Absent on a
+   *  record written before this existed and on an interrupted run. */
+  moves?: readonly { from: string; to: string }[]
 }
 
 /** Hidden gallery preset ids: strings, trimmed, deduped, order kept. Unknown
@@ -890,6 +972,23 @@ export function normalizeHiddenWorkflowPresets(raw: unknown): string[] {
     if (out.length >= 64) break
   }
   return out
+}
+
+const MAX_KANBAN_FOLDER_ROOT_LENGTH = 200
+
+/** The folder board's root (#730): a folder path relative to the notes area,
+ *  posix, no slashes at the ends, '' for none. Backslashes are accepted from
+ *  Windows-minded hands. */
+export function normalizeKanbanFolderRoot(raw: unknown): string {
+  if (typeof raw !== 'string') return ''
+  return raw
+    .trim()
+    .replace(/\\/g, '/')
+    .split('/')
+    .map((part) => part.trim())
+    .filter((part) => part && part !== '.' && part !== '..')
+    .join('/')
+    .slice(0, MAX_KANBAN_FOLDER_ROOT_LENGTH)
 }
 
 export function normalizeKanbanStatuses(raw: unknown): string[] {
@@ -950,6 +1049,9 @@ export function viewPrefsFromVault(settings: VaultSettings | null | undefined): 
   if (Array.isArray(v.kanbanStatuses)) {
     patch.kanbanStatuses = normalizeKanbanStatuses(v.kanbanStatuses)
   }
+  if (typeof v.kanbanFolderRoot === 'string') {
+    patch.kanbanFolderRoot = normalizeKanbanFolderRoot(v.kanbanFolderRoot)
+  }
   if (typeof v.autoReveal === 'boolean') patch.autoReveal = v.autoReveal
   if (v.systemFolderLabels && typeof v.systemFolderLabels === 'object') {
     patch.systemFolderLabels = normalizeSystemFolderLabels(v.systemFolderLabels)
@@ -985,6 +1087,8 @@ function persistVaultViewOverride(patch: VaultViewSettings): void {
 export const DEFAULT_PREFS: Prefs = {
   vimMode: true,
   vimInsertEscape: '',
+  ignoredKeys: [],
+  externalApplicationSchemes: [],
   vimYankToClipboard: false,
   vimBlockImeInNormalMode: true,
   vimWrappedLineMotions: 'display',
@@ -1007,11 +1111,16 @@ export const DEFAULT_PREFS: Prefs = {
   harperLintConfig: {},
   looseMathDelimiters: false,
   keepViewModeAcrossNotes: false,
+  keepPanelsAcrossNotes: true,
+  persistUndoHistory: false,
   defaultPaneMode: 'edit',
   syncTitleHeadingOnRename: true,
+  reviewAgentEdits: true,
+  usageCount: true,
   markdownSnippets: true,
   textReplacementsEnabled: true,
   textReplacements: { '->': '→' },
+  savedTaskFilters: {},
   autoPairs: true,
   autoPairQuotesInProse: false,
   hideBuiltinTemplates: false,
@@ -1048,6 +1157,7 @@ export const DEFAULT_PREFS: Prefs = {
   autoReveal: false,
   unifiedSidebar: true,
   darkSidebar: true,
+  showWindowTitleBar: true,
   showSidebarChevrons: true,
   collapsedFolders: [],
   pinnedRefPath: null,
@@ -1071,6 +1181,7 @@ export const DEFAULT_PREFS: Prefs = {
   // graph editor asks more of a new user than any other view. The feature is
   // opted into once in Settings -> Workflows, not stumbled into.
   workflowsEnabled: false,
+  workflowEventTriggers: true,
   atlasEnabled: true,
   hiddenWorkflowPresets: [],
   collapsedTagNodes: [],
@@ -1080,11 +1191,14 @@ export const DEFAULT_PREFS: Prefs = {
   tasksViewMode: 'list',
   showArchivedTasks: false,
   kanbanGroupBy: 'status',
+  kanbanCardSort: 'manual',
   kanbanColumnTitles: {},
   kanbanColumnOrder: {},
   kanbanCardOrder: {},
   kanbanStatuses: [],
-  hasCompletedOnboarding: false
+  kanbanFolderRoot: '',
+  hasCompletedOnboarding: false,
+  lastSeenWhatsNewVersion: null
 }
 /** Coerce any loaded prefs blob into a valid Prefs object, dropping
  *  anything unknown (e.g. tokyo-night left over from earlier versions). */
@@ -1107,6 +1221,8 @@ function normalizePrefs(p: Partial<Prefs>): Prefs {
       typeof p.vimInsertEscape === 'string'
         ? p.vimInsertEscape.trim().slice(0, 5)
         : DEFAULT_PREFS.vimInsertEscape,
+    ignoredKeys: normalizeIgnoredKeys(p.ignoredKeys),
+    externalApplicationSchemes: normalizeApplicationSchemes(p.externalApplicationSchemes),
     vimYankToClipboard:
       typeof p.vimYankToClipboard === 'boolean'
         ? p.vimYankToClipboard
@@ -1188,11 +1304,22 @@ function normalizePrefs(p: Partial<Prefs>): Prefs {
       typeof p.keepViewModeAcrossNotes === 'boolean'
         ? p.keepViewModeAcrossNotes
         : DEFAULT_PREFS.keepViewModeAcrossNotes,
+    keepPanelsAcrossNotes:
+      typeof p.keepPanelsAcrossNotes === 'boolean'
+        ? p.keepPanelsAcrossNotes
+        : DEFAULT_PREFS.keepPanelsAcrossNotes,
+    persistUndoHistory:
+      typeof p.persistUndoHistory === 'boolean'
+        ? p.persistUndoHistory
+        : DEFAULT_PREFS.persistUndoHistory,
     defaultPaneMode: isPaneMode(p.defaultPaneMode) ? p.defaultPaneMode : DEFAULT_PREFS.defaultPaneMode,
     syncTitleHeadingOnRename:
       typeof p.syncTitleHeadingOnRename === 'boolean'
         ? p.syncTitleHeadingOnRename
         : DEFAULT_PREFS.syncTitleHeadingOnRename,
+    reviewAgentEdits:
+      typeof p.reviewAgentEdits === 'boolean' ? p.reviewAgentEdits : DEFAULT_PREFS.reviewAgentEdits,
+    usageCount: typeof p.usageCount === 'boolean' ? p.usageCount : DEFAULT_PREFS.usageCount,
     markdownSnippets:
       typeof p.markdownSnippets === 'boolean'
         ? p.markdownSnippets
@@ -1203,6 +1330,9 @@ function normalizePrefs(p: Partial<Prefs>): Prefs {
         : DEFAULT_PREFS.textReplacementsEnabled,
     textReplacements: normalizeTextReplacements(
       p.textReplacements ?? DEFAULT_PREFS.textReplacements
+    ),
+    savedTaskFilters: normalizeSavedTaskFilters(
+      p.savedTaskFilters ?? DEFAULT_PREFS.savedTaskFilters
     ),
     autoPairs: typeof p.autoPairs === 'boolean' ? p.autoPairs : DEFAULT_PREFS.autoPairs,
     autoPairQuotesInProse:
@@ -1296,6 +1426,10 @@ function normalizePrefs(p: Partial<Prefs>): Prefs {
         ? p.autoReveal
         : DEFAULT_PREFS.autoReveal,
     unifiedSidebar: true,
+    showWindowTitleBar:
+      typeof p.showWindowTitleBar === 'boolean'
+        ? p.showWindowTitleBar
+        : DEFAULT_PREFS.showWindowTitleBar,
     darkSidebar:
       typeof p.darkSidebar === 'boolean'
         ? p.darkSidebar
@@ -1380,6 +1514,10 @@ function normalizePrefs(p: Partial<Prefs>): Prefs {
       typeof p.workflowsEnabled === 'boolean'
         ? p.workflowsEnabled
         : DEFAULT_PREFS.workflowsEnabled,
+    workflowEventTriggers:
+      typeof p.workflowEventTriggers === 'boolean'
+        ? p.workflowEventTriggers
+        : DEFAULT_PREFS.workflowEventTriggers,
     atlasEnabled:
       typeof p.atlasEnabled === 'boolean' ? p.atlasEnabled : DEFAULT_PREFS.atlasEnabled,
     hiddenWorkflowPresets: normalizeHiddenWorkflowPresets(p.hiddenWorkflowPresets),
@@ -1407,14 +1545,20 @@ function normalizePrefs(p: Partial<Prefs>): Prefs {
         ? p.showArchivedTasks
         : DEFAULT_PREFS.showArchivedTasks,
     kanbanGroupBy: normalizeKanbanGroupBy(p.kanbanGroupBy),
+    kanbanCardSort: p.kanbanCardSort === 'due' ? 'due' : 'manual',
     kanbanColumnTitles: normalizeKanbanColumnTitles(p.kanbanColumnTitles),
     kanbanColumnOrder: normalizeKanbanColumnOrder(p.kanbanColumnOrder),
     kanbanCardOrder: normalizeKanbanCardOrder(p.kanbanCardOrder),
     kanbanStatuses: normalizeKanbanStatuses(p.kanbanStatuses),
+    kanbanFolderRoot: normalizeKanbanFolderRoot(p.kanbanFolderRoot),
     hasCompletedOnboarding:
       typeof p.hasCompletedOnboarding === 'boolean'
         ? p.hasCompletedOnboarding
-        : DEFAULT_PREFS.hasCompletedOnboarding
+        : DEFAULT_PREFS.hasCompletedOnboarding,
+    lastSeenWhatsNewVersion:
+      typeof p.lastSeenWhatsNewVersion === 'string' && p.lastSeenWhatsNewVersion
+        ? p.lastSeenWhatsNewVersion
+        : DEFAULT_PREFS.lastSeenWhatsNewVersion
   }
 }
 // --- Portable config file integration (desktop) -----------------------------
@@ -1424,6 +1568,10 @@ function normalizePrefs(p: Partial<Prefs>): Prefs {
 // and the web fallback. `getConfigSync()` returns null on web (and when the
 // bridge is absent, e.g. tests) — we then behave exactly as before.
 let cachedInitialPrefs: Prefs | null = null
+/** Whether this launch began as a returning user's, read with the first
+ *  prefs load: What's New must not greet a fresh install whose user skips
+ *  the onboarding before the window's check runs. */
+let onboardedAtLaunch: boolean | null = null
 // True when a config file is available on this platform (desktop). Gates
 // whether savePrefs mirrors changes out to the file.
 let configFileEnabled = false
@@ -1488,6 +1636,7 @@ function loadPrefs(): Prefs {
   }
 
   cachedInitialPrefs = hadLocalStorage || configFileHadContent ? normalized : DEFAULT_PREFS
+  onboardedAtLaunch ??= cachedInitialPrefs.hasCompletedOnboarding
   return cachedInitialPrefs
 }
 
@@ -1507,6 +1656,25 @@ function pushPortableConfig(p: Prefs): void {
       /* ignore */
     }
   }, CONFIG_PUSH_DEBOUNCE_MS)
+}
+
+/** What's New belongs to the desktop app: the phones announce through their
+ *  stores, and a self-hosted web app updates with its server. */
+function isDesktopHost(): boolean {
+  if (typeof window === 'undefined' || !window.zen) return false
+  const info = window.zen.getAppInfo()
+  return (info.hostKind ?? info.runtime) === 'desktop'
+}
+
+/** Whether ZenNotes Cloud is connected, for leaving the Cloud card out of
+ *  What's New. Asked before the window opens, so the card never flashes and
+ *  vanishes; an answer that never comes counts as not connected. */
+async function cloudConnected(): Promise<boolean> {
+  try {
+    return (await window.zen.getCloudAccountStatus?.())?.state === 'connected'
+  } catch {
+    return false
+  }
 }
 
 function savePrefs(p: Prefs): void {
@@ -1639,6 +1807,13 @@ export interface ConnectionPreviewState {
   anchorRect: PreviewAnchorRect
 }
 
+export interface CreateDatabaseOptions {
+  /** Initial columns and rows (a converted Markdown table, #832). */
+  seed?: DatabaseSeed
+  /** Open the new grid in the active pane. Default true. */
+  open?: boolean
+}
+
 function getVisiblePreviewScrollElement(): HTMLElement | null {
   if (typeof document === 'undefined') return null
   return [...document.querySelectorAll<HTMLElement>('[data-preview-scroll]')].find(
@@ -1739,25 +1914,46 @@ function parseIsoDateLocal(iso: string): Date | null {
   return Number.isNaN(d.getTime()) ? null : d
 }
 
-// Per-vault "we already rolled over today" marker, persisted in localStorage so
-// opening today's daily note across sessions doesn't re-scan past notes once
-// it's done for the day. Keyed by vault root so multiple vaults don't collide.
-function rolloverMarkerKey(root: string): string {
-  return `zen.tasks.rollover.${root || 'default'}`
+// Per-vault record of the past daily notes the rollover already read and found
+// free of open tasks, persisted in localStorage so opening today's note does
+// not re-read years of daily notes every time. Each entry is keyed by note
+// path and holds the `updatedAt:size` signature of the listing that was
+// scanned, so a note edited since (a task typed into yesterday's note later
+// today, a file changed by sync) stops matching and is read again. Its
+// predecessor was a once-per-day marker written even when nothing had moved,
+// which meant a task added to a past daily note after today's note had been
+// opened once never rolled over until the next day (#817). Keyed by vault
+// root so multiple vaults don't collide.
+type RolloverCleanRecord = Record<string, string>
+
+function rolloverCleanKey(root: string): string {
+  return `zen.tasks.rolloverClean.${root || 'default'}`
 }
-function readRolloverMarker(root: string): string | null {
+function rolloverNoteSignature(note: NoteMeta): string {
+  return `${note.updatedAt}:${note.size}`
+}
+function readRolloverClean(root: string): RolloverCleanRecord {
   try {
-    return typeof localStorage !== 'undefined'
-      ? localStorage.getItem(rolloverMarkerKey(root))
-      : null
+    const raw =
+      typeof localStorage !== 'undefined' ? localStorage.getItem(rolloverCleanKey(root)) : null
+    if (!raw) return {}
+    const parsed: unknown = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+    const record: RolloverCleanRecord = {}
+    for (const [path, signature] of Object.entries(parsed)) {
+      if (typeof signature === 'string') record[path] = signature
+    }
+    return record
   } catch {
-    return null
+    return {}
   }
 }
-function writeRolloverMarker(root: string, iso: string): void {
+function writeRolloverClean(root: string, record: RolloverCleanRecord): void {
   try {
     if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(rolloverMarkerKey(root), iso)
+      localStorage.setItem(rolloverCleanKey(root), JSON.stringify(record))
+      // The once-per-day marker this record replaces; nothing reads it any more.
+      localStorage.removeItem(`zen.tasks.rollover.${root || 'default'}`)
     }
   } catch {
     // localStorage may be unavailable (private mode); the in-session flow still works.
@@ -2101,21 +2297,6 @@ function noteHistoryAfterJump(
   }
 }
 
-function rewriteNoteJumpHistory(
-  history: NoteJumpLocation[],
-  rewrite: (path: string) => string
-): NoteJumpLocation[] {
-  const next: NoteJumpLocation[] = []
-  for (const entry of history) {
-    const mapped = { ...entry, path: rewrite(entry.path) }
-    if (sameNoteJumpLocation(next[next.length - 1] ?? null, mapped)) continue
-    next.push(mapped)
-  }
-  return next.length > MAX_NOTE_JUMP_HISTORY
-    ? next.slice(next.length - MAX_NOTE_JUMP_HISTORY)
-    : next
-}
-
 /**
  * Rewrite every occurrence of `#oldTag` across all non-trash notes.
  * When `newTag` is null the hashtag is stripped (delete semantics);
@@ -2194,6 +2375,9 @@ async function rewriteTagAcrossVault(
 function collectPrefs(s: {
   vimMode: boolean
   vimInsertEscape: string
+  /** Keys the app ignores entirely (#732): a remapper's tap-hold no-op, by DOM key or code. */
+  ignoredKeys: string[]
+  externalApplicationSchemes: string[]
   vimYankToClipboard: boolean
   vimBlockImeInNormalMode: boolean
   vimWrappedLineMotions: VimWrappedLineMotionMode
@@ -2218,11 +2402,16 @@ function collectPrefs(s: {
   harperLintConfig: HarperLintConfig
   looseMathDelimiters: boolean
   keepViewModeAcrossNotes: boolean
+  keepPanelsAcrossNotes: boolean
+  persistUndoHistory: boolean
   defaultPaneMode: PaneMode
   syncTitleHeadingOnRename: boolean
+  reviewAgentEdits: boolean
+  usageCount: boolean
   markdownSnippets: boolean
   textReplacementsEnabled: boolean
   textReplacements: TextReplacements
+  savedTaskFilters: SavedTaskFilters
   autoPairs: boolean
   autoPairQuotesInProse: boolean
   hideBuiltinTemplates: boolean
@@ -2254,6 +2443,7 @@ function collectPrefs(s: {
   autoReveal: boolean
   unifiedSidebar: boolean
   darkSidebar: boolean
+  showWindowTitleBar: boolean
   showSidebarChevrons: boolean
   collapsedFolders: string[]
   pinnedRefPath: string | null
@@ -2274,6 +2464,10 @@ function collectPrefs(s: {
   tagsCollapsed: boolean
   nestedTags: boolean
   workflowsEnabled: boolean
+  /** Whether active workflows whose `trigger:` names an event run on their
+   *  own for the edits made in this app. Kept apart from the master switch so
+   *  the canvas and manual runs can stay while nothing fires by itself. */
+  workflowEventTriggers: boolean
   atlasEnabled: boolean
   hiddenWorkflowPresets: string[]
   collapsedTagNodes: string[]
@@ -2283,15 +2477,21 @@ function collectPrefs(s: {
   tasksViewMode: TasksViewMode
   showArchivedTasks: boolean
   kanbanGroupBy: KanbanGroupBy
+  kanbanCardSort: KanbanCardSort
   kanbanColumnTitles: Record<string, string>
   kanbanColumnOrder: Record<string, string[]>
   kanbanCardOrder: Record<string, string[]>
   kanbanStatuses: string[]
+  /** Folder board root (#730): group by the children of this folder; '' = each note's own folder. */
+  kanbanFolderRoot: string
   hasCompletedOnboarding: boolean
+  lastSeenWhatsNewVersion: string | null
 }): Prefs {
   return {
     vimMode: s.vimMode,
     vimInsertEscape: s.vimInsertEscape,
+    ignoredKeys: s.ignoredKeys,
+    externalApplicationSchemes: s.externalApplicationSchemes,
     vimYankToClipboard: s.vimYankToClipboard,
     vimBlockImeInNormalMode: s.vimBlockImeInNormalMode,
     vimWrappedLineMotions: s.vimWrappedLineMotions,
@@ -2316,11 +2516,16 @@ function collectPrefs(s: {
     harperLintConfig: s.harperLintConfig,
     looseMathDelimiters: s.looseMathDelimiters,
     keepViewModeAcrossNotes: s.keepViewModeAcrossNotes,
+    keepPanelsAcrossNotes: s.keepPanelsAcrossNotes,
+    persistUndoHistory: s.persistUndoHistory,
     defaultPaneMode: s.defaultPaneMode,
     syncTitleHeadingOnRename: s.syncTitleHeadingOnRename,
+    reviewAgentEdits: s.reviewAgentEdits,
+    usageCount: s.usageCount,
     markdownSnippets: s.markdownSnippets,
     textReplacementsEnabled: s.textReplacementsEnabled,
     textReplacements: s.textReplacements,
+    savedTaskFilters: s.savedTaskFilters,
     autoPairs: s.autoPairs,
     autoPairQuotesInProse: s.autoPairQuotesInProse,
     hideBuiltinTemplates: s.hideBuiltinTemplates,
@@ -2352,6 +2557,7 @@ function collectPrefs(s: {
     autoReveal: s.autoReveal,
     unifiedSidebar: s.unifiedSidebar,
     darkSidebar: s.darkSidebar,
+    showWindowTitleBar: s.showWindowTitleBar,
     showSidebarChevrons: s.showSidebarChevrons,
     collapsedFolders: s.collapsedFolders,
     pinnedRefPath: s.pinnedRefPath,
@@ -2372,6 +2578,7 @@ function collectPrefs(s: {
     tagsCollapsed: s.tagsCollapsed,
     nestedTags: s.nestedTags,
     workflowsEnabled: s.workflowsEnabled,
+    workflowEventTriggers: s.workflowEventTriggers,
     atlasEnabled: s.atlasEnabled,
     hiddenWorkflowPresets: s.hiddenWorkflowPresets,
     collapsedTagNodes: s.collapsedTagNodes,
@@ -2381,11 +2588,14 @@ function collectPrefs(s: {
     tasksViewMode: s.tasksViewMode,
     showArchivedTasks: s.showArchivedTasks,
     kanbanGroupBy: s.kanbanGroupBy,
+    kanbanCardSort: s.kanbanCardSort,
     kanbanColumnTitles: s.kanbanColumnTitles,
     kanbanColumnOrder: s.kanbanColumnOrder,
     kanbanCardOrder: s.kanbanCardOrder,
     kanbanStatuses: s.kanbanStatuses,
-    hasCompletedOnboarding: s.hasCompletedOnboarding
+    kanbanFolderRoot: s.kanbanFolderRoot,
+    hasCompletedOnboarding: s.hasCompletedOnboarding,
+    lastSeenWhatsNewVersion: s.lastSeenWhatsNewVersion
   }
 }
 
@@ -2409,6 +2619,10 @@ interface WorkspaceSnapshot {
   sidebarOpen: boolean
   noteListOpen: boolean
   selectedTags: string[]
+  /** Per-note panels, by pane id then note path, so a note comes back after a
+   *  restart with the panels it was left with. Optional: snapshots written
+   *  before 2.52 do not have it. (#794) */
+  panePanels?: PanePanelsSnapshot
   /** Epoch ms of the last write — drives newest-wins when the synced file and
    *  the local cache disagree (e.g. after working in this vault on another
    *  machine). (#292) */
@@ -2667,27 +2881,14 @@ function hasTasksViewOpen(state: { paneLayout: PaneLayout }): boolean {
 }
 
 /** True when a surface backed by `vaultTasks` is on screen and therefore needs
- *  the shared task cache kept fresh on note edits. Covers the Tasks view and the
- *  calendar panel — the latter is per-pane local state exposed via a DOM marker
- *  (the same one VimNav reads for pane navigation), so editing a daily note with
- *  only the calendar open still refreshes its tasks. */
+ *  the shared task cache kept fresh on note edits. Tasks tabs are in the pane
+ *  tree; Home and calendar expose the navigation markers also read by VimNav. */
 function tasksSurfaceVisible(state: { paneLayout: PaneLayout }): boolean {
   if (hasTasksViewOpen(state)) return true
   return (
     typeof document !== 'undefined' &&
-    document.querySelector('[data-calendar-panel]') !== null
+    document.querySelector('[data-calendar-panel], [data-home-nav]') !== null
   )
-}
-
-let isolatedCloudTaskPaths = new Set(
-  (useCloudSyncStatusStore.getState().lastSummary?.pending_conflicts ?? []).flatMap(
-    (conflict) => [conflict.path, conflict.cloud_path].filter((path): path is string => Boolean(path))
-  ).map(cloudSyncPathKey)
-)
-
-function withoutPendingCloudConflictTasks(tasks: VaultTask[]): VaultTask[] {
-  if (isolatedCloudTaskPaths.size === 0) return tasks
-  return tasks.filter((task) => !isolatedCloudTaskPaths.has(cloudSyncPathKey(task.sourcePath)))
 }
 
 /** True when the active pane's active tab is the vault-wide Tags view. */
@@ -2762,6 +2963,12 @@ interface Store {
   typstPreambleNotes: TypstPreambleNote[]
   folders: FolderEntry[]
   assetFiles: AssetMeta[]
+  /** True once `refreshAssets` has read the open vault's files into
+   *  `assetFiles`, so an empty list means a vault with no files rather than
+   *  one not listed yet. Only that listing may call an embedded file missing:
+   *  the share viewer and PDF export seed `assetFiles` themselves and leave
+   *  this false. */
+  assetFilesListed: boolean
   assetUndoStack: AssetUndoEntry[]
   hasAssetsDir: boolean
   view: View
@@ -2802,6 +3009,7 @@ interface Store {
   query: string
   initialized: boolean
   workspaceRestored: boolean
+  workspaceTransitioning: boolean
   sidebarOpen: boolean
   noteListOpen: boolean
   zenMode: boolean
@@ -2809,6 +3017,9 @@ interface Store {
   vimMode: boolean
   /** Key sequence that exits insert mode (maps to <Esc>), e.g. "jk". Persisted. */
   vimInsertEscape: string
+  /** Keys the app ignores entirely (#732): a remapper's tap-hold no-op, by DOM key or code. */
+  ignoredKeys: string[]
+  externalApplicationSchemes: string[]
   /** When true, Vim yank/delete/change also copy to the system clipboard. Persisted. */
   vimYankToClipboard: boolean
   vimBlockImeInNormalMode: boolean
@@ -2837,14 +3048,25 @@ interface Store {
   harperLintConfig: HarperLintConfig
   looseMathDelimiters: boolean
   keepViewModeAcrossNotes: boolean
+  /** One sticky set of right-hand panels per pane (on, the default) or one per
+   *  note (off). Persisted. (#794) */
+  keepPanelsAcrossNotes: boolean
+  /** Undo history is also kept between launches (Vim's `undofile`). Off by
+   *  default, desktop only. Persisted. (#793) */
+  persistUndoHistory: boolean
   /** The mode a note opens in before it has a remembered one. Persisted. (#543) */
   defaultPaneMode: PaneMode
   /** Renaming a note rewrites its leading `# Heading` to match. Persisted. (#455) */
   syncTitleHeadingOnRename: boolean
+  /** Record assistant edits made through MCP for review. Persisted (portable). */
+  reviewAgentEdits: boolean
+  /** Send the anonymous install/update count (desktop). Persisted (portable). */
+  usageCount: boolean
   /** Auto-close markdown delimiters while typing. Persisted. */
   markdownSnippets: boolean
   textReplacementsEnabled: boolean
   textReplacements: TextReplacements
+  savedTaskFilters: SavedTaskFilters
   /** Auto-insert matching `[]`, `()`, and `{}` delimiters while typing. Persisted. */
   autoPairs: boolean
   /** Also auto-insert matching quotes outside Markdown code spans and blocks. Persisted. */
@@ -2897,6 +3119,7 @@ interface Store {
   autoReveal: boolean
   unifiedSidebar: boolean
   darkSidebar: boolean
+  showWindowTitleBar: boolean
   showSidebarChevrons: boolean
   /** Manual (drag-to-reorder) note order for `noteSortOrder: 'manual'`, keyed
    *  by parent directory → ordered note paths. Persisted per vault (#224). */
@@ -2965,6 +3188,10 @@ interface Store {
    *  row, the `view.workflows` command, and the leader binding, so the canvas
    *  has no way in at all. */
   workflowsEnabled: boolean
+  /** Whether active workflows whose `trigger:` names an event run on their
+   *  own for the edits made in this app. Kept apart from the master switch so
+   *  the canvas and manual runs can stay while nothing fires by itself. */
+  workflowEventTriggers: boolean
   atlasEnabled: boolean
   /** Built-in recipes hidden from the New-workflow gallery, by preset id.
    *  Persisted (portable). Hiding is per taste, not per vault. */
@@ -3008,6 +3235,8 @@ interface Store {
   showArchivedTasks: boolean
   /** Column source for the Tasks Kanban view. */
   kanbanGroupBy: KanbanGroupBy
+  /** Cards in each Kanban column by hand-placed order or by due date. (#889) */
+  kanbanCardSort: KanbanCardSort
   /** Display-only column title overrides for the Tasks Kanban view. */
   kanbanColumnTitles: Record<string, string>
   /** Manual column arrangement per board (groupBy → ordered column ids). */
@@ -3018,8 +3247,13 @@ interface Store {
   kanbanCardOrder: Record<string, string[]>
   /** Ordered status ids for the custom-status Kanban board (config-driven). */
   kanbanStatuses: string[]
+  kanbanFolderRoot: string
   /** True once the user has finished or skipped the first-run onboarding. */
   hasCompletedOnboarding: boolean
+  lastSeenWhatsNewVersion: string | null
+  whatsNewOpen: boolean
+  /** What the What’s New window shows while it is open. */
+  whatsNew: WhatsNewView | null
   /** ISO YYYY-MM-DD currently selected in the Calendar view. null = today. */
   tasksCalendarSelectedDate: string | null
   /** First-of-month anchor (ISO YYYY-MM-01) for the Calendar view's grid. */
@@ -3028,6 +3262,7 @@ interface Store {
   /** Hydrated CSV databases keyed by their vault-relative `.csv` path. */
   databases: Record<string, DatabaseDoc>
   /** In-flight load flags keyed by `.csv` path. */
+  databasesDeletingRows: Record<string, boolean>
   databasesLoading: Record<string, boolean>
 
   /** Tags currently selected in the Tags view. The view shows every non-
@@ -3053,6 +3288,16 @@ interface Store {
    *  `keepViewModeAcrossNotes` is on, so every note in the pane follows the
    *  pane's current mode instead of its own. Ephemeral, like `paneModes`. */
   paneStickyModes: Record<string, PaneMode>
+  /** Right-hand panels per pane, per note path, read only while
+   *  `keepPanelsAcrossNotes` is off. In the store for the same reasons as
+   *  `paneModes`: it survives EditorPane remounts, follows a rename, and a
+   *  split inherits it. Unlike `paneModes` it is also written to the workspace
+   *  snapshot, so it outlives a restart. (#794) */
+  panePanels: Record<string, PanePanelsByPath>
+  /** The latest renames, moves and deletes, appended in the same update that
+   *  rewrites the paths. An editor reads it to tell "my note has a new path"
+   *  from "I am being shown a different note". See lib/path-rewrites. */
+  recentPathRewrites: PathRewrite[]
   noteListCursorIndex: number
   connectionsCursorIndex: number
   /** Row cursor for the Outline panel, mirroring the connections cursor so
@@ -3078,11 +3323,27 @@ interface Store {
   noteDirty: Record<string, boolean>
   /** Comment sidecars keyed by note path. Loaded lazily per open note. */
   noteComments: Record<string, NoteComment[]>
+  /** Notes an assistant edited through MCP that the user has not reviewed
+   *  yet, keyed by note path (docs/ideas/agent-edit-review.md). Empty on
+   *  hosts without `supportsAgentEditReview`. */
+  agentEdits: Record<string, AgentEditSummary>
   activeCommentId: string | null
   closedTabStack: ClosedTabEntry[]
 
   setVault: (v: VaultInfo | null) => void
-  setVaultSettings: (next: VaultSettings) => Promise<void>
+  /** Resolves true once the settings are on disk. A failed write is logged,
+   *  not thrown, because most callers fire and forget; the Cloud settings
+   *  prompt reads the flag so it does not discard the cloud's copy after a
+   *  save that never happened. */
+  setVaultSettings: (next: VaultSettings) => Promise<boolean>
+  /**
+   * Give the open vault a display name (#692), kept in its vault.json so it
+   * travels with the folder; empty or whitespace goes back to the folder's
+   * own name. Local vaults only: a temporary folder session writes nothing.
+   * Resolves true once saved; the header, switcher and remembered-vaults
+   * list follow without a reopen.
+   */
+  renameVault: (name: string | null) => Promise<boolean>
   /**
    * Toggle a favorite (a note path or a `folder:subpath` key) and persist it.
    * Favorites pin to the top of the sidebar.
@@ -3099,6 +3360,12 @@ interface Store {
    * (`vaultRelativeFolderPath` output, e.g. `inbox/Books`).
    */
   toggleTasksExcludedFolder: (relDir: string) => Promise<void>
+  /**
+   * Toggle a folder on the vault's Task folders list (`tasks.includedFolders`,
+   * #962) and rescan. Once the list names folders, only the notes inside them
+   * feed Tasks; the excluded list still applies within them.
+   */
+  toggleTasksIncludedFolder: (relDir: string) => Promise<void>
   /**
    * Point the vault at a different Typst preamble folder (#562). Empty or
    * invalid input restores the default (`typst`). Notes in the folder are
@@ -3136,12 +3403,22 @@ interface Store {
   loadDatabase: (csvPath: string) => Promise<void>
   /** Load a database and open it as a tab in the active pane. */
   openDatabase: (csvPath: string) => Promise<void>
-  /** Create a new empty database under `folder`/`subpath` and open it. */
-  createDatabase: (folder: NoteFolder, subpath?: string, title?: string) => Promise<void>
+  /** Create a new database under `folder`/`subpath` and open it: empty by
+   *  default, or holding `options.seed` (a converted Markdown table, #832).
+   *  `options.open: false` leaves the caller in place. Resolves to the created
+   *  doc (its title may carry a collision suffix), or undefined when nothing
+   *  was created or the workspace moved on meanwhile. */
+  createDatabase: (
+    folder: NoteFolder,
+    subpath?: string,
+    title?: string,
+    isCurrent?: () => boolean,
+    options?: CreateDatabaseOptions
+  ) => Promise<DatabaseDoc | undefined>
   /** Create a database in the configured default databases location and open it. (#362) */
   newDatabase: () => Promise<void>
   /** Rename a database (its `.base` folder); rehomes the open grid tab. */
-  renameDatabase: (csvPath: string, newTitle: string) => Promise<void>
+  renameDatabase: (csvPath: string, newTitle: string, isCurrent?: () => boolean) => Promise<void>
   /** Optimistically replace a database's rows and debounce-persist the CSV. */
   updateDatabaseRows: (csvPath: string, next: DatabaseDoc) => void
   /** Delete rows AND purge their record-page mappings from the sidecar (a plain
@@ -3212,6 +3489,7 @@ interface Store {
    *  surface, and a bulk archive asks once, not once per note. */
   confirmArchiveNotes: (paths: string[]) => Promise<boolean>
   setKanbanGroupBy: (group: KanbanGroupBy) => void
+  setKanbanCardSort: (sort: KanbanCardSort) => void
   setKanbanColumnTitle: (
     group: KanbanGroupBy,
     columnId: string,
@@ -3228,6 +3506,8 @@ interface Store {
   /** Replace the ordered custom-status list (from Settings). Normalized and
    *  written back to config.toml + the per-vault view override. (#354) */
   setKanbanStatuses: (statuses: string[]) => void
+  /** Folder board root (#730); '' groups by each note's own folder. Persisted per vault and portably. */
+  setKanbanFolderRoot: (root: string) => void
   setTasksCalendarSelectedDate: (iso: string | null) => void
   setTasksCalendarMonthAnchor: (iso: string | null) => void
   setTaskCursorIndex: (idx: number) => void
@@ -3246,23 +3526,44 @@ interface Store {
   jumpToPreviousNote: () => Promise<void>
   jumpToNextNote: () => Promise<void>
   toggleRecentNote: () => Promise<void>
-  applyChange: (ev: VaultChangeEvent) => Promise<void>
+  /**
+   * Bring a vault change into the store. A body re-read for an open note
+   * counts as a change from disk unless `options.source` is `'app'`: the app
+   * itself rewrote the file (a link re-targeted after an asset rename) and
+   * the editor should keep the note's undo history through it, as it does
+   * for a rename's heading rewrite, rather than start it clean (#852).
+   */
+  applyChange: (ev: VaultChangeEvent, options?: { source?: 'disk' | 'app' }) => Promise<void>
   refreshNotes: () => Promise<void>
   refreshRootContentHidden: () => Promise<void>
   /** Dismiss the vault-root notice for the current vault, persisted (#216). */
   dismissRootContentBanner: () => void
   refreshAssets: () => Promise<void>
+  /** Put files the app has just saved into `assetFiles` at once, ahead of the
+   *  listing that will carry them, and start that listing. Called before the
+   *  note gains their embeds, which would otherwise read as files this device
+   *  does not have until the listing lands. */
+  indexImportedAssets: (assets: readonly ImportedAsset[]) => void
+  /** Rename an asset file in place. Every note referencing it is rewritten on
+   *  disk (#785), so open buffers are flushed first and notes re-listed after. */
+  renameAsset: (relPath: string, nextName: string) => Promise<AssetMeta>
+  /** Move an asset into another vault folder. Like `renameAsset`, every note
+   *  referencing it is re-targeted on disk (#785), so buffers flush first and
+   *  notes re-list after. */
+  moveAsset: (relPath: string, targetDir: string) => Promise<AssetMeta>
   deleteAsset: (relPath: string) => Promise<void>
   undoLastAssetAction: () => Promise<boolean>
   updateActiveBody: (body: string) => void
   persistActive: () => Promise<void>
   formatActiveNote: () => Promise<void>
-  renameNote: (oldPath: string, nextTitle: string) => Promise<void>
+  renameNote: (oldPath: string, nextTitle: string, hostIsCurrent?: () => boolean) => Promise<void>
   renameActive: (nextTitle: string) => Promise<void>
+  /** Create a note and open it. `tags` seeds the body with one line of
+   *  `#tags` under the heading, the way `zn capture --tag` does. */
   createAndOpen: (
     folder: NoteFolder,
     subpath?: string,
-    options?: { focusTitle?: boolean; title?: string }
+    options?: { focusTitle?: boolean; title?: string; tags?: readonly string[] }
   ) => Promise<void>
   createDrawingAndOpen: (folder: NoteFolder, subpath?: string) => Promise<void>
   /** Quick-add a whole-note task file (`#task`-tagged, TaskNotes-style). Prompts
@@ -3303,6 +3604,24 @@ interface Store {
   /** Delete any note for good (confirm, delete, drop its tabs and buffers).
    *  Resolves true when the file is gone. */
   deleteNotePermanently: (path: string) => Promise<boolean>
+  emptyTrash: (hostIsCurrent?: () => boolean) => Promise<void>
+  changeNoteLifecycle: (path: string, action: 'archive' | 'trash' | 'restore' | 'delete', hostIsCurrent?: () => boolean) => Promise<NoteMeta | null>
+  /**
+   * Keep the open editors on notes a workflow run is about to move.
+   *
+   * The host moves the file and the watcher reports an unlink of the old path,
+   * which closes its tab (`applyChange`); a move the app makes itself shields
+   * the path in `renamesInFlight` and carries the tab, the buffer and the undo
+   * history to the new path when the host answers (`mutateNoteImpl`). A run is
+   * applied by the host in one transaction, so the shield goes up for every
+   * promised move before the run and the carry happens after it, for the notes
+   * that landed where the plan promised, byte for byte. Returns the function
+   * that ends it, to call once the run is over, landed or not.
+   */
+  followWorkflowMoves: (
+    moves: readonly { from: string; to: string }[],
+    options?: { reverting?: boolean }
+  ) => () => Promise<void>
   restoreActive: () => Promise<void>
   archiveActive: () => Promise<void>
   unarchiveActive: () => Promise<void>
@@ -3321,6 +3640,12 @@ interface Store {
   setFocusMode: (focus: boolean) => void
   setVimMode: (on: boolean) => void
   setVimInsertEscape: (sequence: string) => void
+  setExternalApplicationSchemes: (schemes: string[]) => void
+  /** Replace the ignored-keys list (#732); persisted with the prefs and mirrored to config.toml. */
+  setIgnoredKeys: (keys: string[]) => void
+  /** Add one key to the ignored list, by the name Settings shows. */
+  addIgnoredKey: (key: string) => void
+  removeIgnoredKey: (key: string) => void
   setVimYankToClipboard: (on: boolean) => void
   setVimBlockImeInNormalMode: (on: boolean) => void
   setVimWrappedLineMotions: (mode: VimWrappedLineMotionMode) => void
@@ -3347,17 +3672,29 @@ interface Store {
   saveHarperVaultState: (next: HarperVaultState) => Promise<void>
   setLooseMathDelimiters: (on: boolean) => void
   setKeepViewModeAcrossNotes: (on: boolean) => void
+  setKeepPanelsAcrossNotes: (on: boolean) => void
+  setPersistUndoHistory: (on: boolean) => void
   setDefaultPaneMode: (mode: PaneMode) => void
   setSyncTitleHeadingOnRename: (on: boolean) => void
+  setReviewAgentEdits: (on: boolean) => void
+  setUsageCount: (on: boolean) => void
   setMarkdownSnippets: (on: boolean) => void
   setTextReplacementsEnabled: (on: boolean) => void
   setTextReplacements: (replacements: TextReplacements) => void
+  /** Saved Tasks filters (#731). Names match case-insensitively; edits keep the
+   *  chip order, and every change is mirrored to config.toml with the prefs. */
+  saveTaskFilter: (name: string, query: string) => void
+  renameSavedTaskFilter: (from: string, to: string) => void
+  deleteSavedTaskFilter: (name: string) => void
+  /** Set the Tasks filter to the query saved under `name`; false when unknown. */
+  applySavedTaskFilter: (name: string) => boolean
   setAutoPairs: (on: boolean) => void
   setAutoPairQuotesInProse: (on: boolean) => void
   setHideBuiltinTemplates: (hidden: boolean) => void
   /** Turn the whole Workflows feature on or off. Switching it off also closes
    *  any pane still showing the canvas. */
   setWorkflowsEnabled: (on: boolean) => void
+  setWorkflowEventTriggers: (on: boolean) => void
   setAtlasEnabled: (on: boolean) => void
   hideWorkflowPreset: (id: string) => void
   restoreWorkflowPreset: (id: string) => void
@@ -3411,6 +3748,7 @@ interface Store {
   setAutoReveal: (on: boolean) => void
   setUnifiedSidebar: (on: boolean) => void
   setDarkSidebar: (on: boolean) => void
+  setShowWindowTitleBar: (on: boolean) => void
   setShowSidebarChevrons: (on: boolean) => void
   toggleCollapseFolder: (key: string) => void
   setCollapsedFolders: (keys: string[]) => void
@@ -3501,13 +3839,20 @@ interface Store {
   addTaskForDate: (dateIso: string, text: string) => Promise<void>
   /** Move unfinished tasks from past daily notes into today's note. Returns the
    *  number of task lines moved. Without `force`, it is gated by the
-   *  `rolloverUnfinishedTasks` setting and a once-per-day marker. */
+   *  `rolloverUnfinishedTasks` setting and skips past notes it already found
+   *  clean and that have not changed on disk since; `force` re-reads them all. */
   rolloverUnfinishedTasksIntoToday: (opts?: {
     force?: boolean
     open?: boolean
   }) => Promise<number>
   /** Mark the first-run onboarding as complete (or skipped). Persists. */
   completeOnboarding: () => void
+  /** First launch of a version: record it, send the anonymous count (when
+   *  Settings allows it), and after an update open What’s New. Desktop only. */
+  showWhatsNewAfterUpdate: () => Promise<void>
+  /** The palette's What’s New in ZenNotes. */
+  openWhatsNew: () => Promise<void>
+  closeWhatsNew: () => void
   /** Re-open the first-run onboarding wizard. Persists. */
   restartOnboarding: () => void
   setFocusedPanel: (panel: Panel | null) => void
@@ -3554,6 +3899,11 @@ interface Store {
   /** Update sizes on a split node (for divider drag). */
   resizeSplit: (splitId: string, sizes: number[]) => void
   setPaneModeForPath: (paneId: string, path: string | null, mode: PaneMode) => void
+  updatePanePanelsForPath: (
+    paneId: string,
+    path: string | null,
+    update: (panels: PanePanelsState) => PanePanelsState
+  ) => void
   /** Pin a tab within a specific pane — sticks it to the left of the
    *  strip and protects it from "Close Others" / "Close Tabs to Right". */
   pinTabInPane: (paneId: string, path: string) => void
@@ -3564,8 +3914,12 @@ interface Store {
   /** Update an open note's body (typed into any pane). Flags dirty. */
   updateNoteBody: (path: string, body: string) => void
   /** Persist a specific note to disk. */
-  persistNote: (path: string) => Promise<void>
+  persistNote: (path: string, duringFolderMutation?: boolean) => Promise<void>
   loadNoteComments: (path: string) => Promise<NoteComment[]>
+  /** Re-list every note with assistant edits to review. */
+  refreshAgentEdits: () => Promise<void>
+  /** Re-read one note's record after it changed on disk. */
+  refreshAgentEdit: (path: string) => Promise<void>
   addNoteComment: (input: NoteCommentInput) => Promise<NoteComment | null>
   updateNoteComment: (
     path: string,
@@ -3585,13 +3939,14 @@ interface Store {
   renameTag: (oldTag: string, newTag: string) => Promise<void>
   /** Remove `#tag` from every non-trash note. */
   deleteTag: (tag: string) => Promise<void>
-  createFolder: (folder: NoteFolder, subpath: string) => Promise<void>
+  createFolder: (folder: NoteFolder, subpath: string, isCurrent?: () => boolean) => Promise<void>
   renameFolder: (
     folder: NoteFolder,
     oldSubpath: string,
-    newSubpath: string
+    newSubpath: string,
+    isCurrent?: () => boolean
   ) => Promise<void>
-  deleteFolder: (folder: NoteFolder, subpath: string) => Promise<void>
+  deleteFolder: (folder: NoteFolder, subpath: string, isCurrent?: () => boolean) => Promise<void>
   duplicateFolder: (folder: NoteFolder, subpath: string) => Promise<void>
   revealFolder: (folder: NoteFolder, subpath: string) => Promise<void>
   revealAssetsDir: () => Promise<void>
@@ -3599,11 +3954,13 @@ interface Store {
   moveNote: (
     relPath: string,
     targetFolder: NoteFolder,
-    targetSubpath: string
+    targetSubpath: string,
+    isCurrent?: () => boolean
   ) => Promise<void>
   init: () => Promise<void>
   openVaultPicker: () => Promise<void>
   openLocalVault: (root: string) => Promise<void>
+  relocateLocalVault: (operation: LocalVaultRelocation) => Promise<void>
   closeVault: () => Promise<void>
   connectRemoteWorkspace: () => Promise<void>
   connectRemoteWorkspaceProfile: (id: string) => Promise<void>
@@ -3628,15 +3985,33 @@ const pathSaveTimers = new Map<string, ReturnType<typeof setTimeout>>()
  *  older one to the final rename. */
 const pathSaveQueues = new Map<string, Promise<void>>()
 const PATH_SAVE_DEBOUNCE_MS = 350
-
+/** The on-disk body of every dirty note, taken from the buffer the moment it
+ *  first drifted from disk (a clean buffer equals disk) and moved forward by
+ *  each completed write. An edit that brings the buffer back to these bytes
+ *  is not a change: a custom Vim insert-mode escape such as `jk` types and
+ *  removes its `j`, and saving the identical text only moved the file's mtime
+ *  and the {{modified_*}} tokens with it (#828). Entries are consulted only
+ *  while `noteDirty[path]` is true and are replaced by the note's next edit
+ *  once it is clean again, so a leftover for a clean note is never read. */
+const savedBodies = new Map<string, string>()
+// Only the latest watcher read may apply, and a newer local save invalidates
+// older reads even if it finishes or returns to the same starting body.
+const noteContentVersions = new Map<string, number>()
 /**
- * The body we most recently wrote to each path. The vault file watcher
- * inevitably echoes our own writes back through `applyChange` after a
- * short delay — when we recognise the echo (disk body === what we
- * wrote) we skip the refresh. Without this, edits made between save
- * completion and echo arrival get rolled back to the older disk body.
+ * How many times each open note's body was taken from disk this session (a
+ * watcher event, a resync after a remote feed came back), bumped in the same
+ * update that replaces the body and left alone by every in-app writer. The
+ * editor reads it to tell a change from disk apart from a peer pane or a
+ * rename rewrite, which look the same in the body, and starts the note's undo
+ * history clean for the former (#852). Keyed by path like noteContentVersions;
+ * an entry outliving a vault switch is harmless, since an editor re-baselines
+ * on every note it starts showing.
  */
-const lastWrittenByPath = new Map<string, string>()
+const noteDiskRevisions = new Map<string, number>()
+
+export function noteDiskRevision(path: string): number {
+  return noteDiskRevisions.get(path) ?? 0
+}
 
 /**
  * Old paths of renames the host has not answered yet. A rename is a move on
@@ -3651,6 +4026,16 @@ const lastWrittenByPath = new Map<string, string>()
  * unlink is the rename's own echo and its tab is kept through refreshes.
  */
 const renamesInFlight = new Set<string>()
+
+/**
+ * How long an open note's file may be gone before its tab closes. A writer
+ * that replaces a file by deleting it and writing it back (git, some sync
+ * clients, editors that save that way) reaches the watcher as an unlink and a
+ * later add, and chokidar merges the pair only inside 100 ms. Closing on the
+ * unlink dropped the reader on Home and threw away the text they had not
+ * saved yet along with the tab (#863).
+ */
+const UNLINK_SETTLE_MS = 1500
 
 // --- CSV database debounced persistence + echo suppression ---
 const DATABASE_SAVE_DEBOUNCE_MS = 400
@@ -3671,6 +4056,137 @@ function databaseToSidecar(doc: DatabaseDoc): DatabaseSidecar {
   }
 }
 
+const databaseLoadVersions = new Map<string, number>()
+const databaseWriteQueues = new Map<string, Promise<void>>()
+const databaseCreations = new Map<string, Promise<void>>()
+const databaseRowActions = new Map<string, Promise<void>>()
+let pendingRowConfirmation = false
+const folderMutations = new Map<string, Promise<void>>()
+const uncertainFolderMutations = new Map<string, VaultInfo | null>()
+let noteIndexRequest = 0
+let assetIndexRequest = 0
+let taskIndexRevision = 0
+const inFlightNoteWrites = new Set<Promise<unknown>>()
+let pendingNoteRename: {
+  oldPath: string
+  nextPath: string
+  title: string
+  notesBefore: NoteMeta[]
+  isCurrent: () => boolean
+} | null = null
+
+function rewriteRenamingBody(path: string, body: string, folder: NoteFolder): string {
+  const rename = pendingNoteRename
+  if (
+    !rename ||
+    !rename.isCurrent() ||
+    path === rename.nextPath ||
+    folder === 'trash' ||
+    !path.toLowerCase().endsWith('.md') ||
+    isObsidianExcalidrawPath(path) ||
+    isObsidianExcalidrawMarkdown(body)
+  )
+    return body
+  return rewriteWikilinksForRename(body, rename.notesBefore, rename.oldPath, rename.title).body
+}
+
+/** Body writers outside the editor must settle before a file mutation starts. */
+function trackNoteWrite<Args extends unknown[], Result>(
+  blocked: Result,
+  work: (...args: Args) => Promise<Result>
+): (...args: Args) => Promise<Result> {
+  return async (...args) => {
+    if (
+      workspaceWritesBlocked() || folderMutations.size > 0 || databaseRowActions.size > 0 ||
+      [...uncertainFolderMutations.values()].includes(useStore.getState().vault)
+    ) {
+      useToastStore
+        .getState()
+        .addToast(
+          'Wait for the file operation to finish, or reload the vault if it failed.',
+          'info'
+        )
+      return blocked
+    }
+    const running = work(...args)
+    inFlightNoteWrites.add(running)
+    try {
+      return await running
+    } finally {
+      inFlightNoteWrites.delete(running)
+    }
+  }
+}
+
+const folderReadVersions = new Map<string, number>()
+const mutationContains = pathInScope
+const folderReadVersion = (path: string): number =>
+  [...folderReadVersions].reduce(
+    (version, [prefix, value]) => (mutationContains(prefix, path) ? version + value : version),
+    0
+  )
+const folderMutationBlocks = (path: string): boolean =>
+  [...folderMutations.keys()].some((prefix) => mutationContains(prefix, path)) ||
+  [...uncertainFolderMutations].some(
+    ([prefix, vault]) => vault === useStore.getState().vault && mutationContains(prefix, path)
+  )
+
+/** Register every task writer, including actions that write a closed note directly. */
+function trackTaskWrite<Args extends unknown[]>(
+  work: (...args: Args) => Promise<void>
+): (...args: Args) => Promise<void> {
+  return async (...args) => {
+    if ([...uncertainFolderMutations.values()].includes(useStore.getState().vault)) {
+      useToastStore.getState().addToast('Reload the vault before changing tasks after a failed file operation.', 'error')
+      return
+    }
+    if (workspaceWritesBlocked() || folderMutations.size > 0 || databaseRowActions.size > 0) {
+      useToastStore.getState().addToast('Wait for the file operation to finish before changing tasks.', 'info')
+      return
+    }
+    const running = work(...args)
+    inFlightTaskMutations.add(running)
+    try { await running } finally { inFlightTaskMutations.delete(running) }
+  }
+}
+
+async function flushDatabaseWrite(
+  csvPath: string,
+  getDoc: () => DatabaseDoc | undefined
+): Promise<void> {
+  const isCurrent = captureFolderActionContext(useStore.getState)
+  const timer = databaseSaveTimers.get(csvPath)
+  if (timer) clearTimeout(timer)
+  databaseSaveTimers.delete(csvPath)
+  const previous = databaseWriteQueues.get(csvPath)
+  const write = async (): Promise<void> => {
+    if (!isCurrent()) return
+    const kind = databaseWriteKind.get(csvPath)
+    const doc = getDoc()
+    if (!kind || !doc) return
+    databaseWriteKind.delete(csvPath)
+    try {
+      if (kind === 'schema')
+        await window.zen.writeDatabaseSchema(csvPath, databaseToSidecar(doc), doc.rows)
+      else await window.zen.writeDatabaseRows(csvPath, doc.rows)
+      lastDatabaseWriteAt.set(csvPath, Date.now())
+    } catch (error) {
+      databaseWriteKind.set(
+        csvPath,
+        kind === 'schema' ? kind : (databaseWriteKind.get(csvPath) ?? kind)
+      )
+      throw error
+    }
+  }
+  const run = previous ? previous.catch(() => {}).then(write) : write()
+  databaseWriteQueues.set(csvPath, run)
+  try {
+    await run
+  } finally {
+    if (databaseWriteQueues.get(csvPath) === run) databaseWriteQueues.delete(csvPath)
+  }
+}
+
 function scheduleDatabaseWrite(
   csvPath: string,
   kind: 'rows' | 'schema',
@@ -3680,24 +4196,11 @@ function scheduleDatabaseWrite(
   databaseWriteKind.set(csvPath, kind === 'schema' || prev === 'schema' ? 'schema' : 'rows')
   const existing = databaseSaveTimers.get(csvPath)
   if (existing) clearTimeout(existing)
-  databaseSaveTimers.set(
-    csvPath,
-    setTimeout(() => {
-      databaseSaveTimers.delete(csvPath)
-      const writeKind = databaseWriteKind.get(csvPath) ?? 'rows'
-      databaseWriteKind.delete(csvPath)
-      const doc = getDoc()
-      if (!doc) return
-      const done = (): void => {
-        lastDatabaseWriteAt.set(csvPath, Date.now())
-      }
-      const write =
-        writeKind === 'schema'
-          ? window.zen.writeDatabaseSchema(csvPath, databaseToSidecar(doc), doc.rows)
-          : window.zen.writeDatabaseRows(csvPath, doc.rows)
-      void write.catch((err) => console.error('database write failed', err)).finally(done)
-    }, DATABASE_SAVE_DEBOUNCE_MS)
-  )
+  databaseSaveTimers.delete(csvPath)
+  if (folderMutationBlocks(csvPath) || databaseRowActions.has(csvPath)) return
+  databaseSaveTimers.set(csvPath, setTimeout(() => {
+    void flushDatabaseWrite(csvPath, getDoc).catch((err) => console.error('database write failed', err))
+  }, DATABASE_SAVE_DEBOUNCE_MS))
 }
 
 /**
@@ -3835,43 +4338,292 @@ function activeFieldsFrom(
   }
 }
 
-function renameNoteState(
+const commentOperations = new Map<string, Set<Promise<unknown>>>()
+
+async function trackCommentOperation<T>(
+  path: string,
+  fallback: T,
+  work: () => Promise<T>
+): Promise<T> {
+  if (folderMutationBlocks(path) || workspaceWritesBlocked()) return fallback
+  const operations = commentOperations.get(path) ?? new Set<Promise<unknown>>()
+  commentOperations.set(path, operations)
+  const pending = work()
+  operations.add(pending)
+  try {
+    return await pending
+  } finally {
+    operations.delete(pending)
+    if (operations.size === 0) commentOperations.delete(path)
+  }
+}
+
+function captureFolderActionContext(
+  get: () => Store,
+  hostIsCurrent?: () => boolean
+): () => boolean {
+  const vault = get().vault
+  const bridge = window.zen
+  const layout = JSON.stringify([
+    get().vaultSettings.primaryNotesLocation,
+    get().vaultSettings.systemFolderPaths
+  ])
+  return () => {
+    try {
+      return (
+        get().vault === vault &&
+        window.zen === bridge &&
+        JSON.stringify([
+          get().vaultSettings.primaryNotesLocation,
+          get().vaultSettings.systemFolderPaths
+        ]) === layout &&
+        (hostIsCurrent?.() ?? true)
+      )
+    } catch {
+      return false
+    }
+  }
+}
+
+/** Keep saves and watcher echoes at the old paths until the host finishes moving them. */
+async function mutateFolderContents(
+  get: () => Store,
+  prefix: string,
+  isCurrent: () => boolean,
+  canReconcile: () => boolean,
+  mutate: () => Promise<string | null | undefined>,
+  rowActionOwner?: string
+): Promise<void> {
+  if (workspaceWritesBlocked()) throw new Error('Wait for the vault change to finish')
+  if ([...databaseRowActions.keys()].some((owner) => owner !== rowActionOwner))
+    throw new Error('Wait for database row deletion to finish before changing files')
+  if (inFlightNoteWrites.size > 0)
+    throw new Error('Wait for pending note changes to finish before changing files')
+  if (
+    [...databaseCreations.keys()].some((other) => prefix.startsWith(other) || other.startsWith(prefix)) ||
+    folderMutationBlocks(prefix) ||
+    [...uncertainFolderMutations].some(([other, vault]) => vault === get().vault && other.startsWith(prefix)) ||
+    [...folderMutations.keys()].some(
+      (other) => prefix.startsWith(other) || other.startsWith(prefix)
+    )
+  )
+    throw new Error('This folder already has an operation in progress')
+  let release!: () => void
+  const done = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  folderMutations.set(prefix, done)
+  folderReadVersions.set(prefix, (folderReadVersions.get(prefix) ?? 0) + 1)
+  taskIndexRevision += 1
+  useStore.setState({ tasksLoading: false })
+  noteIndexRequest += 1
+  assetIndexRequest += 1
+  const notePaths = Object.keys(get().noteContents).filter((path) => mutationContains(prefix, path))
+  const databasePaths = [
+    ...new Set([
+      ...Object.keys(get().databases),
+      ...Object.keys(get().databasesLoading),
+      ...databaseWriteQueues.keys(),
+      ...databaseWriteKind.keys()
+    ])
+  ].filter((path) => mutationContains(prefix, path))
+  for (const path of databasePaths)
+    databaseLoadVersions.set(path, (databaseLoadVersions.get(path) ?? 0) + 1)
+  useStore.setState((s) => ({
+    databasesLoading: {
+      ...s.databasesLoading,
+      ...Object.fromEntries(databasePaths.map((path) => [path, false]))
+    }
+  }))
+  let nextPrefix: string | null = prefix
+  for (const path of notePaths) {
+    renamesInFlight.add(path)
+    noteContentVersions.set(path, (noteContentVersions.get(path) ?? 0) + 1)
+  }
+  try {
+    await Promise.all(
+      [...commentOperations]
+        .filter(([path]) => mutationContains(prefix, path))
+        .flatMap(([, operations]) => [...operations])
+    )
+    if (!isCurrent()) return
+    await Promise.all(notePaths.map((path) => get().persistNote(path, true)))
+    if (!isCurrent()) return
+    if (notePaths.some((path) => get().noteDirty[path]))
+      throw new Error('Could not change this folder while notes still have unsaved changes')
+    await Promise.all(
+      databasePaths.map((path) =>
+        flushDatabaseWrite(path, () => (isCurrent() ? get().databases[path] : undefined))
+      )
+    )
+    if (!isCurrent()) return
+    nextPrefix = (await mutate()) ?? null
+  } catch (error) {
+    if (String(error).includes('FOLDER_STATE_UNCERTAIN:') && canReconcile()) {
+      uncertainFolderMutations.set(prefix, get().vault)
+      nextPrefix = null
+    }
+    throw error
+  } finally {
+    for (const path of notePaths) renamesInFlight.delete(path)
+    for (const path of databasePaths) {
+      const kind = databaseWriteKind.get(path)
+      databaseWriteKind.delete(path)
+      const timer = databaseSaveTimers.get(path)
+      if (timer) clearTimeout(timer)
+      databaseSaveTimers.delete(path)
+      if (canReconcile() && nextPrefix !== null && kind) {
+        const nextPath = nextPrefix + path.slice(prefix.length)
+        databaseWriteKind.set(
+          nextPath,
+          kind === 'schema' ? kind : (databaseWriteKind.get(nextPath) ?? kind)
+        )
+      }
+    }
+    try {
+      if (canReconcile() && nextPrefix !== null) {
+        const targetPrefix = nextPrefix
+        await Promise.all(
+          Object.keys(get().noteDirty)
+            .filter((path) => mutationContains(targetPrefix, path) && get().noteDirty[path])
+            .map((path) => get().persistNote(path, true))
+        )
+      }
+    } finally {
+      folderMutations.delete(prefix)
+      if (canReconcile() && nextPrefix !== null) {
+        const targetPrefix = nextPrefix
+        for (const path of Object.keys(get().databases)) {
+          const kind = databaseWriteKind.get(path)
+          if (mutationContains(targetPrefix, path) && kind)
+            scheduleDatabaseWrite(path, kind, () => get().databases[path])
+        }
+      }
+      release()
+    }
+  }
+}
+
+function rewriteFolderWorkspace(
   s: Store,
-  oldPath: string,
-  meta: NoteMeta
+  prefix: string,
+  nextPrefix: string | null
 ): Partial<Store> {
-  const rewrite = (p: string): string => (p === oldPath ? meta.path : p)
-  const nextLayout = rewritePathsInTree(s.paneLayout, rewrite)
-  const ensured = ensureActivePane(nextLayout, s.activePaneId)
-  const contents = { ...s.noteContents }
-  const dirty = { ...s.noteDirty }
-  const prevContent = contents[oldPath]
-  const prevDirty = dirty[oldPath] ?? false
-  if (oldPath !== meta.path) {
-    delete contents[oldPath]
-    delete dirty[oldPath]
+  const rewriteFile = (path: string): string | null =>
+    mutationContains(prefix, path)
+      ? nextPrefix === null
+        ? null
+        : nextPrefix + path.slice(prefix.length)
+      : path
+  const rewrite = (path: string): string | null => {
+    const csv = csvPathFromDatabaseTab(path)
+    const asset = isAssetTabPath(path) ? assetPathFromTab(path) : null
+    const mapped = rewriteFile(csv ?? asset ?? path)
+    return mapped === null
+      ? null
+      : csv
+        ? databaseTabPath(mapped)
+        : asset
+          ? assetTabPath(mapped)
+          : mapped
   }
-  if (prevContent) {
-    contents[meta.path] = { ...prevContent, ...meta }
+  const remap = <T,>(
+    entries: Record<string, T>,
+    update: (value: T, path: string) => T
+  ): Record<string, T> => {
+    const next: Record<string, T> = {}
+    for (const [path, value] of Object.entries(entries)) {
+      const mapped = rewriteFile(path)
+      if (mapped !== null) next[mapped] = mapped === path ? value : update(value, mapped)
+    }
+    return next
   }
-  dirty[meta.path] = prevDirty
+  const contents = remap(s.noteContents, (content, path) => ({ ...content, path }))
+  const dirty = remap(s.noteDirty, (value) => value)
+  const ensured = ensureActivePane(rewritePathsInTree(s.paneLayout, rewrite), s.activePaneId)
+  const history = (entries: NoteJumpLocation[]) =>
+    entries.flatMap((entry) => {
+      const path = rewrite(entry.path)
+      return path === null ? [] : [{ ...entry, path }]
+    })
+  const pendingPath = s.pendingJumpLocation && rewrite(s.pendingJumpLocation.path)
   return {
     paneLayout: ensured.layout,
     activePaneId: ensured.activePaneId,
     noteContents: contents,
     noteDirty: dirty,
-    notes: replaceNoteMeta(s.notes, oldPath, meta),
-    noteBackstack: rewriteNoteJumpHistory(s.noteBackstack, rewrite),
-    noteForwardstack: rewriteNoteJumpHistory(s.noteForwardstack, rewrite),
-    pendingJumpLocation:
-      s.pendingJumpLocation?.path === oldPath
-        ? { ...s.pendingJumpLocation, path: meta.path }
-        : s.pendingJumpLocation,
-    pendingTitleFocusPath:
-      s.pendingTitleFocusPath === oldPath ? meta.path : s.pendingTitleFocusPath,
-    pinnedRefPath: s.pinnedRefPath === oldPath ? meta.path : s.pinnedRefPath,
-    noteComments: rewriteNoteCommentsPath(s.noteComments, oldPath, meta.path),
-    activeCommentId: s.activeCommentId,
+    manualNoteOrder: Object.fromEntries(
+      Object.entries(s.manualNoteOrder).flatMap(([directory, paths]) => {
+        const mapped = rewriteFile(`${directory}/`)
+        return mapped
+          ? [
+              [
+                mapped.slice(0, -1),
+                paths.flatMap((path) => {
+                  const next = rewriteFile(path)
+                  return next ? [next] : []
+                })
+              ]
+            ]
+          : []
+      })
+    ),
+    paneModes: Object.fromEntries(
+      Object.entries(s.paneModes).map(([pane, modes]) => [pane, remap(modes, (mode) => mode)])
+    ),
+    panePanels: Object.fromEntries(
+      Object.entries(s.panePanels).map(([pane, panels]) => [pane, remap(panels, (open) => open)])
+    ),
+    recentPathRewrites: appendPathRewrite(
+      s.recentPathRewrites,
+      s.vault?.root ?? '',
+      prefix,
+      nextPrefix
+    ),
+    noteRefs: Object.fromEntries(
+      Object.entries(s.noteRefs).flatMap(([owner, ref]) => {
+        const nextOwner = rewriteFile(owner)
+        const path = rewriteFile(ref.path)
+        return nextOwner && path ? [[nextOwner, { ...ref, path }]] : []
+      })
+    ),
+    assetFiles: s.assetFiles.flatMap((asset) => {
+      const path = rewriteFile(asset.path)
+      return path ? [{ ...asset, path }] : []
+    }),
+    vaultTasks: s.vaultTasks.flatMap((task) => {
+      const sourcePath = rewriteFile(task.sourcePath)
+      return sourcePath
+        ? [{ ...task, sourcePath, id: sourcePath + task.id.slice(task.sourcePath.length) }]
+        : []
+    }),
+    tasksLoading: false,
+    agentEdits: remap(s.agentEdits, (summary, notePath) => ({ ...summary, notePath })),
+    noteComments: remap(s.noteComments, (comments, notePath) =>
+      comments.map((comment) => ({ ...comment, notePath }))
+    ),
+    databases: remap(s.databases, (doc, path) => ({
+      ...doc,
+      path,
+      title: formTitleFromCsvPath(path),
+      ...(doc.pages
+        ? {
+            pages: Object.fromEntries(
+              Object.entries(doc.pages).map(([id, page]) => [id, rewriteFile(page) ?? page])
+            )
+          }
+        : {})
+    })),
+    databasesLoading: remap(s.databasesLoading, () => false),
+    noteBackstack: history(s.noteBackstack),
+    noteForwardstack: history(s.noteForwardstack),
+    closedTabStack: s.closedTabStack.flatMap((entry) => {
+      const path = rewrite(entry.path)
+      return path === null ? [] : [{ ...entry, path }]
+    }),
+    pendingJumpLocation: pendingPath ? { ...s.pendingJumpLocation!, path: pendingPath } : null,
+    pendingTitleFocusPath: s.pendingTitleFocusPath ? rewrite(s.pendingTitleFocusPath) : null,
+    pinnedRefPath: s.pinnedRefPath ? rewrite(s.pinnedRefPath) : null,
     ...activeFieldsFrom(ensured.layout, ensured.activePaneId, contents, dirty)
   }
 }
@@ -3892,10 +4644,12 @@ async function syncHeadingAfterRename(
     syncTitleHeadingOnRename: boolean
     noteContents: Record<string, NoteContent>
     updateNoteBody: (path: string, body: string) => void
-    persistNote: (path: string) => Promise<void>
-  }
+    persistNote: (path: string, duringFolderMutation?: boolean) => Promise<void>
+  },
+  isCurrent: () => boolean = () => true,
+  duringMutation = false
 ): Promise<void> {
-  if (!get().syncTitleHeadingOnRename) return
+  if (!isCurrent() || !get().syncTitleHeadingOnRename) return
   // Markdown only, and never an Obsidian drawing: those are `.md` files whose
   // headings (`# Excalidraw Data`) are structure, not a title.
   if (!meta.path.toLowerCase().endsWith('.md')) return
@@ -3907,14 +4661,15 @@ async function syncHeadingAfterRename(
       const next = retitleLeadingHeading(open.body, meta.title)
       if (next === open.body) return
       get().updateNoteBody(meta.path, next)
-      await get().persistNote(meta.path)
+      await get().persistNote(meta.path, duringMutation)
       return
     }
-    const content = await window.zen.readNote(meta.path)
-    if (isObsidianExcalidrawMarkdown(content.body)) return
+    const bridge = window.zen
+    const content = await bridge.readNote(meta.path)
+    if (!isCurrent() || isObsidianExcalidrawMarkdown(content.body)) return
     const next = retitleLeadingHeading(content.body, meta.title)
     if (next === content.body) return
-    await window.zen.writeNote(meta.path, next)
+    await bridge.writeNote(meta.path, next)
   } catch (err) {
     // The rename itself succeeded; a failed heading rewrite must not undo it.
     console.error('syncHeadingAfterRename failed', err)
@@ -4025,19 +4780,6 @@ function withDateNotePatternHistory(
   }
 }
 
-function rewriteNoteCommentsPath(
-  comments: Record<string, NoteComment[]>,
-  oldPath: string,
-  nextPath: string
-): Record<string, NoteComment[]> {
-  if (oldPath === nextPath || !(oldPath in comments)) return comments
-  const { [oldPath]: moving, ...rest } = comments
-  return {
-    ...rest,
-    [nextPath]: moving.map((comment) => ({ ...comment, notePath: nextPath }))
-  }
-}
-
 /** Ensure `activePaneId` points at a real leaf. Falls back to first leaf. */
 function ensureActivePane(
   layout: PaneLayout,
@@ -4063,11 +4805,13 @@ function noteReadCacheKey(
   relPath: string
 ): string {
   return [
+    workspaceGeneration(),
     state.workspaceMode,
     state.vault?.root ?? '',
     state.remoteWorkspaceInfo?.baseUrl ?? '',
     state.remoteWorkspaceInfo?.profileId ?? '',
-    relPath
+    relPath,
+    folderReadVersion(relPath)
   ].join('\0')
 }
 
@@ -4077,11 +4821,17 @@ function clearNoteContentReadCaches(): void {
 }
 
 function readNoteContent(relPath: string, state: Store): Promise<NoteContent> {
+  if (folderMutationBlocks(relPath)) return Promise.reject(new Error('Folder operation in progress'))
+  const version = folderReadVersion(relPath)
   const cacheKey = noteReadCacheKey(state, relPath)
   const pending = noteReadPromises.get(cacheKey)
   if (pending) return pending
 
-  const next = window.zen.readNote(relPath).finally(() => {
+  const next = window.zen.readNote(relPath).then((content) => {
+    if (folderMutationBlocks(relPath) || folderReadVersion(relPath) !== version)
+      throw new Error('Folder changed while loading this note')
+    return content
+  }).finally(() => {
     noteReadPromises.delete(cacheKey)
   })
   noteReadPromises.set(cacheKey, next)
@@ -4183,12 +4933,207 @@ function withoutNoteInWorkspace(s: Store, path: string): Partial<Store> {
   }
 }
 
+/**
+ * Give the open vault the name its settings say (#692): the display name when
+ * there is one, else the folder's own, read off the root the way main does.
+ * Runs after every settings save and every external vault.json change, so
+ * the header, title bar and note-list heading move with the file. A plain
+ * `set`, not `setVault`: a renamed vault is the same vault.
+ */
+function applyVaultNameFromSettings(settings: VaultSettings): void {
+  const vault = useStore.getState().vault
+  if (!vault) return
+  const name = resolveVaultName(settings.displayName, vaultFolderName(vault))
+  if (name === vault.name) return
+  useStore.setState({ vault: { ...vault, name } })
+}
+
 export const useStore = create<Store>((set, get) => {
+  const mutateNoteImpl = async (
+    path: string,
+    mutate: () => Promise<NoteMeta | null>,
+    hostIsCurrent?: () => boolean,
+    rename = false,
+    rowActionOwner?: string
+  ): Promise<NoteMeta | null> => {
+    const isCurrent = captureFolderActionContext(get, hostIsCurrent)
+    const canReconcile = captureFolderActionContext(get)
+    if (!isCurrent()) return null
+    if (inFlightTaskMutations.size > 0 || taskMutationQueues.size > 0)
+      throw new Error('Wait for pending task changes to finish before changing this note')
+    let result: NoteMeta | null = null
+    // Rename can rewrite links anywhere in the vault, including buffers edited
+    // while the host is working. Hold those saves until their links are updated.
+    try {
+      await mutateFolderContents(get, rename ? '' : path, isCurrent, canReconcile, async () => {
+        const notesBefore = get().notes
+        result = await mutate()
+        if (!canReconcile()) return
+        if (rename && result && result.path !== path)
+          pendingNoteRename = {
+            oldPath: path,
+            nextPath: result.path,
+            title: result.title,
+            notesBefore,
+            isCurrent: canReconcile
+          }
+        const nextPath = result?.path ?? null
+        noteIndexRequest += 1
+        taskIndexRevision += 1
+        if (nextPath) folderReadVersions.set(nextPath, (folderReadVersions.get(nextPath) ?? 0) + 1)
+        set((s) => {
+          const rewritten = rewriteFolderWorkspace(s, path, nextPath)
+          const manualNoteOrder = { ...rewritten.manualNoteOrder }
+          const parent = parentDirOf(path)
+          const nextParent = nextPath ? parentDirOf(nextPath) : null
+          if (nextParent !== parent && s.manualNoteOrder[parent]?.includes(path)) {
+            manualNoteOrder[parent] = s.manualNoteOrder[parent].filter((value) => value !== path)
+            if (nextParent !== null)
+              manualNoteOrder[nextParent] = [
+                ...(manualNoteOrder[nextParent] ?? []).filter((value) => value !== nextPath),
+                nextPath!
+              ]
+          }
+          const contents = rewritten.noteContents!
+          if (rename) {
+            for (const [owner, content] of Object.entries(contents)) {
+              const body = rewriteRenamingBody(owner, content.body, content.folder)
+              if (body !== content.body) {
+                contents[owner] = { ...content, body }
+                rewritten.noteDirty![owner] = true
+              }
+            }
+          }
+          if (result && contents[result.path])
+            contents[result.path] = { ...contents[result.path], ...result }
+          return {
+            ...rewritten,
+            manualNoteOrder,
+            notes: result
+              ? replaceNoteMeta(s.notes, path, result)
+              : s.notes.filter((note) => note.path !== path),
+            vaultTasks: rewritten.vaultTasks!.map((task) =>
+              result && task.sourcePath === result.path
+                ? { ...task, noteFolder: result.folder, noteTitle: result.title }
+                : task
+            ),
+            ...activeFieldsFrom(
+              rewritten.paneLayout!,
+              rewritten.activePaneId!,
+              contents,
+              rewritten.noteDirty!
+            )
+          }
+        })
+        savePrefs(collectPrefs(get()))
+        writeManualOrder(get().vault?.root ?? '', get().manualNoteOrder)
+        await get().applyFavorites(
+          nextPath && result?.folder !== 'trash'
+            ? rewriteFavoriteNotePath(get().vaultSettings.favorites, path, nextPath)
+            : get().vaultSettings.favorites.filter((favorite) => favorite !== path)
+        )
+        if (rename && result) await syncHeadingAfterRename(result, get, canReconcile, true)
+        if (isCurrent()) await get().refreshNotes()
+        return rename ? '' : nextPath
+      }, rowActionOwner)
+    } finally {
+      if (rename && pendingNoteRename?.isCurrent === canReconcile) pendingNoteRename = null
+    }
+    if (isCurrent() && tasksSurfaceVisible(get())) await get().refreshTasks()
+    if (rename && isCurrent() && Object.values(get().noteDirty).some(Boolean))
+      throw new Error(
+        'The rename finished, but notes still have unsaved changes. Retry saving before leaving the vault.'
+      )
+    const finalMeta = result as NoteMeta | null
+    if (!rename && canReconcile() && finalMeta && get().noteDirty[finalMeta.path])
+      throw new Error('The note moved, but it still has unsaved changes. Save it before closing it.')
+    return result
+  }
+
+  const renameFolderImpl = async (
+    folder: NoteFolder,
+    oldSubpath: string,
+    oldPrefix: string,
+    rename: () => Promise<{ subpath: string; prefix: string }>,
+    hostIsCurrent?: () => boolean
+  ): Promise<void> => {
+    const isCurrent = captureFolderActionContext(get, hostIsCurrent)
+    const canReconcile = captureFolderActionContext(get)
+    if (!isCurrent()) return
+    await mutateFolderContents(get, oldPrefix, isCurrent, canReconcile, async () => {
+      const { subpath: newSubpath, prefix: newPrefix } = await rename()
+      if (!canReconcile()) return
+      noteIndexRequest += 1
+      taskIndexRevision += 1
+      assetIndexRequest += 1
+      set((s) => ({
+        ...rewriteFolderWorkspace(s, oldPrefix, newPrefix),
+        view:
+          s.view.kind === 'folder' &&
+          s.view.folder === folder &&
+          (s.view.subpath === oldSubpath || s.view.subpath.startsWith(`${oldSubpath}/`))
+            ? { ...s.view, subpath: newSubpath + s.view.subpath.slice(oldSubpath.length) }
+            : s.view,
+        notes: s.notes.map((note) =>
+          note.path.startsWith(oldPrefix)
+            ? { ...note, path: newPrefix + note.path.slice(oldPrefix.length) }
+            : note
+        ),
+        folders: s.folders.map((entry) =>
+          entry.folder === folder &&
+          (entry.subpath === oldSubpath || entry.subpath.startsWith(`${oldSubpath}/`))
+            ? { ...entry, subpath: newSubpath + entry.subpath.slice(oldSubpath.length) }
+            : entry
+        ),
+        vaultSettings: {
+          ...s.vaultSettings,
+          folderIcons: rewriteFolderIconsForRename(
+            s.vaultSettings.folderIcons,
+            folder,
+            oldSubpath,
+            newSubpath
+          ),
+          folderColors: rewriteFolderColorsForRename(
+            s.vaultSettings.folderColors,
+            folder,
+            oldSubpath,
+            newSubpath
+          ),
+          // Main rewrote the Tasks folder lists on disk; mirror that here, or
+          // the next toggle would write the old paths back.
+          tasks: rewriteTasksFoldersForRename(
+            s.vaultSettings.tasks,
+            oldPrefix.replace(/\/$/, ''),
+            newPrefix.replace(/\/$/, '')
+          )
+        }
+      }))
+      savePrefs(collectPrefs(get()))
+      writeManualOrder(get().vault?.root ?? '', get().manualNoteOrder)
+      await get().applyFavorites(
+        rewriteFavoritesForFolderRename(
+          get().vaultSettings.favorites,
+          folder,
+          oldSubpath,
+          newSubpath,
+          oldPrefix,
+          newPrefix
+        )
+      )
+      if (!isCurrent()) return newPrefix
+      await get().refreshNotes()
+      if (!isCurrent()) return newPrefix
+      return newPrefix
+    })
+  }
+
   const selectNoteImpl = async (
     relPath: string | null,
     historyMode: 'push' | 'preserve' = 'push',
     opts?: { preview?: boolean }
   ): Promise<boolean> => {
+    const isCurrent = captureNavigationContext()
+    if (!isCurrent()) return false
     const startedAt = performance.now()
     const state = get()
     const activeLeaf = findLeaf(state.paneLayout, state.activePaneId)
@@ -4235,6 +5180,7 @@ export const useStore = create<Store>((set, get) => {
         state.noteDirty[state.selectedPath]
       ) {
         await get().persistNote(state.selectedPath)
+      if (!isCurrent()) return false
       }
       const latest = get()
       const leafNow = findLeaf(latest.paneLayout, latest.activePaneId)
@@ -4309,6 +5255,7 @@ export const useStore = create<Store>((set, get) => {
       state.noteDirty[state.selectedPath]
     ) {
       await get().persistNote(state.selectedPath)
+      if (!isCurrent()) return false
     }
 
     const latest = get()
@@ -4322,6 +5269,7 @@ export const useStore = create<Store>((set, get) => {
       const readScopeKey = noteReadCacheKey(latest, relPath)
       const content = await readNoteContent(relPath, latest)
       const s = get()
+      if (!isCurrent()) return false
       if (noteReadCacheKey(s, relPath) !== readScopeKey) {
         set({ loadingNote: false })
         return false
@@ -4355,12 +5303,15 @@ export const useStore = create<Store>((set, get) => {
         path: relPath
       })
       console.error('readNote failed', err)
+      if (!isCurrent()) return false
       set({ loadingNote: false, pendingJumpLocation: null })
       return false
     }
   }
 
   const jumpThroughNoteHistory = async (direction: 'back' | 'forward'): Promise<void> => {
+    const isCurrent = captureNavigationContext()
+    if (!isCurrent()) return
     const state = get()
     const source =
       direction === 'back' ? [...state.noteBackstack] : [...state.noteForwardstack]
@@ -4368,6 +5319,7 @@ export const useStore = create<Store>((set, get) => {
 
     if (state.selectedPath && state.noteDirty[state.selectedPath]) {
       await get().persistNote(state.selectedPath)
+      if (!isCurrent()) return
     }
 
     set({ loadingNote: true })
@@ -4402,7 +5354,9 @@ export const useStore = create<Store>((set, get) => {
         return
       }
       try {
+        const scope = noteReadCacheKey(get(), target.path)
         const content = await readNoteContent(target.path, get())
+        if (!isCurrent() || noteReadCacheKey(get(), target.path) !== scope) return
         const latest = get()
         const leaf = findLeaf(latest.paneLayout, latest.activePaneId)
         if (!leaf) continue
@@ -4428,6 +5382,7 @@ export const useStore = create<Store>((set, get) => {
         return
       } catch (err) {
         console.error(`jump ${direction} readNote failed`, err)
+        if (!isCurrent()) return
       }
     }
 
@@ -4533,6 +5488,12 @@ export const useStore = create<Store>((set, get) => {
           ? snapshot.noteListOpen
           : get().noteListOpen,
       selectedTags: normalizeWorkspaceTags(snapshot.selectedTags),
+      // Replaced, not merged: whatever the store held belonged to the panes of
+      // the vault that was open before this one.
+      panePanels: panePanelsFromSnapshot(
+        snapshot.panePanels,
+        new Set(allLeaves(ensured.layout).map((leaf) => leaf.id))
+      ),
       collapsedFolders,
       workspaceRestored: true,
       ...active
@@ -4582,6 +5543,15 @@ export const useStore = create<Store>((set, get) => {
         ...activeFieldsFrom(ensured.layout, ensured.activePaneId, s.noteContents, s.noteDirty)
       }
     })
+    // The same listing retires panel memory for notes that are gone (deleted on
+    // another machine, or outside the app), so the synced snapshot cannot
+    // collect dead paths forever. Same empty-listing guard as above. (#794)
+    set((s) => {
+      if (s.notes.length === 0) return {}
+      const existing = new Set(s.notes.map((note) => note.path))
+      const pruned = prunePanePanels(s.panePanels, (path) => existing.has(path))
+      return pruned === s.panePanels ? {} : { panePanels: pruned }
+    })
     const s = get()
     // Folder rows did not exist while the workspace painted, so collapse the
     // ones the index just discovered. Quick Notes and Inbox were decided at
@@ -4607,6 +5577,243 @@ export const useStore = create<Store>((set, get) => {
     }
   }
 
+  const initImpl = async (): Promise<void> => {
+    if (get().initialized) return
+    const startedAt = performance.now()
+    set({ initialized: true })
+    let initializedVault = false
+    try {
+      const remoteWorkspaceProfilesPromise = get().refreshRemoteWorkspaceProfiles()
+      const localVaultsPromise = get().refreshLocalVaults()
+      const [bootWorkspaceInfo, serverCapabilities] = await Promise.all([
+        get().refreshWorkspaceContext(),
+        window.zen.getServerCapabilities().catch(() => null)
+      ])
+      if (!(await ensureWebServerSession(serverCapabilities))) {
+        void remoteWorkspaceProfilesPromise
+        void localVaultsPromise
+        set({
+          workspaceMode: workspaceModeFrom(bootWorkspaceInfo),
+          remoteWorkspaceInfo: bootWorkspaceInfo,
+          workspaceSetupError: null,
+          workspaceRestored: true,
+          vaultSettings: DEFAULT_VAULT_SETTINGS
+        })
+        recordRendererPerf('store.init', performance.now() - startedAt, {
+          hasVault: false
+        })
+        return
+      }
+      const vault = await window.zen.getCurrentVault()
+      // getCurrentVault is what connects a configured remote workspace, so
+      // the info fetched above predates the connection: its capabilities and
+      // bootError are still null, and keeping it would leave Settings
+      // believing the server advertises nothing (#723). Ask again now that
+      // the answer exists.
+      const remoteWorkspaceInfo = bootWorkspaceInfo
+        ? await get().refreshWorkspaceContext()
+        : bootWorkspaceInfo
+      void remoteWorkspaceProfilesPromise
+      void localVaultsPromise
+      if (vault) {
+        const vaultSettings = normalizeVaultSettings(await window.zen.getVaultSettings())
+        set({
+          vault,
+          workspaceMode: workspaceModeFrom(remoteWorkspaceInfo),
+          remoteWorkspaceInfo,
+          workspaceSetupError: null,
+          vaultSettings,
+          workspaceRestored: false
+        })
+        await openVaultWorkspace(vault)
+        await prefetchInitialVisibleNotes(get())
+        initializedVault = true
+      } else {
+        set({
+          workspaceMode: workspaceModeFrom(remoteWorkspaceInfo),
+          remoteWorkspaceInfo,
+          workspaceSetupError: null,
+          workspaceRestored: true,
+          vaultSettings: DEFAULT_VAULT_SETTINGS
+        })
+      }
+    } catch (err) {
+      console.error('init failed', err)
+      set({
+        workspaceMode: 'local',
+        remoteWorkspaceInfo: null,
+        workspaceSetupError:
+          window.zen.getAppInfo().runtime === 'web' ? describeWebServerSetupError(err) : null,
+        workspaceRestored: true,
+        vaultSettings: DEFAULT_VAULT_SETTINGS
+      })
+    }
+    recordRendererPerf('store.init', performance.now() - startedAt, {
+      hasVault: initializedVault
+    })
+    // Default focus to the sidebar so j/k navigation works immediately
+    if (get().sidebarOpen && !get().focusedPanel) {
+      set({ focusedPanel: 'sidebar' })
+    }
+    // Restore the pinned reference note by loading its content — the
+    // path survived in prefs; `refreshNotes` has already confirmed it
+    // still exists and otherwise cleared `pinnedRefPath`.
+    const pinnedPath = get().pinnedRefPath
+    if (pinnedPath && !get().noteContents[pinnedPath]) {
+      try {
+        const content = await readNoteContent(pinnedPath, get())
+        set((s) => ({
+          noteContents: { ...s.noteContents, [pinnedPath]: content },
+          noteDirty: { ...s.noteDirty, [pinnedPath]: false }
+        }))
+      } catch (err) {
+        console.error('pinned reference readNote failed', err)
+        set({ pinnedRefPath: null })
+        savePrefs(collectPrefs(get()))
+      }
+    }
+    // `retryWorkspaceBoot` re-enters `init` on every successful reconnect, so
+    // the previous subscription has to go before a new one is made. Without
+    // this each reconnect left a live listener behind and one file change
+    // arrived as N changes, each running the full `applyChange`.
+    vaultChangeUnsubscribe?.()
+    vaultChangeUnsubscribe = window.zen.onVaultChange((ev) => {
+      void get().applyChange(ev)
+    })
+  }
+
+  const openLocalVaultImpl = async (root: string, requireVault = false): Promise<void> => {
+      set({ workspaceSetupError: null })
+      const vault = await window.zen.openLocalVault(root)
+      await get().refreshLocalVaults()
+      if (!vault) {
+        if (requireVault) throw new Error('The relocated vault could not be opened.')
+        return
+      }
+
+      const remoteWorkspaceInfo = await get().refreshWorkspaceContext()
+      const vaultSettings = normalizeVaultSettings(await window.zen.getVaultSettings())
+      const fresh = makeLeaf()
+      set({
+        vault,
+        workspaceMode: workspaceModeFrom(remoteWorkspaceInfo),
+        remoteWorkspaceInfo,
+        workspaceSetupError: null,
+        vaultSettings,
+        notes: [],
+        folders: [],
+        hasAssetsDir: false,
+        assetFiles: [],
+        assetFilesListed: false,
+        assetUndoStack: [],
+        closedTabStack: [],
+        workflowRunRecord: null,
+        workflowTutorialStep: null,
+        vaultTasks: [],
+        selectedTags: [],
+        view: { kind: 'folder', folder: 'inbox', subpath: '' },
+        selectedPath: null,
+        activeNote: null,
+        activeDirty: false,
+        paneLayout: fresh,
+        activePaneId: fresh.id,
+        noteContents: {},
+        noteDirty: {},
+        loadingNote: false,
+        noteBackstack: [],
+        noteForwardstack: [],
+        pendingJumpLocation: null,
+        pinnedRefPath: null,
+        workspaceRestored: false
+      })
+      savePrefs(collectPrefs(get()))
+      await openVaultWorkspace(vault)
+  }
+
+  const disconnectRemoteWorkspaceImpl = async (): Promise<void> => {
+    try {
+      await get().flushDirtyNotes()
+      const vault = await window.zen.disconnectRemoteWorkspace()
+      const remoteWorkspaceInfo = await get().refreshWorkspaceContext()
+      await get().refreshLocalVaults()
+
+      if (!vault) {
+        const fresh = makeLeaf()
+        set({
+          vault: null,
+          workspaceMode: workspaceModeFrom(remoteWorkspaceInfo),
+          remoteWorkspaceInfo,
+          vaultSettings: DEFAULT_VAULT_SETTINGS,
+          notes: [],
+          folders: [],
+          hasAssetsDir: false,
+          assetFiles: [],
+          assetFilesListed: false,
+          assetUndoStack: [],
+          closedTabStack: [],
+          workflowRunRecord: null,
+          workflowTutorialStep: null,
+          vaultTasks: [],
+          selectedTags: [],
+          view: { kind: 'folder', folder: 'inbox', subpath: '' },
+          selectedPath: null,
+          activeNote: null,
+          activeDirty: false,
+          paneLayout: fresh,
+          activePaneId: fresh.id,
+          noteContents: {},
+          noteDirty: {},
+          loadingNote: false,
+          noteBackstack: [],
+          noteForwardstack: [],
+          pendingJumpLocation: null,
+          pinnedRefPath: null,
+          workspaceRestored: true
+        })
+        savePrefs(collectPrefs(get()))
+        return
+      }
+
+      const vaultSettings = normalizeVaultSettings(await window.zen.getVaultSettings())
+      const fresh = makeLeaf()
+      set({
+        vault,
+        workspaceMode: workspaceModeFrom(remoteWorkspaceInfo),
+        remoteWorkspaceInfo,
+        vaultSettings,
+        notes: [],
+        folders: [],
+        hasAssetsDir: false,
+        assetFiles: [],
+        assetFilesListed: false,
+        assetUndoStack: [],
+        closedTabStack: [],
+        workflowRunRecord: null,
+        workflowTutorialStep: null,
+        vaultTasks: [],
+        selectedTags: [],
+        view: { kind: 'folder', folder: 'inbox', subpath: '' },
+        selectedPath: null,
+        activeNote: null,
+        activeDirty: false,
+        paneLayout: fresh,
+        activePaneId: fresh.id,
+        noteContents: {},
+        noteDirty: {},
+        loadingNote: false,
+        noteBackstack: [],
+        noteForwardstack: [],
+        pendingJumpLocation: null,
+        pinnedRefPath: null,
+        workspaceRestored: false
+      })
+      savePrefs(collectPrefs(get()))
+      await openVaultWorkspace(vault)
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : String(error))
+    }
+  }
+
   return {
   vault: null,
   workspaceMode: 'local',
@@ -4622,6 +5829,7 @@ export const useStore = create<Store>((set, get) => {
   typstPreambleNotes: [],
   folders: [],
   assetFiles: [],
+  assetFilesListed: false,
   assetUndoStack: [],
   hasAssetsDir: false,
   view: { kind: 'folder', folder: 'inbox', subpath: '' },
@@ -4648,12 +5856,15 @@ export const useStore = create<Store>((set, get) => {
   query: '',
   initialized: false,
   workspaceRestored: false,
+  workspaceTransitioning: false,
   sidebarOpen: true,
   noteListOpen: true,
   zenMode: false,
   zenRestoreState: null,
   vimMode: loadPrefs().vimMode,
   vimInsertEscape: loadPrefs().vimInsertEscape,
+  ignoredKeys: loadPrefs().ignoredKeys,
+  externalApplicationSchemes: loadPrefs().externalApplicationSchemes,
   vimYankToClipboard: loadPrefs().vimYankToClipboard,
   vimBlockImeInNormalMode: loadPrefs().vimBlockImeInNormalMode,
   vimWrappedLineMotions: loadPrefs().vimWrappedLineMotions,
@@ -4678,11 +5889,16 @@ export const useStore = create<Store>((set, get) => {
   harperLintConfig: loadPrefs().harperLintConfig,
   looseMathDelimiters: loadPrefs().looseMathDelimiters,
   keepViewModeAcrossNotes: loadPrefs().keepViewModeAcrossNotes,
+  keepPanelsAcrossNotes: loadPrefs().keepPanelsAcrossNotes,
+  persistUndoHistory: loadPrefs().persistUndoHistory,
   defaultPaneMode: loadPrefs().defaultPaneMode,
   syncTitleHeadingOnRename: loadPrefs().syncTitleHeadingOnRename,
+  reviewAgentEdits: loadPrefs().reviewAgentEdits,
+  usageCount: loadPrefs().usageCount,
   markdownSnippets: loadPrefs().markdownSnippets,
   textReplacementsEnabled: loadPrefs().textReplacementsEnabled,
   textReplacements: loadPrefs().textReplacements,
+  savedTaskFilters: loadPrefs().savedTaskFilters,
   autoPairs: loadPrefs().autoPairs,
   autoPairQuotesInProse: loadPrefs().autoPairQuotesInProse,
   hideBuiltinTemplates: loadPrefs().hideBuiltinTemplates,
@@ -4717,6 +5933,7 @@ export const useStore = create<Store>((set, get) => {
   autoReveal: loadPrefs().autoReveal,
   unifiedSidebar: loadPrefs().unifiedSidebar,
   darkSidebar: loadPrefs().darkSidebar,
+  showWindowTitleBar: loadPrefs().showWindowTitleBar,
   showSidebarChevrons: loadPrefs().showSidebarChevrons,
   collapsedFolders: DEFAULT_PREFS.collapsedFolders,
   pinnedRefPath: loadPrefs().pinnedRefPath,
@@ -4738,6 +5955,7 @@ export const useStore = create<Store>((set, get) => {
   tagsCollapsed: loadPrefs().tagsCollapsed,
   nestedTags: loadPrefs().nestedTags,
   workflowsEnabled: loadPrefs().workflowsEnabled,
+  workflowEventTriggers: loadPrefs().workflowEventTriggers,
   atlasEnabled: loadPrefs().atlasEnabled,
   hiddenWorkflowPresets: loadPrefs().hiddenWorkflowPresets,
   collapsedTagNodes: loadPrefs().collapsedTagNodes,
@@ -4747,11 +5965,16 @@ export const useStore = create<Store>((set, get) => {
   tasksViewMode: loadPrefs().tasksViewMode,
   showArchivedTasks: loadPrefs().showArchivedTasks,
   kanbanGroupBy: loadPrefs().kanbanGroupBy,
+  kanbanCardSort: loadPrefs().kanbanCardSort,
   kanbanColumnTitles: loadPrefs().kanbanColumnTitles,
   kanbanColumnOrder: loadPrefs().kanbanColumnOrder,
   kanbanCardOrder: loadPrefs().kanbanCardOrder,
   kanbanStatuses: loadPrefs().kanbanStatuses,
+  kanbanFolderRoot: loadPrefs().kanbanFolderRoot,
   hasCompletedOnboarding: loadPrefs().hasCompletedOnboarding,
+  lastSeenWhatsNewVersion: loadPrefs().lastSeenWhatsNewVersion,
+  whatsNewOpen: false,
+  whatsNew: null,
   vaultTasks: [],
   customThemes: [],
   customCodeLanguages: [],
@@ -4763,6 +5986,7 @@ export const useStore = create<Store>((set, get) => {
   tasksCalendarSelectedDate: null,
   tasksCalendarMonthAnchor: null,
   databases: {},
+  databasesDeletingRows: {},
   databasesLoading: {},
   selectedTags: [],
   tagMatchMode: 'all',
@@ -4770,6 +5994,8 @@ export const useStore = create<Store>((set, get) => {
   sidebarCursorIndex: 0,
   dateNavExpanded: [],
   paneModes: {},
+  panePanels: {},
+  recentPathRewrites: [],
   paneStickyModes: {},
   noteListCursorIndex: 0,
   connectionsCursorIndex: 0,
@@ -4783,12 +6009,16 @@ export const useStore = create<Store>((set, get) => {
   noteContents: {},
   noteDirty: {},
   noteComments: {},
+  agentEdits: {},
   activeCommentId: null,
   closedTabStack: [],
 
   setVault: (v) =>
     set((s) => {
-      const vaultChanged = s.vault?.root !== v?.root || s.vault?.name !== v?.name
+      // The root is the vault's identity. Its name is a label the user can
+      // change (#692), so a renamed vault keeps its caches, undo stacks and
+      // closed-tab history; only a different folder starts those over.
+      const vaultChanged = s.vault?.root !== v?.root
       if (vaultChanged) {
         clearNoteContentReadCaches()
       }
@@ -4801,13 +6031,38 @@ export const useStore = create<Store>((set, get) => {
       set({
         vaultSettings: settings
       })
+      applyVaultNameFromSettings(settings)
+    } catch (err) {
+      console.error('setVaultSettings failed', err)
+      return false
+    }
+    // The settings are saved at this point; a failed listing refresh is not a
+    // failed save.
+    try {
       await get().refreshNotes()
       await get().refreshRootContentHidden()
     } catch (err) {
       console.error('setVaultSettings failed', err)
     }
+    return true
+  },
+  renameVault: async (name) => {
+    const vault = get().vault
+    if (!vault || vault.temporary) return false
+    const displayName = normalizeVaultDisplayName(name ?? '')
+    const current = get().vaultSettings
+    if (current.displayName === displayName) return true
+    const { displayName: _previous, ...rest } = current
+    const saved = await get().setVaultSettings(
+      displayName ? { ...rest, displayName } : rest
+    )
+    // Main rewrote the remembered-vaults entry with the save; the switcher
+    // and the sidebar header read that list, so fetch it again.
+    if (saved) await get().refreshLocalVaults()
+    return saved
   },
   applyFavorites: async (nextFavorites) => {
+    const isCurrent = captureFolderActionContext(get)
     const current = get().vaultSettings
     if (
       current.favorites.length === nextFavorites.length &&
@@ -4822,10 +6077,10 @@ export const useStore = create<Store>((set, get) => {
       const saved = normalizeVaultSettings(
         await window.zen.setVaultSettings({ ...get().vaultSettings, favorites: nextFavorites })
       )
-      set({ vaultSettings: saved })
+      if (isCurrent()) set({ vaultSettings: saved })
     } catch (err) {
       console.error('applyFavorites failed', err)
-      set({ vaultSettings: current }) // revert on failure
+      if (isCurrent()) set({ vaultSettings: current }) // revert on failure
     }
   },
   toggleFavorite: async (key) => {
@@ -4836,16 +6091,22 @@ export const useStore = create<Store>((set, get) => {
     const cleaned = normalizeTasksExcludedFolder(relDir)
     if (!cleaned) return
     const settings = get().vaultSettings
-    const current = settings.tasks?.excludedFolders ?? []
-    const next = current.includes(cleaned)
-      ? current.filter((f) => f !== cleaned)
-      : [...current, cleaned]
     await get().setVaultSettings({
       ...settings,
-      tasks: next.length > 0 ? { excludedFolders: next } : undefined
+      tasks: toggleTasksFolder(settings.tasks, 'excludedFolders', cleaned)
     })
     // Rescan immediately: the Tasks view, boards, and calendars should reflect
     // the exclusion without waiting for the next natural refresh.
+    await get().refreshTasks()
+  },
+  toggleTasksIncludedFolder: async (relDir) => {
+    const cleaned = normalizeTasksIncludedFolder(relDir)
+    if (!cleaned) return
+    const settings = get().vaultSettings
+    await get().setVaultSettings({
+      ...settings,
+      tasks: toggleTasksFolder(settings.tasks, 'includedFolders', cleaned)
+    })
     await get().refreshTasks()
   },
   setTypstPreambleFolder: async (folder) => {
@@ -5030,10 +6291,16 @@ export const useStore = create<Store>((set, get) => {
     set({ focusedPanel: 'editor' })
   },
   loadDatabase: async (csvPath) => {
-    if (get().databasesLoading[csvPath]) return
+    if (isWorkspaceTransitionPending()) return
+    if (get().databasesLoading[csvPath] || databaseRowActions.has(csvPath) || folderMutationBlocks(csvPath)) return
+    const contextIsCurrent = captureFolderActionContext(get)
+    const version = databaseLoadVersions.get(csvPath) ?? 0
+    const generation = workspaceGeneration()
+    const isCurrent = () => generation === workspaceGeneration() && contextIsCurrent() && (databaseLoadVersions.get(csvPath) ?? 0) === version
     set((s) => ({ databasesLoading: { ...s.databasesLoading, [csvPath]: true } }))
     try {
       const doc = await window.zen.openDatabase(csvPath)
+      if (!isCurrent()) return
       if (!doc) {
         // The .csv is gone — drop it and close any stale tab rather than leave
         // a grid pointed at a deleted file (and re-requesting it on every render).
@@ -5042,6 +6309,7 @@ export const useStore = create<Store>((set, get) => {
       }
       set((s) => ({ databases: { ...s.databases, [csvPath]: doc } }))
     } catch (err) {
+      if (!isCurrent()) return
       // Failing silently here is how "clicking a database does nothing" bug
       // reports happen (#499): the sidebar row looks live, the click dies in
       // the console. Whatever the cause (server unreachable, bad schema),
@@ -5054,35 +6322,74 @@ export const useStore = create<Store>((set, get) => {
     } finally {
       set((s) =>
         csvPath in s.databasesLoading
-          ? { databasesLoading: { ...s.databasesLoading, [csvPath]: false } }
+          && isCurrent() ? { databasesLoading: { ...s.databasesLoading, [csvPath]: false } }
           : {}
       )
     }
   },
   openDatabase: async (csvPath) => {
+    const isCurrent = captureNavigationContext()
+    if (!isCurrent()) return
     await get().loadDatabase(csvPath)
+    if (!isCurrent()) return
     // The load may have failed/forgotten a now-missing database — don't open an
     // empty tab for it.
     if (!get().databases[csvPath]) return
     await get().openNoteInPane(get().activePaneId, databaseTabPath(csvPath))
+    if (!isCurrent()) return
     ;(document.activeElement as HTMLElement | null)?.blur?.()
     set({ focusedPanel: 'editor' })
   },
-  createDatabase: async (folder, subpath = '', title) => {
+  createDatabase: async (folder, subpath = '', title, hostIsCurrent, options) => {
+    if (workspaceWritesBlocked()) return undefined
+    const isCurrent = captureFolderActionContext(get, hostIsCurrent)
+    if (!isCurrent()) return undefined
+    const directory = vaultRelativeFolderPath(folder, subpath, get().vaultSettings)
+    const prefix = directory ? `${directory}/` : ''
+    let release: (() => void) | undefined
     try {
-      const doc = await window.zen.createDatabase(folder, subpath, title)
+      const busy = [
+        ...folderMutations.keys(),
+        ...databaseCreations.keys(),
+        ...[...uncertainFolderMutations]
+          .filter(([, vault]) => vault === get().vault)
+          .map(([path]) => path)
+      ]
+      if (busy.some((path) => prefix.startsWith(path) || path.startsWith(prefix)))
+        throw new Error('This folder already has an operation in progress')
+      databaseCreations.set(
+        prefix,
+        new Promise<void>((resolve) => {
+          release = resolve
+        })
+      )
+      const doc = await window.zen.createDatabase(folder, subpath, title, options?.seed)
+      if (!isCurrent()) return undefined
       set((s) => ({ databases: { ...s.databases, [doc.path]: doc } }))
+      await get().refreshNotes()
+      if (!isCurrent()) return undefined
+      if (options?.open === false) return doc
       await get().openNoteInPane(get().activePaneId, databaseTabPath(doc.path))
+      if (!isCurrent()) return undefined
       ;(document.activeElement as HTMLElement | null)?.blur?.()
       set({ focusedPanel: 'editor' })
+      return doc
     } catch (err) {
+      if (hostIsCurrent) throw err
       console.error('createDatabase failed', err)
-      const { useToastStore } = await import('./lib/toast')
-      useToastStore
-        .getState()
-        .addToast(humanIpcError(err, 'Could not create database'), 'error')
+      if (isCurrent()) {
+        const { useToastStore } = await import('./lib/toast')
+        useToastStore.getState().addToast(humanIpcError(err, 'Could not create database'), 'error')
+      }
+      return undefined
+    } finally {
+      if (release) {
+        databaseCreations.delete(prefix)
+        release()
+      }
     }
   },
+
   newDatabase: async () => {
     const s = get()
     const settings = normalizeVaultSettings(s.vaultSettings)
@@ -5093,7 +6400,7 @@ export const useStore = create<Store>((set, get) => {
     )
     await get().createDatabase(folder, subpath)
   },
-  newTaskFile: async (opts) => {
+  newTaskFile: trackNoteWrite(null, async (opts) => {
     const title = (
       await promptApp({
         title: 'New task',
@@ -5112,6 +6419,7 @@ export const useStore = create<Store>((set, get) => {
     try {
       const meta = await window.zen.createNote(folder, title, subpath)
       rememberEditModeForCreatedNote(meta.path)
+      emitNoteEvent('note-created', meta.path)
       // Overwrite the default `# title` body with the TaskNotes-style frontmatter
       // so the note is recognized as a task and shows up in the Tasks view.
       await window.zen.writeNote(
@@ -5119,12 +6427,25 @@ export const useStore = create<Store>((set, get) => {
         composeTaskFile({ title, dateCreated: new Date().toISOString() })
       )
       await get().refreshTasks()
+      // On the Tasks view the new task shows up in the list. Anywhere else (the
+      // palette, `:newtask`, a phone's Action Button) nothing on screen
+      // changes, so say it landed and offer the note.
+      if (!isTasksViewActive(get())) {
+        useToastStore
+          .getState()
+          .addToast(
+            'Task added',
+            'success',
+            { label: 'Open', onClick: () => void get().selectNote(meta.path) },
+            6000
+          )
+      }
       return meta.path
     } catch (err) {
       console.error('newTaskFile failed', err)
       return null
     }
-  },
+  }),
   newTaskFileInChosenFolder: async () => {
     const state = get()
     const entered = await promptApp(buildNoteDestinationPrompt('', state.folders))
@@ -5132,67 +6453,61 @@ export const useStore = create<Store>((set, get) => {
     const dest = parseTemplateDestination(entered)
     return get().newTaskFile({ folder: dest.folder, subpath: dest.subpath })
   },
-  renameDatabase: async (csvPath, newTitle) => {
-    if (typeof window.zen.renameDatabase !== 'function') return
+  renameDatabase: async (csvPath, newTitle, hostIsCurrent) => {
     try {
-      const newCsvPath = await window.zen.renameDatabase(csvPath, newTitle)
-      if (!newCsvPath || newCsvPath === csvPath) {
-        await get().refreshNotes()
-        return
-      }
-      // The `.base` folder moved, so the open grid tab's path changed. Rehome it
-      // in place (and the cached doc) instead of leaving a stale tab.
-      const oldTab = databaseTabPath(csvPath)
-      const newTab = databaseTabPath(newCsvPath)
-      set((s) => {
-        const rewrite = (p: string): string => (p === oldTab ? newTab : p)
-        const ensured = ensureActivePane(rewritePathsInTree(s.paneLayout, rewrite), s.activePaneId)
-        const databases = { ...s.databases }
-        const loading = { ...s.databasesLoading }
-        const prev = databases[csvPath]
-        if (prev) {
-          databases[newCsvPath] = {
-            ...prev,
-            path: newCsvPath,
-            title: formTitleFromCsvPath(newCsvPath)
+      if (newTitle.trim().startsWith('.')) throw new Error('Database names cannot start with a dot.')
+      if (typeof window.zen.renameDatabase !== 'function')
+        throw new Error('Database renaming is unavailable')
+      const directory = formDirFromCsvPath(csvPath)
+      if (!directory) throw new Error('Only database folders can be renamed')
+      const settings = get().vaultSettings
+      const folder = folderForVaultRelativePath(csvPath, settings) ?? 'inbox'
+      const oldSubpath = noteFolderSubpath({ path: csvPath, folder }, settings)
+      await renameFolderImpl(
+        folder,
+        oldSubpath,
+        `${directory}/`,
+        async () => {
+          const nextPath = await window.zen.renameDatabase(csvPath, newTitle)
+          const nextDirectory = formDirFromCsvPath(nextPath)
+          if (!nextDirectory)
+            throw new Error('FOLDER_STATE_UNCERTAIN: Database rename returned an invalid path')
+          return {
+            subpath: noteFolderSubpath({ path: nextPath, folder }, settings),
+            prefix: `${nextDirectory}/`
           }
-          delete databases[csvPath]
-        }
-        delete loading[csvPath]
-        return {
-          paneLayout: ensured.layout,
-          activePaneId: ensured.activePaneId,
-          databases,
-          databasesLoading: loading,
-          ...activeFieldsFrom(ensured.layout, ensured.activePaneId, s.noteContents, s.noteDirty)
-        }
-      })
-      await get().refreshNotes()
+        },
+        hostIsCurrent
+      )
     } catch (err) {
+      if (hostIsCurrent) throw err
       console.error('renameDatabase failed', err)
       window.alert(err instanceof Error ? err.message : String(err))
     }
   },
+
   updateDatabaseRows: (csvPath, next) => {
+    if (databaseRowActions.has(csvPath) || isNoteEditingLocked(get().vault, csvPath)) return
     set((s) => ({ databases: { ...s.databases, [csvPath]: next } }))
     scheduleDatabaseWrite(csvPath, 'rows', () => get().databases[csvPath])
     remirrorOpenRecordPages(csvPath, get)
   },
   deleteDatabaseRows: async (csvPath, rowIds) => {
+    if (workspaceWritesBlocked()) return
     const doc = get().databases[csvPath]
-    if (!doc) return
+    const vault = get().vault
+    if (!doc || !vault || databaseRowActions.size > 0 || pendingRowConfirmation || getConfirmRequest() || getPromptRequest()) return
+    const isCurrent = captureFolderActionContext(get)
+    const bridge = window.zen
     const ids = [...new Set(rowIds)].filter((id) => doc.rows.some((r) => r.id === id))
     if (ids.length === 0) return
-
-    // Deleted rows that carry a linked record page — the ones worth asking about.
-    const attached = ids
-      .map((id) => doc.pages?.[id])
-      .filter((p): p is string => typeof p === 'string' && p.length > 0)
-
+    const mappings = new Map(ids.map((id) => [id, doc.pages?.[id]]))
+    const attached = [...mappings.values()].filter((path): path is string => !!path)
     let trashNotes = false
     if (attached.length > 0) {
       const many = attached.length > 1
-      trashNotes = await confirmApp({
+      pendingRowConfirmation = true
+      try { trashNotes = await confirmApp({
         title: many ? `Delete ${ids.length} rows and their notes?` : 'Delete row and its linked note?',
         description: many
           ? `${attached.length} of these rows have a linked page note. Move those notes to Trash too, or keep them as standalone notes? The rows are deleted either way.`
@@ -5200,55 +6515,133 @@ export const useStore = create<Store>((set, get) => {
         confirmLabel: many ? 'Delete rows + notes' : 'Delete row + note',
         cancelLabel: many ? 'Keep notes' : 'Keep note',
         danger: true
-      })
+      }) } finally { pendingRowConfirmation = false }
     }
-
-    // Re-read after the (async) prompt so a concurrent edit isn't clobbered.
+    if (!isCurrent()) return
     const latest = get().databases[csvPath]
-    if (!latest) return
+    if (!latest || ids.some((id) => !latest.rows.some(row => row.id === id) || latest.pages?.[id] !== mappings.get(id))) {
+      useToastStore.getState().addToast('The linked pages changed. Review the rows before deleting them.', 'info')
+      return
+    }
+    if (databaseRowActions.size || folderMutations.size || databaseCreations.size || inFlightNoteWrites.size || inFlightTaskMutations.size || taskMutationQueues.size || [...uncertainFolderMutations.values()].includes(vault)) {
+      useToastStore.getState().addToast('Wait for pending file and task changes before deleting rows.', 'info')
+      return
+    }
     const removeSet = new Set(ids)
     const nextPages = { ...(latest.pages ?? {}) }
     const nextFlags = { ...(latest.pageHasContent ?? {}) }
-    const prunedPaths: string[] = []
     for (const id of ids) {
-      const pagePath = nextPages[id]
-      if (pagePath) {
-        prunedPaths.push(pagePath)
-        delete nextPages[id]
-        delete nextFlags[id]
-      }
+      delete nextPages[id]
+      delete nextFlags[id]
     }
-    const pagesChanged = prunedPaths.length > 0
+    const remainingPages = new Set(Object.values(nextPages))
+    const directory = formDirFromCsvPath(csvPath)
+    // Only this database's exclusive pages can be changed automatically. A
+    // hand-edited foreign/shared mapping must not overwrite another record.
+    const pages = [...new Set(attached)].filter((path) =>
+      directory && formDirContaining(path) === directory && !remainingPages.has(path)
+    )
     const next: DatabaseDoc = {
       ...latest,
-      rows: latest.rows.filter((r) => !removeSet.has(r.id)),
-      ...(pagesChanged ? { pages: nextPages, pageHasContent: nextFlags } : {})
+      rows: latest.rows.filter((row) => !removeSet.has(row.id)),
+      pages: nextPages,
+      pageHasContent: nextFlags
     }
-    set((s) => ({ databases: { ...s.databases, [csvPath]: next } }))
-    // A pruned page mapping lives in the sidecar, so force a schema write; a
-    // plain 'rows' write only rewrites the CSV and would leave the stale entry.
-    scheduleDatabaseWrite(csvPath, pagesChanged ? 'schema' : 'rows', () => get().databases[csvPath])
-    remirrorOpenRecordPages(csvPath, get)
-
-    if (trashNotes) {
-      for (const pagePath of prunedPaths) {
-        await moveNoteToTrash(pagePath, { temporarySession: get().vault?.temporary === true })
+    let release!: () => void
+    const done = new Promise<void>((resolve) => { release = resolve })
+    databaseRowActions.set(csvPath, done)
+    set((s) => ({ databasesDeletingRows: { ...s.databasesDeletingRows, [csvPath]: true } }))
+    databaseLoadVersions.set(csvPath, (databaseLoadVersions.get(csvPath) ?? 0) + 1)
+    const unlock: Array<() => void> = []
+    let committed = false
+    let moved = 0
+    try {
+      for (const path of pages) unlock.push(lockNoteEditing(vault, path))
+      await flushDatabaseWrite(csvPath, () => isCurrent() ? get().databases[csvPath] : undefined)
+      if (!isCurrent()) return
+      // Materialize properties while rows still exist. Preserve the freshest
+      // editor body, including an unsaved page that is open in another pane.
+      for (const path of pages) {
+        const pending = pathSaveQueues.get(path)
+        if (pending) await pending
+        if (!isCurrent()) return
+        const content = get().noteContents[path] ?? await bridge.readNote(path)
+        if (!isCurrent()) return
+        const row = latest.rows.find((row) => removeSet.has(row.id) && latest.pages?.[row.id] === path)
+        if (!row) continue
+        const body = composePageBody(latest, row, parseFrontmatter(content.body).body)
+        if (get().noteContents[path]) {
+          set((s) => {
+            const noteContents = { ...s.noteContents, [path]: { ...s.noteContents[path], body } }
+            const noteDirty = { ...s.noteDirty, [path]: true }
+            return { noteContents, noteDirty, ...activeFieldsFrom(s.paneLayout, s.activePaneId, noteContents, noteDirty) }
+          })
+          await get().persistNote(path, true)
+          if (get().noteDirty[path]) throw new Error('A linked page could not be saved')
+        } else {
+          await bridge.writeNote(path, body)
+        }
+        if (!isCurrent()) return
       }
+      set((s) => ({ databases: { ...s.databases, [csvPath]: next } }))
+      databaseWriteKind.set(csvPath, 'schema')
+      try {
+        await flushDatabaseWrite(csvPath, () => isCurrent() ? get().databases[csvPath] : undefined)
+      } catch (error) {
+        // Keep the recoverable rows and schedule their full schema for retry.
+        if (isCurrent()) {
+          set((s) => ({ databases: { ...s.databases, [csvPath]: latest } }))
+          databaseWriteKind.set(csvPath, 'schema')
+        }
+        throw error
+      }
+      if (!isCurrent()) return
+      committed = true
+      if (trashNotes) {
+        for (const path of pages) {
+          if (!isCurrent()) return
+          const result = await mutateNoteImpl(path, async () => {
+            const meta = await bridge.moveToTrash(path)
+            return vault.temporary ? null : meta
+          }, isCurrent, false, csvPath)
+          moved += 1
+          if (isCurrent() && result && !get().noteDirty[result.path])
+            set((s) => withoutNoteInWorkspace(s, result.path))
+        }
+      }
+    } catch (error) {
+      const message = committed
+        ? `Rows deleted; ${moved} linked pages moved. Remaining pages are saved as standalone notes.`
+        : 'Rows were kept because deletion could not finish.'
+      useToastStore.getState().addToast(`${message} ${humanIpcError(error, 'Could not finish deleting rows')}`, 'error')
+    } finally {
+      for (const restore of unlock) restore()
+      databaseRowActions.delete(csvPath)
+      if (isCurrent()) {
+        set((s) => ({ databasesDeletingRows: { ...s.databasesDeletingRows, [csvPath]: false } }))
+        const kind = databaseWriteKind.get(csvPath)
+        if (kind) scheduleDatabaseWrite(csvPath, kind, () => get().databases[csvPath])
+      }
+      release()
     }
   },
   updateDatabaseSchema: (csvPath, next) => {
+    if (databaseRowActions.has(csvPath) || isNoteEditingLocked(get().vault, csvPath)) return
     set((s) => ({ databases: { ...s.databases, [csvPath]: next } }))
     scheduleDatabaseWrite(csvPath, 'schema', () => get().databases[csvPath])
     remirrorOpenRecordPages(csvPath, get)
   },
   syncDatabaseFromDisk: async (csvPath) => {
-    if (!get().databases[csvPath]) return
+    if (!get().databases[csvPath] || databaseRowActions.has(csvPath) || folderMutationBlocks(csvPath)) return
+    const contextIsCurrent = captureFolderActionContext(get)
+    const version = databaseLoadVersions.get(csvPath) ?? 0
     // Ignore the watcher echo of a write we just made.
     if (Date.now() - (lastDatabaseWriteAt.get(csvPath) ?? 0) < 1500) return
     // Don't clobber edits that are still mid-debounce.
-    if (databaseSaveTimers.has(csvPath)) return
+    if (databaseWriteKind.has(csvPath) || databaseWriteQueues.has(csvPath)) return
     try {
       const doc = await window.zen.openDatabase(csvPath)
+      if (!contextIsCurrent() || databaseRowActions.has(csvPath) || (databaseLoadVersions.get(csvPath) ?? 0) !== version || databaseWriteKind.has(csvPath) || databaseWriteQueues.has(csvPath)) return
       if (!doc) {
         await get().forgetDatabase(csvPath)
         return
@@ -5280,7 +6673,7 @@ export const useStore = create<Store>((set, get) => {
       return { databases, databasesLoading }
     })
   },
-  openRecordPage: async (csvPath, rowId) => {
+  openRecordPage: trackNoteWrite(undefined, async (csvPath, rowId) => {
     const doc = get().databases[csvPath]
     if (!doc) return
     const row = doc.rows.find((r) => r.id === rowId)
@@ -5318,15 +6711,17 @@ export const useStore = create<Store>((set, get) => {
       }
     }
     await get().selectNote(pagePath)
-  },
+  }),
   renameRecordPage: async (csvPath, rowId) => {
+    const isCurrent = captureFolderActionContext(get)
     const doc = get().databases[csvPath]
     const pagePath = doc?.pages?.[rowId]
     if (!doc || !pagePath) return
     const row = doc.rows.find((r) => r.id === rowId)
     if (!row) return
     try {
-      const meta = await window.zen.renameNote(pagePath, recordTitle(doc, row))
+      const meta = await mutateNoteImpl(pagePath, () => window.zen.renameNote(pagePath, recordTitle(doc, row)), isCurrent, true)
+      if (!meta || !isCurrent()) return
       if (meta.path !== pagePath) {
         get().updateDatabaseSchema(csvPath, {
           ...get().databases[csvPath]!,
@@ -5366,21 +6761,28 @@ export const useStore = create<Store>((set, get) => {
   setTagMatchMode: (mode) => set({ tagMatchMode: mode }),
 
   refreshTasks: async () => {
+    if (folderMutations.size > 0) return
+    const isCurrent = captureFolderActionContext(get)
+    const revision = taskIndexRevision
     set({ tasksLoading: true })
     try {
       const tasks = await window.zen.scanTasks()
-      set({ vaultTasks: withoutPendingCloudConflictTasks(tasks), tasksLoading: false })
+      if (!isCurrent() || revision !== taskIndexRevision) return
+      set({ vaultTasks: tasks, tasksLoading: false })
     } catch (err) {
       console.error('scanTasks failed', err)
+      if (!isCurrent() || revision !== taskIndexRevision) return
       set({ tasksLoading: false })
     }
   },
 
   rescanTasksForPath: async (relPath) => {
+    if (folderMutationBlocks(relPath)) return
+    const isCurrent = captureFolderActionContext(get)
+    const version = folderReadVersion(relPath)
     try {
-      const fresh = isolatedCloudTaskPaths.has(cloudSyncPathKey(relPath))
-        ? []
-        : await window.zen.scanTasksForPath(relPath)
+      const fresh = await window.zen.scanTasksForPath(relPath)
+      if (!isCurrent() || folderMutationBlocks(relPath) || version !== folderReadVersion(relPath)) return
       set((s) => ({
         vaultTasks: s.vaultTasks.filter((t) => t.sourcePath !== relPath).concat(fresh)
       }))
@@ -5390,6 +6792,8 @@ export const useStore = create<Store>((set, get) => {
   },
 
   openTaskAt: async (task) => {
+    const isCurrent = captureNavigationContext()
+    if (!isCurrent()) return
     const state = get()
 
     // Pull body — in-memory first, disk fallback. Used to resolve lineNumber
@@ -5398,6 +6802,7 @@ export const useStore = create<Store>((set, get) => {
     if (!body) {
       try {
         const content = await window.zen.readNote(task.sourcePath)
+        if (!isCurrent()) return
         body = content.body
       } catch (err) {
         console.error('openTaskAt readNote failed', err)
@@ -5422,6 +6827,7 @@ export const useStore = create<Store>((set, get) => {
     // tab's content area with the note (the Tasks tab itself stays in the
     // strip, so the user can hop back with a click).
     await get().openNoteInPane(state.activePaneId, task.sourcePath)
+    if (!isCurrent() || get().selectedPath !== task.sourcePath) return
     // Make sure the folder view is sensible in case the sidebar is visible.
     if (state.view.kind !== 'folder' || state.view.folder !== task.noteFolder) {
       set({ view: { kind: 'folder', folder: task.noteFolder, subpath: '' } })
@@ -5445,7 +6851,7 @@ export const useStore = create<Store>((set, get) => {
     requestEditorFocus()
   },
 
-  toggleTaskFromList: async (task) => {
+  toggleTaskFromList: trackTaskWrite(async (task) => {
     const state = get()
     const path = task.sourcePath
     const openBuffer = state.noteContents[path]
@@ -5485,9 +6891,9 @@ export const useStore = create<Store>((set, get) => {
           : t
       )
     }))
-  },
+  }),
 
-  cancelTaskFromList: async (task) => {
+  cancelTaskFromList: trackTaskWrite(async (task) => {
     const path = task.sourcePath
     const openBuffer = get().noteContents[path]
     const body = openBuffer?.body ?? (await window.zen.readNote(path)).body
@@ -5519,9 +6925,9 @@ export const useStore = create<Store>((set, get) => {
           : t
       )
     }))
-  },
+  }),
 
-  startTaskFromList: async (task) => {
+  startTaskFromList: trackTaskWrite(async (task) => {
     const path = task.sourcePath
     const openBuffer = get().noteContents[path]
     const body = openBuffer?.body ?? (await window.zen.readNote(path)).body
@@ -5553,9 +6959,9 @@ export const useStore = create<Store>((set, get) => {
           : t
       )
     }))
-  },
+  }),
 
-  applyTaskMutation: async (task, mutation) => {
+  applyTaskMutation: trackTaskWrite(async (task, mutation) => {
     const mutations: TaskMutation[] = Array.isArray(mutation) ? mutation : [mutation]
     if (mutations.length === 0) return
 
@@ -5669,51 +7075,47 @@ export const useStore = create<Store>((set, get) => {
     } finally {
       inFlightTaskMutations.delete(running)
     }
-  },
+  }),
 
   deleteTaskFromList: async (task) => {
-    const path = task.sourcePath
-    // A file-task *is* the note, so "delete" means trash the whole note (with a
-    // confirm, since it may hold body notes). Inline tasks just drop their line.
+    // File tasks use the note action before entering the inline-task write queue.
     if (task.kind === 'file') {
-      if (!(await confirmMoveToTrash(task.noteTitle))) return
-      set((s) => ({ vaultTasks: s.vaultTasks.filter((t) => t.sourcePath !== path) }))
-      if (await moveNoteToTrash(path, { temporarySession: get().vault?.temporary === true })) {
-        await get().refreshNotes()
-      }
-      else void get().refreshTasks()
+      await get().trashNote(task.sourcePath)
       return
     }
-    const openBuffer = get().noteContents[path]
-    let body: string
-    try {
-      body = openBuffer?.body ?? (await window.zen.readNote(path)).body
-    } catch (err) {
-      console.error('deleteTaskFromList readNote failed', err)
-      return
-    }
-    const nextBody = removeTaskAtIndex(body, task.taskIndex)
-    if (nextBody === body) return
-    // Optimistically drop it from the index so the row vanishes immediately.
-    set((s) => ({
-      vaultTasks: s.vaultTasks.filter(
-        (t) => !(t.sourcePath === path && t.taskIndex === task.taskIndex)
-      )
-    }))
-    if (openBuffer) {
-      get().updateNoteBody(path, nextBody)
-    } else {
+    await trackTaskWrite(async () => {
+      const path = task.sourcePath
+      const openBuffer = get().noteContents[path]
+      let body: string
       try {
-        await window.zen.writeNote(path, nextBody)
-        await get().rescanTasksForPath(path)
+        body = openBuffer?.body ?? (await window.zen.readNote(path)).body
       } catch (err) {
-        console.error('deleteTaskFromList writeNote failed', err)
-        void get().rescanTasksForPath(path)
+        console.error('deleteTaskFromList readNote failed', err)
+        return
       }
-    }
+      const nextBody = removeTaskAtIndex(body, task.taskIndex)
+      if (nextBody === body) return
+      // Optimistically drop it from the index so the row vanishes immediately.
+      set((s) => ({
+        vaultTasks: s.vaultTasks.filter(
+          (t) => !(t.sourcePath === path && t.taskIndex === task.taskIndex)
+        )
+      }))
+      if (openBuffer) {
+        get().updateNoteBody(path, nextBody)
+      } else {
+        try {
+          await window.zen.writeNote(path, nextBody)
+          await get().rescanTasksForPath(path)
+        } catch (err) {
+          console.error('deleteTaskFromList writeNote failed', err)
+          void get().rescanTasksForPath(path)
+        }
+      }
+    })()
   },
 
-  moveTaskToDate: async (task, dateIso) => {
+  moveTaskToDate: trackTaskWrite(async (task, dateIso) => {
     const parsed = parseIsoDateLocal(dateIso)
     if (!parsed) return
     // A file-task isn't a line that can move into a daily note; rescheduling it
@@ -5754,8 +7156,10 @@ export const useStore = create<Store>((set, get) => {
     // already reads as that day, so strip any `due:` token; otherwise write the
     // explicit date.
     const movedLine = setTaskDueAtIndex(line, 0, inferDue ? null : dateIso)
-    const trimmed = tgtBody.replace(/\s+$/u, '')
-    const nextTgt = trimmed.length ? `${trimmed}\n${movedLine}\n` : `${movedLine}\n`
+
+    // Insert into the destination note's Tasks section when one exists;
+    // otherwise append to the end of the note.
+    const nextTgt = insertTasksUnderTasksHeading(tgtBody, [movedLine])
 
     // Persist both notes (open buffers go through the edit pipeline).
     if (srcBuffer) get().updateNoteBody(task.sourcePath, strippedSrc)
@@ -5791,19 +7195,17 @@ export const useStore = create<Store>((set, get) => {
       folder: target.folder
     })
     set((s) => ({
-      // Both rebuilt notes go back through the Cloud filter: a note waiting on
-      // a conflict decision must stay out of the task surfaces even when an
-      // edit to another note reindexes it.
       vaultTasks: [
         ...s.vaultTasks.filter(
           (t) => t.sourcePath !== task.sourcePath && t.sourcePath !== target.path
         ),
-        ...withoutPendingCloudConflictTasks([...srcTasks, ...tgtTasks])
+        ...srcTasks,
+        ...tgtTasks
       ]
     }))
-  },
+  }),
 
-  forwardTask: async (task, targetPath) => {
+  forwardTask: trackTaskWrite(async (task, targetPath) => {
     if (!targetPath || targetPath === task.sourcePath) return
     const targetMeta = get().notes.find((n) => n.path === targetPath)
     if (!targetMeta) return
@@ -5871,16 +7273,15 @@ export const useStore = create<Store>((set, get) => {
       folder: targetMeta.folder
     })
     set((s) => ({
-      // Same filter as the move above: forwarding must not slip a withheld
-      // note's tasks back into the shared cache.
       vaultTasks: [
         ...s.vaultTasks.filter(
           (t) => t.sourcePath !== task.sourcePath && t.sourcePath !== targetPath
         ),
-        ...withoutPendingCloudConflictTasks([...srcTasks, ...tgtTasks])
+        ...srcTasks,
+        ...tgtTasks
       ]
     }))
-  },
+  }),
 
   setTasksFilter: (q) => set({ tasksFilter: q, taskCursorIndex: 0 }),
   setTasksViewMode: (mode) => {
@@ -5916,6 +7317,10 @@ export const useStore = create<Store>((set, get) => {
     set({ kanbanGroupBy: group })
     savePrefs(collectPrefs(get()))
     persistVaultViewOverride({ kanbanGroupBy: group })
+  },
+  setKanbanCardSort: (sort) => {
+    set({ kanbanCardSort: sort })
+    savePrefs(collectPrefs(get()))
   },
   setKanbanColumnTitle: (group, columnId, title) => {
     const key = `${group}:${columnId}`
@@ -5961,6 +7366,12 @@ export const useStore = create<Store>((set, get) => {
     set({ kanbanStatuses: next })
     savePrefs(collectPrefs(get()))
     persistVaultViewOverride({ kanbanStatuses: next })
+  },
+  setKanbanFolderRoot: (root) => {
+    const next = normalizeKanbanFolderRoot(root)
+    set({ kanbanFolderRoot: next })
+    savePrefs(collectPrefs(get()))
+    persistVaultViewOverride({ kanbanFolderRoot: next })
   },
   setTasksCalendarSelectedDate: (iso) => set({ tasksCalendarSelectedDate: iso }),
   setTasksCalendarMonthAnchor: (iso) => set({ tasksCalendarMonthAnchor: iso }),
@@ -6034,6 +7445,8 @@ export const useStore = create<Store>((set, get) => {
   },
 
   openNoteAtOffset: async (relPath, offset, options) => {
+    const isCurrent = captureNavigationContext()
+    if (!isCurrent()) return
     const state = get()
     const anchor = Math.max(0, offset)
     const pendingJumpLocation = {
@@ -6053,6 +7466,7 @@ export const useStore = create<Store>((set, get) => {
       ...noteHistoryAfterJump(state, relPath)
     })
     await get().openNoteInPane(state.activePaneId, relPath)
+    if (!isCurrent()) return
     set((s) => {
       if (s.selectedPath === relPath) return { focusedPanel: 'editor' }
       if (s.pendingJumpLocation?.path === relPath) {
@@ -6108,6 +7522,8 @@ export const useStore = create<Store>((set, get) => {
   },
 
   refreshNotes: async () => {
+    const request = ++noteIndexRequest
+    const isCurrent = captureFolderActionContext(get)
     try {
       // Load this vault's manual note order once per vault (drives #224).
       const orderRoot = get().vault?.root ?? ''
@@ -6121,6 +7537,7 @@ export const useStore = create<Store>((set, get) => {
         window.zen.listFolders(),
         window.zen.hasAssetsDir()
       ])
+      if (!isCurrent() || request !== noteIndexRequest) return
       recordRendererPerf('store.refreshNotes.fetch', performance.now() - startedAt, {
         notes: notes.length,
         folders: folders.length,
@@ -6140,8 +7557,10 @@ export const useStore = create<Store>((set, get) => {
           existingPaths.has(path) ||
           isWorkspaceVirtualTabPath(path) ||
           renamesInFlight.has(path) ||
-          (path === s.selectedPath &&
-            (s.noteContents[path] !== undefined || s.noteDirty[path] === true))
+          // Unsaved edits outrank a listing taken while their file was
+          // briefly gone, in a background tab as in the active one (#863).
+          s.noteDirty[path] === true ||
+          (path === s.selectedPath && s.noteContents[path] !== undefined)
         const prunedLayout = rewritePathsInTree(s.paneLayout, (path) =>
           keep(path) ? path : null
         )
@@ -6210,18 +7629,47 @@ export const useStore = create<Store>((set, get) => {
     }
   },
 
+  renameAsset: async (relPath, nextName) => {
+    let result!: AssetMeta
+    // Link rewrites touch every referencing note. Reserve the vault while
+    // draining saves and refreshing buffers so neither typing nor a workspace
+    // switch can overwrite the rewritten links (#785).
+    await runWorkspaceTransition(async () => {
+      result = await window.zen.renameAsset(relPath, nextName)
+      await Promise.all([get().refreshAssets(), get().refreshNotes()])
+      await Promise.all(Object.values(get().noteContents).map(({ path, folder }) =>
+        get().applyChange({ kind: 'change', path, folder }, { source: 'app' })
+      ))
+    }, false, true)
+    return result
+  },
+  moveAsset: async (relPath, targetDir) => {
+    let result!: AssetMeta
+    await runWorkspaceTransition(async () => {
+      result = await window.zen.moveAsset(relPath, targetDir)
+      await Promise.all([get().refreshAssets(), get().refreshNotes()])
+      await Promise.all(Object.values(get().noteContents).map(({ path, folder }) =>
+        get().applyChange({ kind: 'change', path, folder }, { source: 'app' })
+      ))
+    }, false, true)
+    return result
+  },
   refreshAssets: async () => {
+    const request = ++assetIndexRequest
+    const isCurrent = captureFolderActionContext(get)
     try {
       const startedAt = performance.now()
       const [rawAssets, hasAssetsDirOnDisk] = await Promise.all([
         window.zen.listAssets(),
         window.zen.hasAssetsDir()
       ])
+      if (!isCurrent() || request !== assetIndexRequest) return
       // Hide database internals (sidecar + .bak backups) — they're not
       // standalone files the user manages.
       const assetFiles = rawAssets.filter((a) => !isDatabaseInternalPath(a.path))
       set({
         assetFiles,
+        assetFilesListed: true,
         hasAssetsDir: hasAssetsDirOnDisk || assetFiles.length > 0
       })
       recordRendererPerf('store.refreshAssets.fetch', performance.now() - startedAt, {
@@ -6231,6 +7679,27 @@ export const useStore = create<Store>((set, get) => {
     } catch (err) {
       console.error('refresh assets failed', err)
     }
+  },
+
+  indexImportedAssets: (assets) => {
+    const s = get()
+    // Before the first listing there is nothing to add to, and that listing
+    // is already on its way with these files in it.
+    if (!s.assetFilesListed || assets.length === 0) return
+    const listed = new Set(s.assetFiles.map((asset) => asset.path))
+    const updatedAt = Date.now()
+    const added: AssetMeta[] = []
+    for (const asset of assets) {
+      if (listed.has(asset.path)) continue
+      listed.add(asset.path)
+      added.push({ path: asset.path, name: asset.name, kind: asset.kind, siblingOrder: 0, size: 0, updatedAt })
+    }
+    if (added.length === 0) return
+    set({ assetFiles: [...added, ...s.assetFiles], hasAssetsDir: true })
+    // A listing already in flight may have been read before these files were
+    // written, and landing after this would drop them again. A fresh one
+    // supersedes it and brings their real size and time.
+    void get().refreshAssets()
   },
 
   deleteAsset: async (relPath) => {
@@ -6276,7 +7745,8 @@ export const useStore = create<Store>((set, get) => {
     }
   },
 
-  applyChange: async (ev) => {
+  applyChange: async (ev, options) => {
+    if (folderMutationBlocks(ev.path)) return
     // The live feed's unlink handling, shared with the resync path below:
     // a deleted note's tab closes wherever it is open.
     const closeUnlinkedNote = (notePath: string): void => {
@@ -6302,6 +7772,30 @@ export const useStore = create<Store>((set, get) => {
         }
       })
     }
+    // An unlink from outside the app (this app's own deletes and moves close
+    // their tabs themselves) may be the first half of a replace, so the tab
+    // waits for the file to come back before closing. It never closes over
+    // unsaved edits: the note's pending save writes the file back instead,
+    // the same way a stale listing never outranks a dirty buffer (#863).
+    const settleUnlinkedNote = async (notePath: string): Promise<void> => {
+      const root = get().vault?.root
+      await new Promise((resolve) => setTimeout(resolve, UNLINK_SETTLE_MS))
+      const stillOpen = (): boolean => {
+        const s = get()
+        return (
+          s.vault?.root === root &&
+          findLeavesContaining(s.paneLayout, notePath).length > 0 &&
+          !s.noteDirty[notePath]
+        )
+      }
+      if (!stillOpen()) return
+      const back = await window.zen.readNote(notePath).then(
+        () => true,
+        () => false
+      )
+      if (back || !stillOpen()) return
+      closeUnlinkedNote(notePath)
+    }
     if (ev.scope === 'resync') {
       // The change feed was interrupted and events were lost; re-pull every
       // surface the feed keeps fresh instead of trusting the resumed stream.
@@ -6320,7 +7814,12 @@ export const useStore = create<Store>((set, get) => {
           .catch((err) => {
             console.error('resync vault settings failed', err)
           }),
-        tasksSurfaceVisible(get()) ? get().refreshTasks() : Promise.resolve()
+        tasksSurfaceVisible(get()) ? get().refreshTasks() : Promise.resolve(),
+        // Templates ride the feed too (scope 'templates'), so a gap may have
+        // swallowed a template saved on another device.
+        get().loadCustomTemplates(),
+        // So do agent edit records (scope 'agent-edits').
+        get().refreshAgentEdits()
       ])
       const stateAfter = get()
       const openTabs = [...new Set(allLeaves(stateAfter.paneLayout).flatMap((leaf) => leaf.tabs))]
@@ -6358,6 +7857,10 @@ export const useStore = create<Store>((set, get) => {
               if (!existing || existing.body === content.body || s.noteDirty[openPath]) return s
               const contents = { ...s.noteContents, [openPath]: content }
               const dirty = { ...s.noteDirty, [openPath]: false }
+              // The body comes from the server's disk: the editor starts the
+              // note's undo history clean rather than mapping steps onto
+              // text written elsewhere (#852).
+              noteDiskRevisions.set(openPath, noteDiskRevision(openPath) + 1)
               return {
                 noteContents: contents,
                 noteDirty: dirty,
@@ -6383,6 +7886,18 @@ export const useStore = create<Store>((set, get) => {
     }
     if (ev.scope === 'comments') {
       await get().loadNoteComments(ev.path)
+      return
+    }
+    if (ev.scope === 'agent-edits') {
+      // An assistant edited the note through MCP, or a review moved on.
+      await get().refreshAgentEdit(ev.path)
+      return
+    }
+    if (ev.scope === 'templates') {
+      // A custom template changed on disk: another client on this vault, a
+      // synced dotfile, or this app's own save. Re-list the templates, not
+      // the note tree; a template is not a note.
+      await get().loadCustomTemplates()
       return
     }
     if (ev.scope === 'database') {
@@ -6431,6 +7946,11 @@ export const useStore = create<Store>((set, get) => {
                 vaultSettings: normalized,
                 ...(get().viewSettingsScope === 'vault' ? viewPrefsFromVault(normalized) : {})
               })
+              // A display name edited outside (#692) renames the open vault
+              // too; the remembered list is what main rewrites, so refetch it.
+              const nameBefore = get().vault?.name
+              applyVaultNameFromSettings(normalized)
+              if (get().vault?.name !== nameBefore) void get().refreshLocalVaults()
             })
             .catch((err) => {
               console.error('refresh vault settings failed', err)
@@ -6471,7 +7991,7 @@ export const useStore = create<Store>((set, get) => {
     if (!open) return
 
     if (ev.kind === 'unlink') {
-      closeUnlinkedNote(ev.path)
+      await settleUnlinkedNote(ev.path)
       return
     }
 
@@ -6482,15 +8002,21 @@ export const useStore = create<Store>((set, get) => {
     // noise left the buffer showing content that no longer existed on disk.
     if (ev.kind === 'change' || ev.kind === 'add') {
       try {
+        const beforeRead = get()
+        if (beforeRead.noteDirty[ev.path]) return
+        const bodyBeforeRead = beforeRead.noteContents[ev.path]?.body
+        const readVersion = (noteContentVersions.get(ev.path) ?? 0) + 1
+        noteContentVersions.set(ev.path, readVersion)
         const content = await window.zen.readNote(ev.path)
-        // Drop the watcher echo of our own writes. Without this, an
-        // edit made between save-completion and echo-arrival gets
-        // overwritten with the older disk body and the user sees
-        // their last keystroke (often Enter) reverted.
-        if (lastWrittenByPath.get(ev.path) === content.body) return
         set((s) => {
           const existing = s.noteContents[ev.path]
-          // Ignore noise — only push when disk differs from our buffer.
+          if (
+            s.vault?.root !== beforeRead.vault?.root ||
+            existing?.body !== bodyBeforeRead ||
+            noteContentVersions.get(ev.path) !== readVersion
+          ) return s
+          // Compare against the current buffer, not a historical local save:
+          // a Cloud restore can legitimately bring those old bytes back.
           if (existing && existing.body === content.body) return s
           // Never replace a dirty buffer: it holds edits the user has not
           // saved, and the editor applies this push as a non-undoable doc
@@ -6500,6 +8026,12 @@ export const useStore = create<Store>((set, get) => {
           if (s.noteDirty[ev.path]) return s
           const contents = { ...s.noteContents, [ev.path]: content }
           const dirty = { ...s.noteDirty, [ev.path]: false }
+          // Text from disk, not from this app: the editor starts the note's
+          // undo history clean, since the user's steps would map onto text
+          // nobody here wrote (#852). A rewrite the app made itself keeps it.
+          if (options?.source !== 'app') {
+            noteDiskRevisions.set(ev.path, noteDiskRevision(ev.path) + 1)
+          }
           return {
             noteContents: contents,
             noteDirty: dirty,
@@ -6519,11 +8051,19 @@ export const useStore = create<Store>((set, get) => {
   },
 
   updateNoteBody: (path, body) => {
+    if (isNoteEditingLocked(get().vault, path)) return
+    let backOnDisk = false
     set((s) => {
       const existing = s.noteContents[path]
+      if (existing) body = rewriteRenamingBody(path, body, existing.folder)
       if (!existing || existing.body === body) return s
+      if (!s.noteDirty[path]) savedBodies.set(path, existing.body)
+      // While a write is in flight the bytes on disk are changing under us,
+      // so only a settled note can be declared back on them; the completion
+      // below records what actually landed for the next comparison.
+      backOnDisk = !pathSaveQueues.has(path) && savedBodies.get(path) === body
       const contents = { ...s.noteContents, [path]: { ...existing, body } }
-      const dirty = { ...s.noteDirty, [path]: true }
+      const dirty = { ...s.noteDirty, [path]: !backOnDisk }
       // Editing a preview tab promotes it to a permanent tab (VS Code
       // behavior) so the edit can't be displaced by the next preview.
       // Cheap guard first: this runs on every keystroke.
@@ -6538,6 +8078,16 @@ export const useStore = create<Store>((set, get) => {
         ...activeFieldsFrom(layout, s.activePaneId, contents, dirty)
       }
     })
+    if (backOnDisk) {
+      savedBodies.delete(path)
+      const pending = pathSaveTimers.get(path)
+      if (pending) {
+        clearTimeout(pending)
+        pathSaveTimers.delete(path)
+      }
+      return
+    }
+    if (folderMutationBlocks(path)) return
     // Debounced disk write.
     const existing = pathSaveTimers.get(path)
     if (existing) clearTimeout(existing)
@@ -6556,22 +8106,27 @@ export const useStore = create<Store>((set, get) => {
     await get().persistNote(path)
   },
 
-  persistNote: async (path) => {
+  persistNote: async (path, duringFolderMutation = false) => {
+    const isCurrent = captureFolderActionContext(get)
     const pending = pathSaveTimers.get(path)
     if (pending) {
       clearTimeout(pending)
       pathSaveTimers.delete(path)
     }
     const performWrite = async (): Promise<void> => {
+      if (!isCurrent()) return
       const s = get()
+      if (!duringFolderMutation && folderMutationBlocks(path)) return
       const content = s.noteContents[path]
       if (!content || !s.noteDirty[path]) return
       try {
         // Snapshot only after earlier writes finish. A second caller sees the
         // newest buffer here, then becomes the last writer by construction.
         const writtenBody = content.body
-        lastWrittenByPath.set(path, writtenBody)
+        const tagsBefore = s.notes.find((note) => note.path === path)?.tags
+        noteContentVersions.set(path, (noteContentVersions.get(path) ?? 0) + 1)
         const meta = await window.zen.writeNote(path, writtenBody)
+        if (!isCurrent()) return
         // Saving a Typst preamble note changes the definitions every note tagged
         // for it compiles against, so reload and repaint open panes. (#486)
         if (
@@ -6585,8 +8140,11 @@ export const useStore = create<Store>((set, get) => {
         }
         set((cur) => {
           // Keystrokes that landed while the write was in flight leave the
-          // buffer ahead of disk. The queued caller will persist them next.
+          // buffer ahead of disk. The queued caller will persist them next,
+          // unless they take the buffer back to the bytes just written.
           const stillCurrent = cur.noteContents[path]?.body === writtenBody
+          if (stillCurrent || !cur.noteContents[path]) savedBodies.delete(path)
+          else savedBodies.set(path, writtenBody)
           const dirty = stillCurrent ? { ...cur.noteDirty, [path]: false } : cur.noteDirty
           return {
             noteDirty: dirty,
@@ -6594,6 +8152,12 @@ export const useStore = create<Store>((set, get) => {
             ...activeFieldsFrom(cur.paneLayout, cur.activePaneId, cur.noteContents, dirty)
           }
         })
+        // This app saved the note, which is what the workflow event triggers
+        // listen for. A tag the note did not carry before is its own event.
+        emitNoteEvent('note-saved', path)
+        if (tagsBefore !== undefined && meta.tags.some((tag) => !tagsBefore.includes(tag))) {
+          emitNoteEvent('tag-added', path)
+        }
       } catch (err) {
         console.error('writeNote failed', err)
       }
@@ -6611,91 +8175,154 @@ export const useStore = create<Store>((set, get) => {
     }
   },
 
-  loadNoteComments: async (path) => {
-    if (!path || isWorkspaceVirtualTabPath(path)) return []
-    try {
-      const comments = await window.zen.readNoteComments(path)
-      set((s) => ({
-        noteComments: { ...s.noteComments, [path]: comments }
-      }))
-      return comments
-    } catch (err) {
-      console.error('readNoteComments failed', err)
-      return get().noteComments[path] ?? []
+  refreshAgentEdits: async () => {
+    const list = window.zen.listAgentEdits
+    if (!list || !window.zen.getCapabilities().supportsAgentEditReview) {
+      set({ agentEdits: {} })
+      return
     }
+    const isCurrent = captureFolderActionContext(get)
+    try {
+      const summaries = await list()
+      if (!isCurrent()) return
+      set({ agentEdits: Object.fromEntries(summaries.map((summary) => [summary.notePath, summary])) })
+    } catch (err) {
+      console.error('listAgentEdits failed', err)
+    }
+  },
+
+  refreshAgentEdit: async (path) => {
+    const read = window.zen.readAgentEdit
+    if (!read || !window.zen.getCapabilities().supportsAgentEditReview) return
+    const isCurrent = captureFolderActionContext(get)
+    try {
+      const record = await read(path)
+      if (!isCurrent()) return
+      set((s) => {
+        const next = { ...s.agentEdits }
+        if (record) {
+          const latest = record.edits.at(-1)
+          next[path] = {
+            notePath: path,
+            agent: latest?.agent ?? 'Assistant',
+            at: latest?.at ?? 0,
+            edits: record.edits.length
+          }
+        } else {
+          delete next[path]
+        }
+        return { agentEdits: next }
+      })
+    } catch (err) {
+      console.error('readAgentEdit failed', err)
+    }
+  },
+
+  loadNoteComments: async (path) => {
+    return trackCommentOperation(path, [], async () => {
+      const isCurrent = captureFolderActionContext(get)
+      if (!path || isWorkspaceVirtualTabPath(path)) return []
+      try {
+        const comments = await window.zen.readNoteComments(path)
+        if (!isCurrent()) return []
+        set((s) => ({
+          noteComments: { ...s.noteComments, [path]: comments }
+        }))
+        return comments
+      } catch (err) {
+        console.error('readNoteComments failed', err)
+        return get().noteComments[path] ?? []
+      }
+    })
   },
 
   addNoteComment: async (input) => {
-    const path = input.notePath
-    if (!path || isWorkspaceVirtualTabPath(path)) return null
-    const body = input.body.trim()
-    if (!body) return null
-    const now = Date.now()
-    const current = get().noteComments[path] ?? (await get().loadNoteComments(path))
-    const draft: NoteCommentInput = {
-      ...input,
-      notePath: path,
-      body,
-      createdAt: input.createdAt ?? now,
-      updatedAt: now,
-      resolvedAt: input.resolvedAt ?? null
-    }
-    try {
-      const comments = await window.zen.writeNoteComments(path, [...current, draft])
-      const created = comments[comments.length - 1] ?? null
-      set((s) => ({
-        noteComments: { ...s.noteComments, [path]: comments },
-        activeCommentId: created?.id ?? s.activeCommentId
-      }))
-      return created
-    } catch (err) {
-      console.error('writeNoteComments failed', err)
-      return null
-    }
+    return trackCommentOperation(input.notePath, null, async () => {
+      const isCurrent = captureFolderActionContext(get)
+      const path = input.notePath
+      if (!path || isWorkspaceVirtualTabPath(path)) return null
+      const body = input.body.trim()
+      if (!body) return null
+      const now = Date.now()
+      const current = get().noteComments[path] ?? (await get().loadNoteComments(path))
+      const draft: NoteCommentInput = {
+        ...input,
+        notePath: path,
+        body,
+        createdAt: input.createdAt ?? now,
+        updatedAt: now,
+        resolvedAt: input.resolvedAt ?? null
+      }
+      try {
+        if (!isCurrent()) return null
+        const comments = await window.zen.writeNoteComments(path, [...current, draft])
+        const created = comments[comments.length - 1] ?? null
+        if (!isCurrent()) return null
+        set((s) => ({
+          noteComments: { ...s.noteComments, [path]: comments },
+          activeCommentId: created?.id ?? s.activeCommentId
+        }))
+        return created
+      } catch (err) {
+        console.error('writeNoteComments failed', err)
+        return null
+      }
+    })
   },
 
   updateNoteComment: async (path, id, patch) => {
-    if (!path || !id) return
-    const current = get().noteComments[path] ?? (await get().loadNoteComments(path))
-    const now = Date.now()
-    const next = current.map((comment) =>
-      comment.id === id
-        ? {
-            ...comment,
-            ...patch,
-            body: patch.body !== undefined ? patch.body.trim() : comment.body,
-            updatedAt: now
-          }
-        : comment
-    )
-    try {
-      const comments = await window.zen.writeNoteComments(path, next)
-      set((s) => ({
-        noteComments: { ...s.noteComments, [path]: comments },
-        activeCommentId:
-          s.activeCommentId && comments.some((comment) => comment.id === s.activeCommentId)
-            ? s.activeCommentId
-            : null
-      }))
-    } catch (err) {
-      console.error('updateNoteComment failed', err)
-    }
+    return trackCommentOperation(path, undefined, async () => {
+      const isCurrent = captureFolderActionContext(get)
+      if (!path || !id) return
+      const current = get().noteComments[path] ?? (await get().loadNoteComments(path))
+      const now = Date.now()
+      const next = current.map((comment) =>
+        comment.id === id
+          ? {
+              ...comment,
+              ...patch,
+              body: patch.body !== undefined ? patch.body.trim() : comment.body,
+              updatedAt: now
+            }
+          : comment
+      )
+      try {
+        if (!isCurrent()) return undefined
+        const comments = await window.zen.writeNoteComments(path, next)
+        if (!isCurrent()) return undefined
+        set((s) => ({
+          noteComments: { ...s.noteComments, [path]: comments },
+          activeCommentId:
+            s.activeCommentId && comments.some((comment) => comment.id === s.activeCommentId)
+              ? s.activeCommentId
+              : null
+        }))
+      } catch (err) {
+        console.error('updateNoteComment failed', err)
+      }
+    })
   },
 
   deleteNoteComment: async (path, id) => {
-    if (!path || !id) return
-    const current = get().noteComments[path] ?? (await get().loadNoteComments(path))
-    const next = current.filter((comment) => comment.id !== id)
-    try {
-      const comments = await window.zen.writeNoteComments(path, next)
-      set((s) => ({
-        noteComments: { ...s.noteComments, [path]: comments },
-        activeCommentId: s.activeCommentId === id ? null : s.activeCommentId
-      }))
-    } catch (err) {
-      console.error('deleteNoteComment failed', err)
-    }
+    return trackCommentOperation(path, undefined, async () => {
+      const isCurrent = captureFolderActionContext(get)
+      if (!path || !id) return
+      const current = get().noteComments[path] ?? (await get().loadNoteComments(path))
+      const next = current.filter((comment) => comment.id !== id)
+      try {
+        if (!isCurrent()) return undefined
+        const comments = await window.zen.writeNoteComments(path, next)
+        if (!isCurrent()) return undefined
+        set((s) => ({
+          noteComments: { ...s.noteComments, [path]: comments },
+          activeCommentId: s.activeCommentId === id ? null : s.activeCommentId
+        }))
+      } catch (err) {
+        console.error('deleteNoteComment failed', err)
+      }
+    })
   },
+
 
   setActiveCommentId: (id) => set({ activeCommentId: id }),
 
@@ -6715,33 +8342,24 @@ export const useStore = create<Store>((set, get) => {
     }
   },
 
-  renameNote: async (oldPath, nextTitle) => {
+  renameNote: async (oldPath, nextTitle, hostIsCurrent) => {
     if (!oldPath) return
     try {
-      // Renaming rewrites every inbound wikilink on disk. Flush open buffers
-      // first so that rewrite cannot race a pending save and get overwritten
-      // by stale editor contents immediately afterwards.
-      await get().flushDirtyNotes()
-      if (Object.values(get().noteDirty).some(Boolean)) {
-        throw new Error('Could not rename while notes still have unsaved changes')
-      }
-      renamesInFlight.add(oldPath)
-      let meta: NoteMeta
-      try {
-        meta = await window.zen.renameNote(oldPath, nextTitle)
-        set((s) => renameNoteState(s, oldPath, meta))
-      } finally {
-        renamesInFlight.delete(oldPath)
-      }
-      await get().applyFavorites(
-        rewriteFavoriteNotePath(get().vaultSettings.favorites, oldPath, meta.path)
-      )
-      // Before the refresh so one listing picks up both the rename and the
-      // rewritten heading (excerpt, size).
-      await syncHeadingAfterRename(meta, get)
-      await get().refreshNotes()
+      const moved = await mutateNoteImpl(oldPath, () => window.zen.renameNote(oldPath, nextTitle), hostIsCurrent, true)
+      if (moved && moved.path !== oldPath) emitNoteEvent('note-moved', moved.path)
     } catch (err) {
+      if (hostIsCurrent) throw err
       console.error('renameNote failed', err)
+      // Every rename in the UI (title field, sidebar, note list, :rename)
+      // lands here, and a refusal used to leave the old name in place with
+      // nothing said about why (#839).
+      const title =
+        get().notes.find((note) => note.path === oldPath)?.title ??
+        oldPath.split('/').pop()?.replace(/\.(md|excalidraw)$/i, '') ??
+        oldPath
+      useToastStore
+        .getState()
+        .addToast(`Could not rename “${title}”: ${humanIpcError(err, 'the rename failed.')}`, 'error')
     }
   },
 
@@ -6751,10 +8369,16 @@ export const useStore = create<Store>((set, get) => {
     await get().renameNote(oldPath, nextTitle)
   },
 
-  createAndOpen: async (folder, subpath = '', options) => {
+  createAndOpen: trackNoteWrite(undefined, async (folder, subpath = '', options) => {
     try {
       const meta = await window.zen.createNote(folder, options?.title, subpath)
       rememberEditModeForCreatedNote(meta.path)
+      emitNoteEvent('note-created', meta.path)
+      // The heading uses the title the vault settled on, which may carry a
+      // " 2" suffix the requested one did not.
+      if (options?.tags && options.tags.length > 0) {
+        await window.zen.writeNote(meta.path, composeNewNoteBody(meta.title, options.tags))
+      }
       await get().refreshNotes()
       set({
         view: { kind: 'folder', folder, subpath },
@@ -6764,9 +8388,9 @@ export const useStore = create<Store>((set, get) => {
     } catch (err) {
       console.error('createNote failed', err)
     }
-  },
+  }),
 
-  createDrawingAndOpen: async (folder, subpath = '') => {
+  createDrawingAndOpen: trackNoteWrite(undefined, async (folder, subpath = '') => {
     try {
       const meta = await window.zen.createExcalidraw(folder, subpath)
       await get().refreshNotes()
@@ -6775,7 +8399,7 @@ export const useStore = create<Store>((set, get) => {
     } catch (err) {
       console.error('createExcalidraw failed', err)
     }
-  },
+  }),
 
   insertEmbedAtCursor: (embed) => {
     const state = get()
@@ -6790,7 +8414,7 @@ export const useStore = create<Store>((set, get) => {
     view.focus()
   },
 
-  newDrawing: async () => {
+  newDrawing: trackNoteWrite(undefined, async () => {
     try {
       const s = get()
       const settings = normalizeVaultSettings(s.vaultSettings)
@@ -6805,9 +8429,9 @@ export const useStore = create<Store>((set, get) => {
     } catch (err) {
       console.error('newDrawing failed', err)
     }
-  },
+  }),
 
-  embedNewDrawing: async () => {
+  embedNewDrawing: trackNoteWrite(undefined, async () => {
     try {
       const s = get()
       const settings = normalizeVaultSettings(s.vaultSettings)
@@ -6825,7 +8449,7 @@ export const useStore = create<Store>((set, get) => {
     } catch (err) {
       console.error('embedNewDrawing failed', err)
     }
-  },
+  }),
 
   createNoteInCurrentFolder: async () => {
     const s = get()
@@ -6855,7 +8479,7 @@ export const useStore = create<Store>((set, get) => {
     await get().createAndOpen(dest.folder, dest.subpath, { focusTitle: true })
   },
 
-  importDroppedMarkdownFiles: async (files) => {
+  importDroppedMarkdownFiles: trackNoteWrite(undefined, async (files) => {
     const createdPaths: string[] = []
     for (const file of files) {
       try {
@@ -6863,6 +8487,7 @@ export const useStore = create<Store>((set, get) => {
         const title = file.name.replace(/\.(md|markdown)$/i, '').trim()
         const meta = await window.zen.createNote('inbox', title || undefined)
         if (content) await window.zen.writeNote(meta.path, content)
+        emitNoteEvent('note-created', meta.path)
         createdPaths.push(meta.path)
       } catch (err) {
         console.error('importDroppedMarkdownFiles failed', file.name, err)
@@ -6871,7 +8496,7 @@ export const useStore = create<Store>((set, get) => {
     if (createdPaths.length === 0) return
     await get().refreshNotes()
     for (const path of createdPaths) await get().openNoteInTab(path)
-  },
+  }),
 
   closeActiveNote: async () => {
     const state = get()
@@ -6909,113 +8534,172 @@ export const useStore = create<Store>((set, get) => {
   },
 
   trashNote: async (path) => {
-    const state = get()
-    const title = state.notes.find((note) => note.path === path)?.title
-    if (!(await confirmMoveToTrash(title))) return false
-    if (!(await moveNoteToTrash(path, { temporarySession: state.vault?.temporary === true }))) {
+    const isCurrent = captureFolderActionContext(get)
+    const title = get().notes.find((note) => note.path === path)?.title
+    if (!(await confirmMoveToTrash(title, get().vault?.temporary === true)) || !isCurrent() || !get().notes.some(note => note.path === path)) return false
+    try {
+      await get().changeNoteLifecycle(path, 'trash', isCurrent)
+      return isCurrent()
+    } catch (error) {
+      useToastStore.getState().addToast(humanIpcError(error, 'Could not move the note to Trash.'), 'error')
       return false
     }
-    set((s) => withoutNoteInWorkspace(s, path))
-    await get().refreshNotes()
-    return true
   },
 
   deleteActivePermanently: async () => {
     const path = get().selectedPath
-    if (!path) return
-    await get().deleteNotePermanently(path)
+    if (path) await get().deleteNotePermanently(path)
   },
 
   deleteNotePermanently: async (path) => {
+    const isCurrent = captureFolderActionContext(get)
     const title = get().notes.find((note) => note.path === path)?.title
-    if (!(await confirmDeletePermanently(title))) return false
-    if (!(await deleteNotePermanently(path))) return false
-    set((s) => withoutNoteInWorkspace(s, path))
-    await get().refreshNotes()
-    return true
+    if (!(await confirmDeletePermanently(title)) || !isCurrent() || !get().notes.some(note => note.path === path)) return false
+    try {
+      await get().changeNoteLifecycle(path, 'delete', isCurrent)
+      return isCurrent()
+    } catch (error) {
+      useToastStore.getState().addToast(`Could not delete: ${humanIpcError(error, 'the note could not be deleted.')}`, 'error')
+      return false
+    }
+  },
+
+  emptyTrash: async (hostIsCurrent) => {
+    const vault = get().vault
+    const isCurrent = captureFolderActionContext(get, hostIsCurrent)
+    const canReconcile = captureFolderActionContext(get)
+    if (!vault || !isCurrent()) return
+    if (inFlightTaskMutations.size || taskMutationQueues.size)
+      throw new Error('Wait for pending task changes before emptying Trash.')
+    const prefix = `${vaultRelativeFolderPath('trash', '', get().vaultSettings)}/`
+    const bridge = window.zen
+    const unlock = lockNoteEditing(vault, prefix)
+    try {
+      await mutateFolderContents(get, prefix, isCurrent, canReconcile, async () => {
+        await bridge.emptyTrash()
+        if (!canReconcile()) return null
+        set(s => ({
+          ...rewriteFolderWorkspace(s, prefix, null),
+          notes: s.notes.filter(note => !note.path.startsWith(prefix)),
+          folders: s.folders.filter(folder => folder.folder !== 'trash'),
+          view: s.view.kind === 'folder' && s.view.folder === 'trash'
+            ? {kind:'folder',folder:'trash',subpath:''} : s.view
+        }))
+        savePrefs(collectPrefs(get()))
+        writeManualOrder(vault.root, get().manualNoteOrder)
+        await get().applyFavorites(get().vaultSettings.favorites.filter(path => !path.startsWith(prefix)))
+        if (isCurrent()) await get().refreshNotes()
+        return null
+      })
+    } finally {unlock()}
+  },
+
+  changeNoteLifecycle: async (path, action, hostIsCurrent) => {
+    const isCurrent = captureFolderActionContext(get, hostIsCurrent)
+    const canReconcile = captureFolderActionContext(get)
+    const source = get().notes.find(note => note.path === path)
+    if (!source || !isCurrent()) return null
+    const bridge = window.zen
+    const systemTrash = action === 'trash' && get().vault?.temporary === true
+    if (action === 'delete' || systemTrash) {
+      const unlock = lockNoteEditing(get().vault!, path)
+      let committed = false
+      try {
+        await mutateNoteImpl(path, async () => {
+          if (systemTrash) await bridge.moveToTrash(path)
+          else await bridge.deleteNote(path)
+          committed = true
+          return null
+        }, isCurrent)
+        if (systemTrash && committed && canReconcile()) {
+          useToastStore.getState().addToast('Moved to system Trash', 'info')
+        }
+        return null
+      } finally {
+        unlock()
+      }
+    }
+    const meta = await mutateNoteImpl(path, () => {
+      if (action === 'archive') return bridge.archiveNote(path)
+      if (action === 'trash') return bridge.moveToTrash(path)
+      return source.folder === 'archive' ? bridge.unarchiveNote(path) : bridge.restoreFromTrash(path)
+    }, isCurrent)
+    if (meta && meta.path !== path) emitNoteEvent('note-moved', meta.path)
+    if (meta && canReconcile() && (action === 'archive' || action === 'trash')) {
+      if (get().noteDirty[meta.path]) throw new Error('The moved note still has unsaved changes.')
+      set(s => withoutNoteInWorkspace(s, meta.path))
+      savePrefs(collectPrefs(get()))
+    }
+    return meta
+  },
+
+  followWorkflowMoves: (moves, options) => {
+    const openTabs = new Set(allLeaves(get().paneLayout).flatMap((leaf) => leaf.tabs))
+    const open = moves.filter(({ from, to }) => from !== to && (openTabs.has(from) || from in get().noteContents))
+    for (const { from } of open) renamesInFlight.add(from)
+    return async () => {
+      try {
+        if (open.length === 0) return
+        await get().refreshNotes()
+        const notes = get().notes
+        for (const { from, to } of open) {
+          // Asked of the disk, not of the list: a refresh that was already in
+          // flight when the run landed answers with the vault as it was.
+          const landed = await window.zen.readNote(to).then((content) => content.body, () => null)
+          if (landed === null) continue
+          if (await window.zen.readNote(from).then(() => true, () => false)) continue
+          // The promised path can be taken by another note, in which case the
+          // applier suffixed ours and this file is someone else's: only a file
+          // that reads exactly as the buffer did is the note that moved. An undo
+          // carries the note back to a path the ledger restored for it, so there
+          // the bytes may differ (the run edited the note after moving it) and
+          // a clean buffer takes the restored text instead.
+          const buffer = get().noteContents[from]
+          let restored: string | null = null
+          if (buffer && landed !== buffer.body) {
+            if (!options?.reverting || get().noteDirty[from]) continue
+            restored = landed
+          }
+          const meta = notes.find((note) => note.path === to)
+          set((s) => {
+            const rewritten = rewriteFolderWorkspace(s, from, to)
+            const contents = rewritten.noteContents!
+            if (meta && contents[to]) contents[to] = { ...contents[to], ...meta }
+            if (restored !== null && contents[to]) contents[to] = { ...contents[to], body: restored }
+            return {
+              ...rewritten,
+              ...activeFieldsFrom(rewritten.paneLayout!, rewritten.activePaneId!, contents, rewritten.noteDirty!)
+            }
+          })
+        }
+        savePrefs(collectPrefs(get()))
+      } finally {
+        for (const { from } of open) renamesInFlight.delete(from)
+      }
+    }
   },
 
   restoreActive: async () => {
     const path = get().selectedPath
     if (!path) return
-    const meta = await window.zen.restoreFromTrash(path)
-    await get().refreshNotes()
-    set((s) => {
-      const rewrite = (p: string): string => (p === path ? meta.path : p)
-      const nextLayout = rewritePathsInTree(s.paneLayout, rewrite)
-      const ensured = ensureActivePane(nextLayout, s.activePaneId)
-      const contents = { ...s.noteContents }
-      const dirty = { ...s.noteDirty }
-      const prevContent = contents[path]
-      if (path !== meta.path) {
-        delete contents[path]
-        delete dirty[path]
-      }
-      if (prevContent) {
-        contents[meta.path] = { ...prevContent, ...meta }
-      }
-      dirty[meta.path] = false
-      return {
-        paneLayout: ensured.layout,
-        activePaneId: ensured.activePaneId,
-        noteContents: contents,
-        noteDirty: dirty,
-        noteBackstack: rewriteNoteJumpHistory(s.noteBackstack, rewrite),
-        noteForwardstack: rewriteNoteJumpHistory(s.noteForwardstack, rewrite),
-        pendingJumpLocation:
-          s.pendingJumpLocation?.path === path
-            ? { ...s.pendingJumpLocation, path: meta.path }
-            : s.pendingJumpLocation,
-        pinnedRefPath: s.pinnedRefPath === path ? meta.path : s.pinnedRefPath,
-        ...activeFieldsFrom(ensured.layout, ensured.activePaneId, contents, dirty)
-      }
-    })
+    try { await get().changeNoteLifecycle(path, 'restore') }
+    catch (error) { useToastStore.getState().addToast(humanIpcError(error, 'Could not restore the note.'), 'error') }
   },
 
   archiveActive: async () => {
     const path = get().selectedPath
     if (!path) return
-    if (!(await get().confirmArchiveNotes([path]))) return
-    await window.zen.archiveNote(path)
-    set((s) => withoutNoteInWorkspace(s, path))
-    await get().refreshNotes()
+    const isCurrent = captureFolderActionContext(get)
+    if (!(await get().confirmArchiveNotes([path])) || !isCurrent()) return
+    try { await get().changeNoteLifecycle(path, 'archive', isCurrent) }
+    catch (error) { useToastStore.getState().addToast(humanIpcError(error, 'Could not archive the note.'), 'error') }
   },
 
   unarchiveActive: async () => {
     const path = get().selectedPath
     if (!path) return
-    const meta = await window.zen.unarchiveNote(path)
-    await get().refreshNotes()
-    set((s) => {
-      const rewrite = (p: string): string => (p === path ? meta.path : p)
-      const nextLayout = rewritePathsInTree(s.paneLayout, rewrite)
-      const ensured = ensureActivePane(nextLayout, s.activePaneId)
-      const contents = { ...s.noteContents }
-      const dirty = { ...s.noteDirty }
-      const prevContent = contents[path]
-      if (path !== meta.path) {
-        delete contents[path]
-        delete dirty[path]
-      }
-      if (prevContent) {
-        contents[meta.path] = { ...prevContent, ...meta }
-      }
-      dirty[meta.path] = false
-      return {
-        paneLayout: ensured.layout,
-        activePaneId: ensured.activePaneId,
-        noteContents: contents,
-        noteDirty: dirty,
-        noteBackstack: rewriteNoteJumpHistory(s.noteBackstack, rewrite),
-        noteForwardstack: rewriteNoteJumpHistory(s.noteForwardstack, rewrite),
-        pendingJumpLocation:
-          s.pendingJumpLocation?.path === path
-            ? { ...s.pendingJumpLocation, path: meta.path }
-            : s.pendingJumpLocation,
-        pinnedRefPath: s.pinnedRefPath === path ? meta.path : s.pinnedRefPath,
-        ...activeFieldsFrom(ensured.layout, ensured.activePaneId, contents, dirty)
-      }
-    })
+    try { await get().changeNoteLifecycle(path, 'restore') }
+    catch (error) { useToastStore.getState().addToast(humanIpcError(error, 'Could not restore the note.'), 'error') }
   },
 
   exportActiveNoteDocx: async () => {
@@ -7219,6 +8903,21 @@ export const useStore = create<Store>((set, get) => {
     set({ vimInsertEscape: sequence.trim().slice(0, 5) })
     savePrefs(collectPrefs(get()))
   },
+  setExternalApplicationSchemes: (schemes) => {
+    set({ externalApplicationSchemes: normalizeApplicationSchemes(schemes) })
+    savePrefs(collectPrefs(get()))
+  },
+  setIgnoredKeys: (keys) => {
+    set({ ignoredKeys: normalizeIgnoredKeys(keys) })
+    savePrefs(collectPrefs(get()))
+  },
+  addIgnoredKey: (key) => {
+    get().setIgnoredKeys([...get().ignoredKeys, key])
+  },
+  removeIgnoredKey: (key) => {
+    const wanted = key.trim().toLowerCase()
+    get().setIgnoredKeys(get().ignoredKeys.filter((entry) => entry.toLowerCase() !== wanted))
+  },
   setVimYankToClipboard: (on) => {
     set({ vimYankToClipboard: on })
     savePrefs(collectPrefs(get()))
@@ -7234,8 +8933,10 @@ export const useStore = create<Store>((set, get) => {
   setKeymapBinding: (id, binding) => {
     set((s) => {
       const nextOverrides = { ...s.keymapOverrides }
-      if (binding) nextOverrides[id] = binding
-      else delete nextOverrides[id]
+      // null clears the override so the default returns; the empty string is
+      // a stored unbind and has to stay.
+      if (binding === null) delete nextOverrides[id]
+      else nextOverrides[id] = binding
       return { keymapOverrides: nextOverrides }
     })
     savePrefs(collectPrefs(get()))
@@ -7353,12 +9054,28 @@ export const useStore = create<Store>((set, get) => {
     set({ keepViewModeAcrossNotes: on })
     savePrefs(collectPrefs(get()))
   },
+  setKeepPanelsAcrossNotes: (on) => {
+    set({ keepPanelsAcrossNotes: on })
+    savePrefs(collectPrefs(get()))
+  },
+  setPersistUndoHistory: (on) => {
+    set({ persistUndoHistory: on })
+    savePrefs(collectPrefs(get()))
+  },
   setDefaultPaneMode: (mode) => {
     set({ defaultPaneMode: mode })
     savePrefs(collectPrefs(get()))
   },
   setSyncTitleHeadingOnRename: (on) => {
     set({ syncTitleHeadingOnRename: on })
+    savePrefs(collectPrefs(get()))
+  },
+  setReviewAgentEdits: (on) => {
+    set({ reviewAgentEdits: on })
+    savePrefs(collectPrefs(get()))
+  },
+  setUsageCount: (on) => {
+    set({ usageCount: on })
     savePrefs(collectPrefs(get()))
   },
   setMarkdownSnippets: (on) => {
@@ -7372,6 +9089,30 @@ export const useStore = create<Store>((set, get) => {
   setTextReplacements: (replacements) => {
     set({ textReplacements: normalizeTextReplacements(replacements) })
     savePrefs(collectPrefs(get()))
+  },
+  saveTaskFilter: (name, query) => {
+    const next = withSavedTaskFilter(get().savedTaskFilters, name, query)
+    if (next === get().savedTaskFilters) return
+    set({ savedTaskFilters: next })
+    savePrefs(collectPrefs(get()))
+  },
+  renameSavedTaskFilter: (from, to) => {
+    const next = renameSavedTaskFilterEntry(get().savedTaskFilters, from, to)
+    if (next === get().savedTaskFilters) return
+    set({ savedTaskFilters: next })
+    savePrefs(collectPrefs(get()))
+  },
+  deleteSavedTaskFilter: (name) => {
+    const next = withoutSavedTaskFilter(get().savedTaskFilters, name)
+    if (next === get().savedTaskFilters) return
+    set({ savedTaskFilters: next })
+    savePrefs(collectPrefs(get()))
+  },
+  applySavedTaskFilter: (name) => {
+    const query = savedTaskFilterQuery(get().savedTaskFilters, name)
+    if (query === null) return false
+    set({ tasksFilter: query, taskCursorIndex: 0 })
+    return true
   },
   setAutoPairs: (on) => {
     set({ autoPairs: on })
@@ -7406,6 +9147,10 @@ export const useStore = create<Store>((set, get) => {
     set({ workflowsEnabled: on })
     savePrefs(collectPrefs(get()))
     if (!on) closeWorkflowsTabsEverywhere()
+  },
+  setWorkflowEventTriggers: (on) => {
+    set({ workflowEventTriggers: on })
+    savePrefs(collectPrefs(get()))
   },
   setAtlasEnabled: (on) => {
     set({ atlasEnabled: on })
@@ -7588,7 +9333,7 @@ export const useStore = create<Store>((set, get) => {
     set({ manualNoteOrder: nextMap })
     writeManualOrder(s.vault?.root ?? '', nextMap)
   },
-  reorderTaskInNote: async (task, targetTask, position) => {
+  reorderTaskInNote: trackTaskWrite(async (task, targetTask, position) => {
     // Reorder is a within-note line move — tasks in different notes live in
     // different files, so cross-note moves aren't possible here.
     if (task.sourcePath !== targetTask.sourcePath || task.taskIndex === targetTask.taskIndex) {
@@ -7627,7 +9372,7 @@ export const useStore = create<Store>((set, get) => {
         void get().rescanTasksForPath(path)
       }
     }
-  },
+  }),
   setGroupByKind: (on) => {
     set({ groupByKind: on })
     savePrefs(collectPrefs(get()))
@@ -7642,6 +9387,10 @@ export const useStore = create<Store>((set, get) => {
     set({ unifiedSidebar: true })
     savePrefs(collectPrefs(get()))
     persistVaultViewOverride({ unifiedSidebar: true })
+  },
+  setShowWindowTitleBar: (on) => {
+    set({ showWindowTitleBar: on })
+    savePrefs(collectPrefs(get()))
   },
   setDarkSidebar: (on) => {
     set({ darkSidebar: on })
@@ -7845,7 +9594,7 @@ export const useStore = create<Store>((set, get) => {
     await get().openDailyNoteForDate(new Date())
   },
 
-  ensureDailyNoteForDate: async (date) => {
+  ensureDailyNoteForDate: trackNoteWrite(null, async (date) => {
     const state = get()
     const settings = normalizeVaultSettings(state.vaultSettings)
     if (!settings.dailyNotes.enabled) return null
@@ -7858,15 +9607,16 @@ export const useStore = create<Store>((set, get) => {
       const meta = await window.zen.createNote('inbox', title, subpath)
       rememberEditModeForCreatedNote(meta.path)
       if (body) await window.zen.writeNote(meta.path, body)
+      emitNoteEvent('note-created', meta.path)
       await get().refreshNotes()
       return get().notes.find((n) => n.path === meta.path) ?? meta
     } catch (err) {
       console.error('ensureDailyNoteForDate failed', err)
       return null
     }
-  },
+  }),
 
-  addTaskForDate: async (dateIso, text) => {
+  addTaskForDate: trackNoteWrite(undefined, async (dateIso, text) => {
     const content = text.trim()
     if (!content) return
     const parsed = parseIsoDateLocal(dateIso)
@@ -7892,8 +9642,9 @@ export const useStore = create<Store>((set, get) => {
       : `- [ ] ${content} due:${dateIso}`
     const openBuffer = get().noteContents[path]
     const body = openBuffer?.body ?? (await window.zen.readNote(path)).body
-    const trimmed = body.replace(/\s+$/u, '')
-    const nextBody = trimmed.length ? `${trimmed}\n${line}\n` : `${line}\n`
+    // Insert into the note's Tasks section when one exists; otherwise
+    // append to the end of the note
+    const nextBody = insertTasksUnderTasksHeading(body, [line])
     if (openBuffer) {
       // Open note: edit through the buffer so unsaved changes aren't stomped;
       // its autosave + the watcher rescan the tasks (a disk rescan now would be
@@ -7907,19 +9658,16 @@ export const useStore = create<Store>((set, get) => {
         console.error('addTaskForDate writeNote failed', err)
       }
     }
-  },
+  }),
 
-  rolloverUnfinishedTasksIntoToday: async (opts) => {
+  rolloverUnfinishedTasksIntoToday: trackNoteWrite(0, async (opts) => {
     const force = opts?.force === true
     const settings = normalizeVaultSettings(get().vaultSettings)
     if (!settings.dailyNotes.enabled) return 0
     const today = new Date()
     const todayIso = noteTitleForDate(today)
     const vaultRoot = get().vault?.root ?? ''
-    if (!force) {
-      if (!settings.dailyNotes.rolloverUnfinishedTasks) return 0
-      if (readRolloverMarker(vaultRoot) === todayIso) return 0
-    }
+    if (!force && !settings.dailyNotes.rolloverUnfinishedTasks) return 0
     const todayNote = await get().ensureDailyNoteForDate(today)
     if (!todayNote) return 0
     if (opts?.open) {
@@ -7939,9 +9687,20 @@ export const useStore = create<Store>((set, get) => {
     }
     pastNotes.sort((a, b) => (a.iso < b.iso ? -1 : a.iso > b.iso ? 1 : 0))
 
+    // The explicit command is the escape hatch: it re-reads every past note
+    // instead of trusting the record. Notes that vanished from the listing
+    // drop out of the record because only notes seen this run are carried.
+    const clean = force ? {} : readRolloverClean(vaultRoot)
+    const nextClean: RolloverCleanRecord = {}
     const movedLines: string[] = []
+    const trimmed: Array<{ path: string; rest: string; buffered: boolean }> = []
     for (const { note } of pastNotes) {
+      const signature = rolloverNoteSignature(note)
       const buffer = get().noteContents[note.path]
+      if (!buffer && clean[note.path] === signature) {
+        nextClean[note.path] = signature
+        continue
+      }
       let body: string
       try {
         body = buffer?.body ?? (await window.zen.readNote(note.path)).body
@@ -7950,29 +9709,24 @@ export const useStore = create<Store>((set, get) => {
         continue
       }
       const { moved, rest } = extractOpenTaskBlocks(body)
-      if (moved.length === 0) continue
-      movedLines.push(...moved)
-      if (buffer) {
-        // Open buffer: route through the normal edit pipeline (marks dirty,
-        // autosaves, watcher rescans tasks) — same as toggleTaskFromList. A disk
-        // rescan here would read the not-yet-flushed file and go stale.
-        get().updateNoteBody(note.path, rest)
-      } else {
-        try {
-          await window.zen.writeNote(note.path, rest)
-          await get().rescanTasksForPath(note.path)
-        } catch (err) {
-          console.error('rollover writeNote (source) failed', note.path, err)
-          // Don't drop the lines we already pulled — they'll still land in today.
-        }
+      if (moved.length === 0) {
+        // The signature describes the file on disk, so only a disk read may
+        // vouch for it: an open buffer can be ahead of the listing, and it
+        // costs nothing to read again.
+        if (!buffer) nextClean[note.path] = signature
+        continue
       }
+      movedLines.push(...moved)
+      trimmed.push({ path: note.path, rest, buffered: Boolean(buffer) })
     }
 
     if (movedLines.length === 0) {
-      writeRolloverMarker(vaultRoot, todayIso)
+      writeRolloverClean(vaultRoot, nextClean)
       return 0
     }
 
+    // Today's note takes the tasks first and the sources give them up after,
+    // so a failure midway leaves a task in two notes rather than in none.
     const todayBuffer = get().noteContents[todayNote.path]
     let todayBody: string
     try {
@@ -7983,7 +9737,9 @@ export const useStore = create<Store>((set, get) => {
     }
     // Group the rolled-over tasks under today's `## Tasks` heading if it has
     // one, else append them to the end (#452).
-    const nextBody = insertTasksUnderTasksHeading(todayBody, movedLines)
+    const nextBody = insertTasksUnderTasksHeading(todayBody, movedLines, {
+      replaceEmptyPlaceholders: true
+    })
     if (todayBuffer) {
       get().updateNoteBody(todayNote.path, nextBody)
     } else {
@@ -7995,9 +9751,29 @@ export const useStore = create<Store>((set, get) => {
         return 0
       }
     }
-    writeRolloverMarker(vaultRoot, todayIso)
+
+    for (const { path, rest, buffered } of trimmed) {
+      if (buffered) {
+        // Open buffer: route through the normal edit pipeline (marks dirty,
+        // autosaves, watcher rescans tasks), same as toggleTaskFromList. A disk
+        // rescan here would read the not-yet-flushed file and go stale.
+        get().updateNoteBody(path, rest)
+      } else {
+        try {
+          await window.zen.writeNote(path, rest)
+          await get().rescanTasksForPath(path)
+        } catch (err) {
+          console.error('rollover writeNote (source) failed', path, err)
+          // The task already landed in today; the copy left here rolls again
+          // next time and the user sees a duplicate, not a lost task.
+        }
+      }
+    }
+    // Trimmed notes are left out on purpose: their signature changes with the
+    // write, and the next run reads them once more before vouching for them.
+    writeRolloverClean(vaultRoot, nextClean)
     return movedLines.length
-  },
+  }),
 
   openWeeklyNoteForDate: async (date) => {
     const state = get()
@@ -8119,7 +9895,7 @@ export const useStore = create<Store>((set, get) => {
     await get().loadCustomTemplates()
   },
 
-  createFromTemplate: async (template, opts) => {
+  createFromTemplate: trackNoteWrite(undefined, async (template, opts) => {
     try {
       // 1. Destination. An explicit folder (e.g. right-click on a folder) is
       // used directly; otherwise prompt, defaulting to the vault root so the
@@ -8164,6 +9940,7 @@ export const useStore = create<Store>((set, get) => {
       const { body, cursorOffset } = renderTemplate(template.body, { title, now: opts?.date })
       const meta = await window.zen.createNote(folder, title, subpath)
       rememberEditModeForCreatedNote(meta.path)
+      emitNoteEvent('note-created', meta.path)
       // Write the rendered body before opening so the editor never flashes the
       // default `# Title` scaffold (mirrors importDroppedMarkdownFiles).
       await window.zen.writeNote(meta.path, body)
@@ -8182,7 +9959,7 @@ export const useStore = create<Store>((set, get) => {
     } catch (err) {
       console.error('createFromTemplate failed', err)
     }
-  },
+  }),
 
   saveActiveNoteAsTemplate: async () => {
     const active = get().activeNote
@@ -8200,7 +9977,7 @@ export const useStore = create<Store>((set, get) => {
     await get().saveCustomTemplate({ slug: slugifyTemplateName(trimmed), raw })
   },
 
-  saveActiveNoteAs: async (newName: string) => {
+  saveActiveNoteAs: trackNoteWrite(undefined, async (newName: string) => {
     const active = get().activeNote
     const notePath = active?.path
     if (!active || !notePath) return
@@ -8229,7 +10006,7 @@ export const useStore = create<Store>((set, get) => {
     } catch (err) {
       window.alert(err instanceof Error ? err.message : String(err))
     }
-  },
+  }),
 
   setWordWrap: (on) => {
     set({ wordWrap: on })
@@ -8294,6 +10071,39 @@ export const useStore = create<Store>((set, get) => {
     set({ hasCompletedOnboarding: true })
     savePrefs(collectPrefs(get()))
   },
+  showWhatsNewAfterUpdate: async () => {
+    if (!isDesktopHost()) return
+    const current = window.zen.getAppInfo().version
+    const { updated, entries, record, count } = whatsNewAtLaunch({
+      lastSeen: get().lastSeenWhatsNewVersion,
+      current,
+      returningUser: onboardedAtLaunch ?? get().hasCompletedOnboarding
+    })
+    // Recorded before the window opens, so a second window starting with
+    // this one, or a crash with it open, does not show it twice.
+    if (record) {
+      set({ lastSeenWhatsNewVersion: current })
+      savePrefs(collectPrefs(get()))
+    }
+    // One anonymous count per fresh install and per update, never per launch
+    // (the recorded version above is what makes it once).
+    if (count && get().usageCount) void window.zen.sendUsageCount?.(count)
+    if (!updated) return
+    const showCloud = !(await cloudConnected())
+    if (!entries.length && !showCloud) return
+    set({ whatsNewOpen: true, whatsNew: { version: current, entries, showCloud } })
+  },
+  openWhatsNew: async () => {
+    if (!isDesktopHost()) return
+    const current = window.zen.getAppInfo().version
+    const entries = whatsNewOnDemand(current)
+    const showCloud = !(await cloudConnected())
+    set({
+      whatsNewOpen: true,
+      whatsNew: { version: entries[0]?.version ?? current, entries, showCloud }
+    })
+  },
+  closeWhatsNew: () => set({ whatsNewOpen: false, whatsNew: null }),
   restartOnboarding: () => {
     set({ hasCompletedOnboarding: false, settingsOpen: false })
     savePrefs(collectPrefs(get()))
@@ -8344,6 +10154,8 @@ export const useStore = create<Store>((set, get) => {
   },
 
   focusTabInPane: async (paneId, path) => {
+    const isCurrent = captureNavigationContext()
+    if (!isCurrent()) return
     const s = get()
     const leaf = findLeaf(s.paneLayout, paneId)
     if (!leaf) return
@@ -8353,6 +10165,8 @@ export const useStore = create<Store>((set, get) => {
     if (s.activePaneId === paneId && s.selectedPath && s.selectedPath !== path) {
       if (s.noteDirty[s.selectedPath]) await get().persistNote(s.selectedPath)
     }
+
+    if (!isCurrent()) return
 
     // Virtual Workflows tab. Same deal as Tasks below: `zen://workflows` is not
     // a file, so it must short-circuit before the disk read or readNote tries to
@@ -8490,7 +10304,9 @@ export const useStore = create<Store>((set, get) => {
     if (needContent) {
       set({ loadingNote: paneId === s.activePaneId })
       try {
+        const scope = noteReadCacheKey(s, path)
         const content = await readNoteContent(path, s)
+        if (!isCurrent() || noteReadCacheKey(get(), path) !== scope) return
         set((cur) => {
           const contents = { ...cur.noteContents, [path]: content }
           const dirty = { ...cur.noteDirty, [path]: false }
@@ -8508,6 +10324,7 @@ export const useStore = create<Store>((set, get) => {
         })
       } catch (err) {
         console.error('focusTabInPane readNote failed', err)
+        if (!isCurrent()) return
         set({ loadingNote: false })
       }
       return
@@ -8526,6 +10343,8 @@ export const useStore = create<Store>((set, get) => {
   },
 
   openNoteInPane: async (paneId, path, insertIndex) => {
+    const isCurrent = captureNavigationContext()
+    if (!isCurrent()) return
     const s = get()
     const leaf = findLeaf(s.paneLayout, paneId)
     if (!leaf) return
@@ -8551,7 +10370,9 @@ export const useStore = create<Store>((set, get) => {
     }
     if (!s.noteContents[path]) {
       try {
+        const scope = noteReadCacheKey(s, path)
         const content = await readNoteContent(path, s)
+        if (!isCurrent() || noteReadCacheKey(get(), path) !== scope) return
         set((cur) => {
           const contents = { ...cur.noteContents, [path]: content }
           const dirty = { ...cur.noteDirty, [path]: false }
@@ -8758,6 +10579,11 @@ export const useStore = create<Store>((set, get) => {
           ...cur.paneModes,
           [newLeaf.id]: cur.paneModes[sourcePaneId ?? targetPaneId] ?? {}
         },
+        // Same for per-note panels: the note keeps its panels in the new pane.
+        panePanels: {
+          ...cur.panePanels,
+          [newLeaf.id]: cur.panePanels[sourcePaneId ?? targetPaneId] ?? {}
+        },
         ...activeFieldsFrom(layout, newLeaf.id, nextContents, nextDirty)
       }
     })
@@ -8773,6 +10599,19 @@ export const useStore = create<Store>((set, get) => {
       // every note in this pane follow it.
       paneStickyModes: { ...s.paneStickyModes, [paneId]: mode }
     })),
+
+  updatePanePanelsForPath: (paneId, path, update) => {
+    // `update` runs out here, not inside `set`: the panel toggles do store
+    // writes of their own in it (closing a preview, moving focus), and a
+    // write nested in a `set` callback is clobbered when that callback returns.
+    const current = get().panePanels[paneId] ?? {}
+    const next = panePanelsWithPath(current, path, update(panePanelsForPath(current, path)))
+    if (next === current) return
+    set((s) => ({ panePanels: { ...s.panePanels, [paneId]: next } }))
+    // Panels are part of the workspace snapshot, and nothing else about the
+    // workspace changes when one is toggled, so the save is asked for here.
+    get().persistWorkspace()
+  },
 
   resizeSplit: (splitId, sizes) => {
     set((s) => {
@@ -8840,162 +10679,83 @@ export const useStore = create<Store>((set, get) => {
   clearPendingTitleFocus: () => set({ pendingTitleFocusPath: null }),
   clearPendingJumpLocation: () => set({ pendingJumpLocation: null }),
 
-  renameTag: async (oldTag, newTag) => {
+  renameTag: trackNoteWrite(undefined, async (oldTag, newTag) => {
     await rewriteTagAcrossVault(get, oldTag, newTag)
-  },
-  deleteTag: async (tag) => {
+  }),
+  deleteTag: trackNoteWrite(undefined, async (tag) => {
     await rewriteTagAcrossVault(get, tag, null)
-  },
+  }),
 
-  createFolder: async (folder, subpath) => {
+  createFolder: async (folder, subpath, hostIsCurrent) => {
+    if (workspaceWritesBlocked()) return
+    const isCurrent = captureFolderActionContext(get, hostIsCurrent)
+    if (!isCurrent()) return
+    noteIndexRequest += 1
     await window.zen.createFolder(folder, subpath)
+    if (!isCurrent()) return
     await get().refreshNotes()
-    set({ view: { kind: 'folder', folder, subpath } })
+    if (isCurrent()) set({ view: { kind: 'folder', folder, subpath } })
   },
 
-  renameFolder: async (folder, oldSubpath, newSubpath) => {
-    await window.zen.renameFolder(folder, oldSubpath, newSubpath)
-
-    const folderPath = resolveFolderPath(folder, get().vaultSettings.systemFolderPaths)
-    const oldPrefix = `${folderPath}/${oldSubpath}/`
-    const newPrefix = `${folderPath}/${newSubpath}/`
-    const rewritePath = (p: string): string =>
-      p.toLowerCase().startsWith(oldPrefix.toLowerCase())
-        ? newPrefix + p.slice(oldPrefix.length)
-        : p
-
-    const notes = get().notes.map((n) =>
-      n.path.toLowerCase().startsWith(oldPrefix.toLowerCase()) ? { ...n, path: rewritePath(n.path) } : n
-    )
-    const folders = get().folders.map((f) => {
-      if (f.folder !== folder) return f
-      if (f.subpath === oldSubpath) return { ...f, subpath: newSubpath }
-      if (f.subpath.startsWith(`${oldSubpath}/`)) {
-        return { ...f, subpath: newSubpath + f.subpath.slice(oldSubpath.length) }
-      }
-      return f
-    })
-    const nextFolderIcons = rewriteFolderIconsForRename(
-      get().vaultSettings.folderIcons,
+  renameFolder: async (folder, oldSubpath, requestedSubpath, hostIsCurrent) => {
+    const settings = get().vaultSettings
+    await renameFolderImpl(
       folder,
       oldSubpath,
-      newSubpath
+      `${vaultRelativeFolderPath(folder, oldSubpath, settings)}/`,
+      async () => {
+        const subpath = await window.zen.renameFolder(folder, oldSubpath, requestedSubpath)
+        return { subpath, prefix: `${vaultRelativeFolderPath(folder, subpath, settings)}/` }
+      },
+      hostIsCurrent
     )
-    const nextFolderColors = rewriteFolderColorsForRename(
-      get().vaultSettings.folderColors,
-      folder,
-      oldSubpath,
-      newSubpath
-    )
-    set((s) => {
-      const nextLayout = rewritePathsInTree(s.paneLayout, rewritePath)
-      const ensured = ensureActivePane(nextLayout, s.activePaneId)
-      const contents: Record<string, NoteContent> = {}
-      const dirty: Record<string, boolean> = {}
-      for (const [path, content] of Object.entries(s.noteContents)) {
-        const next = rewritePath(path)
-        contents[next] = path === next ? content : { ...content, path: next }
-        dirty[next] = s.noteDirty[path] ?? false
-      }
-      return {
-        notes,
-        folders,
-        paneLayout: ensured.layout,
-        activePaneId: ensured.activePaneId,
-        noteContents: contents,
-        noteDirty: dirty,
-        noteBackstack: rewriteNoteJumpHistory(s.noteBackstack, rewritePath),
-        noteForwardstack: rewriteNoteJumpHistory(s.noteForwardstack, rewritePath),
-        pendingJumpLocation: s.pendingJumpLocation
-          ? { ...s.pendingJumpLocation, path: rewritePath(s.pendingJumpLocation.path) }
-          : null,
-        pinnedRefPath: s.pinnedRefPath ? rewritePath(s.pinnedRefPath) : null,
+  },
+
+  deleteFolder: async (folder, subpath, hostIsCurrent) => {
+    const isCurrent = captureFolderActionContext(get, hostIsCurrent)
+    const canReconcile = captureFolderActionContext(get)
+    if (!isCurrent()) return
+    const prefix = `${vaultRelativeFolderPath(folder, subpath, get().vaultSettings)}/`
+    await mutateFolderContents(get, prefix, isCurrent, canReconcile, async () => {
+      await window.zen.deleteFolder(folder, subpath)
+      if (!canReconcile()) return
+      noteIndexRequest += 1
+      taskIndexRevision += 1
+      assetIndexRequest += 1
+      set((s) => ({
+        ...rewriteFolderWorkspace(s, prefix, null),
+        notes: s.notes.filter((note) => !note.path.startsWith(prefix)),
+        folders: s.folders.filter(
+          (entry) =>
+            entry.folder !== folder ||
+            (entry.subpath !== subpath && !entry.subpath.startsWith(`${subpath}/`))
+        ),
+        view:
+          s.view.kind === 'folder' &&
+          s.view.folder === folder &&
+          (s.view.subpath === subpath || s.view.subpath.startsWith(`${subpath}/`))
+            ? { kind: 'folder', folder, subpath: '' }
+            : s.view,
         vaultSettings: {
           ...s.vaultSettings,
-          folderIcons: nextFolderIcons,
-          folderColors: nextFolderColors
-        },
-        ...activeFieldsFrom(ensured.layout, ensured.activePaneId, contents, dirty)
-      }
-    })
-
-    // Repoint favorites at the renamed folder (its own key, descendant folder
-    // keys, and note favorites that lived under it) and persist.
-    await get().applyFavorites(
-      rewriteFavoritesForFolderRename(
-        get().vaultSettings.favorites,
-        folder,
-        oldSubpath,
-        newSubpath,
-        oldPrefix,
-        newPrefix
-      )
-    )
-
-    await get().refreshNotes()
-
-    const v = get().view
-    if (v.kind === 'folder' && v.folder === folder) {
-      if (v.subpath === oldSubpath) {
-        set({ view: { ...v, subpath: newSubpath } })
-      } else if (v.subpath.startsWith(`${oldSubpath}/`)) {
-        const tail = v.subpath.slice(oldSubpath.length + 1)
-        set({ view: { ...v, subpath: `${newSubpath}/${tail}` } })
-      }
-    }
-  },
-
-  deleteFolder: async (folder, subpath) => {
-    await window.zen.deleteFolder(folder, subpath)
-    await get().refreshNotes()
-    const v = get().view
-    if (
-      v.kind === 'folder' &&
-      v.folder === folder &&
-      (v.subpath === subpath || v.subpath.startsWith(`${subpath}/`))
-    ) {
-      set({ view: { kind: 'folder', folder, subpath: '' } })
-    }
-    const folderPath = resolveFolderPath(folder, get().vaultSettings.systemFolderPaths)
-    const prefix = `${folderPath}/${subpath}/`
-    const nextFolderIcons = removeFolderIcons(get().vaultSettings.folderIcons, folder, subpath)
-    const nextFolderColors = removeFolderColors(get().vaultSettings.folderColors, folder, subpath)
-    set((s) => {
-      const nextLayout = rewritePathsInTree(s.paneLayout, (p) =>
-        p.startsWith(prefix) ? null : p
-      )
-      const ensured = ensureActivePane(nextLayout, s.activePaneId)
-      const contents: Record<string, NoteContent> = {}
-      const dirty: Record<string, boolean> = {}
-      for (const [path, content] of Object.entries(s.noteContents)) {
-        if (!path.startsWith(prefix)) {
-          contents[path] = content
-          dirty[path] = s.noteDirty[path] ?? false
+          folderIcons: removeFolderIcons(s.vaultSettings.folderIcons, folder, subpath),
+          folderColors: removeFolderColors(s.vaultSettings.folderColors, folder, subpath)
         }
-      }
-      return {
-        paneLayout: ensured.layout,
-        activePaneId: ensured.activePaneId,
-        noteContents: contents,
-        noteDirty: dirty,
-        pendingJumpLocation: null,
-        pinnedRefPath:
-          s.pinnedRefPath && s.pinnedRefPath.startsWith(prefix) ? null : s.pinnedRefPath,
-        vaultSettings: {
-          ...s.vaultSettings,
-          folderIcons: nextFolderIcons,
-          folderColors: nextFolderColors
-        },
-        ...activeFieldsFrom(ensured.layout, ensured.activePaneId, contents, dirty)
-      }
+      }))
+      savePrefs(collectPrefs(get()))
+      writeManualOrder(get().vault?.root ?? '', get().manualNoteOrder)
+      await get().applyFavorites(
+        removeFavoritesForFolder(get().vaultSettings.favorites, folder, subpath, prefix)
+      )
+      if (!isCurrent()) return null
+      await get().refreshNotes()
+      if (!isCurrent()) return null
+      return null
     })
-    // Drop favorites for the deleted folder and the notes that lived under it.
-    await get().applyFavorites(
-      removeFavoritesForFolder(get().vaultSettings.favorites, folder, subpath, prefix)
-    )
   },
 
-  duplicateFolder: async (folder, subpath) => {
+
+  duplicateFolder: trackNoteWrite(undefined, async (folder, subpath) => {
     const newSubpath = await window.zen.duplicateFolder(folder, subpath)
     await get().refreshNotes()
     set((s) => ({
@@ -9016,7 +10776,7 @@ export const useStore = create<Store>((set, get) => {
         )
       }
     }))
-  },
+  }),
 
   revealFolder: async (folder, subpath) => {
     await window.zen.revealFolder(folder, subpath)
@@ -9026,44 +10786,12 @@ export const useStore = create<Store>((set, get) => {
     await window.zen.revealAssetsDir()
   },
 
-  moveNote: async (relPath, targetFolder, targetSubpath) => {
+  moveNote: async (relPath, targetFolder, targetSubpath, hostIsCurrent) => {
     try {
-      const meta = await window.zen.moveNote(relPath, targetFolder, targetSubpath)
-      await get().refreshNotes()
-      set((s) => {
-        const rewrite = (p: string): string => (p === relPath ? meta.path : p)
-        const nextLayout = rewritePathsInTree(s.paneLayout, rewrite)
-        const ensured = ensureActivePane(nextLayout, s.activePaneId)
-        const contents = { ...s.noteContents }
-        const dirty = { ...s.noteDirty }
-        const prev = contents[relPath]
-        if (relPath !== meta.path) {
-          delete contents[relPath]
-          delete dirty[relPath]
-        }
-        if (prev) {
-          contents[meta.path] = { ...prev, ...meta }
-          dirty[meta.path] = s.noteDirty[relPath] ?? false
-        }
-        return {
-          paneLayout: ensured.layout,
-          activePaneId: ensured.activePaneId,
-          noteContents: contents,
-          noteDirty: dirty,
-          noteBackstack: rewriteNoteJumpHistory(s.noteBackstack, rewrite),
-          noteForwardstack: rewriteNoteJumpHistory(s.noteForwardstack, rewrite),
-          pendingJumpLocation:
-            s.pendingJumpLocation?.path === relPath
-              ? { ...s.pendingJumpLocation, path: meta.path }
-              : s.pendingJumpLocation,
-          pinnedRefPath: s.pinnedRefPath === relPath ? meta.path : s.pinnedRefPath,
-          ...activeFieldsFrom(ensured.layout, ensured.activePaneId, contents, dirty)
-        }
-      })
-      await get().applyFavorites(
-        rewriteFavoriteNotePath(get().vaultSettings.favorites, relPath, meta.path)
-      )
+      const moved = await mutateNoteImpl(relPath, () => window.zen.moveNote(relPath, targetFolder, targetSubpath), hostIsCurrent)
+      if (moved && moved.path !== relPath) emitNoteEvent('note-moved', moved.path)
     } catch (err) {
+      if (hostIsCurrent) throw err
       console.error('moveNote failed', err)
     }
   },
@@ -9118,104 +10846,9 @@ export const useStore = create<Store>((set, get) => {
     }
   },
 
-  init: async () => {
-    if (get().initialized) return
-    const startedAt = performance.now()
-    set({ initialized: true })
-    let initializedVault = false
-    try {
-      const remoteWorkspaceProfilesPromise = get().refreshRemoteWorkspaceProfiles()
-      const localVaultsPromise = get().refreshLocalVaults()
-      const [remoteWorkspaceInfo, serverCapabilities] = await Promise.all([
-        get().refreshWorkspaceContext(),
-        window.zen.getServerCapabilities().catch(() => null)
-      ])
-      if (!(await ensureWebServerSession(serverCapabilities))) {
-        void remoteWorkspaceProfilesPromise
-        void localVaultsPromise
-        set({
-          workspaceMode: workspaceModeFrom(remoteWorkspaceInfo),
-          remoteWorkspaceInfo,
-          workspaceSetupError: null,
-          workspaceRestored: true,
-          vaultSettings: DEFAULT_VAULT_SETTINGS
-        })
-        recordRendererPerf('store.init', performance.now() - startedAt, {
-          hasVault: false
-        })
-        return
-      }
-      const vault = await window.zen.getCurrentVault()
-      void remoteWorkspaceProfilesPromise
-      void localVaultsPromise
-      if (vault) {
-        const vaultSettings = normalizeVaultSettings(await window.zen.getVaultSettings())
-        set({
-          vault,
-          workspaceMode: workspaceModeFrom(remoteWorkspaceInfo),
-          remoteWorkspaceInfo,
-          workspaceSetupError: null,
-          vaultSettings,
-          workspaceRestored: false
-        })
-        await openVaultWorkspace(vault)
-        await prefetchInitialVisibleNotes(get())
-        initializedVault = true
-      } else {
-        set({
-          workspaceMode: workspaceModeFrom(remoteWorkspaceInfo),
-          remoteWorkspaceInfo,
-          workspaceSetupError: null,
-          workspaceRestored: true,
-          vaultSettings: DEFAULT_VAULT_SETTINGS
-        })
-      }
-    } catch (err) {
-      console.error('init failed', err)
-      set({
-        workspaceMode: 'local',
-        remoteWorkspaceInfo: null,
-        workspaceSetupError:
-          window.zen.getAppInfo().runtime === 'web' ? describeWebServerSetupError(err) : null,
-        workspaceRestored: true,
-        vaultSettings: DEFAULT_VAULT_SETTINGS
-      })
-    }
-    recordRendererPerf('store.init', performance.now() - startedAt, {
-      hasVault: initializedVault
-    })
-    // Default focus to the sidebar so j/k navigation works immediately
-    if (get().sidebarOpen && !get().focusedPanel) {
-      set({ focusedPanel: 'sidebar' })
-    }
-    // Restore the pinned reference note by loading its content — the
-    // path survived in prefs; `refreshNotes` has already confirmed it
-    // still exists and otherwise cleared `pinnedRefPath`.
-    const pinnedPath = get().pinnedRefPath
-    if (pinnedPath && !get().noteContents[pinnedPath]) {
-      try {
-        const content = await readNoteContent(pinnedPath, get())
-        set((s) => ({
-          noteContents: { ...s.noteContents, [pinnedPath]: content },
-          noteDirty: { ...s.noteDirty, [pinnedPath]: false }
-        }))
-      } catch (err) {
-        console.error('pinned reference readNote failed', err)
-        set({ pinnedRefPath: null })
-        savePrefs(collectPrefs(get()))
-      }
-    }
-    // `retryWorkspaceBoot` re-enters `init` on every successful reconnect, so
-    // the previous subscription has to go before a new one is made. Without
-    // this each reconnect left a live listener behind and one file change
-    // arrived as N changes, each running the full `applyChange`.
-    vaultChangeUnsubscribe?.()
-    vaultChangeUnsubscribe = window.zen.onVaultChange((ev) => {
-      void get().applyChange(ev)
-    })
-  },
+  init: () => get().initialized ? Promise.resolve() : runWorkspaceTransition(initImpl, true),
 
-  retryWorkspaceBoot: async () => {
+  retryWorkspaceBoot: () => runWorkspaceTransition(async () => {
     set({ workspaceSetupError: null })
     try {
       const vault = await window.zen.retryWorkspaceBoot()
@@ -9224,7 +10857,7 @@ export const useStore = create<Store>((set, get) => {
         // vault, settings, indexes and session restore land the normal way.
         // init() is once-guarded for real boots; this re-entry is the point.
         set({ initialized: false })
-        await get().init()
+        await initImpl()
         return
       }
       // Still down. Refresh the info so the screen shows the latest reason.
@@ -9233,9 +10866,9 @@ export const useStore = create<Store>((set, get) => {
       console.error('retryWorkspaceBoot failed', err)
       set({ workspaceSetupError: humanIpcError(err, 'Could not reach the server.') })
     }
-  },
+  }),
 
-  openVaultPicker: async () => {
+  openVaultPicker: () => runWorkspaceTransition(async () => {
     await get().flushDirtyNotes()
     set({ workspaceSetupError: null })
     const capabilities = window.zen.getCapabilities()
@@ -9289,6 +10922,7 @@ export const useStore = create<Store>((set, get) => {
       folders: [],
       hasAssetsDir: false,
       assetFiles: [],
+      assetFilesListed: false,
       assetUndoStack: [],
       closedTabStack: [],
       workflowRunRecord: null,
@@ -9312,66 +10946,42 @@ export const useStore = create<Store>((set, get) => {
     })
     savePrefs(collectPrefs(get()))
     await openVaultWorkspace(vault)
-  },
+  }),
 
-  openLocalVault: async (root: string) => {
+  openLocalVault: (root: string) => {
     const trimmed = root.trim()
-    if (!trimmed) return
-    // Only a no-op when we are already in this exact local vault. In remote
-    // mode vault.root holds the server-reported path, which for a localhost
-    // server equals the local vault's own path -- comparing against it here
-    // would wrongly block switching back from remote to local.
-    if (get().workspaceMode === 'local' && trimmed === get().vault?.root) return
-    try {
-      await get().flushDirtyNotes()
-      set({ workspaceSetupError: null })
-      const vault = await window.zen.openLocalVault(trimmed)
-      await get().refreshLocalVaults()
-      if (!vault) return
-
-      const remoteWorkspaceInfo = await get().refreshWorkspaceContext()
-      const vaultSettings = normalizeVaultSettings(await window.zen.getVaultSettings())
-      const fresh = makeLeaf()
-      set({
-        vault,
-        workspaceMode: workspaceModeFrom(remoteWorkspaceInfo),
-        remoteWorkspaceInfo,
-        workspaceSetupError: null,
-        vaultSettings,
-        notes: [],
-        folders: [],
-        hasAssetsDir: false,
-        assetFiles: [],
-        assetUndoStack: [],
-        closedTabStack: [],
-        workflowRunRecord: null,
-        workflowTutorialStep: null,
-        vaultTasks: [],
-        selectedTags: [],
-        view: { kind: 'folder', folder: 'inbox', subpath: '' },
-        selectedPath: null,
-        activeNote: null,
-        activeDirty: false,
-        paneLayout: fresh,
-        activePaneId: fresh.id,
-        noteContents: {},
-        noteDirty: {},
-        loadingNote: false,
-        noteBackstack: [],
-        noteForwardstack: [],
-        pendingJumpLocation: null,
-        pinnedRefPath: null,
-        workspaceRestored: false
-      })
-      savePrefs(collectPrefs(get()))
-      await openVaultWorkspace(vault)
-    } catch (err) {
-      console.error('openLocalVault failed', err)
-      window.alert(err instanceof Error ? err.message : String(err))
-    }
+    if (!trimmed || (get().workspaceMode === 'local' && trimmed === get().vault?.root))
+      return Promise.resolve()
+    return runWorkspaceTransition(() => openLocalVaultImpl(trimmed))
   },
 
-  closeVault: async () => {
+  relocateLocalVault: (operation) => runWorkspaceTransition(async () => {
+    const previous = get()
+    if (operation.reopen && (!previous.vault || previous.workspaceMode !== 'local'))
+      throw new Error('Open the local vault before relocating it.')
+    await operation.move()
+    if (!operation.reopen) return
+    try {
+      await openLocalVaultImpl(operation.reopen.destination, true)
+    } catch (error) {
+      try {
+        await operation.rollback()
+        const restored = await window.zen.openLocalVault(operation.reopen.source)
+        if (!restored) throw new Error('The original vault could not be reopened.')
+        set(previous)
+        savePrefs(collectPrefs(previous))
+      } catch (rollbackError) {
+        // Keep writers stopped when the native storage location is uncertain.
+        set({ vault: null, workspaceRestored: false, workspaceSetupError: 'Vault relocation failed. Reopen the vault after checking its storage location.' })
+        throw new AggregateError([error, rollbackError], 'Vault relocation and recovery failed. Your files have not been deleted.')
+      }
+      throw error
+    }
+  }, false, true),
+
+  closeVault: () => {
+    if (!get().vault || get().workspaceMode === 'remote') return Promise.resolve()
+    return runWorkspaceTransition(async () => {
     const closingVault = get().vault
     if (!closingVault || get().workspaceMode === 'remote') return
     try {
@@ -9404,6 +11014,7 @@ export const useStore = create<Store>((set, get) => {
           folders: [],
           hasAssetsDir: false,
           assetFiles: [],
+          assetFilesListed: false,
           assetUndoStack: [],
           closedTabStack: [],
           workflowRunRecord: null,
@@ -9441,6 +11052,7 @@ export const useStore = create<Store>((set, get) => {
         folders: [],
         hasAssetsDir: false,
         assetFiles: [],
+        assetFilesListed: false,
         assetUndoStack: [],
         closedTabStack: [],
         workflowRunRecord: null,
@@ -9467,9 +11079,10 @@ export const useStore = create<Store>((set, get) => {
       console.error('closeVault failed', err)
       window.alert(err instanceof Error ? err.message : String(err))
     }
+    })
   },
 
-  connectRemoteWorkspace: async () => {
+  connectRemoteWorkspace: () => runWorkspaceTransition(async () => {
     try {
       await get().flushDirtyNotes()
       const capabilities = window.zen.getCapabilities()
@@ -9508,7 +11121,7 @@ export const useStore = create<Store>((set, get) => {
 
       const authToken = await promptApp({
         title: 'Auth Token',
-        description: "The server's auth token — leave blank if it doesn't need one.",
+        description: "The server's auth token. Leave blank if it doesn't need one.",
         placeholder: 'Optional',
         okLabel: 'Connect',
         allowEmptySubmit: true,
@@ -9572,6 +11185,7 @@ export const useStore = create<Store>((set, get) => {
         folders: [],
         hasAssetsDir: false,
         assetFiles: [],
+        assetFilesListed: false,
         assetUndoStack: [],
         closedTabStack: [],
         workflowRunRecord: null,
@@ -9602,9 +11216,9 @@ export const useStore = create<Store>((set, get) => {
     } catch (error) {
       window.alert(error instanceof Error ? error.message : String(error))
     }
-  },
+  }),
 
-  connectRemoteWorkspaceProfile: async (id: string) => {
+  connectRemoteWorkspaceProfile: (id: string) => runWorkspaceTransition(async () => {
     try {
       await get().flushDirtyNotes()
       const profile = get().remoteWorkspaceProfiles.find((entry) => entry.id === id)
@@ -9656,6 +11270,7 @@ export const useStore = create<Store>((set, get) => {
         folders: [],
         hasAssetsDir: false,
         assetFiles: [],
+        assetFilesListed: false,
         assetUndoStack: [],
         closedTabStack: [],
         workflowRunRecord: null,
@@ -9682,9 +11297,11 @@ export const useStore = create<Store>((set, get) => {
     } catch (error) {
       window.alert(error instanceof Error ? error.message : String(error))
     }
-  },
+  }),
 
-  changeRemoteWorkspaceVaultPath: async () => {
+  changeRemoteWorkspaceVaultPath: () => {
+    if (get().workspaceMode !== 'remote') return Promise.resolve()
+    return runWorkspaceTransition(async () => {
     try {
       if (get().workspaceMode !== 'remote') return
       const remoteInfo = get().remoteWorkspaceInfo
@@ -9738,6 +11355,7 @@ export const useStore = create<Store>((set, get) => {
         folders: [],
         hasAssetsDir: false,
         assetFiles: [],
+        assetFilesListed: false,
         assetUndoStack: [],
         closedTabStack: [],
         workflowRunRecord: null,
@@ -9764,89 +11382,10 @@ export const useStore = create<Store>((set, get) => {
     } catch (error) {
       window.alert(error instanceof Error ? error.message : String(error))
     }
+    })
   },
 
-  disconnectRemoteWorkspace: async () => {
-    try {
-      await get().flushDirtyNotes()
-      const vault = await window.zen.disconnectRemoteWorkspace()
-      const remoteWorkspaceInfo = await get().refreshWorkspaceContext()
-      await get().refreshLocalVaults()
-
-      if (!vault) {
-        const fresh = makeLeaf()
-        set({
-          vault: null,
-          workspaceMode: workspaceModeFrom(remoteWorkspaceInfo),
-          remoteWorkspaceInfo,
-          vaultSettings: DEFAULT_VAULT_SETTINGS,
-          notes: [],
-          folders: [],
-          hasAssetsDir: false,
-          assetFiles: [],
-          assetUndoStack: [],
-          closedTabStack: [],
-          workflowRunRecord: null,
-          workflowTutorialStep: null,
-          vaultTasks: [],
-          selectedTags: [],
-          view: { kind: 'folder', folder: 'inbox', subpath: '' },
-          selectedPath: null,
-          activeNote: null,
-          activeDirty: false,
-          paneLayout: fresh,
-          activePaneId: fresh.id,
-          noteContents: {},
-          noteDirty: {},
-          loadingNote: false,
-          noteBackstack: [],
-          noteForwardstack: [],
-          pendingJumpLocation: null,
-          pinnedRefPath: null,
-          workspaceRestored: true
-        })
-        savePrefs(collectPrefs(get()))
-        return
-      }
-
-      const vaultSettings = normalizeVaultSettings(await window.zen.getVaultSettings())
-      const fresh = makeLeaf()
-      set({
-        vault,
-        workspaceMode: workspaceModeFrom(remoteWorkspaceInfo),
-        remoteWorkspaceInfo,
-        vaultSettings,
-        notes: [],
-        folders: [],
-        hasAssetsDir: false,
-        assetFiles: [],
-        assetUndoStack: [],
-        closedTabStack: [],
-        workflowRunRecord: null,
-        workflowTutorialStep: null,
-        vaultTasks: [],
-        selectedTags: [],
-        view: { kind: 'folder', folder: 'inbox', subpath: '' },
-        selectedPath: null,
-        activeNote: null,
-        activeDirty: false,
-        paneLayout: fresh,
-        activePaneId: fresh.id,
-        noteContents: {},
-        noteDirty: {},
-        loadingNote: false,
-        noteBackstack: [],
-        noteForwardstack: [],
-        pendingJumpLocation: null,
-        pinnedRefPath: null,
-        workspaceRestored: false
-      })
-      savePrefs(collectPrefs(get()))
-      await openVaultWorkspace(vault)
-    } catch (error) {
-      window.alert(error instanceof Error ? error.message : String(error))
-    }
-  },
+  disconnectRemoteWorkspace: () => runWorkspaceTransition(disconnectRemoteWorkspaceImpl),
 
   saveRemoteWorkspaceProfile: async (input) => {
     const profile = await window.zen.saveRemoteWorkspaceProfile(input)
@@ -9854,7 +11393,7 @@ export const useStore = create<Store>((set, get) => {
     return profile
   },
 
-  deleteRemoteWorkspaceProfile: async (id) => {
+  deleteRemoteWorkspaceProfile: (id) => runWorkspaceTransition(async () => {
     const wasRemote = get().workspaceMode === 'remote'
     await window.zen.deleteRemoteWorkspaceProfile(id)
     const [profiles] = await Promise.all([
@@ -9862,9 +11401,9 @@ export const useStore = create<Store>((set, get) => {
       get().refreshWorkspaceContext()
     ])
     if (wasRemote && profiles.length === 0) {
-      await get().disconnectRemoteWorkspace()
+      await disconnectRemoteWorkspaceImpl()
     }
-  },
+  }),
 
   persistWorkspace: () => {
     const state = get()
@@ -9881,11 +11420,24 @@ export const useStore = create<Store>((set, get) => {
       view: state.view,
       sidebarOpen,
       noteListOpen,
-      selectedTags: state.selectedTags
+      selectedTags: state.selectedTags,
+      panePanels: panePanelsForSnapshot(
+        state.panePanels,
+        new Set(allLeaves(state.paneLayout).map((leaf) => leaf.id))
+      )
     })
   },
 
   flushDirtyNotes: async () => {
+    while (commentOperations.size > 0)
+      await Promise.all([...commentOperations.values()].flatMap(operations => [...operations]))
+    while (inFlightNoteWrites.size > 0) await Promise.all([...inFlightNoteWrites])
+    await Promise.all([...databaseRowActions.values()])
+    await Promise.all([...folderMutations.values(), ...databaseCreations.values()])
+    if ([...uncertainFolderMutations.values()].includes(get().vault))
+      throw new Error('FOLDER_STATE_UNCERTAIN: Reload the vault before saving or switching')
+    await Promise.all([...new Set([...databaseWriteKind.keys(), ...databaseWriteQueues.keys()])]
+      .map((path) => flushDatabaseWrite(path, () => get().databases[path])))
     get().persistWorkspace()
     // Before the dirty sweep, not after: a queued task write on a note someone
     // has open lands in the buffer rather than on disk, so draining first is
@@ -9895,6 +11447,8 @@ export const useStore = create<Store>((set, get) => {
       .filter(([, isDirty]) => isDirty)
       .map(([path]) => path)
     await Promise.all(dirtyPaths.map(async (path) => get().persistNote(path)))
+    if (Object.values(get().noteDirty).some(Boolean))
+      throw new Error('Notes still have unsaved changes. Save them before leaving the vault.')
   }
   }
 })
@@ -10142,7 +11696,7 @@ export function initOverrides(): void {
   }
 }
 
-useCloudSyncStatusStore.subscribe((state) => {
+useCloudSyncStatusStore.subscribe((state, previous) => {
   const nextPaths = new Set(
     (state.lastSummary?.pending_conflicts ?? []).flatMap((conflict) =>
       [conflict.path, conflict.cloud_path]
@@ -10150,18 +11704,13 @@ useCloudSyncStatusStore.subscribe((state) => {
         .map(cloudSyncPathKey)
     )
   )
-  if (
-    nextPaths.size === isolatedCloudTaskPaths.size &&
-    [...nextPaths].every((path) => isolatedCloudTaskPaths.has(path))
-  ) {
-    return
-  }
-
-  const restoredPath = [...isolatedCloudTaskPaths].some((path) => !nextPaths.has(path))
-  isolatedCloudTaskPaths = nextPaths
-  useStore.setState((current) => ({
-    vaultTasks: withoutPendingCloudConflictTasks(current.vaultTasks)
-  }))
+  const restoredPath = (previous.lastSummary?.pending_conflicts ?? []).some((conflict) =>
+    [conflict.path, conflict.cloud_path].some((path) =>
+      path && !nextPaths.has(cloudSyncPathKey(path))
+    )
+  )
+  // Task views always use the local note. A completed decision can replace
+  // that note, so refresh even when the filesystem watcher coalesces its write.
   if (restoredPath && tasksSurfaceVisible(useStore.getState())) {
     void useStore.getState().refreshTasks()
   }

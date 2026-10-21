@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import type {
+  CloudBackupSchedule,
+  CloudBackupScheduleResponse,
+  CloudBackupSnapshotItemCollection,
   CloudSyncContent,
   CloudSyncManifestResponse,
   CloudSyncMutationRequest,
@@ -13,6 +16,7 @@ import {
   type CloudSyncHostPersistence,
   type CloudSyncHostVault
 } from './cloud-sync-host-service'
+import { CLOUD_VAULT_SUPERSEDED_MESSAGE, isCloudVaultSuperseded } from './cloud-vault-availability'
 
 function textContent(data: string): CloudSyncContent {
   return {
@@ -27,7 +31,14 @@ function textContent(data: string): CloudSyncContent {
 function setup(vaults: CloudSyncVault[] = [], localItems: CloudSyncLocalItem[] = []) {
   let link: unknown = null
   let state: unknown = null
-  const persistence: CloudSyncHostPersistence = {
+  const retiredStates: Array<{ vaultKey: string; baseUrl: string; vaultId: string; state: unknown }> = []
+  const persistence: CloudSyncHostPersistence & {
+    retireState(vaultKey: string, baseUrl: string, vaultId: string): Promise<void>
+  } = {
+    async retireState(vaultKey, baseUrl, vaultId) {
+      if (state !== null) retiredStates.push({ vaultKey, baseUrl, vaultId, state: structuredClone(state) })
+      state = null
+    },
     async loadLink() {
       return link
     },
@@ -112,7 +123,7 @@ function setup(vaults: CloudSyncVault[] = [], localItems: CloudSyncLocalItem[] =
       cursor: body.mutations.length
     })),
     listBackups: vi.fn(async () => ({ data: [] })),
-    backupSchedule: vi.fn(async () => ({
+    backupSchedule: vi.fn(async (): Promise<CloudBackupScheduleResponse> => ({
       data: {
         enabled: false,
         frequency: 'daily' as const,
@@ -128,7 +139,7 @@ function setup(vaults: CloudSyncVault[] = [], localItems: CloudSyncLocalItem[] =
         last_backup_at: null
       }
     })),
-    listBackupItems: vi.fn(async () => ({
+    listBackupItems: vi.fn(async (): Promise<CloudBackupSnapshotItemCollection> => ({
       data: [
         {
           id: 42,
@@ -202,7 +213,7 @@ function setup(vaults: CloudSyncVault[] = [], localItems: CloudSyncLocalItem[] =
     ids: { itemId: () => 'item-1', operationId: () => 'operation-1' }
   })
 
-  return { client, hostVault, persistence, service }
+  return { client, hostVault, persistence, service, retiredStates }
 }
 
 describe('CloudSyncHostService', () => {
@@ -450,6 +461,33 @@ describe('CloudSyncHostService', () => {
     await expect(service.sync(hostVault)).rejects.toThrow('different ZenNotes Cloud account')
   })
 
+  it('hands on why the last automatic backup did not happen, as the service sent it', async () => {
+    const remoteVault: CloudSyncVault = {
+      id: 'vault-1',
+      name: 'Notes',
+      cursor: 0,
+      created_at: '2026-08-10T12:00:00.000Z',
+      updated_at: '2026-08-10T12:00:00.000Z'
+    }
+    const { client, hostVault, service } = setup([remoteVault])
+    await service.link(hostVault, remoteVault.id)
+    const schedule: CloudBackupSchedule = {
+      enabled: true,
+      frequency: 'daily',
+      next_backup_at: '2026-10-05T03:00:00.000Z',
+      last_backup_at: '2026-10-02T03:00:00.000Z',
+      last_failure: {
+        code: 'BACKUP_QUOTA_EXCEEDED',
+        message: 'The latest automatic backup was skipped because this vault reached a backup limit.',
+        details: { limit: 'max_snapshots', current: 30, allowed: 30 },
+        occurred_at: '2026-10-04T03:00:00.000Z'
+      }
+    }
+    client.backupSchedule.mockResolvedValueOnce({ data: schedule })
+
+    await expect(service.backupSchedule(hostVault)).resolves.toEqual(schedule)
+  })
+
   it('creates, lists, schedules, deletes, and restores backups for the linked vault', async () => {
     const remoteVault: CloudSyncVault = {
       id: 'vault-1',
@@ -500,6 +538,48 @@ describe('CloudSyncHostService', () => {
     })
   })
 
+  it('pages and searches backup notes, reading an answer without paging as one page', async () => {
+    const remoteVault: CloudSyncVault = {
+      id: 'vault-1',
+      name: 'Notes',
+      cursor: 0,
+      created_at: '2026-08-10T12:00:00.000Z',
+      updated_at: '2026-08-10T12:00:00.000Z'
+    }
+    const { client, hostVault, service } = setup([remoteVault])
+    await service.link(hostVault, remoteVault.id)
+    const plan = {
+      id: 77,
+      item_id: 'item-77',
+      path: 'Projects/Launch plan.md',
+      kind: 'text',
+      byte_length: 12,
+      revision: 2,
+      content_hash: 'def456',
+      media_type: 'text/markdown'
+    }
+    client.listBackupItems.mockResolvedValueOnce({
+      data: [plan],
+      meta: { current_page: 2, last_page: 5, per_page: 50, total: 230 }
+    })
+
+    await expect(
+      service.listBackupItemsPage(hostVault, 'backup-1', { page: 2, search: '  launch  ' })
+    ).resolves.toEqual({ items: [plan], page: 2, lastPage: 5, total: 230, search: 'launch' })
+    expect(client.listBackupItems).toHaveBeenLastCalledWith('vault-1', 'backup-1', {
+      page: 2,
+      search: '  launch  '
+    })
+
+    await expect(service.listBackupItemsPage(hostVault, 'backup-1', { page: 1 })).resolves.toEqual({
+      items: [expect.objectContaining({ id: 42, path: 'Notes/Launch.md' })],
+      page: 1,
+      lastPage: 1,
+      total: 1,
+      search: ''
+    })
+  })
+
   it('does not snapshot the remote vault when the pre-backup sync has conflicts', async () => {
     const remoteVault: CloudSyncVault = {
       id: 'vault-1',
@@ -527,7 +607,199 @@ describe('CloudSyncHostService', () => {
       local_conflicts: []
     })
 
-    await expect(service.createBackup(hostVault)).rejects.toThrow('Resolve sync conflicts')
+    await expect(service.createBackup(hostVault)).rejects.toThrow('Some files are waiting for review')
     expect(client.createBackup).not.toHaveBeenCalled()
+  })
+
+  it('says which plan limit a refused backup ran into, and passes other failures through', async () => {
+    const remoteVault: CloudSyncVault = {
+      id: 'vault-1',
+      name: 'Notes',
+      cursor: 0,
+      created_at: '2026-08-10T12:00:00.000Z',
+      updated_at: '2026-08-10T12:00:00.000Z'
+    }
+    const { client, hostVault, service } = setup([remoteVault])
+    await service.link(hostVault, remoteVault.id)
+    const outage = Object.assign(new Error('ZenNotes Cloud request failed (503).'), {
+      name: 'CloudServiceRequestError', status: 503, code: null, details: null
+    })
+    client.createBackup
+      .mockRejectedValueOnce(Object.assign(new Error('This backup would exceed your plan limits.'), {
+        name: 'CloudServiceRequestError',
+        status: 409,
+        code: 'BACKUP_QUOTA_EXCEEDED',
+        details: { limit: 'max_snapshot_bytes', current: 54_200_000, allowed: 52_428_800 }
+      }))
+      .mockRejectedValueOnce(outage)
+
+    await expect(service.createBackup(hostVault, 'Before travel')).rejects.toThrow(
+      'This vault holds 54 MB, and backups on your plan hold up to 52 MB. Remove large files, or contact support to raise the limit.'
+    )
+    await expect(service.createBackup(hostVault)).rejects.toBe(outage)
+  })
+})
+
+
+describe('CloudSyncHostService deleted vault recovery (#791)', () => {
+  const remoteVault: CloudSyncVault = {
+    id: 'vault-1', name: 'Notes', cursor: 0,
+    created_at: '2026-09-16T12:00:00.000Z', updated_at: '2026-09-16T12:00:00.000Z'
+  }
+  const missing = () => Object.assign(new Error('The requested resource was not found.'), {
+    name: 'CloudServiceRequestError', status: 404, code: 'NOT_FOUND'
+  })
+
+  it('retires a confirmed deleted association and its old cursor without applying local file changes', async () => {
+    const { service, client, persistence, hostVault } = setup([remoteVault])
+    await service.link(hostVault, remoteVault.id)
+    await service.sync(hostVault)
+    expect(await persistence.loadState(hostVault.key, 'https://zennotes.org', remoteVault.id)).not.toBeNull()
+    const apply = vi.spyOn(hostVault.repository, 'apply')
+    client.changes.mockRejectedValue(missing())
+    client.manifest.mockRejectedValue(missing())
+
+    await expect(service.sync(hostVault)).rejects.toThrow()
+
+    expect(await service.linkedVault(hostVault)).toBeNull()
+    expect(await persistence.loadState(hostVault.key, 'https://zennotes.org', remoteVault.id)).toBeNull()
+    expect(apply).not.toHaveBeenCalled()
+    expect(client.deleteVault).not.toHaveBeenCalled()
+    expect((await service.serviceAccount()).user.email).toBe('ada@example.com')
+  })
+
+  it('archives the full conflict state including an unsent merge draft before retiring it', async () => {
+    const local = textContent('local version')
+    const cloud = textContent('cloud version')
+    const { service, client, persistence, hostVault, retiredStates } = setup(
+      [remoteVault], [{ path: 'Note.md', kind: 'text', content: local }]
+    )
+    client.manifest.mockResolvedValue({
+      data: [{ item_id: 'item-1', path: 'Note.md', kind: 'text', revision: 2,
+        sha256: cloud.sha256, byte_length: cloud.byte_length, media_type: cloud.media_type, content: cloud }],
+      cursor: 1, next_page: null
+    })
+    await service.link(hostVault, remoteVault.id)
+    const conflict = (await service.sync(hostVault)).pending_conflicts![0]!
+    const draft = 'Unsent merge draft\r\nKeep every byte 📝\r\n'
+    await service.saveConflictDraft(hostVault, conflict.id, draft)
+    const state = structuredClone(await persistence.loadState(hostVault.key, 'https://zennotes.org', remoteVault.id))
+    client.changes.mockRejectedValue(missing())
+    client.manifest.mockRejectedValue(missing())
+
+    await expect(service.sync(hostVault)).rejects.toThrow()
+
+    expect(retiredStates).toEqual([{ vaultKey: hostVault.key, baseUrl: 'https://zennotes.org', vaultId: remoteVault.id, state }])
+    expect((retiredStates[0]!.state as CloudSyncState).pending_conflicts![conflict.id]!.draft_text).toBe(draft)
+    expect(await persistence.loadState(hostVault.key, 'https://zennotes.org', remoteVault.id)).toBeNull()
+    expect(await service.linkedVault(hostVault)).toBeNull()
+  })
+
+  it('keeps the link and active state if the recovery archive cannot be written', async () => {
+    const { service, client, persistence, hostVault, retiredStates } = setup([remoteVault])
+    const link = await service.link(hostVault, remoteVault.id)
+    await service.sync(hostVault)
+    const state = structuredClone(await persistence.loadState(hostVault.key, 'https://zennotes.org', remoteVault.id))
+    const retire = vi.spyOn(persistence, 'retireState').mockRejectedValue(new Error('Storage full'))
+    client.changes.mockRejectedValue(missing())
+    client.manifest.mockRejectedValue(missing())
+
+    await expect(service.sync(hostVault)).rejects.toThrow()
+
+    expect(retire).toHaveBeenCalledWith(hostVault.key, 'https://zennotes.org', remoteVault.id)
+    expect(await service.linkedVault(hostVault)).toEqual(link)
+    expect(await persistence.loadState(hostVault.key, 'https://zennotes.org', remoteVault.id)).toEqual(state)
+    expect(retiredStates).toEqual([])
+  })
+
+  it('keeps the association when the same 404 is for a resource inside a surviving vault', async () => {
+    const { service, client, hostVault } = setup([remoteVault])
+    const link = await service.link(hostVault, remoteVault.id)
+    await service.sync(hostVault)
+    client.changes.mockRejectedValue(missing())
+    client.manifest.mockResolvedValue({ data: [], cursor: 0, next_page: null })
+
+    await expect(service.sync(hostVault)).rejects.toThrow()
+
+    expect(await service.linkedVault(hostVault)).toEqual(link)
+  })
+})
+
+describe('CloudSyncHostService vault replaced by an encrypted one', () => {
+  const remoteVault: CloudSyncVault = {
+    id: 'vault-1', name: 'Notes', cursor: 0,
+    created_at: '2026-10-13T12:00:00.000Z', updated_at: '2026-10-13T12:00:00.000Z'
+  }
+  // What Cloud answers a device still linked to a readable vault that another
+  // device moved into an encrypted one.
+  const superseded = () => Object.assign(
+    new Error('This vault was replaced by an end-to-end encrypted vault. Update ZenNotes on this device to keep syncing it.'),
+    { name: 'CloudServiceRequestError', status: 410, code: 'VAULT_SUPERSEDED', details: { successor_vault_id: 'vault-2' } }
+  )
+
+  it('retires the link and its cursor on the first 410, and says the vault is now encrypted', async () => {
+    const { service, client, persistence, hostVault, retiredStates } = setup([remoteVault])
+    await service.link(hostVault, remoteVault.id)
+    await service.sync(hostVault)
+    const state = structuredClone(await persistence.loadState(hostVault.key, 'https://zennotes.org', remoteVault.id))
+    const apply = vi.spyOn(hostVault.repository, 'apply')
+    client.changes.mockRejectedValue(superseded())
+    client.manifest.mockRejectedValue(superseded())
+
+    await expect(service.sync(hostVault)).rejects.toThrow(CLOUD_VAULT_SUPERSEDED_MESSAGE)
+
+    expect(await service.linkedVault(hostVault)).toBeNull()
+    expect(retiredStates).toEqual([{ vaultKey: hostVault.key, baseUrl: 'https://zennotes.org', vaultId: remoteVault.id, state }])
+    expect(apply).not.toHaveBeenCalled()
+    expect(client.deleteVault).not.toHaveBeenCalled()
+  })
+
+  it('says the same when the check for remote changes meets the 410 first', async () => {
+    const { service, client, hostVault } = setup([remoteVault])
+    await service.link(hostVault, remoteVault.id)
+    await service.sync(hostVault)
+    client.manifest.mockRejectedValue(superseded())
+
+    await expect(service.hasRemoteChanges(hostVault)).rejects.toThrow(CLOUD_VAULT_SUPERSEDED_MESSAGE)
+
+    expect(await service.linkedVault(hostVault)).toBeNull()
+    client.manifest.mockClear()
+    expect(await service.hasRemoteChanges(hostVault)).toBe(false)
+    expect(client.manifest).not.toHaveBeenCalled()
+  })
+
+  it('counts only Cloud\'s own 410 VAULT_SUPERSEDED', () => {
+    expect(isCloudVaultSuperseded(superseded())).toBe(true)
+    expect(isCloudVaultSuperseded(Object.assign(new Error('Gone'), {
+      name: 'CloudServiceRequestError', status: 410, code: null
+    }))).toBe(false)
+    expect(isCloudVaultSuperseded(Object.assign(new Error('Gone'), { status: 410, code: 'VAULT_SUPERSEDED' }))).toBe(false)
+    expect(isCloudVaultSuperseded(new Error(CLOUD_VAULT_SUPERSEDED_MESSAGE))).toBe(false)
+    expect(isCloudVaultSuperseded(null)).toBe(false)
+  })
+})
+
+describe('CloudSyncHostService back after Cloud pruned its change log', () => {
+  const remoteVault: CloudSyncVault = {
+    id: 'vault-1', name: 'Notes', cursor: 0,
+    created_at: '2026-10-13T12:00:00.000Z', updated_at: '2026-10-13T12:00:00.000Z'
+  }
+
+  it('keeps the link and catches up from the manifest on a 410 CURSOR_EXPIRED', async () => {
+    const { service, client, persistence, hostVault, retiredStates } = setup([remoteVault])
+    await service.link(hostVault, remoteVault.id)
+    await service.sync(hostVault)
+    client.changes.mockRejectedValueOnce(Object.assign(
+      new Error('This cursor is older than the retained change log. Rebuild this vault from its manifest.'),
+      { name: 'CloudServiceRequestError', status: 410, code: 'CURSOR_EXPIRED', details: { pruned_through: 30, cursor: 40 } }
+    ))
+    client.manifest.mockResolvedValue({ data: [], cursor: 40, next_page: null })
+
+    await expect(service.sync(hostVault)).resolves.toMatchObject({ cursor: 40, pending_conflicts: [] })
+
+    expect(await service.linkedVault(hostVault)).not.toBeNull()
+    expect(retiredStates).toEqual([])
+    const state = await persistence.loadState(hostVault.key, 'https://zennotes.org', remoteVault.id)
+    expect((state as CloudSyncState).cursor).toBe(40)
   })
 })

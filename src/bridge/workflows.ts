@@ -22,6 +22,22 @@
  *    recorded state is right by construction.
  *  - Apply, undo and delete are serialized, so the Undo toast cannot race a
  *    second run into interleaving their read-journal-write sequences.
+ *
+ * A note's comments, creation date and unreviewed assistant edits live in
+ * `.zennotes`, keyed by the note's path (src-tauri/src/vault/sidecars.rs), so
+ * a path op that moved only the Markdown would detach the discussion, lose the
+ * date, and leave both behind to block or pollute the next note given the old
+ * name (upstream #839). Path ops carry them under the same rules: each is
+ * journalled as `{ note, sidecar, before }` before it moves, undo restores
+ * those bytes, and the sidecar file is derived from the note's path at restore
+ * time rather than stored, so a ledger can never name an arbitrary file
+ * inside `.zennotes`.
+ *
+ * A symlinked note is the one path its bytes do not describe: a move renames
+ * the LINK, so the file it points at, which may live outside the vault, never
+ * moves at all. The journal records the link's text beside its bytes, and undo
+ * moves that same link back from wherever the run left it, found by its text
+ * and never made from what a ledger says. See `restoreEntries`.
  */
 
 import { invoke } from '@tauri-apps/api/core'
@@ -103,14 +119,62 @@ interface WorkflowRunLedger {
   irreversible: number
   paths: string[]
   ops: WorkflowOp[]
-  journal: WorkflowJournalEntry[]
+  journal: NoteJournalEntry[]
   /** Content hash of what the run LEFT at each path (null where it removed the
    *  file), so undo can tell a file it wrote from one that has since changed. */
   hashes: Record<string, string | null>
+  /** The sidecars the run moved with its notes. Beside `journal` rather than in
+   *  it, and absent when there were none, because every other reader of a
+   *  ledger (an older ZenNotes, the Go server) resolves each journal entry as a
+   *  note path and would refuse a `.zennotes` one, leaving the run's undo
+   *  failing forever. Kept apart, they skip the sidecars and still undo notes. */
+  sidecars?: LedgerSidecarEntry[]
   undone: boolean
   undoneAt?: number
   rolledBack?: { reason: string }
   interrupted?: { reason: string }
+}
+
+/** A note's journal entry. `link` is the text of the symlink the path was
+ *  before the run, when it was one: its bytes cannot say that, and a move
+ *  renames the link itself, so undo needs the text to find that link again
+ *  (see `restoreEntries`). Absent in ledgers from before it was recorded,
+ *  which still undo, just without putting links back. */
+interface NoteJournalEntry extends WorkflowJournalEntry {
+  link?: string
+}
+
+/** The files `.zennotes` keeps for a note: its comments, its creation date,
+ *  and an assistant's edits waiting for review. */
+type SidecarKind = 'comments' | 'metadata' | 'agent-edits'
+
+const SIDECAR_KINDS: readonly SidecarKind[] = ['comments', 'metadata', 'agent-edits']
+
+/** How a failure names a sidecar, since the user knows it by what it holds. */
+const SIDECAR_LABELS: Record<SidecarKind, string> = {
+  comments: 'comments',
+  metadata: 'creation date',
+  'agent-edits': 'assistant edits waiting for review'
+}
+
+/** A sidecar's pre-run bytes: `before: null` means the note had none. It names
+ *  the NOTE, as the run spelled it, and never the sidecar's own path. On a
+ *  crash journal line the missing `path` is deliberate: an older ZenNotes
+ *  takes every line with a `path` for a note's entry, and would fail the whole
+ *  undo on one inside `.zennotes`. Without it those lines are skipped, and the
+ *  notes still undo. */
+interface SidecarJournalEntry {
+  note: string
+  sidecar: SidecarKind
+  before: string | null
+}
+
+/** As a finished ledger keeps it: plus the hash of what the run left there
+ *  (null where it moved the sidecar away), which undo's drift report
+ *  compares. Absent where the run cannot know, as in a ledger rebuilt from a
+ *  crash journal, the same way `hashes` is empty there. */
+interface LedgerSidecarEntry extends SidecarJournalEntry {
+  after?: string | null
 }
 
 /* -------------------------------------------------------------------------- */
@@ -131,6 +195,40 @@ const appendText = (relPath: string, text: string): Promise<void> =>
 const exists = (relPath: string): Promise<boolean> => invoke<boolean>('db_exists', { relPath })
 const listDir = (relPath: string): Promise<string[]> => invoke<string[]>('db_list_dir', { relPath })
 const fileSize = (relPath: string): Promise<number> => invoke<number>('db_file_size', { relPath })
+/** Whether anything at all sits at a path, a link that points at nothing
+ *  included. `exists` follows links, so it calls such a link free, and a
+ *  rename onto it replaces the link without a trace. */
+const pathTaken = (relPath: string): Promise<boolean> => invoke<boolean>('db_path_taken', { relPath })
+/** The text of the symlink at a path, or undefined when it is not one. */
+const linkTextOf = async (relPath: string): Promise<string | undefined> =>
+  (await invoke<string | null>('db_link_text', { relPath })) ?? undefined
+/** Give a symlink a new spelling of the same target (Rust checks it is one). */
+const respellLink = (relPath: string, text: string): Promise<void> =>
+  invoke('db_respell_link', { relPath, text })
+/** Rename the way the app moves a note: a moved link keeps pointing at its
+ *  file (`rebaseMovedLink`). */
+const renameEntry = (oldRel: string, newRel: string): Promise<void> =>
+  invoke('db_rename_entry', { oldRel, newRel })
+/** Remove what sits at a path as itself, never through a link, and prune the
+ *  folders that leaves empty below the top-level ones. */
+const removeEntry = (relPath: string): Promise<void> => invoke('db_remove_entry', { relPath })
+/** Prune empty folders upward inside the sidecar tree `relDir` belongs to. */
+const pruneSidecarDirs = (relDir: string): Promise<void> =>
+  invoke('db_prune_sidecar_dirs', { relDir })
+
+/**
+ * Where a note's sidecar lives, derived from the note's path every time.
+ *
+ * The note's path is checked by `resolveVaultRel` first, exactly as a journal
+ * entry is, because at undo time it came off disk. Deriving the rest (in Rust,
+ * which also refuses a symlink anywhere on a metadata path) is what keeps the
+ * `.zennotes` refusal meaningful: a ledger can only ever aim a restore at some
+ * note's own comments, creation date or edit record, never at a workflow, a
+ * template or another run's record.
+ */
+function sidecarRelOf(note: string, sidecar: SidecarKind): Promise<string> {
+  return invoke<string>('db_sidecar_rel', { noteRel: resolveVaultRel(note), kind: sidecar })
+}
 
 /**
  * Refuse a vault-relative path a workflow may not write, before anything is
@@ -189,8 +287,10 @@ async function uniqueRel(rel: string): Promise<string> {
   // A ceiling rather than `while (true)`: a directory that answers "exists" to
   // everything must fail loudly instead of spinning inside a run that holds a
   // half-written journal.
+  // "Taken" includes a symlink that points at nothing: the rename would
+  // replace it, and nothing could put it back.
   for (let n = 2; n < 1000; n += 1) {
-    if (!(await exists(candidate))) return candidate
+    if (!(await pathTaken(candidate))) return candidate
     candidate = `${stem} ${n}${ext}`
   }
   throw new Error(`Cannot find a free destination for ${rel}`)
@@ -394,15 +494,20 @@ function newRunJournalFile(run: RunIdentity): RunJournalFile {
   }
 }
 
-async function appendJournalEntry(
+/** Record journal entries on disk, opening the file on first use. Several
+ *  entries share one append and one fsync: a process killed inside that write
+ *  leaves a prefix of the lines, the tail of which the reader skips as a
+ *  fragment, and the writes those lines protect have not begun. */
+async function appendJournalEntries(
   file: RunJournalFile,
-  entry: WorkflowJournalEntry
+  entries: ReadonlyArray<NoteJournalEntry | SidecarJournalEntry>
 ): Promise<void> {
+  if (entries.length === 0) return
   if (!file.started) {
     await appendText(file.rel, `${file.header}\n`)
     file.started = true
   }
-  await appendText(file.rel, `${JSON.stringify(entry)}\n`)
+  await appendText(file.rel, `${entries.map((entry) => JSON.stringify(entry)).join('\n')}\n`)
 }
 
 async function discardRunJournal(file: RunJournalFile): Promise<void> {
@@ -416,7 +521,8 @@ interface ParsedRunJournal {
   startedAt: number
   irreversible: number
   ops: WorkflowOp[]
-  journal: WorkflowJournalEntry[]
+  journal: NoteJournalEntry[]
+  sidecars: SidecarJournalEntry[]
 }
 
 /**
@@ -436,19 +542,23 @@ async function readRunJournalFile(rel: string): Promise<ParsedRunJournal | null>
     return null
   }
   if (!isRecord(header)) return null
-  const journal: WorkflowJournalEntry[] = []
+  const journal: NoteJournalEntry[] = []
+  const sidecars: SidecarJournalEntry[] = []
   for (const line of lines.slice(1)) {
+    let parsed: unknown
     try {
-      const entry: unknown = JSON.parse(line)
-      if (!isRecord(entry)) continue
-      const entryPath = entry.path
-      const before = entry.before
-      if (typeof entryPath !== 'string') continue
-      if (typeof before !== 'string' && before !== null) continue
-      journal.push({ path: entryPath, before })
+      parsed = JSON.parse(line)
     } catch {
-      // The truncated tail of a killed write.
+      continue // the truncated tail of a killed write
     }
+    const sidecar = parseSidecarEntry(parsed)
+    if (sidecar) {
+      // Never with `after`: a crash journal cannot know how the run left things.
+      sidecars.push({ note: sidecar.note, sidecar: sidecar.sidecar, before: sidecar.before })
+      continue
+    }
+    const entry = parseNoteEntry(parsed)
+    if (entry) journal.push(entry)
   }
   return {
     workflowId: typeof header.workflowId === 'string' ? header.workflowId : 'unknown',
@@ -457,7 +567,8 @@ async function readRunJournalFile(rel: string): Promise<ParsedRunJournal | null>
     ops: Array.isArray(header.ops)
       ? header.ops.map(parseWorkflowOp).filter((op): op is WorkflowOp => op !== null)
       : [],
-    journal
+    journal,
+    sidecars
   }
 }
 
@@ -470,37 +581,82 @@ interface RunState {
   /** Journal key to the entry, in the order the run touched the paths. Written
    *  only when absent — the first-touch-wins rule, so the entry describes the
    *  state before the RUN, not before the latest op. */
-  journal: Map<string, WorkflowJournalEntry>
+  journal: Map<string, NoteJournalEntry>
   journalFile: RunJournalFile
   /** Journal key to the path as the run named it and the hash of what it left
    *  there (null where it removed the file). */
   written: Map<string, { path: string; hash: string | null }>
+  /** The sidecars path ops carried, keyed by `sidecarKey`, first touch wins
+   *  for the reason `journal` does: a note moved twice in one run leaves
+   *  comments at the middle path only in between, and undo must remove them
+   *  there rather than restore what the first move put down. */
+  sidecars: Map<string, SidecarJournalEntry>
+  /** Sidecar key to the hash of what the run left there (null: moved away). */
+  sidecarsWritten: Map<string, string | null>
   /** Destination the plan promised to where the file actually landed, for the
    *  one case where they differ: `uniqueRel` had to suffix around a collision. */
   redirects: Map<string, string>
 }
 
+/** Whether this host's disks fold case: macOS and Windows by default. */
+const CASE_INSENSITIVE_FS = (() => {
+  const ua = (typeof navigator !== 'undefined' && (navigator.userAgent || navigator.platform)) || ''
+  return /Mac|iPhone|iPad|iPod|Win/i.test(ua)
+})()
+
 /**
- * How the journal recognises two paths as the same file. This build targets
- * Linux, where `Inbox/A.md` and `inbox/a.md` really are two files, so the key
- * is the path itself. (Upstream folds case on darwin and win32, where
- * journalling them separately would break first-touch-wins.)
+ * How the journal recognises two paths as the same file. On a case-insensitive
+ * filesystem `Inbox/A.md` and `inbox/a.md` ARE one file, and journalling them
+ * separately would break first-touch-wins: the second entry would record what
+ * the first op had just written, and undo would restore that half-applied state
+ * as if it were the original. Folding the key (never the stored path) keeps one
+ * file to one entry. Linux is left alone, where those really are two files.
  */
 function journalKey(rel: string): string {
-  return rel
+  return CASE_INSENSITIVE_FS ? rel.toLowerCase() : rel
+}
+
+/** The entry, plus the text of the symlink its path is, when it is one. Read
+ *  at the first touch, like the bytes, so it describes the path before the run. */
+async function withLinkText(entry: WorkflowJournalEntry): Promise<NoteJournalEntry> {
+  const link = await linkTextOf(resolveVaultRel(entry.path))
+  return link === undefined ? entry : { ...entry, link }
+}
+
+/** One key per note and sidecar, folded like the note's own journal key. */
+function sidecarKey(note: string, sidecar: SidecarKind): string {
+  return `${sidecar}:${journalKey(note)}`
 }
 
 /**
- * Record a path's pre-run bytes, on disk before it is recorded in memory.
+ * Record the pre-run state of everything one op is about to change, on disk
+ * before it is recorded in memory: the note (both ends of it, for a path op)
+ * and each sidecar the op touches, first touch winning throughout.
+ *
  * The order is the durability guarantee: every caller awaits this before the
- * write it describes.
+ * write it describes, so a process killed at any point leaves a journal that
+ * covers at least every file it had begun to change. It is ONE append and ONE
+ * fsync for all of them, since the op writes none of these files until all
+ * of them are durable either way.
  */
-async function journalTouch(state: RunState, rel: string, before: string | null): Promise<void> {
-  const key = journalKey(rel)
-  if (state.journal.has(key)) return
-  const entry: WorkflowJournalEntry = { path: rel, before }
-  await appendJournalEntry(state.journalFile, entry)
-  state.journal.set(key, entry)
+async function journalOp(
+  state: RunState,
+  notes: WorkflowJournalEntry[],
+  sidecars: SidecarJournalEntry[]
+): Promise<void> {
+  const newNotes = new Map<string, NoteJournalEntry>()
+  for (const entry of notes) {
+    const key = journalKey(entry.path)
+    if (!state.journal.has(key) && !newNotes.has(key)) newNotes.set(key, await withLinkText(entry))
+  }
+  const newSidecars = new Map<string, SidecarJournalEntry>()
+  for (const entry of sidecars) {
+    const key = sidecarKey(entry.note, entry.sidecar)
+    if (!state.sidecars.has(key) && !newSidecars.has(key)) newSidecars.set(key, entry)
+  }
+  await appendJournalEntries(state.journalFile, [...newNotes.values(), ...newSidecars.values()])
+  for (const [key, entry] of newNotes) state.journal.set(key, entry)
+  for (const [key, entry] of newSidecars) state.sidecars.set(key, entry)
 }
 
 /** Note what the run left at a path. The spelling of the first touch wins. */
@@ -555,9 +711,93 @@ async function applyTextOpToVault(state: RunState, op: WorkflowOp): Promise<void
   // not touch the file: an mtime bump is a sync round trip and a watcher event
   // for a change that did not happen.
   if (live !== null && next === live) return
-  await journalTouch(state, rel, live)
+  const metadata = await sidecarRelOf(rel, 'metadata')
+  // Creating a note where a date file waits with no note beside it: that date
+  // belongs to nobody (#839), and `createNote` discards it too. Journalled,
+  // so undo puts it back; the new note's date is its own birth time.
+  const leftover = live === null ? await readText(metadata) : null
+  if (live !== null) await keepCreationDate(rel)
+  await journalOp(
+    state,
+    [{ path: rel, before: live }],
+    leftover === null ? [] : [{ note: rel, sidecar: 'metadata', before: leftover }]
+  )
+  if (leftover !== null) {
+    await deleteFile(metadata)
+    state.sidecarsWritten.set(sidecarKey(rel, 'metadata'), null)
+  }
   await writeThroughLinks(rel, next)
   recordWritten(state, rel, await hashText(next))
+}
+
+/**
+ * Write a note's creation date down before its file is replaced.
+ *
+ * A note ZenNotes has never saved has no date file: its date is the file's own
+ * birth time, and an atomic write (temp file plus rename) replaces that file
+ * with one born now. Saving from the editor writes the date down first, and so
+ * must every write here, and every move: the rename keeps the file, but undo
+ * writes it back as a new one. A date file already there is left alone, valid
+ * or not, so a corrupt one cannot fail a run the way it fails a save. The one
+ * write that is not journalled first, safely: it records a date the note
+ * already had, where the app already looks for it. Rust skips a temporary
+ * folder session, which never gets app state written into it.
+ */
+async function keepCreationDate(rel: string): Promise<void> {
+  if ((await readText(await sidecarRelOf(rel, 'metadata'))) !== null) return
+  await invoke('db_prepare_note_creation', { relPath: rel })
+}
+
+/** A sidecar a path op is about to carry. */
+interface SidecarMove {
+  kind: SidecarKind
+  fromRel: string
+  toRel: string
+  /** The note's own, or null when it has none. */
+  fromBytes: string | null
+  /** Whatever already sits at the destination's name. With no note there, it
+   *  belongs to nobody. */
+  toBytes: string | null
+}
+
+/** The words a move shows when an earlier note's comments sit on the
+ *  destination name (`leftoverCommentsMessage` in sidecars.rs). */
+function leftoverCommentsMessage(noteRel: string, commentsRel: string): string {
+  const name = stripNoteExtension(relBasename(noteRel))
+  return `Comments from an earlier note named “${name}” are still in ${commentsRel}. Move or delete that file to use this name.`
+}
+
+/**
+ * The sidecars a path op carries, read before anything is journalled.
+ *
+ * `to` is free (`uniqueRel`), so anything already at its sidecar paths was left
+ * by a note moved or deleted without them. The policy is the one every other
+ * writer follows (`relocate_note` in sidecars.rs): a leftover creation date is
+ * replaced, or removed, since it would stamp another note's date on this one;
+ * leftover comments refuse, because taking over another note's discussion and
+ * deleting it are both wrong. The refusal fails the run, which rolls it back,
+ * and the message names the file to move aside.
+ */
+async function sidecarsToCarry(from: string, to: string): Promise<SidecarMove[]> {
+  const moves: SidecarMove[] = []
+  // Refused before anything is written down, so a refusal leaves no trace.
+  const toComments = await sidecarRelOf(to, 'comments')
+  if ((await readText(toComments)) !== null) {
+    throw new Error(leftoverCommentsMessage(to, toComments))
+  }
+  // The rename keeps the file's birth time, but undo cannot: it writes the
+  // note back as a new file. Written down now, the date travels and comes back
+  // like any other sidecar.
+  await keepCreationDate(from)
+  for (const kind of SIDECAR_KINDS) {
+    const fromRel = await sidecarRelOf(from, kind)
+    const toRel = await sidecarRelOf(to, kind)
+    const toBytes = await readText(toRel)
+    const fromBytes = await readText(fromRel)
+    if (fromBytes === null && toBytes === null) continue
+    moves.push({ kind, fromRel, toRel, fromBytes, toBytes })
+  }
+  return moves
 }
 
 /** One path change. Journals both ends, which is what makes undo need no inverse. */
@@ -579,16 +819,43 @@ async function movePathInVault(
   if (nominal === from) return
 
   const to = await uniqueRel(nominal)
-  await journalTouch(state, from, live)
-  // `uniqueRel` just said this path is free, but it is read rather than assumed
-  // null: another process can create a file inside that window, and journalling
-  // it as "did not exist" would turn undo into a delete of somebody's note.
-  await journalTouch(state, to, await readText(to))
-  const parent = relDirname(to)
-  if (parent) await invoke('db_mkdir', { relPath: parent })
-  await invoke('db_rename', { oldRel: from, newRel: to })
+  // Before the first journal line, so an op refused over its sidecars leaves
+  // nothing of itself to take back.
+  const sidecars = await sidecarsToCarry(from, to)
+  await journalOp(
+    state,
+    [
+      { path: from, before: live },
+      // `uniqueRel` just said this path is free, but it is read rather than
+      // assumed null: another process can create a file inside that window, and
+      // journalling it as "did not exist" would turn undo into a delete of
+      // somebody's note.
+      { path: to, before: await readText(to) }
+    ],
+    sidecars.flatMap((sidecar) => [
+      ...(sidecar.fromBytes === null
+        ? []
+        : [{ note: from, sidecar: sidecar.kind, before: sidecar.fromBytes }]),
+      { note: to, sidecar: sidecar.kind, before: sidecar.toBytes }
+    ])
+  )
+  // A symlinked note keeps pointing where it did, as the app's own move keeps it.
+  await renameEntry(from, to)
   recordWritten(state, from, null)
   recordWritten(state, to, await hashText(live))
+  for (const sidecar of sidecars) {
+    if (sidecar.fromBytes === null) {
+      // Only a leftover date was waiting there, and this note has none of its
+      // own to put in its place.
+      await deleteFile(sidecar.toRel)
+      state.sidecarsWritten.set(sidecarKey(to, sidecar.kind), null)
+      continue
+    }
+    // Replaces a leftover date, when one was waiting there.
+    await renameEntry(sidecar.fromRel, sidecar.toRel)
+    state.sidecarsWritten.set(sidecarKey(from, sidecar.kind), null)
+    state.sidecarsWritten.set(sidecarKey(to, sidecar.kind), await hashText(sidecar.fromBytes))
+  }
   // Later ops in this plan name the destination the engine promised; when the
   // vault forced a different one, leave a forwarding address.
   const promised = normalizeRel(promisedRel)
@@ -661,18 +928,74 @@ function describeFailures(failures: RestoreFailure[]): string {
  * could not restore rather than throwing: the caller is already handling a
  * failure and needs the full list, and a rollback that stops at the first
  * problem leaves more of the vault wrong than one that carries on.
+ *
+ * A symlinked note needs more than its bytes. A move renames the link itself,
+ * so the destination holds the link while the file it points at never moved.
+ * Putting the vault back means moving that same link back, and a path the run
+ * filled is emptied by removing what sits there as itself, never through a
+ * link: the file a link points at is not the run's to delete. The one
+ * exception is a link that pointed at nothing before the run, whose target the
+ * run created by writing through it; its entry records the link's text, and
+ * only while that same link is there is its target removed.
+ *
+ * A link is only ever moved back, never made: it is found by its recorded text
+ * among the paths the run filled. Creating one from what a ledger says would
+ * let an edited or synced ledger plant a link to anywhere and then write
+ * through it. With no link to move back (a ledger from before the text was
+ * recorded, or a link removed since), the bytes come back as a plain file.
  */
 async function restoreEntries(
-  entries: Iterable<WorkflowJournalEntry>
+  entries: Iterable<NoteJournalEntry>
 ): Promise<{ restored: number; failures: RestoreFailure[] }> {
   const failures: RestoreFailure[] = []
   let restored = 0
-  for (const { path: rel, before } of entries) {
+  const list = [...entries]
+  // Where the run left the links it moved, by the file each names: a path the
+  // run found empty that now holds a link it did not have before. By the file
+  // rather than the text, because a relative text was re-based when the link
+  // moved, and is again on the way back.
+  const movedLinks = new Map<string, string[]>()
+  for (const entry of list) {
+    if (entry.before !== null) continue
+    try {
+      const safe = resolveVaultRel(entry.path)
+      const text = await linkTextOf(safe)
+      if (text === undefined || text === entry.link) continue
+      const names = linkNames(safe, text)
+      const same = movedLinks.get(names)
+      if (same) same.push(safe)
+      else movedLinks.set(names, [safe])
+    } catch {
+      // The loop below meets the same entry and reports it.
+    }
+  }
+  for (const { path: rel, before, link } of list) {
     try {
       // Re-validated on the way back out. At rollback time these paths came
       // from this run, but undo replays the same code over a file read off
       // disk, and that file must never be able to point a write anywhere.
       const safe = resolveVaultRel(rel)
+      if (link !== undefined && !(await pathTaken(safe))) {
+        const names = linkNames(safe, link)
+        const moved = movedLinks.get(names)?.pop()
+        const text = moved === undefined ? undefined : await linkTextOf(moved)
+        if (moved !== undefined && text !== undefined && linkNames(moved, text) === names) {
+          await renameEntry(moved, safe)
+          // The recorded text, when it names the very file the link now names
+          // from here: the same reach, spelled the way it was.
+          if ((await linkTextOf(safe)) !== link) await respellLink(safe, link)
+        }
+      }
+      if (before === null) {
+        // Empty before the run, so whatever sits there now goes, as itself.
+        // Behind the link the path had before the run, pointing at nothing
+        // then, it is the file the run created by writing through that link.
+        const text = await linkTextOf(safe)
+        if (text !== undefined && text === link) await removeThroughLinks(safe)
+        else if (await pathTaken(safe)) await removeEntry(safe)
+        restored += 1
+        continue
+      }
       // A path is journalled BEFORE its write is attempted, so a run that
       // failed mid-way has journalled paths it never actually changed.
       // Restoring those is pointless at best: whatever failed the write fails
@@ -682,20 +1005,105 @@ async function restoreEntries(
         restored += 1
         continue
       }
-      if (before === null) {
-        // Through a symlink, what the run created is the TARGET file: the link
-        // itself was there before the run, so putting the vault back means
-        // leaving it there, pointing at nothing again.
-        await removeThroughLinks(safe)
-      } else {
-        await writeThroughLinks(safe, before)
-      }
+      await writeThroughLinks(safe, before)
       restored += 1
     } catch (err) {
       failures.push({ path: rel, message: messageOf(err) })
     }
   }
   return { restored, failures }
+}
+
+/** The vault path a link's text names, from the link's own folder. Textual,
+ *  like `path.resolve(dirname, text)`: `.` and `..` segments are collapsed,
+ *  so two spellings of one target compare equal. An absolute text names
+ *  itself; a target above the vault keeps its leading `..` segments. */
+function linkNames(linkRel: string, text: string): string {
+  if (text.startsWith('/')) return text
+  const out: string[] = []
+  for (const segment of joinRel(relDirname(linkRel), text).replace(/\\/g, '/').split('/')) {
+    if (!segment || segment === '.') continue
+    if (segment === '..' && out.length > 0 && out[out.length - 1] !== '..') out.pop()
+    else out.push(segment)
+  }
+  return out.join('/')
+}
+
+/**
+ * Put every journalled sidecar back, the way `restoreEntries` does notes. A
+ * failure is reported under its NOTE's path, which is the name the user knows
+ * and the one a receipt lists; the message says which sidecar it was.
+ */
+async function restoreSidecars(entries: Iterable<SidecarJournalEntry>): Promise<RestoreFailure[]> {
+  const failures: RestoreFailure[] = []
+  const list = [...entries]
+  // Files this run put where none had been, by what they hold now. When one
+  // still holds exactly the bytes another entry must get back (a sidecar the
+  // run moved and nobody touched since), renaming it there restores those
+  // bytes and removes it from where the run put it, which is what writing the
+  // one and deleting the other would do, minus a synced write per sidecar.
+  // Only ever after comparing the bytes, so this is the same restore.
+  const moved = new Map<string, string[]>()
+  for (const entry of list) {
+    if (entry.before !== null) continue
+    try {
+      const rel = await sidecarRelOf(entry.note, entry.sidecar)
+      const live = await readText(rel)
+      if (live === null) continue
+      const key = `${entry.sidecar}\n${live}`
+      const same = moved.get(key)
+      if (same) same.push(rel)
+      else moved.set(key, [rel])
+    } catch {
+      // The loop below meets the same entry and reports it.
+    }
+  }
+  for (const entry of list) {
+    try {
+      const rel = await sidecarRelOf(entry.note, entry.sidecar)
+      const live = await readText(rel)
+      // Unchanged since the run journalled it, for the reason given in
+      // `restoreEntries`: a failed run journals sidecars it never moved.
+      if (live === entry.before) continue
+      if (entry.before === null) {
+        await deleteFile(rel)
+        await pruneSidecarDirs(relDirname(rel))
+        continue
+      }
+      const source =
+        live === null ? moved.get(`${entry.sidecar}\n${entry.before}`)?.pop() : undefined
+      // Read again right before the rename, so nothing written in between
+      // rides along with it.
+      if (source !== undefined && (await readText(source)) === entry.before) {
+        try {
+          await renameEntry(source, rel)
+          await pruneSidecarDirs(relDirname(source))
+          continue
+        } catch {
+          // Writing the bytes is the restore; the rename was only quicker.
+        }
+      }
+      await writeText(rel, entry.before)
+    } catch (err) {
+      failures.push({
+        path: entry.note,
+        message: `its ${SIDECAR_LABELS[entry.sidecar]}: ${messageOf(err)}`
+      })
+    }
+  }
+  return failures
+}
+
+/** A run's notes and their sidecars, put back together. `restored` counts
+ *  notes only: it is what the undo toast reports, and a note whose comments
+ *  came back with it is still one note. */
+async function restoreRun(
+  journal: Iterable<NoteJournalEntry>,
+  sidecars: Iterable<SidecarJournalEntry>
+): Promise<{ restored: number; failures: RestoreFailure[] }> {
+  const notes = await restoreEntries(journal)
+  const sidecarFailures = await restoreSidecars(sidecars)
+  return { restored: notes.restored, failures: [...notes.failures, ...sidecarFailures] }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -710,18 +1118,40 @@ function parseNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback
 }
 
-function parseJournal(value: unknown): WorkflowJournalEntry[] {
+/** One note entry, from a ledger or a crash journal line, or null. */
+function parseNoteEntry(value: unknown): NoteJournalEntry | null {
+  if (!isRecord(value)) return null
+  const { path: entryPath, before, link } = value
+  if (typeof entryPath !== 'string') return null
+  if (typeof before !== 'string' && before !== null) return null
+  return typeof link === 'string' ? { path: entryPath, before, link } : { path: entryPath, before }
+}
+
+function parseJournal(value: unknown): NoteJournalEntry[] {
   if (!Array.isArray(value)) return []
-  const entries: WorkflowJournalEntry[] = []
-  for (const item of value) {
-    if (!isRecord(item)) continue
-    const entryPath = item.path
-    const before = item.before
-    if (typeof entryPath !== 'string') continue
-    if (typeof before !== 'string' && before !== null) continue
-    entries.push({ path: entryPath, before })
-  }
-  return entries
+  return value
+    .map((item) => parseNoteEntry(item))
+    .filter((entry): entry is NoteJournalEntry => entry !== null)
+}
+
+/** One sidecar entry, from a ledger or a crash journal line, or null. A kind
+ *  this version does not know is dropped rather than guessed at. */
+function parseSidecarEntry(value: unknown): LedgerSidecarEntry | null {
+  if (!isRecord(value)) return null
+  const { note, sidecar, before, after } = value
+  if (typeof note !== 'string') return null
+  if (sidecar !== 'comments' && sidecar !== 'metadata' && sidecar !== 'agent-edits') return null
+  if (typeof before !== 'string' && before !== null) return null
+  const entry: LedgerSidecarEntry = { note, sidecar, before }
+  if (typeof after === 'string' || after === null) entry.after = after
+  return entry
+}
+
+function parseSidecars(value: unknown): LedgerSidecarEntry[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((item) => parseSidecarEntry(item))
+    .filter((entry): entry is LedgerSidecarEntry => entry !== null)
 }
 
 /**
@@ -761,6 +1191,8 @@ async function readLedger(rel: string): Promise<WorkflowRunLedger | null> {
     hashes,
     undone: parsed.undone === true
   }
+  const sidecars = parseSidecars(parsed.sidecars)
+  if (sidecars.length > 0) ledger.sidecars = sidecars
   if (typeof parsed.undoneAt === 'number') ledger.undoneAt = parsed.undoneAt
   const rolledBack = parsed.rolledBack
   if (isRecord(rolledBack) && typeof rolledBack.reason === 'string') {
@@ -854,6 +1286,8 @@ async function recoverInterruptedRunsNow(): Promise<string[]> {
         ops: parsed.ops,
         journal: parsed.journal,
         hashes: {},
+        // Without `after`, for the reason `hashes` is empty.
+        ...(parsed.sidecars.length > 0 ? { sidecars: parsed.sidecars } : {}),
         undone: false,
         interrupted: {
           reason:
@@ -947,6 +1381,8 @@ async function applyWorkflowNow(input: ApplyWorkflowInput): Promise<WorkflowRunR
     journal: new Map(),
     journalFile: newRunJournalFile(run),
     written: new Map(),
+    sidecars: new Map(),
+    sidecarsWritten: new Map(),
     redirects: new Map()
   }
   let applied = 0
@@ -1010,8 +1446,18 @@ function ledgerBase(
     journal: [...state.journal.values()],
     hashes: Object.fromEntries(
       [...state.written.values()].map((entry) => [entry.path, entry.hash] as const)
-    )
+    ),
+    ...(state.sidecars.size > 0 ? { sidecars: sidecarEntries(state) } : {})
   }
+}
+
+/** The journalled sidecars, each with what the run left there when it got as
+ *  far as moving it (a rolled-back run may not have). */
+function sidecarEntries(state: RunState): LedgerSidecarEntry[] {
+  return [...state.sidecars.entries()].map(([key, entry]) => {
+    const after = state.sidecarsWritten.get(key)
+    return after === undefined ? { ...entry } : { ...entry, after }
+  })
 }
 
 /**
@@ -1028,7 +1474,7 @@ async function rollBackRun(
   state: RunState,
   cause: string
 ): Promise<WorkflowRunReceipt> {
-  const { failures } = await restoreEntries(state.journal.values())
+  const { failures } = await restoreRun(state.journal.values(), state.sidecars.values())
   const base = {
     runId: run.runId,
     workflowId: run.workflowId,
@@ -1036,19 +1482,24 @@ async function rollBackRun(
     applied: 0,
     irreversible: run.irreversible
   }
+  // A cause can be a whole sentence already (the create-note refusal, the
+  // leftover-comments one shared with the rest of the app), and the reason
+  // below adds its own full stop.
+  const stated = cause.replace(/\.\s*$/, '')
   if (failures.length === 0) {
     await discardRunJournal(state.journalFile)
     return {
       ...base,
       paths: [],
-      rolledBack: { reason: `${cause}. The run was rolled back; your vault is unchanged.` }
+      rolledBack: { reason: `${stated}. The run was rolled back; your vault is unchanged.` }
     }
   }
   // The paths still differing from their pre-run bytes are exactly the ones the
-  // rollback could not reach, which is what `paths` promises to list.
-  const unrestored = failures.map((failure) => failure.path)
+  // rollback could not reach, which is what `paths` promises to list. Once
+  // each: a note and its comments can both have failed.
+  const unrestored = [...new Set(failures.map((failure) => failure.path))]
   let reason =
-    `${cause}. ROLLBACK INCOMPLETE: ${failures.length} of ${state.journal.size} ` +
+    `${stated}. ROLLBACK INCOMPLETE: ${failures.length} of ${state.journal.size + state.sidecars.size} ` +
     `files could not be restored (${describeFailures(failures)}). ` +
     `Undo run ${run.runId} to try again.`
   try {
@@ -1099,6 +1550,19 @@ async function driftedPathsOf(ledger: WorkflowRunLedger): Promise<string[]> {
     }
     if ((live === null ? null : await hashText(live)) !== after) drifted.push(entry.path)
   }
+  // A comment added to a moved note since the run is an edit to that note as
+  // far as its author is concerned, and undo takes it away all the same, so
+  // it is reported under the note's name.
+  for (const entry of ledger.sidecars ?? []) {
+    if (entry.after === undefined || drifted.includes(entry.note)) continue
+    let live: string | null
+    try {
+      live = await readText(await sidecarRelOf(entry.note, entry.sidecar))
+    } catch {
+      continue
+    }
+    if ((live === null ? null : await hashText(live)) !== entry.after) drifted.push(entry.note)
+  }
   return drifted
 }
 
@@ -1124,13 +1588,14 @@ async function undoWorkflowRunNow(runId: string): Promise<WorkflowUndoResult> {
   // journal and nothing about the drift is recoverable.
   const driftedPaths = await driftedPathsOf(ledger)
 
-  const { restored, failures } = await restoreEntries(ledger.journal)
+  const sidecars = ledger.sidecars ?? []
+  const { restored, failures } = await restoreRun(ledger.journal, sidecars)
   // A partial restore throws WITHOUT marking the run undone. Restoring recorded
   // bytes is idempotent, so leaving the run undoable means the honest recovery
   // (try again) is also the correct one.
   if (failures.length > 0) {
     throw new Error(
-      `Undo of run ${runId} is incomplete: ${failures.length} of ${ledger.journal.length} ` +
+      `Undo of run ${runId} is incomplete: ${failures.length} of ${ledger.journal.length + sidecars.length} ` +
         `files could not be restored (${describeFailures(failures)}). ` +
         `The run is still undoable; try again.`
     )

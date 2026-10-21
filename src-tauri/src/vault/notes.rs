@@ -9,6 +9,7 @@ use crate::ipc::types::{NoteContent, NoteMeta};
 use crate::vault::config::resolve_path;
 use crate::vault::layout;
 use crate::vault::metadata;
+use crate::vault::sidecars;
 
 const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 
@@ -85,7 +86,7 @@ fn system_time_to_ms(t: SystemTime) -> i64 {
 }
 
 /// `createdAt` mirrors Electron's `stat.birthtimeMs || stat.ctimeMs`.
-fn created_at_ms(md: &fs::Metadata, modified_ms: i64) -> i64 {
+pub(crate) fn created_at_ms(md: &fs::Metadata, modified_ms: i64) -> i64 {
     if let Ok(created) = md.created() {
         return system_time_to_ms(created);
     }
@@ -181,12 +182,16 @@ pub fn read_meta(
         fs::read_to_string(abs).unwrap_or_default()
     };
 
+    // The recorded creation date wins: an atomic save gives the file a new
+    // inode, and with it a new birth time (note-creation-metadata).
+    let created_at = sidecars::read_note_created_at(root, &rel_path, created_at_ms(&md, modified_ms));
+
     Ok(NoteMeta {
         path: rel_path,
         title: title_from_path(abs),
         folder: folder.to_string(),
         sibling_order: resolved_sibling,
-        created_at: created_at_ms(&md, modified_ms),
+        created_at,
         updated_at: modified_ms,
         size: md.len(),
         tags: metadata::extract_tags(&body),

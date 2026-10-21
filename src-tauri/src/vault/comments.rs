@@ -1,6 +1,8 @@
 //! Note comment sidecar files (`.zennotes/comments/<rel>.comments.json`) —
-//! port of `readNoteComments`/`writeNoteComments`/`normalizeNoteComment(s)`
-//! and the move/copy helpers from apps/desktop/src/main/vault.ts.
+//! port of `readNoteComments`/`writeNoteComments` and the copy helper from
+//! apps/desktop/src/main/vault.ts, with the record rules of
+//! `normalizeNoteComment(s)` in packages/shared-domain/src/note-comments.ts
+//! (the one definition upstream's main process, MCP server and CLI share).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,8 +14,10 @@ use crate::ipc::types::NoteComment;
 use crate::vault::layout::INTERNAL_VAULT_DIR;
 use crate::vault::notes::to_posix;
 
-const NOTE_COMMENTS_DIR: &str = "comments";
+pub const NOTE_COMMENTS_DIR: &str = "comments";
 pub const NOTE_COMMENTS_SUFFIX: &str = ".comments.json";
+const MAX_COMMENT_ANCHOR_TEXT_LENGTH: usize = 500;
+const MAX_COMMENT_AUTHOR_LENGTH: usize = 80;
 
 fn now_ms() -> i64 {
     SystemTime::now()
@@ -22,7 +26,7 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-fn comments_root(root: &Path) -> PathBuf {
+pub fn comments_root(root: &Path) -> PathBuf {
     root.join(INTERNAL_VAULT_DIR).join(NOTE_COMMENTS_DIR)
 }
 
@@ -53,6 +57,15 @@ fn num(value: &Value, key: &str) -> Option<i64> {
     })
 }
 
+/// Port of `normalizeCommentAuthor`: whitespace collapsed, trimmed, capped,
+/// and absent rather than empty.
+fn normalize_author(value: Option<&Value>) -> Option<String> {
+    let raw = value?.as_str()?;
+    let author: String = collapse_ws(raw).chars().take(MAX_COMMENT_AUTHOR_LENGTH).collect();
+    let author = author.trim().to_string();
+    (!author.is_empty()).then_some(author)
+}
+
 /// Port of `normalizeNoteComment`. Returns None when the body is empty.
 fn normalize_one(input: &Value, note_path: &str) -> Option<NoteComment> {
     let body = input.get("body").and_then(Value::as_str).unwrap_or("").trim().to_string();
@@ -67,7 +80,7 @@ fn normalize_one(input: &Value, note_path: &str) -> Option<NoteComment> {
     let anchor_text = input
         .get("anchorText")
         .and_then(Value::as_str)
-        .map(|s| collapse_ws(s).chars().take(500).collect())
+        .map(|s| collapse_ws(s).chars().take(MAX_COMMENT_ANCHOR_TEXT_LENGTH).collect())
         .unwrap_or_default();
     let id = input
         .get("id")
@@ -79,6 +92,13 @@ fn normalize_one(input: &Value, note_path: &str) -> Option<NoteComment> {
     let created_at = num(input, "createdAt").unwrap_or(now);
     let updated_at = num(input, "updatedAt").unwrap_or(now);
     let resolved_at = num(input, "resolvedAt");
+    let author = normalize_author(input.get("author"));
+    let parent_id = input
+        .get("parentId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
     Some(NoteComment {
         id,
         note_path: note_path.to_string(),
@@ -89,6 +109,8 @@ fn normalize_one(input: &Value, note_path: &str) -> Option<NoteComment> {
         created_at,
         updated_at,
         resolved_at,
+        author,
+        parent_id,
     })
 }
 
@@ -115,6 +137,18 @@ pub fn normalize(raw: &Value, note_path: &str) -> Vec<NoteComment> {
         }
     }
     out.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
+    // A reply whose parent is missing (or itself) stays as a comment of its
+    // own rather than being lost.
+    let ids: std::collections::HashSet<String> = out.iter().map(|c| c.id.clone()).collect();
+    for comment in &mut out {
+        let orphan = match &comment.parent_id {
+            Some(parent) => parent == &comment.id || !ids.contains(parent),
+            None => false,
+        };
+        if orphan {
+            comment.parent_id = None;
+        }
+    }
     out
 }
 
@@ -144,36 +178,6 @@ pub fn write_note_comments(root: &Path, rel: &str, comments: &Value) -> Result<V
     let body = serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?;
     fs::write(&abs, body).map_err(|e| format!("write failed: {e}"))?;
     Ok(normalized)
-}
-
-pub fn remove_note_comments(root: &Path, rel: &str) {
-    let _ = fs::remove_file(comments_path(root, rel));
-}
-
-/// Relocate a note's comments on rename/move, merging into any existing
-/// destination sidecar. Mirrors `moveNoteComments`.
-pub fn move_note_comments(root: &Path, old_rel: &str, new_rel: &str) {
-    let old_abs = comments_path(root, old_rel);
-    let new_abs = comments_path(root, new_rel);
-    if old_abs == new_abs || !old_abs.exists() {
-        return;
-    }
-    if let Some(parent) = new_abs.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    if new_abs.exists() {
-        let existing = read_note_comments(root, new_rel);
-        let moving = read_note_comments(root, old_rel);
-        let merged: Vec<Value> = existing
-            .into_iter()
-            .chain(moving)
-            .map(|c| serde_json::to_value(c).unwrap_or(Value::Null))
-            .collect();
-        let _ = write_note_comments(root, new_rel, &Value::Array(merged));
-        let _ = fs::remove_file(&old_abs);
-    } else {
-        let _ = fs::rename(&old_abs, &new_abs);
-    }
 }
 
 /// Copy a note's comments to a duplicate, assigning fresh ids/timestamps.
@@ -236,6 +240,32 @@ mod tests {
         assert!(comments_path(v.path(), "inbox/A.md").exists());
         write_note_comments(v.path(), "inbox/A.md", &serde_json::json!([])).unwrap();
         assert!(!comments_path(v.path(), "inbox/A.md").exists());
+    }
+
+    #[test]
+    fn author_and_reply_threading_survive_like_shared_domain() {
+        let v = vault();
+        let input = serde_json::json!([
+            { "id": "top", "body": "question", "createdAt": 1 },
+            { "id": "reply", "body": "answer", "createdAt": 2, "parentId": "top",
+              "author": "  Claude \n Code  " },
+            { "id": "orphan", "body": "lost parent", "createdAt": 3, "parentId": "gone" },
+            { "id": "self", "body": "own parent", "createdAt": 4, "parentId": "self", "author": "   " }
+        ]);
+        let written = write_note_comments(v.path(), "inbox/A.md", &input).unwrap();
+        assert_eq!(written[0].author, None);
+        assert_eq!(written[1].author.as_deref(), Some("Claude Code"));
+        assert_eq!(written[1].parent_id.as_deref(), Some("top"));
+        assert_eq!(written[2].parent_id, None);
+        assert_eq!(written[3].parent_id, None);
+        assert_eq!(written[3].author, None);
+
+        let raw = fs::read_to_string(comments_path(v.path(), "inbox/A.md")).unwrap();
+        let json: Value = serde_json::from_str(&raw).unwrap();
+        // Absent, not null, for the owner: the file reads like upstream's.
+        assert!(json["comments"][0].get("author").is_none());
+        assert!(json["comments"][0].get("parentId").is_none());
+        assert_eq!(json["comments"][1]["parentId"], "top");
     }
 
     #[test]

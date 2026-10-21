@@ -72,6 +72,15 @@ export function pastedImageExtension(input: PastedImageNameInput): string {
   throw new Error('Clipboard item is not an image.')
 }
 
+/** Chromium, which the desktop app and Android's WebView run on, names every
+ *  bitmap pasted from the clipboard `image.png`. Kept as the name, it made
+ *  every paste `image.png`, then `image (2).png` and on (#775), so that stem
+ *  counts as no name and a paste gets the timestamped one. A file copied from
+ *  the Finder or Explorer arrives under its own name and keeps it. */
+function isClipboardPlaceholderName(base: string): boolean {
+  return base.toLowerCase() === 'image'
+}
+
 export function pastedImageFilename(input: PastedImageNameInput, now: Date): string {
   const ext = pastedImageExtension(input)
   const rawName = baseName(input.suggestedName ?? '')
@@ -82,6 +91,7 @@ export function pastedImageFilename(input: PastedImageNameInput, now: Date): str
     .replace(/\s+/g, ' ')
     .trim()
   const fallbackBase = `Pasted Image ${pastedImageTimestamp(now)}`
-  const finalBase = base && base !== '.' && base !== '..' ? base : fallbackBase
+  const finalBase =
+    base && base !== '.' && base !== '..' && !isClipboardPlaceholderName(base) ? base : fallbackBase
   return `${finalBase}${ext}`
 }

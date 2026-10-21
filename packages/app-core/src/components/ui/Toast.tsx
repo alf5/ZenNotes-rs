@@ -27,7 +27,12 @@ export function ToastHost(): JSX.Element | null {
   if (toasts.length === 0) return null
 
   return (
-    <div className="pointer-events-none fixed bottom-4 right-4 z-toast flex flex-col items-end gap-2">
+    // `data-toast-host` is the hook the phone shells reposition toasts by: the
+    // corner it pins them to is where their floating button lives.
+    <div
+      data-toast-host
+      className="pointer-events-none fixed bottom-4 right-4 z-toast flex flex-col items-end gap-2"
+    >
       {toasts.map((t) => (
         <div
           key={t.id}

@@ -42,12 +42,12 @@ interface ScalarFieldMap {
 }
 
 // Order sections are emitted in. Keeps the file stable across rewrites.
-const SECTION_ORDER = ['vim', 'search', 'editor', 'appearance', 'typography', 'view'] as const
+const SECTION_ORDER = ['vim', 'search', 'editor', 'appearance', 'typography', 'view', 'mcp', 'privacy'] as const
 
 // Scalar (string / number / boolean) portable prefs → [section].key (snake_case).
 const SCALAR_FIELDS: Partial<Record<PortablePrefKey, ScalarFieldMap>> = {
   // vim
-  vimMode: { section: 'vim', tomlKey: 'enabled', comment: 'true | false — CodeMirror Vim bindings' },
+  vimMode: { section: 'vim', tomlKey: 'enabled', comment: 'true | false: CodeMirror Vim bindings' },
   vimInsertEscape: {
     section: 'vim',
     tomlKey: 'insert_escape',
@@ -66,7 +66,7 @@ const SCALAR_FIELDS: Partial<Record<PortablePrefKey, ScalarFieldMap>> = {
   vimWrappedLineMotions: {
     section: 'vim',
     tomlKey: 'wrapped_line_motions',
-    comment: 'display | logical — how $, I, A and dependent operators treat soft-wrapped lines'
+    comment: 'display | logical: how $, I, A and dependent operators treat soft-wrapped lines'
   },
   whichKeyHints: {
     section: 'vim',
@@ -119,6 +119,16 @@ const SCALAR_FIELDS: Partial<Record<PortablePrefKey, ScalarFieldMap>> = {
     section: 'editor',
     tomlKey: 'sync_title_heading_on_rename',
     comment: "renaming a note rewrites its leading '# heading' to match"
+  },
+  reviewAgentEdits: {
+    section: 'mcp',
+    tomlKey: 'review_agent_edits',
+    comment: 'keep what a note said before an assistant edits it through MCP, so you can review the change'
+  },
+  usageCount: {
+    section: 'privacy',
+    tomlKey: 'usage_count',
+    comment: 'send an anonymous count when ZenNotes installs or updates: version, OS, architecture, install kind; no identifier'
   },
   markdownSnippets: {
     section: 'editor',
@@ -175,7 +185,7 @@ const SCALAR_FIELDS: Partial<Record<PortablePrefKey, ScalarFieldMap>> = {
   editorScrollOff: {
     section: 'editor',
     tomlKey: 'scroll_off',
-    comment: 'vim scrolloff — lines kept above/below the cursor (0 = off)'
+    comment: 'vim scrolloff: lines kept above/below the cursor (0 = off)'
   },
   timeFormat: {
     section: 'editor',
@@ -195,7 +205,7 @@ const SCALAR_FIELDS: Partial<Record<PortablePrefKey, ScalarFieldMap>> = {
   completedTaskStyle: {
     section: 'editor',
     tomlKey: 'completed_task_style',
-    comment: 'none | strikethrough | gray | gray-strikethrough — style checked-task text'
+    comment: 'none | strikethrough | gray | gray-strikethrough: style checked-task text'
   },
   mathRenderer: {
     section: 'editor',
@@ -205,7 +215,7 @@ const SCALAR_FIELDS: Partial<Record<PortablePrefKey, ScalarFieldMap>> = {
   typstTagPreambles: {
     section: 'editor',
     tomlKey: 'typst_tag_preambles',
-    comment: 'true | false — prepend Typst definitions from notes in a `typst` folder, chosen by a note\'s tags'
+    comment: 'true | false: prepend Typst definitions from notes in a `typst` folder, chosen by a note\'s tags'
   },
   harperEnabled: {
     section: 'editor',
@@ -225,7 +235,17 @@ const SCALAR_FIELDS: Partial<Record<PortablePrefKey, ScalarFieldMap>> = {
   defaultPaneMode: {
     section: 'editor',
     tomlKey: 'default_view_mode',
-    comment: 'edit | split | preview — the mode a note opens in before it has a remembered one'
+    comment: 'edit | split | preview: the mode a note opens in before it has a remembered one'
+  },
+  keepViewModeAcrossNotes: {
+    section: 'editor',
+    tomlKey: 'keep_view_mode_across_notes',
+    comment: 'true = stay in the current Edit / Split / Preview mode when opening another note; false = each note reopens in its own last mode'
+  },
+  persistUndoHistory: {
+    section: 'editor',
+    tomlKey: 'persist_undo_history',
+    comment: "true = keep each note's undo history between launches, like Vim's undofile (stored with the app, never in the vault; holds deleted text; desktop only)"
   },
   lineNumberMode: {
     section: 'editor',
@@ -256,7 +276,7 @@ const SCALAR_FIELDS: Partial<Record<PortablePrefKey, ScalarFieldMap>> = {
   pdfExportUseTheme: {
     section: 'appearance',
     tomlKey: 'pdf_export_use_theme',
-    comment: 'true | false — export PDFs using the current theme instead of a clean light print theme'
+    comment: 'true | false: export PDFs using the current theme instead of a clean light print theme'
   },
   themeFamily: {
     section: 'appearance',
@@ -274,6 +294,11 @@ const SCALAR_FIELDS: Partial<Record<PortablePrefKey, ScalarFieldMap>> = {
     section: 'appearance',
     tomlKey: 'dark_sidebar',
     comment: 'tint the sidebar darker than the canvas'
+  },
+  showWindowTitleBar: {
+    section: 'appearance',
+    tomlKey: 'show_window_title_bar',
+    comment: 'show the main window title bar and window controls'
   },
   showSidebarChevrons: {
     section: 'appearance',
@@ -313,6 +338,12 @@ const SCALAR_FIELDS: Partial<Record<PortablePrefKey, ScalarFieldMap>> = {
     tomlKey: 'workflows_enabled',
     comment:
       'opt in to the Workflows view, its sidebar row, command, and leader shortcut (off by default)'
+  },
+  workflowEventTriggers: {
+    section: 'view',
+    tomlKey: 'workflow_event_triggers',
+    comment:
+      'let active workflows with "trigger: on <event>" run on this device when you save, create, move or tag a note (on by default; needs workflows_enabled)'
   },
   assetSortOrder: {
     section: 'view',
@@ -356,6 +387,11 @@ const SCALAR_FIELDS: Partial<Record<PortablePrefKey, ScalarFieldMap>> = {
     tomlKey: 'auto_calendar_panel',
     comment: 'auto-show the calendar for daily / weekly notes'
   },
+  keepPanelsAcrossNotes: {
+    section: 'view',
+    tomlKey: 'keep_panels_across_notes',
+    comment: 'true = Connections / Outline / Comments / Calendar stay as set while you switch notes; false = each note remembers its own panels (saved with the workspace, so they survive a restart)'
+  },
   calendarWeekStart: {
     section: 'view',
     tomlKey: 'calendar_week_start',
@@ -375,7 +411,18 @@ const SCALAR_FIELDS: Partial<Record<PortablePrefKey, ScalarFieldMap>> = {
   kanbanGroupBy: {
     section: 'view',
     tomlKey: 'kanban_group_by',
-    comment: 'status | priority | folder'
+    comment: 'status | priority | folder (each note\'s own folder; see kanban_folder_root) | field:<key>'
+  },
+  kanbanCardSort: {
+    section: 'view',
+    tomlKey: 'kanban_card_sort',
+    comment: 'manual | due: cards in a Kanban column keep the order you drag them into, or follow their due dates'
+  },
+  kanbanFolderRoot: {
+    section: 'view',
+    tomlKey: 'kanban_folder_root',
+    comment:
+      'folder board: group by the children of this folder, e.g. "Projects" (deeper notes roll up, notes outside it share one column); "" = each note\'s own folder'
   }
 }
 
@@ -390,15 +437,26 @@ interface ListFieldMap {
 
 // List (ordered string[]) portable prefs → [section].key = ["a", "b"].
 const LIST_FIELDS: Partial<Record<PortablePrefKey, ListFieldMap>> = {
+  externalApplicationSchemes: {
+    section: 'editor',
+    tomlKey: 'external_application_schemes',
+    comment: 'application links enabled for opening, e.g. ["zotero", "obsidian", "vscode"]'
+  },
+  ignoredKeys: {
+    section: 'editor',
+    tomlKey: 'ignored_keys',
+    comment:
+      'keys the app ignores entirely, by DOM key or code, e.g. ["KanaMode"] for the no-op a Kanata/QMK tap-hold layer sends with every keystroke'
+  },
   kanbanStatuses: {
     section: 'view',
     tomlKey: 'kanban_statuses',
-    comment: 'custom-status Kanban columns, in order — e.g. ["backlog", "in_progress", "review", "done"]'
+    comment: 'custom-status Kanban columns in order, e.g. ["backlog", "in_progress", "review", "done"]'
   },
   hiddenWorkflowPresets: {
     section: 'view',
     tomlKey: 'hidden_workflow_presets',
-    comment: 'built-in workflow recipes hidden from the gallery, by id — e.g. ["reading-log"]'
+    comment: 'built-in workflow recipe ids hidden from the gallery, e.g. ["reading-log"]'
   }
 }
 
@@ -417,7 +475,8 @@ const MAP_TABLE_FIELDS: Partial<Record<PortablePrefKey, MapTableField>> = {
   keymapOverrides: {
     table: 'keymaps',
     comment: [
-      'Keymap overrides — only list the bindings you want to change.',
+      'Keymap overrides. Only list the bindings you want to change.',
+      'Set a binding to "" to remove the key entirely.',
       'Find the full list of action IDs in Settings → Keymaps.'
     ],
     example: '"global.searchNotes" = "Mod+P"'
@@ -434,7 +493,7 @@ const MAP_TABLE_FIELDS: Partial<Record<PortablePrefKey, MapTableField>> = {
   },
   enabledOverrides: {
     table: 'overrides',
-    comment: ['Enabled CSS overrides — list the filenames you want active.'],
+    comment: ['Enabled CSS overrides. List the filenames you want active.'],
     example: '"focus.css" = "on"'
   },
   themeTweaks: {
@@ -446,6 +505,15 @@ const MAP_TABLE_FIELDS: Partial<Record<PortablePrefKey, MapTableField>> = {
     table: 'text_replacements',
     comment: ['Text replacements expanded while typing, keyed by trigger.'],
     example: '"->" = "→"'
+  },
+  savedTaskFilters: {
+    table: 'saved_filters',
+    comment: [
+      'Saved Tasks filters: a name you pick = the filter query it stands for.',
+      'Recall one from the chips above the task list, the command palette,',
+      'or `:filter <name>` in the Tasks view; `:savefilter <name>` adds one.'
+    ],
+    example: '"Project alpha" = "@project:alpha"'
   }
 }
 
@@ -465,10 +533,10 @@ const FILE_HEADER = `# ZenNotes configuration
 #
 # Holds your portable preferences (theme, editor, vim, keymaps, …) so you can
 # sync them across machines with git, stow, chezmoi, and friends. Managed by
-# ZenNotes but safe to hand-edit — changes apply live, no restart needed.
+# ZenNotes but safe to hand-edit: changes apply live, no restart needed.
 #
 # Every available option is listed below with its current value; the inline
-# comment shows the allowed values. Edit a value to customize it — ZenNotes
+# comment shows the allowed values. Edit a value to customize it. ZenNotes
 # keeps this list complete, so a removed option reappears with its default.
 # Note: comments you add yourself may be dropped when the app rewrites the file.
 
@@ -576,14 +644,26 @@ function keymapSectionLines(rawOverrides: unknown): string[] {
     '# Keymap overrides. Add or uncomment "<action.id>" = "<binding>" lines.',
     '# Binding syntax: "Mod+P" = Cmd/Ctrl+P, "Shift+Mod+K", "Ctrl+W", "Space",',
     '# or a two-key sequence like "g g". Uncomment a reference line to remap it.',
+    '# An empty binding ("") removes the key entirely: nothing triggers that',
+    '# action until you give it a key again or delete the line.',
     '[keymaps]'
   ]
 
   for (const [key, value] of Object.entries(overrides)) {
-    lines.push(`${tomlKey(key)} = ${tomlValue(value)}`)
+    const line = `${tomlKey(key)} = ${tomlValue(value)}`
+    lines.push(value === '' ? `${line}  # unbound` : line)
   }
 
-  lines.push('', '# --- All actions (defaults shown; uncomment + edit to override) ---')
+  // The reference must render the same bytes on every OS. Launch rewrites the
+  // file whenever its canonical text differs, so a reference built from this
+  // platform's defaults made a config synced between a Mac and a Linux box
+  // flip back and forth on every launch (#901). Each line shows the
+  // cross-platform default and notes the Mac one where it differs.
+  lines.push(
+    '',
+    '# --- All actions (defaults shown; uncomment + edit to override) ---',
+    '# A "(macOS: ...)" note marks an action whose Mac default differs.'
+  )
   for (const group of KEYMAP_GROUP_ORDER) {
     const entries = KEYMAP_CATALOG.filter(
       (entry) => entry.group === group && !(entry.id in overrides)
@@ -591,7 +671,13 @@ function keymapSectionLines(rawOverrides: unknown): string[] {
     if (entries.length === 0) continue
     lines.push(`# ${KEYMAP_GROUP_LABELS[group] ?? group}`)
     for (const entry of entries) {
-      lines.push(`# ${tomlKey(entry.id)} = ${tomlValue(entry.defaultBinding)}  # ${entry.title}`)
+      const mac =
+        entry.defaultBindingMac !== undefined && entry.defaultBindingMac !== entry.defaultBinding
+          ? ` (macOS: ${tomlValue(entry.defaultBindingMac)})`
+          : ''
+      lines.push(
+        `# ${tomlKey(entry.id)} = ${tomlValue(entry.defaultBinding)}  # ${entry.title}${mac}`
+      )
     }
   }
 
@@ -602,7 +688,8 @@ function keymapSectionLines(rawOverrides: unknown): string[] {
  *  malformed TOML — callers fall back to the last good config. */
 export function deserializeConfig(text: string): { version: number; portable: AppConfigPortable } {
   const parsed = parseToml(text) as Record<string, unknown>
-  const version = typeof parsed.config_version === 'number' ? parsed.config_version : 0
+  const version =
+    typeof parsed.config_version === 'number' ? parsed.config_version : 0
   const portable: AppConfigPortable = {}
 
   for (const [key, map] of Object.entries(SCALAR_FIELDS)) {
@@ -656,9 +743,10 @@ let lastKnownText: string | null = null
 let writeQueue: Promise<void> = Promise.resolve()
 const changeSubscribers = new Set<(next: AppConfigPortable) => void>()
 
-// Texts we've written ourselves. Rapid writes can make the (debounced) watcher
-// observe an EARLIER own-write out of order; remembering the last several lets
-// the guard skip a stale read instead of clobbering the fresh cache. Bounded.
+// Texts we've written ourselves. With two setPortableConfig calls in a row the
+// watcher can read the file around the second write and see the FIRST.
+// Treating that stale read as an edit would clobber the freshly-merged cache
+// and revert settings to their defaults. Bounded so it can't grow unbounded.
 const ownWrites = new Set<string>()
 const MAX_OWN_WRITES = 16
 function rememberOwnWrite(text: string): void {
@@ -670,8 +758,71 @@ function rememberOwnWrite(text: string): void {
   }
 }
 
-function writeConfigText(text: string): Promise<void> {
-  return invoke('config_file_write', { text })
+// A stale read can only happen while our writes are landing, so an earlier
+// own-write counts as one only then: during a write, or briefly after the last
+// one, for a read that began before it finished. Outside that window the same
+// text is someone putting it back (a hand edit, a dotfile sync), and the file
+// wins. Remembering the texts forever swallowed exactly that edit (upstream
+// 9aebb6f3, "setting a value back in config.toml applies").
+const OWN_WRITE_SETTLE_MS = 1500
+let ownWritesInFlight = 0
+let ownWritesSettledAt = 0
+let recheckTimer: ReturnType<typeof setTimeout> | null = null
+
+function ownWritesSettling(): boolean {
+  return ownWritesInFlight > 0 || Date.now() - ownWritesSettledAt < OWN_WRITE_SETTLE_MS
+}
+
+/** Write a text this module produced, counted while it lands. */
+async function writeOwnText(text: string): Promise<void> {
+  ownWritesInFlight += 1
+  try {
+    await invoke('config_file_write', { text })
+  } finally {
+    ownWritesInFlight -= 1
+    ownWritesSettledAt = Date.now()
+  }
+}
+
+function clearRecheck(): void {
+  if (recheckTimer) clearTimeout(recheckTimer)
+  recheckTimer = null
+}
+
+/** The file's text as the watcher saw it. Upstream's chokidar handler,
+ *  except that the text arrives with the event; a recheck reads it again. */
+function handleFileText(nextText: string): void {
+  // Our latest write, or a save that changed nothing: never fed back.
+  if (nextText === lastKnownText) return
+  // An earlier own-write while ours are still landing may be a stale read:
+  // look again once they settle. If the text is still there then, nothing of
+  // ours explains it, and it applies below.
+  if (ownWrites.has(nextText) && ownWritesSettling()) {
+    clearRecheck()
+    const wait =
+      ownWritesInFlight > 0
+        ? OWN_WRITE_SETTLE_MS
+        : ownWritesSettledAt + OWN_WRITE_SETTLE_MS - Date.now()
+    recheckTimer = setTimeout(() => {
+      recheckTimer = null
+      void invoke<string | null>('config_file_read')
+        .then((text) => {
+          if (typeof text === 'string') handleFileText(text)
+        })
+        .catch(() => {})
+    }, Math.max(0, wait))
+    return
+  }
+  let portable: AppConfigPortable
+  try {
+    portable = deserializeConfig(nextText).portable
+  } catch (err) {
+    console.warn('Failed to parse config.toml, keeping last good config', err)
+    return
+  }
+  cache = portable
+  lastKnownText = nextText
+  for (const cb of changeSubscribers) cb({ ...cache })
 }
 
 /**
@@ -692,7 +843,7 @@ export async function initPortableConfig(): Promise<void> {
       if (canonical !== text) {
         lastKnownText = canonical
         rememberOwnWrite(canonical)
-        await writeConfigText(canonical).catch((err) => {
+        await writeOwnText(canonical).catch((err) => {
           console.error('Failed to normalize config.toml', err)
           lastKnownText = text
         })
@@ -712,19 +863,7 @@ export async function initPortableConfig(): Promise<void> {
   // Rust debounces (150 ms) and sends the fresh raw text; 'unlink' is never
   // forwarded — a deleted config shouldn't wipe live settings.
   await listen<string>('config://file-changed', (event) => {
-    const nextText = event.payload
-    if (typeof nextText !== 'string') return
-    if (nextText === lastKnownText || ownWrites.has(nextText)) return
-    let portable: AppConfigPortable
-    try {
-      portable = deserializeConfig(nextText).portable
-    } catch (err) {
-      console.warn('Failed to parse config.toml — keeping last good config', err)
-      return
-    }
-    cache = portable
-    lastKnownText = nextText
-    for (const cb of changeSubscribers) cb({ ...cache })
+    if (typeof event.payload === 'string') handleFileText(event.payload)
   })
 
   initialized = true
@@ -759,7 +898,7 @@ export function setPortableConfig(partial: AppConfigPortable): Promise<void> {
       // as our own and ignored.
       lastKnownText = text
       rememberOwnWrite(text)
-      await writeConfigText(text).catch((err) => {
+      await writeOwnText(text).catch((err) => {
         console.error('Failed to write config.toml', err)
       })
     })

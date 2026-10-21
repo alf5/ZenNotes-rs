@@ -48,6 +48,17 @@ function trackedState(): CloudSyncState {
 }
 
 describe('planCloudSyncMutations', () => {
+  it('leaves previously tracked local-only runtime files out of deletes and rename matching', () => {
+    const state = trackedState()
+    state.items['item-existing'].path = 'zennotes-cloud-sync/states/vault.json'
+    expect(planCloudSyncMutations(state, [], ids()).mutations).toEqual([])
+    expect(planCloudSyncMutations(state, [
+      { path: 'notes/real.md', kind: 'text', content: content('old') }
+    ], ids()).mutations).toEqual([
+      expect.objectContaining({ type: 'upsert', item_id: 'item-1', base_revision: null, path: 'notes/real.md' })
+    ])
+  })
+
   it('creates an upsert for a new local file', () => {
     const plan = planCloudSyncMutations(
       emptyCloudSyncState('vault-1'),

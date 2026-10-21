@@ -12,7 +12,10 @@ function rollups(lines: string[], first = 1, last = lines.length): Map<number, T
   const source = lines.join('\n')
   const state = EditorState.create({ doc: source, extensions: [markdown()] })
   ensureSyntaxTree(state, source.length, 5_000)
-  return computeTaskRollups(state, first, last)
+  // syntaxTree(state) is the tree from creation, after a 20 ms parse budget; a
+  // slow CI runner left it partial and the counts short. An empty transaction
+  // picks up the tree ensureSyntaxTree finished, as the editor's next update does.
+  return computeTaskRollups(state.update({}).state, first, last)
 }
 
 describe('computeTaskRollups (#512)', () => {

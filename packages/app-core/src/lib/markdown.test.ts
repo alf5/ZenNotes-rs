@@ -56,6 +56,20 @@ describe('renderMarkdown', () => {
     expect(html).toContain('^Z2')
   })
 
+  it('preserves application links through preview sanitization', () => {
+    const url = 'zotero://open-pdf/library/items/W78FUE98?page=3#annotation=ABC'
+    const html = renderMarkdown(`[Paper](${url})`)
+    expect(html).toContain(`href="${url}"`)
+    expect(html).toContain('Paper</a>')
+  })
+
+  it('never extends application URL support to resource attributes', () => {
+    const html = renderMarkdown('<img src="zotero://open-pdf/item"><a href="javascript:alert(1)">bad</a><a href="obsidian://open?vault=Work">good</a>')
+    expect(html).not.toContain('src="zotero:')
+    expect(html).not.toContain('javascript:')
+    expect(html).toContain('href="obsidian://open?vault=Work"')
+  })
+
   it('sanitizes raw HTML and javascript URLs', () => {
     const html = renderMarkdown(
       [
@@ -108,6 +122,29 @@ describe('renderMarkdown', () => {
     expect(html).toContain('data-wikilink="Course Map"')
     expect(html).toContain('class="mermaid"')
     expect(html).toContain('graph TD; A--&gt;B')
+  })
+
+  it('stamps every list item with its own source line, nested ones included (#953)', () => {
+    const html = renderMarkdown('Intro\n\n- [ ] Task 1\n    - Detail 1a\n- [ ] Task 2\n    - Detail 2a\n    - Detail 2b')
+    const doc = new DOMParser().parseFromString(html, 'text/html')
+    const items = [...doc.querySelectorAll('li')].map((li) => [li.getAttribute('data-source-line'), li.textContent?.trim().split('\n')[0]])
+    expect(items).toEqual([
+      ['3', 'Task 1'],
+      ['4', 'Detail 1a'],
+      ['5', 'Task 2'],
+      ['6', 'Detail 2a'],
+      ['7', 'Detail 2b']
+    ])
+    // The list itself keeps the line it starts on, as every top-level block does.
+    expect(doc.querySelector('ul')?.getAttribute('data-source-line')).toBe('3')
+  })
+
+  it('turns a d2 fence into a placeholder that keeps its source for the renderer', () => {
+    const html = renderMarkdown('```d2\nserver -> db: query\n```')
+
+    expect(html).toContain('class="zen-d2"')
+    expect(html).toContain('data-d2-source="server -> db: query"')
+    expect(html).not.toContain('<pre')
   })
 
   it('renders Obsidian image embeds as local image nodes', () => {
@@ -233,6 +270,14 @@ describe('table column widths (#294)', () => {
     const html = renderMarkdown('| A | B |\n| --- | --- |\n| 1 | 2 |\n')
     expect(html).not.toContain('colgroup')
     expect(html).not.toContain('zen-has-col-widths')
+    expect(html).not.toContain('zen-table-scroll')
+  })
+  it('wraps a table with set widths so a wide one scrolls instead of squeezing (#920)', () => {
+    const html = renderMarkdown('# Plan\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n<!-- zen:cols=300,900 -->\n')
+    expect(html).toMatch(/<div class="zen-table-scroll" data-source-line="3"><table class="zen-has-col-widths"><colgroup>/)
+    // Scroll sync reads the stamp from the preview's direct children only, so
+    // it moves to the wrapper rather than staying on the wrapped table.
+    expect(html).not.toMatch(/<table[^>]*data-source-line/)
   })
 })
 
@@ -533,5 +578,110 @@ describe('callout titles keep their inline markup (#549)', () => {
   it('leaves ordinary blockquotes and non-marker text alone', () => {
     expect(renderMarkdown('> just a quote')).not.toContain('callout')
     expect(renderMarkdown('> [!note]x is not a marker')).not.toContain('callout')
+  })
+})
+
+describe('foldable callouts (#853)', () => {
+  it('renders a collapsed callout as a closed <details> with the title as its <summary>', () => {
+    const html = renderMarkdown('> [!example]- Screenshots\n> first\n> second')
+    expect(html).toMatch(/<details class="callout" data-callout="example" data-callout-fold="collapsed"[^>]*>/)
+    expect(html).not.toMatch(/<details[^>]*\sopen/)
+    expect(html).toContain('<summary class="callout-title">Screenshots</summary>')
+    expect(html).toMatch(/<p[^>]*>first\nsecond<\/p>/)
+  })
+
+  it('renders an expanded callout open', () => {
+    const html = renderMarkdown('> [!tip]+ Open by default\n> body')
+    expect(html).toMatch(/<details class="callout" data-callout="tip" data-callout-fold="expanded" open=""/)
+    expect(html).toContain('<summary class="callout-title">Open by default</summary>')
+  })
+
+  it('titles an untitled foldable callout with its type', () => {
+    expect(renderMarkdown('> [!note]-\n> body')).toContain('<summary class="callout-title">Note</summary>')
+  })
+
+  it('draws a plain box for a callout with nothing to fold, or no marker', () => {
+    const empty = renderMarkdown('> [!note]-')
+    expect(empty).not.toContain('<details')
+    expect(empty).toContain('<div class="callout-title">Note</div>')
+    const plain = renderMarkdown('> [!note] Plain\n> body')
+    expect(plain).not.toContain('<details')
+    expect(plain).not.toContain('data-callout-fold')
+  })
+
+  it('takes no marker glued to text for a fold marker', () => {
+    expect(renderMarkdown('> [!note]-x not a marker')).not.toContain('callout')
+  })
+})
+
+// A display block inside an Obsidian-style callout used to lose the reading
+// view entirely: the fence normalizer re-scanned the closing fence of the block
+// BEFORE the callout as an opener, took the callout's `> $$` for content
+// hugging a fence, and rewrote the note with a bare `$$` outside the quote
+// that swallowed everything after it (#748).
+describe('display math inside callouts (#748)', () => {
+  afterEach(() => setMarkdownMathRenderer('katex'))
+
+  it('renders a $$ block inside a callout, after a block outside it', () => {
+    const html = renderMarkdown(
+      ['$$', 'a', '$$', '', '> [!note]', '> $$', '> x_1 = 2', '> $$', '', 'After.'].join('\n')
+    )
+    expect(html.match(/katex-display/g)?.length).toBe(2)
+    expect(html).toMatch(/<div class="callout"[^>]*>[\s\S]*katex-display[\s\S]*<\/div>/)
+    expect(html).not.toContain('&gt;')
+    expect(html).toMatch(/<p[^>]*>After\.<\/p>/)
+  })
+
+  it('hands Typst the formula without the quote markers', () => {
+    setMarkdownMathRenderer('typst')
+    const html = renderMarkdown(['> [!tip]', '> $$', '> x_1 = frac(det W_1, det A)', '> $$'].join('\n'))
+    expect(html).toContain('data-typst-source="x_1 = frac(det W_1, det A)"')
+    expect(html).not.toContain('zen-typst-error')
+  })
+
+  it('expands a one-line $$x^2$$ inside a callout like it does outside', () => {
+    const html = renderMarkdown('> [!note]\n> $$x^2$$\n\nAfter.')
+    expect(html.match(/katex-display/g)?.length).toBe(1)
+    expect(html).toMatch(/<div class="callout"[^>]*>[\s\S]*katex-display[\s\S]*<\/div>/)
+    expect(html).toMatch(/<p[^>]*>After\.<\/p>/)
+  })
+
+  it('never pairs a block with a later line that merely ends in $$', () => {
+    const html = renderMarkdown(['$$', 'a', '$$', '', 'The fence is $$', '', 'After.'].join('\n'))
+    expect(html.match(/katex-display/g)?.length).toBe(1)
+    expect(html).toContain('The fence is $$')
+    expect(html).toMatch(/<p[^>]*>After\.<\/p>/)
+  })
+
+  it('keeps the quote markers out of a demoted $…$ span inside a callout', () => {
+    // Bare `$` lines are not a display block in ZenNotes; the currency guard
+    // demotes the span to text in both views. Inside a callout that text used
+    // to carry the `> ` of every continuation line.
+    const outside = renderMarkdown(['$', 'x_1 = 2', '$'].join('\n'))
+    const inside = renderMarkdown(['> [!note]', '> $', '> x_1 = 2', '> $'].join('\n'))
+    expect(outside).not.toContain('katex')
+    expect(inside).not.toContain('katex')
+    expect(inside).not.toContain('&gt;')
+    expect(inside).toMatch(/<div class="callout"[^>]*>[\s\S]*\$\nx_1 = 2\n\$[\s\S]*<\/div>/)
+  })
+})
+
+describe('a lone dash under a line of text (#898)', () => {
+  it('renders the line as a paragraph ending in the dash, not as a heading', () => {
+    for (const dash of ['-', '- ']) {
+      const html = renderMarkdown(`Some text\n${dash}`)
+      expect(html).not.toContain('<h2')
+      expect(html).toContain('Some text\n-')
+    }
+  })
+
+  it('still renders a line over two dashes as a heading', () => {
+    expect(renderMarkdown('Some text\n--')).toContain('<h2')
+  })
+
+  it('ends the paragraph on the dash line, as the editor does', () => {
+    const html = renderMarkdown('Some text\n-\nmore text')
+    expect(html.match(/<p[ >]/g)).toHaveLength(2)
+    expect(renderMarkdown('> quoted\n> -')).not.toContain('<h2')
   })
 })

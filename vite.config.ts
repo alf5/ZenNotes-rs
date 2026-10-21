@@ -162,6 +162,12 @@ function rendererManualChunk(id: string): string | undefined {
   if (id.includes('/@codemirror/language-data/')) {
     return 'vendor-editor-languages'
   }
+  // The merge view only serves reviewing an assistant's edits, which
+  // cm-agent-review.ts imports on demand. The rule below would pull it into
+  // vendor-editor, onto every launch; left alone it stays in that lazy chunk.
+  // (Upstream has this rule in apps/desktop/electron.vite.config.ts only; the
+  // web build lacks it, and this renderer is the desktop one.)
+  if (id.includes('/@codemirror/merge/')) return undefined
   if (
     id.includes('/@codemirror/') ||
     id.includes('/codemirror/') ||
@@ -186,10 +192,13 @@ function rendererManualChunk(id: string): string | undefined {
   if (id.includes('/vscode-textmate/') || id.includes('/vscode-oniguruma/')) {
     return 'vendor-textmate'
   }
-  // No manualChunks rule for mermaid / cytoscape / dagre on purpose. Mermaid is
-  // only ever reached through a dynamic import (Preview.tsx does
-  // `import("mermaid")`, behind LazyPreview), but forcing its modules into a
-  // named chunk made Rollup hoist that chunk into the entry's STATIC graph:
+  // No manualChunks rule for the diagram stacks on purpose. Mermaid fences are
+  // drawn by Pele, reached only through `import("./pele-runtime")` in
+  // mermaid-render.ts; mermaid.js itself (with cytoscape / dagre) now arrives
+  // only with Excalidraw's Mermaid-to-Excalidraw dialog, also behind a dynamic
+  // import. Both stay async only while Rollup is left to chunk them. When
+  // mermaid's modules were forced into a named chunk, Rollup hoisted that chunk
+  // into the entry's STATIC graph:
   // `index-*.js` ended up with `import{m as gt}from"./vendor-mermaid-*.js"`,
   // where gt is mermaid itself, so every launch fetched and evaluated 2.5MB of
   // diagram code (and vendor-markdown with it, which vendor-mermaid imports)
@@ -239,8 +248,14 @@ function isDeferredRendererPreload(dep: string): boolean {
     dep.includes('vendor-highlight') ||
     dep.includes('vendor-textmate') ||
     dep.includes('vendor-d3') ||
-    // Mermaid is no longer one named chunk; it splits into mermaid.core plus a
-    // chunk per diagram type, with cytoscape/dagre alongside.
+    // Pele, the mermaid-fence renderer: its runtime chunk, after which each
+    // diagram type fetches a chunk of its own on first use.
+    dep.includes('pele-runtime') ||
+    // D2, the ```d2 renderer: one chunk of about 8 MB with its WebAssembly
+    // compiler inside, fetched only when a note holds a d2 fence.
+    dep.includes('d2-runtime') ||
+    // mermaid.js (Excalidraw's Mermaid dialog only) splits into mermaid.core plus
+    // a chunk per diagram type, with cytoscape/dagre alongside.
     dep.includes('mermaid') ||
     dep.includes('cytoscape') ||
     dep.includes('dagre') ||

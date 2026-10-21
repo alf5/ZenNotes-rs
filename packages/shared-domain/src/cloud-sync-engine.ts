@@ -1,16 +1,37 @@
 import type {
   CloudSyncChange,
   CloudSyncContent,
+  CloudSyncContentReference,
+  CloudSyncContentMetadata,
   CloudSyncItemKind,
+  CloudSyncMoveMutation,
   CloudSyncMutation,
   CloudSyncMutationResponse
 } from '@zennotes/bridge-contract/cloud-sync'
 import { cloudSyncPathKey, normalizeCloudSyncPath, shouldSyncVaultPath } from './cloud-sync'
+import { validateCloudSyncContentReference } from './cloud-sync-content'
+import { CloudIssueError, cloudProtocolError } from './cloud-error-copy'
 
 export interface CloudSyncLocalItem {
   path: string
   kind: CloudSyncItemKind
   content: CloudSyncContent
+}
+
+/**
+ * What an encrypted vault needs to seal a moved file's new metadata; the
+ * client strips it before a readable vault's move goes out.
+ */
+function moveHints(item: CloudSyncLocalItem): Pick<CloudSyncMoveMutation, 'kind' | 'content_metadata'> {
+  return {
+    kind: item.kind,
+    content_metadata: {
+      encoding: item.content.encoding,
+      sha256: item.content.sha256,
+      byte_length: item.content.byte_length,
+      media_type: item.content.media_type
+    }
+  }
 }
 
 export interface CloudSyncTrackedItem {
@@ -28,6 +49,7 @@ export interface CloudSyncConflictSnapshot {
   revision: number | null
   kind: CloudSyncItemKind
   content: CloudSyncContent | null
+  content_ref?: CloudSyncContentReference
 }
 
 export interface CloudSyncStoredConflict {
@@ -91,7 +113,7 @@ export function planCloudSyncMutations(
     }
     const key = cloudSyncPathKey(normalizedItem.path)
     if (localByPathKey.has(key)) {
-      throw new Error(`Vault contains a portable path collision at ${normalizedItem.path}`)
+      throw new CloudIssueError('path-collision', `Vault contains a portable path collision at ${normalizedItem.path}`, normalizedItem.path)
     }
     localByPathKey.set(key, normalizedItem)
   }
@@ -103,6 +125,9 @@ export function planCloudSyncMutations(
   )
 
   for (const trackedItem of trackedItems) {
+    // Older clients may have uploaded local-only state. Excluding it from a
+    // scan must not turn it into a delete or rename on another device.
+    if (!shouldSyncVaultPath(trackedItem.path)) continue
     const exactLocalItem = localByPathKey.get(cloudSyncPathKey(trackedItem.path))
     if (exactLocalItem) {
       unmatchedLocalItems.delete(exactLocalItem)
@@ -123,7 +148,8 @@ export function planCloudSyncMutations(
           operation_id: ids.operationId(),
           item_id: trackedItem.item_id,
           base_revision: trackedItem.revision,
-          path: exactLocalItem.path
+          path: exactLocalItem.path,
+          ...moveHints(exactLocalItem)
         })
       }
 
@@ -143,7 +169,8 @@ export function planCloudSyncMutations(
         operation_id: ids.operationId(),
         item_id: trackedItem.item_id,
         base_revision: trackedItem.revision,
-        path: movedItem.path
+        path: movedItem.path,
+        ...moveHints(movedItem)
       })
     } else {
       mutations.push({
@@ -192,7 +219,7 @@ export function resolveCloudSyncMutations(
   for (const acknowledgement of response.acknowledged) {
     const mutation = mutationByOperation.get(acknowledgement.operation_id)
     if (!mutation || mutation.item_id !== acknowledgement.item_id) {
-      throw new Error(
+      throw cloudProtocolError(
         `Server acknowledged an unknown sync operation ${acknowledgement.operation_id}`
       )
     }
@@ -205,7 +232,7 @@ export function resolveCloudSyncMutations(
     const previousItem = nextState.items[mutation.item_id]
     if (mutation.type === 'move') {
       if (!previousItem) {
-        throw new Error(`Server acknowledged a move for unknown item ${mutation.item_id}`)
+        throw cloudProtocolError(`Server acknowledged a move for unknown item ${mutation.item_id}`)
       }
       nextState.items[mutation.item_id] = {
         ...previousItem,
@@ -236,7 +263,7 @@ export function reduceCloudSyncChange(
 ): CloudSyncState {
   if (change.sequence <= state.cursor) return state
   if (change.sequence !== state.cursor + 1) {
-    throw new Error(`Expected sync sequence ${state.cursor + 1}, received ${change.sequence}`)
+    throw cloudProtocolError(`Expected sync sequence ${state.cursor + 1}, received ${change.sequence}`)
   }
 
   const items = { ...state.items }
@@ -244,28 +271,32 @@ export function reduceCloudSyncChange(
     delete items[change.item_id]
   } else if (change.type === 'move') {
     const previousItem = items[change.item_id]
-    if (!previousItem) throw new Error(`Received a move for unknown item ${change.item_id}`)
+    if (!previousItem) throw cloudProtocolError(`Received a move for unknown item ${change.item_id}`)
     items[change.item_id] = {
       ...previousItem,
       path: change.path,
       revision: change.revision
     }
   } else {
-    if (!change.content) throw new Error(`Upsert change ${change.sequence} did not include content`)
+    if (change.content_ref && change.content) throw cloudProtocolError('Ambiguous Cloud change content.')
+    const content = change.content_ref
+      ? validateCloudSyncContentReference(change.content_ref, change)
+      : change.content
+    if (!content) throw cloudProtocolError(`Upsert change ${change.sequence} did not include content`)
     items[change.item_id] = {
       item_id: change.item_id,
       path: change.path,
-      kind: items[change.item_id]?.kind ?? inferItemKind(change.content),
+      kind: items[change.item_id]?.kind ?? inferItemKind(content),
       revision: change.revision,
-      sha256: change.content.sha256,
-      byte_length: change.content.byte_length,
-      media_type: change.content.media_type
+      sha256: content.sha256,
+      byte_length: content.byte_length,
+      media_type: content.media_type
     }
   }
 
   return { ...state, cursor: change.sequence, items }
 }
 
-function inferItemKind(content: CloudSyncContent): CloudSyncItemKind {
+function inferItemKind(content: CloudSyncContentMetadata): CloudSyncItemKind {
   return content.encoding === 'utf8' ? 'text' : 'binary'
 }

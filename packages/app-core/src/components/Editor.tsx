@@ -11,7 +11,13 @@ import { useCallback, useEffect, useMemo, useRef } from "react";
 import type { EditorView } from "@codemirror/view";
 import { Vim, getCM } from "@replit/codemirror-vim";
 import { registerDisplayLineMotion } from "../lib/cm-vim-display-line";
+import {
+  HALF_PAGE_MOTION,
+  halfPageMotionArgs,
+  registerHalfPageMotion,
+} from "../lib/cm-vim-half-page-motion";
 import { registerHeadingMotion } from "../lib/cm-vim-heading-motion";
+import { registerOpenLineContinuation } from "../lib/cm-vim-open-line";
 import { registerReflowOperator } from "../lib/cm-vim-reflow";
 import {
   harperAddWordAtCursor,
@@ -22,7 +28,8 @@ import {
 } from "../lib/cm-harper";
 import { harperEditorConfig } from "../lib/harper-runtime";
 import { moveLineDown, moveLineUp } from "@codemirror/commands";
-import { foldAll, unfoldAll, foldCode, unfoldCode } from "@codemirror/language";
+import { unfoldAll } from "@codemirror/language";
+import { foldAllOutline, foldAtCursor, unfoldAtCursor } from "../lib/cm-heading-fold";
 import { isTagsViewActive, isTasksViewActive, useStore } from "../store";
 import { buildCommands, type Command } from "../lib/commands";
 import { rankItems } from "../lib/fuzzy-score";
@@ -30,6 +37,7 @@ import { BUILTIN_TEMPLATES } from "@shared/builtin-templates";
 import { mergeTemplates } from "@shared/template-files";
 import type { PaneLayout, PaneSplit } from "../lib/pane-layout";
 import { parseCreateNotePath, resolveWikilinkPath } from "../lib/wikilinks";
+import { followApplicationLink } from "../lib/application-link-open";
 import {
   openDatabaseFromWikilink,
   openWikilinkTarget,
@@ -40,18 +48,22 @@ import {
   resolveAssetVaultRelativePath,
 } from "../lib/local-assets";
 import {
-  externalLinkUrl,
-  extractLinkAtCursor,
+  externalUrlForLink,
+  linkRangeAtCursor,
   resolveInternalNoteHref,
 } from "../lib/internal-links";
 import {
   buildMoveNotePrompt,
+  moveNoteVocabulary,
   parseMoveNoteTarget,
   parseTemplateDestination,
   validateMoveNoteTarget,
 } from "../lib/move-note";
 import { promptApp } from "../lib/prompt-requests";
 import { offerCreateNoteFromLink } from "../lib/create-note-from-link";
+import { openWikilinkAttachment } from "../lib/open-wikilink-attachment";
+import { buildVersionReport } from "../lib/version-report";
+import { writeClipboardText } from "../lib/clipboard-text";
 import {
   externalFileLink,
   openExternalFileLink,
@@ -63,27 +75,33 @@ import { focusPaneInDirection, focusPaneOrEdgePanel } from "../lib/pane-nav";
 import { requestPaneMode } from "../lib/pane-mode";
 import {
   getKeymapBinding,
+  getKeymapDefinitions,
+  getKeymapDisplay,
   getSequenceTokens,
+  UNBOUND_BINDING,
   type KeymapId,
   type KeymapOverrides,
 } from "../lib/keymaps";
+import { requestSettingsTarget } from "../lib/settings-navigation";
+import { useToastStore } from "../lib/toast";
 import {
   navigateActiveBuffer,
   selectActiveBuffer,
 } from "../lib/buffer-navigation";
 import { applyVimInsertEscape } from "../lib/vim-insert-escape";
-import { listContinuationPrefix } from "../lib/list-continuation";
 import { focusEditorNormalMode } from "../lib/editor-focus";
 import { toVimSequence } from "../lib/vim-key-sequence";
 import { registerNoteMoveExCommands } from "../lib/vim-ex-commands";
 import { promptImageWidth, setImageWidthFromInput } from "../lib/image-resize";
 import { copyLinkAtCursor } from "../lib/link-copy";
+import { followLinkTarget } from "../lib/follow-link";
 
 let vimCommandsRegistered = false;
 let syncedVimBindings: Partial<Record<KeymapId, string[]>> = {};
 
 const DEFAULT_VIM_MAPPINGS_TO_CLEAR = [
   "gd",
+  "gD",
   "<C-w>h",
   "<C-w>j",
   "<C-w>k",
@@ -131,48 +149,22 @@ function paneMapBindings(
   return [...new Set(bindings)];
 }
 
-/**
- * Clamped half-page scroll for the editor, bound to Ctrl+D / Ctrl+U.
- *
- * Replaces CodeMirror-Vim's built-in `<C-d>`/`<C-u>` (`moveByScroll`), which
- * derives its scroll target from the cursor's pixel coordinates. With live-
- * preview decorations and folded headings shifting block heights, that math
- * can resolve to the top of the document, snapping the cursor and viewport
- * back to line 1 at the end of a note. Moving by display lines and scrolling
- * by a fixed half-viewport — both clamped to the document bounds — can never
- * wrap. Mirrors the clamped preview scroll (`scrollPreviewBy`) in VimNav.
- */
-function editorHalfPage(view: EditorView | undefined, forward: boolean): void {
-  if (!view) return;
-  const scroller = view.scrollDOM;
-  const half = Math.max(1, Math.round(scroller.clientHeight / 2));
-  const lineHeight = view.defaultLineHeight || 18;
-  const steps = Math.max(1, Math.round(half / lineHeight));
-  let range = view.state.selection.main;
-  for (let i = 0; i < steps; i++) {
-    const next = view.moveVertically(range, forward);
-    if (next.head === range.head) break; // reached the first/last line — stop, never wrap
-    range = next;
-  }
-  const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
-  const nextTop = Math.max(
-    0,
-    Math.min(maxTop, scroller.scrollTop + (forward ? half : -half)),
-  );
-  view.dispatch({ selection: { anchor: range.head } });
-  scroller.scrollTop = nextTop;
-}
+type VimKeymapMapping = {
+  id: KeymapId;
+  bindings: string[];
+  // VimNav's global fallback stands down while the editor has focus (#578),
+  // so anything that used to reach it from a standing selection has to be
+  // mapped in visual context here as well.
+  contexts?: Array<"normal" | "visual">;
+} & (
+  | { action: string }
+  // A motion moves Vim's own selection head, so it also extends a visual
+  // selection; an action cannot (#825).
+  | { motion: string; motionArgs: Record<string, unknown> }
+);
 
 function syncVimKeymaps(overrides: KeymapOverrides): void {
-  const mappings: Array<{
-    id: KeymapId;
-    action: string;
-    bindings: string[];
-    // VimNav's global fallback stands down while the editor has focus (#578),
-    // so anything that used to reach it from a standing selection has to be
-    // mapped in visual context here as well.
-    contexts?: Array<"normal" | "visual">;
-  }> = [
+  const mappings: VimKeymapMapping[] = [
       {
         id: "vim.harperNext",
         action: "zenHarperNext",
@@ -213,6 +205,13 @@ function syncVimKeymaps(overrides: KeymapOverrides): void {
         action: "goToDefinition",
         bindings: [
           toVimSequence(getKeymapBinding(overrides, "vim.goToDefinition")),
+        ].filter((binding): binding is string => !!binding),
+      },
+      {
+        id: "vim.createNoteFromLink",
+        action: "zenCreateNoteFromLink",
+        bindings: [
+          toVimSequence(getKeymapBinding(overrides, "vim.createNoteFromLink")),
         ].filter((binding): binding is string => !!binding),
       },
       {
@@ -295,16 +294,25 @@ function syncVimKeymaps(overrides: KeymapOverrides): void {
           toVimSequence(getKeymapBinding(overrides, "vim.unfoldAll")),
         ].filter((binding): binding is string => !!binding),
       },
+      // Half-page keys are a motion in normal AND visual context, so `v` +
+      // Ctrl+D grows the selection as far as Ctrl+D moves the cursor (#825).
+      // Operator-pending (`d<C-d>`) is left to Vim's default motion, like
+      // j/k. The floating, Quick Note and external-file windows map the
+      // same motion to the default chords (`mapDefaultHalfPageKeys`).
       {
         id: "nav.halfPageDown",
-        action: "zenHalfPageDown",
+        contexts: ["normal", "visual"],
+        motion: HALF_PAGE_MOTION,
+        motionArgs: halfPageMotionArgs(true),
         bindings: [
           toVimSequence(getKeymapBinding(overrides, "nav.halfPageDown")),
         ].filter((binding): binding is string => !!binding),
       },
       {
         id: "nav.halfPageUp",
-        action: "zenHalfPageUp",
+        contexts: ["normal", "visual"],
+        motion: HALF_PAGE_MOTION,
+        motionArgs: halfPageMotionArgs(false),
         bindings: [
           toVimSequence(getKeymapBinding(overrides, "nav.halfPageUp")),
         ].filter((binding): binding is string => !!binding),
@@ -324,14 +332,20 @@ function syncVimKeymaps(overrides: KeymapOverrides): void {
     }
     for (const binding of mapping.bindings) {
       for (const context of contexts) {
-        Vim.mapCommand(binding, "action", mapping.action, {}, { context });
+        if ("motion" in mapping) {
+          Vim.mapCommand(binding, "motion", mapping.motion, mapping.motionArgs, {
+            context,
+          });
+        } else {
+          Vim.mapCommand(binding, "action", mapping.action, {}, { context });
+        }
       }
     }
     syncedVimBindings[mapping.id] = mapping.bindings;
   }
 }
 
-// `extractLinkAtCursor` lives in ../lib/internal-links so the editor, the
+// `linkRangeAtCursor` lives in ../lib/internal-links so the editor, the
 // preview, and the Cmd/Ctrl-click handler can all share it.
 
 /**
@@ -343,6 +357,20 @@ function syncVimKeymaps(overrides: KeymapOverrides): void {
  * unavailable. (#173)
  */
 function alertEditorError(message: string): void {
+  showEditorNotification(message, { color: "red", duration: 4000 });
+}
+
+/**
+ * Bottom-of-editor Vim notification. Errors are red like codemirror-vim's
+ * own; informational output (`:version`) inherits the editor color, since
+ * red would read as "something failed". Multi-line text keeps its line
+ * breaks. Falls back to an alert (then refocuses) if the editor notification
+ * is unavailable.
+ */
+function showEditorNotification(
+  message: string,
+  opts: { color?: string; duration: number },
+): void {
   const view = useStore.getState().editorViewRef;
   const cm = view ? getCM(view) : null;
   const openNotification = (
@@ -356,14 +384,46 @@ function alertEditorError(message: string): void {
   if (cm && typeof openNotification === "function") {
     const el = document.createElement("div");
     el.className = "cm-vim-message";
-    el.style.color = "red";
+    if (opts.color) el.style.color = opts.color;
     el.style.whiteSpace = "pre";
     el.textContent = message;
-    openNotification.call(cm, el, { bottom: true, duration: 4000 });
+    openNotification.call(cm, el, { bottom: true, duration: opts.duration });
     return;
   }
   window.alert(message);
   focusEditorNormalMode();
+}
+
+/**
+ * `:version` prints the details a bug report needs (ZenNotes version, OS,
+ * engine, install format, remote server) instead of the stock
+ * codemirror-vim line that only named the Vim library (#814). `:version copy`
+ * or `:version!` also puts the text on the clipboard.
+ */
+function runVersionEx(argString: string): void {
+  const state = useStore.getState();
+  const remote =
+    state.workspaceMode === "remote"
+      ? {
+          baseUrl: state.remoteWorkspaceInfo?.baseUrl ?? null,
+          version: state.remoteWorkspaceInfo?.capabilities?.version ?? null,
+        }
+      : null;
+  const lines = buildVersionReport({
+    app: window.zen.getAppInfo(),
+    remoteServer: remote,
+  });
+  const arg = argString.trim();
+  const copy = arg === "!" || arg.toLowerCase() === "copy";
+  const shown = [...lines];
+  if (copy) {
+    shown.push(
+      writeClipboardText(lines.join("\n"))
+        ? "Copied to the clipboard"
+        : "Could not reach the clipboard",
+    );
+  }
+  showEditorNotification(shown.join("\n"), { duration: 15000 });
 }
 
 // Minimal shape of the CodeMirror-Vim adapter + state the display-line motion
@@ -446,65 +506,7 @@ function registerVimCommands(): void {
     { context: "visual" },
   );
 
-  // #320: opening a line with o/O on a list item carries the marker forward —
-  // like pressing Enter — so bullets repeat, ordered numbers advance (the
-  // renumber pass fixes the exact value for both o and O), indentation is
-  // preserved, and a checkbox continues as a fresh unchecked box. Non-list lines
-  // fall back to Vim's built-in open-line. The handler runs as `actions[name]`,
-  // so `this` is Vim's action table — reuse its open-line + insert-mode entry.
-  type VimActionTable = {
-    newLineAndEnterInsertMode: (
-      cm: unknown,
-      args: unknown,
-      vim: unknown,
-    ) => void;
-    enterInsertMode: (cm: unknown, args: unknown, vim: unknown) => void;
-  };
-  Vim.defineAction("zenOpenLineContinuingList", function (
-    this: VimActionTable,
-    cm: ReturnType<typeof getCM>,
-    actionArgs: { after?: boolean; repeat?: number },
-    vim: { insertMode?: boolean },
-  ) {
-    const view = (cm as unknown as { cm6?: EditorView }).cm6;
-    const prefix = view
-      ? listContinuationPrefix(
-          view.state.doc.lineAt(view.state.selection.main.head).text,
-        )
-      : null;
-    if (!view || prefix == null) {
-      this.newLineAndEnterInsertMode(cm, actionArgs, vim);
-      return;
-    }
-    const line = view.state.doc.lineAt(view.state.selection.main.head);
-    vim.insertMode = true;
-    if (actionArgs.after) {
-      view.dispatch({
-        changes: { from: line.to, insert: `\n${prefix}` },
-        selection: { anchor: line.to + 1 + prefix.length },
-      });
-    } else {
-      view.dispatch({
-        changes: { from: line.from, insert: `${prefix}\n` },
-        selection: { anchor: line.from + prefix.length },
-      });
-    }
-    this.enterInsertMode(cm, { repeat: actionArgs.repeat }, vim);
-  } as unknown as Parameters<typeof Vim.defineAction>[1]);
-  Vim.mapCommand(
-    "o",
-    "action",
-    "zenOpenLineContinuingList",
-    { after: true },
-    { context: "normal", isEdit: true, interlaceInsertRepeat: true },
-  );
-  Vim.mapCommand(
-    "O",
-    "action",
-    "zenOpenLineContinuingList",
-    { after: false },
-    { context: "normal", isEdit: true, interlaceInsertRepeat: true },
-  );
+  registerOpenLineContinuation();
 
   // #290/#312: make j/k move by display line through soft-wrapped content.
   // Shared with the Quick Note window (QuickCaptureApp) via the same helper.
@@ -512,6 +514,7 @@ function registerVimCommands(): void {
     () => useStore.getState().vimWrappedLineMotions,
   );
   registerHeadingMotion();
+  registerHalfPageMotion();
   registerReflowOperator();
 
   Vim.defineEx("write", "w", () => {
@@ -546,6 +549,22 @@ function registerVimCommands(): void {
       setImageWidthFromInput(view, arg);
     },
   );
+  // `:set undofile` / `:set noundofile` / `:set undofile?` (alias `udf`) is
+  // the ex twin of "Keep undo history after quitting", under the name Vim
+  // users already type. Only where the host can keep the files. (#793)
+  Vim.defineOption(
+    "undofile",
+    false,
+    "boolean",
+    ["udf"],
+    (value?: boolean) => {
+      const state = useStore.getState();
+      if (value === undefined) return state.persistUndoHistory;
+      if (!window.zen?.getCapabilities?.().supportsUndoFile) return undefined;
+      if (state.persistUndoHistory !== !!value) state.setPersistUndoHistory(!!value);
+      return undefined;
+    },
+  );
   // `:harper on|off` (or bare `:harper` to toggle) is the ex twin of the
   // Settings toggle "Grammar and spelling with Harper".
   Vim.defineEx(
@@ -557,6 +576,59 @@ function registerVimCommands(): void {
       if (arg === "on") state.setHarperEnabled(true);
       else if (arg === "off") state.setHarperEnabled(false);
       else state.setHarperEnabled(!state.harperEnabled);
+    },
+  );
+  // `:ignorekey <name>` (#732) adds a key the app should never see, the ex
+  // twin of Settings, Keymap, Ignored keys: a remapper's tap-hold no-op such
+  // as KanaMode. Bare, it opens that page, whose recorder names the key.
+  Vim.defineEx(
+    "ignorekey",
+    "ignorekey",
+    (_cm: unknown, params: { argString?: string } | undefined) => {
+      const arg = (params?.argString ?? "").trim();
+      const state = useStore.getState();
+      if (!arg) {
+        requestSettingsTarget("keymaps");
+        state.setSettingsOpen(true);
+        return;
+      }
+      state.addIgnoredKey(arg);
+      useToastStore
+        .getState()
+        .addToast(`Ignoring ${arg}: the app no longer reacts to it`, "success");
+    },
+  );
+  // `:unbind <action.id>` removes an action's key entirely, the ex twin of
+  // the Unbind button under Settings, Keymaps. Without an argument, or with
+  // an id the catalog does not know, it opens that page, where every id is
+  // listed, instead of guessing.
+  Vim.defineEx(
+    "unbind",
+    "unbind",
+    (_cm: unknown, params: { argString?: string } | undefined) => {
+      const arg = (params?.argString ?? "").trim();
+      const state = useStore.getState();
+      const definition = getKeymapDefinitions().find((d) => d.id === arg);
+      if (!definition) {
+        if (arg) {
+          useToastStore
+            .getState()
+            .addToast(`No keymap action is called "${arg}"`, "info");
+        }
+        requestSettingsTarget("keymaps");
+        state.setSettingsOpen(true);
+        return;
+      }
+      const before = getKeymapDisplay(state.keymapOverrides, definition.id);
+      state.setKeymapBinding(definition.id, UNBOUND_BINDING);
+      useToastStore
+        .getState()
+        .addToast(
+          before
+            ? `Unbound ${definition.title} (was ${before})`
+            : `${definition.title} is already unbound`,
+          "success",
+        );
     },
   );
   Vim.defineEx("quit", "q", () => {
@@ -641,6 +713,20 @@ function registerVimCommands(): void {
   Vim.defineEx("template", "template", runTemplateEx);
   Vim.defineEx("tmpl", "tmpl", runTemplateEx);
 
+  // Replaces the library's own `:version`, which reported only the
+  // codemirror-vim version (#814).
+  Vim.defineEx(
+    "version",
+    "ve",
+    (_cm: unknown, params: { argString?: string } | undefined) => {
+      runVersionEx(params?.argString ?? "");
+    },
+  );
+
+  Vim.defineEx("whatsnew", "whatsnew", () => {
+    void useStore.getState().openWhatsNew();
+  });
+
   Vim.defineEx("daily", "daily", () => {
     void useStore.getState().openTodayDailyNote();
   });
@@ -720,15 +806,35 @@ function registerVimCommands(): void {
   Vim.defineEx("pane_focus_up", "pane_focus_up", () => focusDir("k"));
   Vim.defineEx("pane_focus_right", "pane_focus_right", () => focusDir("l"));
 
+  // `gd` without the question: follows the link under the cursor and, when it
+  // reaches nothing, creates the note at the suggested path right away (#768).
+  // The keyboard twin of a Cmd/Ctrl-click on a rendered wikilink.
+  Vim.defineAction("zenCreateNoteFromLink", (cm: ReturnType<typeof getCM>) => {
+    const view = (cm as unknown as { cm6?: EditorView }).cm6;
+    if (!view) return;
+    const link = linkRangeAtCursor(
+      view.state.doc.toString(),
+      view.state.selection.main.head,
+    );
+    if (!link) return;
+    followLinkTarget(link.target, {
+      createWithoutAsking: true,
+      kind: link.kind,
+    });
+  });
+
   Vim.defineAction("goToDefinition", (cm: ReturnType<typeof getCM>) => {
     const view = (cm as unknown as { cm6?: EditorView }).cm6;
     if (!view) return;
     const pos = view.state.selection.main.head;
     const doc = view.state.doc.toString();
-    const target = extractLinkAtCursor(doc, pos);
-    if (!target) return;
+    const link = linkRangeAtCursor(doc, pos);
+    if (!link) return;
+    const target = link.target;
 
-    const external = externalLinkUrl(target);
+    if (followApplicationLink(target)) return;
+    // A wikilink names a note: `[[2024.01.15]]` is not a web address.
+    const external = externalUrlForLink(target, link.kind);
     if (external) {
       window.open(external, "_blank");
       return;
@@ -791,6 +897,10 @@ function registerVimCommands(): void {
       requestAnimationFrame(() => useStore.getState().editorViewRef?.focus());
       return;
     }
+
+    // A file in the vault (an embedded image, a non-PDF attachment) opens in
+    // its own tab instead of becoming a create offer for `file.png.md`. (#757)
+    if (openWikilinkAttachment(target)) return;
 
     // A link to a file outside the vault: open it with the OS default app. (#424)
     if (externalFileLink(target)) {
@@ -957,20 +1067,26 @@ function registerVimNoteCommands(): void {
     const active = state.activeNote;
     if (!active) return;
 
-    const value = raw.trim();
-    let target = value;
+    const vocabulary = moveNoteVocabulary(
+      state.vaultSettings,
+      state.systemFolderLabels,
+      state.folders,
+    );
+    let target: string | null = raw.trim();
     if (!target) {
-      target =
-        (await promptApp(buildMoveNotePrompt(active, state.folders))) ?? "";
-      if (!target) return;
+      // Empty is an answer (the notes root); only null is the Cancel.
+      target = await promptApp(
+        buildMoveNotePrompt(active, state.folders, vocabulary),
+      );
+      if (target === null) return;
     }
 
-    const error = validateMoveNoteTarget(target);
+    const error = validateMoveNoteTarget(target, vocabulary);
     if (error) {
       alertEditorError(error);
       return;
     }
-    const dest = parseMoveNoteTarget(target);
+    const dest = parseMoveNoteTarget(target, vocabulary);
     await state.moveNote(active.path, dest.folder, dest.subpath);
   };
 
@@ -1120,33 +1236,26 @@ function registerVimNoteCommands(): void {
     void useStore.getState().openTrashView();
   });
 
-  // Heading fold helpers — wrap CodeMirror's commands so they work on
-  // whichever pane currently owns the editor. `:fold` / `:unfold` act
-  // on the current heading; `:foldall` / `:unfoldall` cover the whole
-  // note. We map vim's `zc` / `zo` / `zM` / `zR` keys explicitly so the
-  // advertised fold chords work regardless of what CM-Vim ships by default.
-  const runFold = (
-    cmd: (view: { state: unknown; dispatch: unknown }) => boolean,
-  ): void => {
+  // Fold helpers: run on whichever pane currently owns the editor.
+  // `:fold` / `:unfold` act on the heading or list item at the cursor
+  // (#848); `:foldall` / `:unfoldall` cover the whole note, headings and
+  // lists nested. We map vim's `zc` / `zo` / `zM` / `zR` keys explicitly so
+  // the advertised fold chords work regardless of what CM-Vim ships by
+  // default. The action ids keep their heading names; config refers to them.
+  const runFold = (cmd: (view: EditorView) => boolean): void => {
     const view = useStore.getState().editorViewRef;
     if (!view) return;
-    cmd(view as unknown as Parameters<typeof foldCode>[0]);
+    cmd(view);
     view.focus();
   };
-  Vim.defineAction("foldHeadingAtCursor", () => runFold(foldCode as never));
-  Vim.defineAction("unfoldHeadingAtCursor", () => runFold(unfoldCode as never));
-  Vim.defineAction("foldAllHeadings", () => runFold(foldAll as never));
-  Vim.defineAction("unfoldAllHeadings", () => runFold(unfoldAll as never));
-  Vim.defineAction("zenHalfPageDown", (cm: ReturnType<typeof getCM>) =>
-    editorHalfPage((cm as unknown as { cm6?: EditorView }).cm6, true),
-  );
-  Vim.defineAction("zenHalfPageUp", (cm: ReturnType<typeof getCM>) =>
-    editorHalfPage((cm as unknown as { cm6?: EditorView }).cm6, false),
-  );
-  Vim.defineEx("fold", "fold", () => runFold(foldCode as never));
-  Vim.defineEx("unfold", "unfold", () => runFold(unfoldCode as never));
-  Vim.defineEx("foldall", "foldall", () => runFold(foldAll as never));
-  Vim.defineEx("unfoldall", "unfoldall", () => runFold(unfoldAll as never));
+  Vim.defineAction("foldHeadingAtCursor", () => runFold(foldAtCursor));
+  Vim.defineAction("unfoldHeadingAtCursor", () => runFold(unfoldAtCursor));
+  Vim.defineAction("foldAllHeadings", () => runFold(foldAllOutline));
+  Vim.defineAction("unfoldAllHeadings", () => runFold(unfoldAll));
+  Vim.defineEx("fold", "fold", () => runFold(foldAtCursor));
+  Vim.defineEx("unfold", "unfold", () => runFold(unfoldAtCursor));
+  Vim.defineEx("foldall", "foldall", () => runFold(foldAllOutline));
+  Vim.defineEx("unfoldall", "unfoldall", () => runFold(unfoldAll));
 }
 
 /** Flatten the pane tree to a list of leaves, independent of the store's
@@ -1174,6 +1283,7 @@ const MANUAL_EX_NAMES = new Set([
   "q",
   "wq",
   "format",
+  "unbind",
   "tasks",
   "tag",
   "template",
@@ -1261,7 +1371,13 @@ function registerCommandPaletteEx(): void {
   };
 
   const names = new Set<string>(MANUAL_EX_NAMES);
-  for (const cmd of buildCommands()) {
+  // Register every command, gated or not. This runs when the Editor mounts,
+  // before any pane has a view or a note, and buildCommands() drops every
+  // command whose `when` says no at that instant, which is the whole
+  // editor-scoped family (:editor_reflow_paragraph, :task_forward, and the
+  // rest) for the life of the window. `runCommand` re-checks `when` when the
+  // name is actually typed, so nothing runs out of context.
+  for (const cmd of buildCommands({ includeUnavailable: true })) {
     const name = commandIdToExName(cmd.id);
     if (names.has(name)) continue;
     names.add(name);
@@ -1411,7 +1527,7 @@ function renderWildmenu(
   // they should type more to filter rather than keep tabbing forever.
   if (matches.length > slice.length) {
     const more = document.createElement("div");
-    more.textContent = `+${matches.length - slice.length} more — type to filter`;
+    more.textContent = `+${matches.length - slice.length} more · type to filter`;
     more.style.cssText =
       "padding: 4px 8px 2px; font-size: 10px; opacity: 0.6; color: rgb(var(--z-fg))";
     menu.list.appendChild(more);

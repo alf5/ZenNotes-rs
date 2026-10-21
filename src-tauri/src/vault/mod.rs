@@ -3,16 +3,16 @@
 //! exercised directly by `cargo test`.
 
 pub mod assets;
+pub mod atomic;
 pub mod comments;
 pub mod config;
 pub mod crud;
-pub mod demo_tour;
 pub mod folders;
 pub mod layout;
 pub mod listing;
 pub mod metadata;
 pub mod notes;
 pub mod settings;
-pub mod tasks;
+pub mod sidecars;
 pub mod templates;
 pub mod workflows;

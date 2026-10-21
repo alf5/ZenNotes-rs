@@ -23,9 +23,11 @@ import {
 import { useStore } from '../store'
 import { ChevronLeftIcon, ChevronRightIcon } from './icons'
 import { InlineMarkdown } from '../lib/inline-markdown'
+import { CloudTaskConflictIndicator } from './CloudTaskConflictIndicator'
 import { resolveWeekStartDay } from '../lib/week-start'
 import { ContextMenu, type ContextMenuItem } from './ContextMenu'
 import { buildTaskMenuItems } from '../lib/task-context-menu'
+import { isOverlayOrDialogOpen } from '../lib/overlay-open'
 
 interface Props {
   tasks: VaultTask[]
@@ -353,6 +355,12 @@ export function TasksCalendar({
   // sidebar bindings (same trick TasksView's list mode uses).
   useEffect(() => {
     const handler = (e: KeyboardEvent): void => {
+      // A modal, menu or Settings owns the keyboard while open, as in the list
+      // and the board. This handler runs first (capture phase), so without it
+      // Space on a button in Settings or What's New marked the day's task
+      // done behind the dialog, Tab cycled the calendar's tasks instead of
+      // the dialog's buttons, and in Vim mode `dd` deleted a task.
+      if (isOverlayOrDialogOpen()) return
       // While the Vim hint overlay is open it owns the keyboard; yield to it. (#151)
       if (document.querySelector('[data-vim-hint-overlay]')) return
       const active = document.activeElement as HTMLElement | null
@@ -367,6 +375,12 @@ export function TasksCalendar({
       }
 
       if (e.metaKey || e.ctrlKey || e.altKey) return
+      // With Vim off the single-character keys stay with the page, the rule
+      // every list in the app follows: arrows, Enter, Space, Tab and Escape
+      // are universal, the letters (and < > [ ]) are Vim's. A stray letter
+      // then never edits, deletes, moves or reschedules the task under the
+      // cursor, and the hint line names nothing that is not live.
+      if (!vimMode && e.key.length === 1 && e.key !== ' ') return
 
       // Grab & place: while a task is picked up, the grid navigation chooses a
       // target day; Enter places it (move / set-due choice), Esc cancels.
@@ -590,7 +604,8 @@ export function TasksCalendar({
     onToggleTask,
     onRescheduleTask,
     onMoveTask,
-    deleteTaskFromList
+    deleteTaskFromList,
+    vimMode
   ])
 
   const focusedTaskRef = useRef<HTMLDivElement | null>(null)
@@ -632,8 +647,10 @@ export function TasksCalendar({
         </div>
         <div className="text-xs text-current/40">
           {grabbedTask
-            ? `Moving “${grabbedTask.content || 'task'}” — h/j/k/l pick a day · Enter place · Esc cancel`
-            : 'h/j/k/l day · Tab pick · x toggle · e edit · dd del · m move · < > / T due · a add'}
+            ? `Moving “${grabbedTask.content || 'task'}”: h/j/k/l pick a day · Enter place · Esc cancel`
+            : vimMode
+              ? 'h/j/k/l day · Tab pick · x toggle · e edit · dd del · m move · < > / T due · a add'
+              : '←/→/↑/↓ day · Tab pick · Space toggle · drag to move · right-click actions'}
         </div>
       </div>
 
@@ -921,6 +938,7 @@ function CalendarTaskRow({
         )}
       </span>
       <span className="shrink-0 truncate text-xs text-current/45">{task.noteTitle}</span>
+      <CloudTaskConflictIndicator path={task.sourcePath} />
       {task.priority && (
         <span
           className={[

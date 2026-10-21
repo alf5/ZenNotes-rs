@@ -1,10 +1,26 @@
 {
   "name": "@zennotes/app-core",
   "private": true,
-  "version": "2.45.0",
+  "version": "2.73.0",
   "type": "module",
   "exports": {
-    "./main": "./src/main.tsx"
+    "./main": "./src/main.tsx",
+    "./navigation": "./src/navigation.ts",
+    "./notes": "./src/notes.ts",
+    "./shell": "./src/shell.ts",
+    "./browse": "./src/browse.ts",
+    "./editor": "./src/editor.ts",
+    "./vite": {
+      "types": "./build/vite.d.ts",
+      "import": "./build/vite.mjs"
+    },
+    "./styles.css": "./src/styles/index.css",
+    "./tasks": "./src/tasks.ts",
+    "./workspace": "./src/workspace.ts",
+    "./settings": "./src/settings.ts",
+    "./commands": "./src/commands.ts",
+    "./dialogs": "./src/dialogs.ts",
+    "./host": "./src/host.ts"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.18.3",
@@ -26,16 +42,21 @@
     "@codemirror/language": "^6.10.6",
     "@codemirror/language-data": "^6.5.1",
     "@codemirror/lint": "^6.9.7",
+    "@codemirror/merge": "^6.12.2",
     "@codemirror/search": "^6.5.8",
     "@codemirror/state": "^6.5.0",
     "@codemirror/view": "^6.35.3",
     "@excalidraw/excalidraw": "^0.18.1",
+    "@lezer/common": "^1.5.2",
     "@lezer/highlight": "^1.2.1",
     "@myriaddreamin/typst-ts-renderer": "^0.7.0",
     "@myriaddreamin/typst-ts-web-compiler": "^0.7.0",
     "@myriaddreamin/typst.ts": "^0.7.0",
     "@replit/codemirror-vim": "^6.3.0",
+    "@terrastruct/d2": "0.1.33",
     "@xyflow/react": "^12.11.2",
+    "@zennotes/bridge-contract": "*",
+    "@zennotes/shared-domain": "*",
     "dompurify": "^3.3.4",
     "function-plot": "^1.25.3",
     "gray-matter": "^4.0.3",
@@ -45,7 +66,7 @@
     "jsxgraph": "^1.12.2",
     "katex": "^0.16.15",
     "mdast": "^3.0.0",
-    "mermaid": "^11.4.1",
+    "pele": "1.6.0",
     "prettier": "^3.8.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
@@ -65,6 +86,13 @@
     "zustand": "^5.0.2"
   },
   "devDependencies": {
+    "@types/react": "^18.3.28",
+    "@types/react-dom": "^18.3.7",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.5.10",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.7.2",
+    "vfile": "^6.0.3",
     "vite": "^6.4.3",
     "vitest": "^3.2.6"
   },

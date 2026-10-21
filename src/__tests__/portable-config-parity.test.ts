@@ -8,7 +8,8 @@
  *
  * That is exactly what happened across v2.15 → v2.45: 21 of 79 portable prefs
  * had no TOML mapping, `workflowsEnabled` among them, so the Workflows feature
- * could not be switched on from the config file at all.
+ * could not be switched on from the config file at all. v2.45 → v2.73 would
+ * have left 11 more behind; this test caught them.
  *
  * This test states the invariant instead of relying on someone remembering:
  * every key in shared-domain's PORTABLE_PREF_KEYS (which IS vendored, so it
@@ -18,19 +19,12 @@ import { describe, expect, it } from 'vitest'
 import { PORTABLE_PREF_KEYS } from '@shared/app-config'
 import { portableConfigMappedKeys } from '../bridge/portable-config'
 
-/**
- * The one key upstream itself leaves unmapped: it is portable in the schema but
- * has no TOML representation in upstream's app-config.ts either. Listed here so
- * the exemption is deliberate and visible rather than a hole in the assertion.
- */
-const UNMAPPED_UPSTREAM = new Set(['keepViewModeAcrossNotes'])
-
 describe('portable config TOML mappings', () => {
   it('covers every portable pref upstream defines', () => {
     const mapped = portableConfigMappedKeys()
-    const missing = PORTABLE_PREF_KEYS.filter(
-      (key) => !mapped.has(key) && !UNMAPPED_UPSTREAM.has(key)
-    )
+    // Upstream maps every portable pref since v2.52 (keepViewModeAcrossNotes
+    // was the last exception), so there is nothing left to exempt.
+    const missing = PORTABLE_PREF_KEYS.filter((key) => !mapped.has(key))
     expect(missing, `unmapped portable prefs: ${missing.join(', ')}`).toEqual([])
   })
 

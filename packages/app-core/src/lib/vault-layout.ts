@@ -12,20 +12,26 @@ import {
   type AssetMeta,
   type DateNotePatternSettings,
   type FileLocationSetting,
+  type FolderEntry,
   type FolderIconId,
   type FolderColorId,
   type NoteFolder,
   type NoteMeta,
   type VaultSettings
 } from '@shared/ipc'
+import { isExcalidrawPath } from '@shared/excalidraw'
 import {
   normalizeSystemFolderPaths,
   resolveFolderPath,
   systemFolderForDirName
 } from '@shared/system-folder-paths'
-import { normalizeTasksExcludedFolders } from '@shared/tasks-excluded-folders'
+import {
+  normalizeTasksExcludedFolders,
+  normalizeTasksIncludedFolders
+} from '@shared/tasks-excluded-folders'
 import { normalizeTypstPreambleSettings } from '@shared/typst-preamble-folder'
 import { normalizeHarperVaultState } from '@shared/harper-settings'
+import { normalizeVaultDisplayName } from '@shared/vault-display-name'
 import { getISOWeek, getISOWeekYear, mondayOfISOWeek } from './template-render'
 
 // Reserved however the system folders are remapped:
@@ -524,7 +530,7 @@ function normalizeFileLocation(
 }
 
 /**
- * Resolve where a new Drawing/Database should be created, from a
+ * Resolve where a new Drawing/Database/task file should be created, from a
  * `FileLocationSetting` + the note you're currently viewing. Returns the
  * `(folder, subpath)` pair the `createExcalidraw` / `createDatabase` bridge calls
  * expect. (#362)
@@ -547,6 +553,21 @@ export function resolveCreateLocation(
     return { folder: 'inbox', subpath: normalized.folder }
   }
   return { folder: 'inbox', subpath: '' }
+}
+
+/**
+ * The vault-relative directory a `Specific folder` location really creates
+ * files in ('' is the vault root), so Settings can spell it out. The folder is
+ * an inbox subpath, not a vault path: `Tasks` is `inbox/Tasks` in an Inbox
+ * vault, `Tasks` in a root vault, and follows a remapped inbox. The Settings
+ * field used to call it vault-relative, which only held in a root vault.
+ */
+export function specificFolderDestination(
+  folder: string | null | undefined,
+  settings: VaultSettings | null | undefined
+): string {
+  const location = resolveCreateLocation({ mode: 'folder', folder: folder ?? '' }, null, settings)
+  return vaultRelativeFolderPath(location.folder, location.subpath, settings)
 }
 
 /**
@@ -599,8 +620,12 @@ export function normalizeVaultSettings(
   const normalizedTasksExcluded = normalizeTasksExcludedFolders(
     settings?.tasks?.excludedFolders
   )
+  const normalizedTasksIncluded = normalizeTasksIncludedFolders(
+    settings?.tasks?.includedFolders
+  )
   const normalizedTypstPreambles = normalizeTypstPreambleSettings(settings?.typstPreambles)
   const normalizedHarper = normalizeHarperVaultState(settings?.harper)
+  const displayName = normalizeVaultDisplayName(settings?.displayName)
   const primaryNotesLocation =
     settings?.primaryNotesLocation === 'root'
       ? 'root'
@@ -667,11 +692,21 @@ export function normalizeVaultSettings(
     // Per-vault view overrides (#292): passed through as-is; the store validates
     // each value when it overlays them onto the live prefs.
     ...(settings?.view ? { view: settings.view } : {}),
-    ...(normalizedTasksExcluded.length > 0
-      ? { tasks: { excludedFolders: normalizedTasksExcluded } }
+    ...(normalizedTasksExcluded.length > 0 || normalizedTasksIncluded.length > 0
+      ? {
+          tasks: {
+            ...(normalizedTasksExcluded.length > 0
+              ? { excludedFolders: normalizedTasksExcluded }
+              : {}),
+            ...(normalizedTasksIncluded.length > 0
+              ? { includedFolders: normalizedTasksIncluded }
+              : {})
+          }
+        }
       : {}),
     ...(normalizedTypstPreambles ? { typstPreambles: normalizedTypstPreambles } : {}),
-    ...(normalizedHarper ? { harper: normalizedHarper } : {})
+    ...(normalizedHarper ? { harper: normalizedHarper } : {}),
+    ...(displayName ? { displayName } : {})
   }
 }
 
@@ -700,6 +735,56 @@ export function parseFavoriteFolderKey(
   if (idx === -1) return null
   const folder = key.slice(0, idx) as NoteFolder
   return { folder, subpath: key.slice(idx + 1) }
+}
+
+/** A favorite key resolved to the live note or folder it names, for rendering. */
+export type FavoriteItem =
+  | { kind: 'note'; key: string; path: string; title: string; isDrawing: boolean }
+  | { kind: 'folder'; key: string; folder: NoteFolder; subpath: string; label: string }
+
+/**
+ * Resolve favorite keys to live notes and folders, in the stored order. A key
+ * whose target no longer exists (renamed away, deleted, trashed) is skipped,
+ * so no surface ever shows a broken row. The sidebar's Favorites section and
+ * the home view's (#810) read the same list through this one function, so a
+ * favorite can never be visible in one and missing from the other.
+ */
+export function resolveFavoriteItems(
+  favorites: readonly string[],
+  notes: readonly NoteMeta[],
+  folders: readonly Pick<FolderEntry, 'folder' | 'subpath'>[]
+): FavoriteItem[] {
+  const out: FavoriteItem[] = []
+  let byPath: Map<string, NoteMeta> | null = null
+  for (const key of favorites) {
+    if (isFavoriteFolderKey(key)) {
+      const parsed = parseFavoriteFolderKey(key)
+      if (!parsed || !parsed.subpath) continue
+      const exists = folders.some(
+        (f) => f.folder === parsed.folder && f.subpath === parsed.subpath
+      )
+      if (!exists) continue
+      out.push({
+        kind: 'folder',
+        key,
+        folder: parsed.folder,
+        subpath: parsed.subpath,
+        label: parsed.subpath.split('/').slice(-1)[0]
+      })
+    } else {
+      byPath ??= new Map(notes.map((n) => [n.path, n]))
+      const note = byPath.get(key)
+      if (!note || note.folder === 'trash') continue
+      out.push({
+        kind: 'note',
+        key,
+        path: note.path,
+        title: note.title,
+        isDrawing: isExcalidrawPath(note.path)
+      })
+    }
+  }
+  return out
 }
 
 /** Toggle a favorite key, returning the next list (added at the end, or removed). */

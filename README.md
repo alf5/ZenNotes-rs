@@ -27,7 +27,7 @@ produced the Arch Linux packaging — iterating against real builds and tests at
 - **Arch Linux:** a `makepkg`/AUR setup lives in [`packaging/arch/`](packaging/arch/) and builds from source against Arch's own `webkit2gtk-4.1` / `gtk3` packages.
 - **Scope:** desktop app only. The original's web/server/self-hosted modes — and some desktop peripherals (auto-updater, MCP install, Raycast, TikZ) — are not part of this port.
 - **Identity:** application id `com.zennotes-rs.app`, deep-link scheme `zennotes-rs://`.
-- **Upstream parity:** mirrored to ZenNotes **v2.45.0**. See [GAP-ANALYSIS.md](GAP-ANALYSIS.md) for what is and is not carried over.
+- **Upstream parity:** mirrored to ZenNotes **v2.73.0**. See [GAP-ANALYSIS.md](GAP-ANALYSIS.md) for what is and is not carried over.
 
 Licensed **MIT** (see [LICENSE](LICENSE)), the same as the upstream project.
 

@@ -9,6 +9,49 @@ export interface CloudSyncContent {
   media_type: string;
 }
 
+export type CloudSyncContentMetadata = Omit<CloudSyncContent, 'data'>
+
+/**
+ * The ciphertext an end-to-end encrypted vault stores for a piece of content.
+ * docs/specs/cloud-e2ee.md describes the format.
+ */
+export interface CloudSyncEncryptedContent {
+  sha256: string
+  byte_length: number
+}
+
+export interface CloudSyncContentReference extends CloudSyncContentMetadata {
+  item_id: string
+  revision: number
+  /**
+   * Set by the vault cipher for encrypted vaults: the metadata above describes
+   * the plaintext, this describes the bytes the download actually returns.
+   */
+  encrypted?: CloudSyncEncryptedContent
+}
+
+export interface CloudSyncContentRequestOptions {
+  contentMode?: 'references'
+  maxInlineBytes?: number
+  maxResponseBytes?: number
+}
+
+export interface CloudSyncDownloadInstruction {
+  item_id: string
+  revision: number
+  content: CloudSyncContentMetadata
+  download: {
+    url: string
+    method: 'GET'
+    headers: Record<string, string>
+    expires_at: string
+  }
+}
+
+export interface CloudSyncDownloadResponse {
+  data: CloudSyncDownloadInstruction
+}
+
 interface CloudSyncMutationBase {
   operation_id: string;
   item_id: string;
@@ -20,11 +63,21 @@ export interface CloudSyncUpsertMutation extends CloudSyncMutationBase {
   path: string;
   kind: CloudSyncItemKind;
   content: CloudSyncContent;
+  /** Encrypted vaults only: the sealed item metadata (base64 ZNE1). */
+  meta?: string;
 }
 
 export interface CloudSyncMoveMutation extends CloudSyncMutationBase {
   type: "move";
   path: string;
+  /** Encrypted vaults only: the sealed item metadata for the new path. */
+  meta?: string;
+  /**
+   * Client-side hints the sync engine attaches so an encrypted vault can seal
+   * the new path's metadata. Never sent to the service.
+   */
+  kind?: CloudSyncItemKind;
+  content_metadata?: CloudSyncContentMetadata;
 }
 
 export interface CloudSyncDeleteMutation extends CloudSyncMutationBase {
@@ -70,6 +123,8 @@ export interface CloudSyncConflict {
   code: CloudSyncConflictCode;
   current_revision: number | null;
   current_path: string | null;
+  /** Encrypted vaults: the sealed metadata behind `current_path`. */
+  current_meta?: string | null;
   capacity?: CloudSyncCapacityConflict;
   /**
    * The vault-relative path of the file the rejected operation was about, as
@@ -96,6 +151,8 @@ export interface CloudSyncUploadRequest {
     CloudSyncContent,
     "encoding" | "sha256" | "byte_length" | "media_type"
   >;
+  /** Encrypted vaults only: the sealed item metadata. */
+  meta?: string;
 }
 
 export interface CloudSyncUploadInitiationResponse {
@@ -131,6 +188,9 @@ export interface CloudSyncManifestItem {
   byte_length: number;
   media_type: string;
   content?: CloudSyncContent;
+  content_ref?: CloudSyncContentReference
+  /** Encrypted vaults: the sealed item metadata. */
+  meta?: string | null;
 }
 
 export interface CloudSyncManifestResponse {
@@ -147,6 +207,10 @@ export interface CloudSyncChange {
   previous_path: string | null;
   revision: number;
   content?: CloudSyncContent;
+  content_ref?: CloudSyncContentReference
+  /** Encrypted vaults: sealed metadata for `path` and `previous_path`. */
+  meta?: string | null;
+  previous_meta?: string | null;
 }
 
 export interface CloudSyncChangeResponse {
@@ -161,11 +225,26 @@ export interface CloudSyncRevision {
   path: string;
   kind: CloudSyncItemKind;
   deleted: boolean;
-  content: CloudSyncContent | null;
+  content?: CloudSyncContent | null;
+  content_ref?: CloudSyncContentReference
+  /** Encrypted vaults: the sealed item metadata. */
+  meta?: string | null;
 }
 
 export interface CloudSyncRevisionResponse {
   data: CloudSyncRevision;
+}
+
+/** How an end-to-end encrypted vault's key and name are sealed (docs/specs/cloud-e2ee.md). */
+export interface CloudSyncVaultEncryption {
+  scheme: "zne1";
+  /** 32 lowercase hex characters, bound into the vault key's envelope. */
+  key_id: string;
+  key_version: number;
+  /** The vault key sealed under the account key, base64 ZNE1. */
+  vault_key_envelope: string;
+  /** The real vault name, base64 ZNE1; `name` holds a placeholder. */
+  name: string;
 }
 
 export interface CloudSyncVault {
@@ -174,6 +253,8 @@ export interface CloudSyncVault {
   cursor: number;
   created_at: string;
   updated_at: string;
+  /** Absent or null for a readable vault. Fixed when the vault is created. */
+  encryption?: CloudSyncVaultEncryption | null;
 }
 
 export interface CloudSyncVaultResponse {
@@ -208,11 +289,27 @@ export interface CloudBackupSnapshotCollection {
   data: CloudBackupSnapshot[];
 }
 
+/**
+ * Why the newest automatic backup did not happen. The service clears it once
+ * an automatic backup succeeds, and when automatic backups are turned off.
+ */
+export interface CloudBackupScheduleFailure {
+  /** BACKUP_QUOTA_EXCEEDED names the plan limit in `details` (`limit`,
+   *  `current`, `allowed`); AUTOMATIC_BACKUP_FAILED is a backup that failed. */
+  code: string;
+  /** The service's own English sentence. */
+  message: string | null;
+  details: Record<string, unknown> | null;
+  occurred_at: string | null;
+}
+
 export interface CloudBackupSchedule {
   enabled: boolean;
   frequency: "daily";
   next_backup_at: string | null;
   last_backup_at: string | null;
+  /** Absent from a service that predates it. */
+  last_failure?: CloudBackupScheduleFailure | null;
 }
 
 export interface CloudBackupScheduleResponse {
@@ -228,10 +325,38 @@ export interface CloudBackupSnapshotItem {
   revision: number;
   content_hash: string | null;
   media_type: string | null;
+  /** Encrypted vaults: the sealed item metadata; `path` is a path id. */
+  meta?: string | null;
 }
 
 export interface CloudBackupSnapshotItemCollection {
   data: CloudBackupSnapshotItem[];
+  /** The paginator's position. An answer without it is read as one page. */
+  meta?: {
+    current_page: number;
+    last_page: number;
+    per_page: number;
+    total: number;
+  };
+}
+
+/** Which notes of a backup to list: a page, optionally of a path search. */
+export interface CloudBackupItemsQuery {
+  page?: number;
+  search?: string;
+}
+
+/**
+ * One page of a backup's notes. `total` counts what `search` matched, and
+ * `search` is the trimmed text that was asked for ("" for the whole backup).
+ * A service that predates search ignores it and pages through every note.
+ */
+export interface CloudBackupItemsPage {
+  items: CloudBackupSnapshotItem[];
+  page: number;
+  lastPage: number;
+  total: number;
+  search: string;
 }
 
 export interface CloudBackupNoteRestoreRequest {
@@ -244,6 +369,8 @@ export interface CloudBackupNoteRestore {
   status: "completed" | "conflict";
   item_id: string;
   path: string;
+  /** Encrypted vaults: the sealed item metadata; `path` is a path id. */
+  meta?: string | null;
   revision: number | null;
   cursor: number;
   error_code: string | null;
@@ -360,6 +487,9 @@ export interface CloudUsage {
 }
 
 export interface CloudServiceAccount {
+  capabilities?: { content_references?: boolean; end_to_end_encryption?: boolean }
+  /** Absent from a service without end-to-end encryption. */
+  encryption?: { keyset: boolean }
   user: CloudAccountUser;
   device: CloudAccountDevice & { app_version: string | null };
   features: Record<
@@ -406,14 +536,57 @@ export interface CloudPublishedNoteAppearance {
 export interface CloudPublishAppearanceInput {
   theme: string;
   /** Omitted preserves the current logo, null removes it, and a file replaces it. */
-  logo?: CloudPublishAssetInput | null;
+  logo?: CloudPublishEncodedAsset | null;
 }
 
+/**
+ * An attachment to publish, by its vault-relative path: the platform reads the
+ * file itself (desktop main, the phone shells), so its bytes never cross the
+ * bridge as base64.
+ */
 export interface CloudPublishAssetInput {
   ref: string;
   name: string;
   mime: string;
+  path: string;
+}
+
+/** An attachment carried inside a one-request (multipart) publish. */
+export interface CloudPublishEncodedAsset {
+  ref: string;
+  name: string;
+  mime: string;
   base64: string;
+}
+
+/** What the server is told about each attachment before it is uploaded. */
+export interface CloudPublishUploadAsset {
+  ref: string;
+  name: string;
+  mime: string;
+  byte_length: number;
+  sha256: string;
+}
+
+export interface CloudPublishUploadRequest {
+  /** The share a republish replaces; omitted for a new publish. */
+  share_id?: number;
+  assets: CloudPublishUploadAsset[];
+}
+
+export interface CloudPublishUploadTarget {
+  ref: string;
+  method: 'PUT';
+  url: string;
+  headers: Record<string, string>;
+}
+
+export interface CloudPublishUploadResponse {
+  data: {
+    id: string;
+    expires_at: string;
+    uploads: CloudPublishUploadTarget[];
+  };
 }
 
 export interface CloudPublishedNoteCollection {
@@ -425,6 +598,12 @@ export interface CloudVaultLink {
   vault_id: string;
   vault_name: string;
   linked_at: string;
+  /**
+   * Set while this local vault moves from a readable Cloud vault into a new
+   * end-to-end encrypted one: the readable vault is retired once everything
+   * has uploaded, and the field is then removed.
+   */
+  replaces_vault_id?: string;
 }
 
 export interface CloudSyncBootstrapConflict {
@@ -550,6 +729,13 @@ export interface CloudSyncPendingConflictResolution {
 export interface CloudSyncSettingsConflict {
   path: string;
   cloud_path: string;
+  /**
+   * The parked cloud vault.json, parsed, so the app can show which settings
+   * differ instead of asking for an all-or-nothing answer. Optional: hosts
+   * that predate it, or a parked copy that is not valid JSON, leave it out and
+   * the app falls back to the whole-file question.
+   */
+  cloud_settings?: Record<string, unknown>;
 }
 
 export type CloudSyncSettingsChoice = "local" | "cloud";
@@ -565,4 +751,83 @@ export interface CloudSyncRunSummary {
   pending_conflicts?: CloudSyncPendingConflict[];
   /** Possible copies made by the pre-v2.44 conflict strategy. Never auto-deleted. */
   legacy_conflict_copies?: Array<{ path: string; original_path: string }>;
+}
+/** Desktop-wide sync handshake. Drafts must be durable before a run starts. */
+export type CloudSyncWindowEvent =
+  | { phase: 'prepare'; requestId: string }
+  | {
+      phase: 'finished'
+      requestId: string
+      summary: CloudSyncRunSummary | null
+      error: string | null
+    }
+
+export interface CloudSyncWindowHandlers {
+  prepare(): Promise<void>
+  finished(summary: CloudSyncRunSummary | null, error: string | null): void
+}
+
+/** End-to-end encryption as the Settings page sees it for the signed-in account. */
+export interface CloudEncryptionStatus {
+  /** ZenNotes Cloud accepts encrypted vaults for this account and this app can open them. */
+  available: boolean;
+  /** The account has set up encryption. */
+  keyset: boolean;
+  /** This device holds the unlocked account key. */
+  unlocked: boolean;
+}
+
+/** Recovery words to show and confirm before setup or a new recovery key takes effect. */
+export interface CloudEncryptionRecoveryPrompt {
+  setupId: string;
+  recoveryWords: string[];
+}
+
+/** Either secret proves the person may change the account's encryption. */
+export type CloudEncryptionSecretInput = { passphrase: string } | { recoveryWords: string };
+
+/** Argon2id settings for the encryption passphrase, stored with the keyset. */
+export interface CloudEncryptionKdf {
+  algorithm: "argon2id";
+  version: 19;
+  memory_kib: number;
+  iterations: number;
+  parallelism: number;
+  /** Base64 of 16 random bytes. */
+  salt: string;
+}
+
+/**
+ * An account's end-to-end encryption keyset: the account key sealed under the
+ * passphrase and, separately, under the recovery key. The service never holds
+ * either secret.
+ */
+export interface CloudEncryptionKeyset {
+  format: 1;
+  account_key_version: number;
+  kdf: CloudEncryptionKdf;
+  passphrase_envelope: string;
+  recovery_envelope: string;
+  revision: number;
+  updated_at: string;
+}
+
+export interface CloudEncryptionKeysetResponse {
+  data: CloudEncryptionKeyset;
+}
+
+export interface CloudEncryptionKeysetCreate {
+  format: 1;
+  account_key_version: number;
+  kdf: CloudEncryptionKdf;
+  passphrase_envelope: string;
+  recovery_envelope: string;
+}
+
+/** A passphrase change replaces kdf and passphrase_envelope; a new recovery key replaces recovery_envelope. */
+export interface CloudEncryptionKeysetUpdate {
+  expected_revision: number;
+  kdf?: CloudEncryptionKdf;
+  passphrase_envelope?: string;
+  recovery_envelope?: string;
 }

@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { CloudSyncRunSummary } from "@zennotes/bridge-contract/cloud-sync";
 import { CloudPendingConflictResolver } from "./CloudPendingConflictResolver";
 import { Modal } from "./ui/Modal";
@@ -8,14 +8,25 @@ const TITLE_ID = "cloud-conflict-dialog-title";
 export function CloudConflictDialog({
   summary,
   vaultName,
+  startConflictId = null,
   onClose,
 }: {
   summary: CloudSyncRunSummary;
   vaultName: string;
+  /** The file to open on (a note's banner or the new-conflict notification
+   *  asked for it); the first file when null or no longer waiting. */
+  startConflictId?: string | null;
   onClose: () => void;
 }): JSX.Element {
   const conflicts = summary.pending_conflicts ?? [];
-  const [selectedId, setSelectedId] = useState(() => conflicts[0]?.id ?? "");
+  const [selectedId, setSelectedId] = useState(
+    () => startConflictId ?? conflicts[0]?.id ?? "",
+  );
+  // The notification floats above this dialog, so its Review can ask for a
+  // file while the queue is already open: the queue moves to it.
+  useEffect(() => {
+    if (startConflictId) setSelectedId(startConflictId);
+  }, [startConflictId]);
   const selected =
     conflicts.find((conflict) => conflict.id === selectedId) ?? conflicts[0];
   // Focus lands on the review area rather than on the first button, which is
@@ -91,6 +102,7 @@ export function CloudConflictDialog({
           {selected && (
             <CloudPendingConflictResolver
               key={selected.id}
+              summary={summary}
               conflict={selected}
               vaultName={vaultName}
               onClose={onClose}

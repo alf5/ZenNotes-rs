@@ -161,8 +161,16 @@ fn walk_notes(
     }
 }
 
-/// `vault:list-notes` — all notes across inbox/quick/archive/trash.
-pub fn list_notes(root: &Path) -> Vec<NoteMeta> {
+/// Every note file as (vault-relative path, folder), without reading any of
+/// them: the cheap walk under `list_notes`, for callers that only need paths.
+pub fn list_note_paths(root: &Path) -> Vec<(String, String)> {
+    walk_all_notes(root)
+        .into_iter()
+        .map(|f| (crate::vault::sidecars::rel_of(root, &f.full), f.folder))
+        .collect()
+}
+
+fn walk_all_notes(root: &Path) -> Vec<NoteFile> {
     let mut files: Vec<NoteFile> = Vec::new();
     for folder in FOLDERS {
         let top_abs = layout::folder_root(root, folder);
@@ -172,6 +180,11 @@ pub fn list_notes(root: &Path) -> Vec<NoteMeta> {
         walk_notes(folder, &top_abs, &top_real, &top_abs, is_primary_root, &mut ancestors, &mut files);
     }
     files
+}
+
+/// `vault:list-notes` — all notes across inbox/quick/archive/trash.
+pub fn list_notes(root: &Path) -> Vec<NoteMeta> {
+    walk_all_notes(root)
         .into_iter()
         .filter_map(|f| {
             notes::read_meta(root, &f.full, &f.folder, Some(f.sibling_order), Some(f.is_symlink)).ok()

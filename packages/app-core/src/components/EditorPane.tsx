@@ -1,3 +1,4 @@
+import { noteEditingSync, noteEditingLockExtension, refreshNoteEditingLock } from '../lib/note-lifecycle-lock'
 /**
  * Single pane of the editor split view. Each leaf in the pane-layout
  * tree renders an `EditorPane` — owning its own CodeMirror view, tab
@@ -13,7 +14,8 @@ import {
   useLayoutEffect,
   useMemo,
   useRef,
-  useState
+  useState,
+  type SetStateAction
 } from 'react'
 import {
   Annotation,
@@ -29,7 +31,6 @@ import {
   type DecorationSet,
   EditorView,
   WidgetType,
-  drawSelection,
   highlightActiveLine,
   highlightActiveLineGutter,
   keymap,
@@ -38,21 +39,24 @@ import {
 } from '@codemirror/view'
 import { Vim, getCM, vim } from '@replit/codemirror-vim'
 import type { AssetMeta, ImportedAsset, NoteComment, NoteFolder } from '@shared/ipc'
+import { registerNoteEditor } from '../lib/note-editor-context'
+import { noteEditorHostExtension } from '../lib/editor-host'
 import {
-  history,
   historyKeymap,
   indentWithTab,
   moveLineDown,
   moveLineUp,
   redo,
+  redoDepth,
   selectAll,
-  undo
+  undo,
+  undoDepth
 } from '@codemirror/commands'
-import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
 import { isImeComposing } from '../lib/ime'
 import { displayRowBoundaryKeymap } from '../lib/cm-display-row'
-import { resolveCodeLanguage } from '../lib/cm-code-languages'
+import { noteMarkdown } from '../lib/cm-markdown-language'
 import { customCodeFenceHighlightExtension } from '../lib/cm-custom-code-languages'
+import { markdownLinkExtension } from '../lib/cm-markdown-links'
 import {
   listIndentGuides as listIndentGuidesExt,
   listIndentWidth,
@@ -65,7 +69,7 @@ import { toggleCheckbox } from '../lib/cm-toggle-checkbox'
 import { completionKeymapExtension, completionNavKeymap } from '../lib/cm-completion-nav'
 import { vimAwareDefaultKeymap, vimAwareMarkdownKeymap, vimAwareSearchKeymap } from '../lib/cm-vim-default-keymap'
 import { isVimAwaitingArgument } from '../lib/vim-nav'
-import { toCodeMirrorKey, vimHalfPageKeymap } from '../lib/vim-half-page-keymap'
+import { keyBindingsFor, vimHalfPageKeymap } from '../lib/vim-half-page-keymap'
 import { scrollOff } from '../lib/cm-scrolloff'
 import { followLinkTarget } from '../lib/follow-link'
 import { pointerOverRange } from '../lib/cm-pointer-range'
@@ -89,13 +93,13 @@ import {
   defaultHighlightStyle
 } from '@codemirror/language'
 import {
-  foldHeadingAtCursor,
+  foldAtCursor,
   headingFolding,
-  unfoldHeadingAtCursor
+  unfoldAtCursor
 } from '../lib/cm-heading-fold'
 import { tags as t } from '@lezer/highlight'
 import { autocompletion } from '@codemirror/autocomplete'
-import { useStore } from '../store'
+import { MIN_RIGHT_PANEL_WIDTH, noteDiskRevision, useStore } from '../store'
 import type { LineNumberMode } from '../store'
 import type { PaneEdge, PaneLeaf } from '../lib/pane-layout'
 import { findLeaf, inferPaneDropEdge } from '../lib/pane-layout'
@@ -103,8 +107,10 @@ import { livePreviewPlugin } from '../lib/cm-live-preview'
 import { codeBlockFlairPlugin } from '../lib/cm-code-block-flair'
 import { tablePlugin, tableVimEntry } from '../lib/cm-table'
 import { wysiwygBlocksPlugin } from '../lib/cm-wysiwyg-blocks'
+import { calloutFolding } from '../lib/cm-callout-fold'
 import { hashtagExtension } from '../lib/cm-hashtags'
 import { taskMetadataExtension } from '../lib/cm-task-metadata'
+import { liveTemplateTokenExtension } from '../lib/cm-live-template-tokens'
 import { taskRollupExtension } from '../lib/cm-task-rollup'
 import { hashtagSource } from '../lib/cm-hashtag-complete'
 import { frontmatterTagSource } from '../lib/cm-frontmatter-tag-complete'
@@ -139,6 +145,13 @@ import { setBlockType, toggleWrap, wrapLink } from '../lib/cm-format'
 import { shouldShowSelectionToolbar } from '../lib/cm-selection-toolbar'
 import { editorCursorPosition } from '../lib/editor-cursor-position'
 import { EditorSelectionToolbar } from './EditorSelectionToolbar'
+import { CloudConflictNoteBanner } from './CloudConflictNoteBanner'
+import {
+  AgentEditNoteBanner,
+  AgentReviewBar,
+  REVIEW_AGENT_EDITS_EVENT,
+  useAgentEditReview
+} from './AgentEditReview'
 import { appMarkdownSnippetExtension } from '../lib/markdown-snippets-config'
 import { LazyDiagramTabView, LazyPreview as Preview } from './LazyPreview'
 import { ConnectionsPanel } from './ConnectionsPanel'
@@ -199,20 +212,35 @@ import {
 } from '../lib/editor-hydration'
 import { recordRendererPerf } from '../lib/perf'
 import {
+  forgetTabScroll,
   rememberTabScroll,
   recallTabScroll,
   type TabScrollPosition
 } from '../lib/tab-scroll-memory'
 import { activeOutlineLineForCursor, parseOutline } from '../lib/outline'
 import {
+  editorLandingTopMargin,
   findRenderedHeadingForOutlineLine,
   nextOutlinePreviewSyncLockUntil,
   outlineHeadingTextOffset,
+  planPreviewJump,
   previewScrollTopForHeading,
+  previewShowsNote,
+  previewShowsSourceLine,
+  previewVisibleSourceLines,
   scrollTopForElementRelativeTop,
-  scrollTopForScrollRatio,
-  shouldSyncPreviewFromEditorViewport
+  shouldSyncPreviewFromEditorViewport,
+  type PreviewEditRequest
 } from '../lib/preview-outline-jump'
+import {
+  mapSplitScrollTop,
+  SPLIT_SCROLL_LEAD_MS,
+  splitScrollAnchors,
+  splitScrollEchoes,
+  type SplitScrollAnchor,
+  type SplitScrollLead,
+  type SplitScrollPane
+} from '../lib/split-scroll-sync'
 import {
   ArchiveIcon,
   ArrowLeftIcon,
@@ -256,8 +284,11 @@ import {
   importedAssetForExistingVaultAsset
 } from '../lib/editor-drops'
 import {
+  editorImagePaste,
+  pasteImageFilesIntoEditor,
   pastedImageFilesFromClipboard,
-  pastedImageInputFromFile
+  pastedImageInputFromFile,
+  readSystemClipboard
 } from '../lib/editor-paste-images'
 import {
   paneModeForPath,
@@ -268,12 +299,33 @@ import {
 import { resolveCommentAnchor, selectionToCommentAnchor } from '../lib/comments'
 import { ZEN_OPEN_EDITOR_CONTEXT_MENU_EVENT } from '../lib/keyboard-context-menu'
 import { armMiddleClickPasteGuard } from '../lib/middle-click-paste-guard'
+import { isWorkspaceVirtualTabPath } from '../lib/workspace-tabs'
+import {
+  followPathRewritesInNoteUndoHistories,
+  noteUndoHistoryFor,
+  noteUndoHistoryKey,
+  setAsideNoteUndoHistory
+} from '../lib/note-undo-history'
+import { noteUndoHistoryFromFile, serializeNoteUndoHistory } from '../lib/note-undo-file'
+import { latestPathRewriteSeq, pathAfterRewrites } from '../lib/path-rewrites'
+import { minimalTextChange } from '../lib/minimal-text-change'
+import { isDiskChange, resetUndoHistory } from '../lib/editor-disk-sync'
+import {
+  MIN_NOTE_WIDTH,
+  MIN_SPLIT_NOTE_WIDTH,
+  bumpSidePanel,
+  fitSidePanels,
+  syncSidePanelRecency,
+  type SidePanelId
+} from '../lib/side-panel-fit'
+import { TuckedPanelsRail } from './TuckedPanelsRail'
 import {
   CALENDAR_PANEL_CLOSED,
   calendarPanelOnNote,
   calendarPanelOnToggle,
   type CalendarPanelState
 } from '../lib/calendar-panel-auto'
+import { usePanePanels } from '../lib/use-pane-panels'
 import {
   assetPathFromTab,
   assetTitleFromPath,
@@ -289,11 +341,14 @@ import {
   formatKeyToken,
   getKeymapBinding,
   getKeymapDisplay,
+  labelWithShortcut,
   type KeymapId,
   type KeymapOverrides
 } from '../lib/keymaps'
 import { isTabStripOverflowing } from '../lib/tab-strip-overflow'
 import { editorTabSize } from '../lib/editor-tab-size'
+import { cursorDrawSelection } from '../lib/cm-cursor-blink'
+import { chromeCarriesWindowDrag, isPaneOnTopEdge } from '../lib/window-chrome'
 
 const MODE_OPTIONS: Array<{
   mode: PaneMode
@@ -333,56 +388,33 @@ function buildEditorKeymap(vimMode: boolean, overrides: KeymapOverrides): Extens
     // edge and misland on wrapped lines under fractional display scaling
     // (#591, the same resolution #575 removed from `$`).
     ...displayRowBoundaryKeymap,
-    {
-      key: 'Mod-f',
-      run: () => {
-        const state = useStore.getState()
-        if (state.vimMode) return false
-        state.setSearchOpen(true)
-        return true
-      }
-    },
+    // Note search's non-Vim shortcut has to win over the find bar's Mod-f in
+    // here, but it is the user's binding: unbound or moved under Settings →
+    // Keymap, Mod+F falls through to the find bar instead of still opening
+    // note search. (#860)
+    ...keyBindingsFor(getKeymapBinding(overrides, 'global.searchNotesNonVim'), () => {
+      const state = useStore.getState()
+      if (state.vimMode) return false
+      state.setSearchOpen(true)
+      return true
+    }),
     // Move the current line (or selection) up/down — reorders the markdown so
     // it persists in the file. Listed before defaultKeymap so the configured
     // binding wins; works in Vim normal/insert and non-Vim alike.
-    {
-      key: toCodeMirrorKey(getKeymapBinding(overrides, 'editor.moveLineUp')),
-      run: moveLineUp
-    },
-    {
-      key: toCodeMirrorKey(getKeymapBinding(overrides, 'editor.moveLineDown')),
-      run: moveLineDown
-    },
+    ...keyBindingsFor(getKeymapBinding(overrides, 'editor.moveLineUp'), moveLineUp),
+    ...keyBindingsFor(getKeymapBinding(overrides, 'editor.moveLineDown'), moveLineDown),
     // Obsidian-style checkbox toggle: line -> `- [ ]` -> `[x]` and back.
     // Mode-agnostic like the line moves.
-    {
-      key: toCodeMirrorKey(getKeymapBinding(overrides, 'editor.toggleCheckbox')),
-      run: toggleCheckbox
-    },
+    ...keyBindingsFor(getKeymapBinding(overrides, 'editor.toggleCheckbox'), toggleCheckbox),
     // Join a hard-wrapped paragraph back into one line so the pane wraps it
     // (#676). Mode-agnostic like the line moves; Vim mode also has `gq`.
-    {
-      key: toCodeMirrorKey(getKeymapBinding(overrides, 'editor.reflowParagraph')),
-      run: reflowParagraph
-    },
+    ...keyBindingsFor(getKeymapBinding(overrides, 'editor.reflowParagraph'), reflowParagraph),
     // Step across inline markers, so a formatted word can be finished without
     // reaching for the arrow keys. Mode-agnostic like the line moves. (#490)
-    {
-      key: toCodeMirrorKey(getKeymapBinding(overrides, 'editor.hopMarkerForward')),
-      run: markerHop.forward
-    },
-    {
-      key: toCodeMirrorKey(getKeymapBinding(overrides, 'editor.hopMarkerBackward')),
-      run: markerHop.backward
-    },
-    {
-      key: toCodeMirrorKey(getKeymapBinding(overrides, 'editor.foldHeading')),
-      run: foldHeadingAtCursor
-    },
-    {
-      key: toCodeMirrorKey(getKeymapBinding(overrides, 'editor.unfoldHeading')),
-      run: unfoldHeadingAtCursor
-    },
+    ...keyBindingsFor(getKeymapBinding(overrides, 'editor.hopMarkerForward'), markerHop.forward),
+    ...keyBindingsFor(getKeymapBinding(overrides, 'editor.hopMarkerBackward'), markerHop.backward),
+    ...keyBindingsFor(getKeymapBinding(overrides, 'editor.foldHeading'), foldAtCursor),
+    ...keyBindingsFor(getKeymapBinding(overrides, 'editor.unfoldHeading'), unfoldAtCursor),
     // Inline-format shortcuts (bold/italic/code/strike/highlight/math/link). In
     // Vim mode VimNav owns these (its window handler also resolves the Ctrl+I
     // jumplist collision on Linux); in non-Vim mode that handler is disabled, so
@@ -412,8 +444,9 @@ function buildEditorKeymap(vimMode: boolean, overrides: KeymapOverrides): Extens
 
 function markdownEditingExtensions(showHeadingLevelLabels = false): Extension[] {
   return [
-    markdown({ base: markdownLanguage, codeLanguages: resolveCodeLanguage, addKeymap: false }),
+    noteMarkdown(),
     customCodeFenceHighlightExtension,
+    markdownLinkExtension,
     vimAwareMarkdownKeymap,
     markdownListIndentPlugin,
     frontmatterTagExtension,
@@ -458,9 +491,13 @@ function wysiwygExtensions(
     // markdown for full keyboard/Vim editing (#232).
     ...(renderTables ? [tablePlugin, tableVimEntry] : []),
     wysiwygBlocksPlugin,
+    // Collapsed callouts (`> [!type]-`) start folded when a note opens (#853).
+    calloutFolding(),
     ...hashtagExtension,
     ...taskMetadataExtension,
     ...taskRollupExtension,
+    // `{{modified_date}}` and friends read as the note's last-saved time (#784).
+    ...liveTemplateTokenExtension,
     ...highlightExtension,
     ...wikilinkRenderExtension,
     mathRenderExtension(mathRenderer, typstPreamble),
@@ -495,7 +532,6 @@ const paperHighlight = HighlightStyle.define([
   { tag: t.emphasis, class: 'tok-emphasis' },
   { tag: t.strong, class: 'tok-strong' },
   { tag: t.strikethrough, class: 'tok-strikethrough' },
-  { tag: t.link, class: 'tok-link' },
   { tag: t.url, class: 'tok-url' },
   { tag: t.monospace, class: 'tok-monospace' },
   { tag: t.quote, class: 'tok-quote' },
@@ -571,6 +607,72 @@ const OUTLINE_JUMP_TOP_MARGIN = 24
 const OUTLINE_JUMP_SCROLL_SYNC_LOCK_MS = 450
 const OUTLINE_JUMP_SCROLL_SYNC_SETTLE_MS = 120
 const TASK_JUMP_HIGHLIGHT_MS = 1400
+
+/**
+ * Where the editor lands when a pane leaves Preview. (#822)
+ *
+ * - `reading-position`: the default. The caret stays put while its line is
+ *   still on screen in the reading view; once the reader has scrolled away
+ *   from it, the editor opens on the block at the top of what they were
+ *   reading instead of snapping back to a caret they left screens ago.
+ * - `caller`: the caller places the caret itself (a comment jump, a task
+ *   jump), so the reading position must not override it.
+ * - a line: a block the reader pointed at, with the viewport offset that keeps
+ *   it at the same height on screen.
+ */
+type EditorLanding =
+  | 'reading-position'
+  | 'caller'
+  | { line: number; topMargin: number }
+
+interface PendingEditorLanding {
+  path: string
+  line: number
+  topMargin: number
+}
+
+function landEditorOnLine(view: EditorView, line: number, topMargin: number): void {
+  const safeLine = Math.min(Math.max(1, line), view.state.doc.lines)
+  const targetLine = view.state.doc.line(safeLine)
+  // Focus before moving the selection. CodeMirror mirrors a new selection
+  // into the DOM only while it owns focus; dispatched into an unfocused
+  // editor, the DOM selection stays parked where the last click left it
+  // (inside the editor that Preview had hidden), and the observer's next
+  // flush reads that stale caret back as a user selection, snapping the
+  // cursor to the old line a frame before the deferred focus arrives.
+  if (!view.hasFocus) view.focus()
+  view.dispatch({
+    selection: { anchor: targetLine.from + outlineHeadingTextOffset(targetLine.text) },
+    effects: EditorView.scrollIntoView(targetLine.from, { y: 'start', yMargin: topMargin })
+  })
+}
+
+// Where each top-level block of the note starts, as a scroll position in the
+// editor and in the split preview. Only the article's own children count: a
+// nested element stamped with some other note's lines (an embed) would put an
+// anchor in the wrong place.
+function splitScrollAnchorsFor(view: EditorView, previewEl: HTMLElement): SplitScrollAnchor[] {
+  const editorEl = view.scrollDOM
+  const doc = view.state.doc
+  // The document starts below the scroller's top padding.
+  const editorOffset = view.documentTop - editorEl.getBoundingClientRect().top + editorEl.scrollTop
+  const previewOffset = previewEl.scrollTop - previewEl.getBoundingClientRect().top
+  const blocks: SplitScrollAnchor[] = []
+  for (const el of previewEl.querySelectorAll<HTMLElement>('[data-preview-content] > [data-source-line]')) {
+    const line = Number(el.dataset.sourceLine)
+    if (!Number.isInteger(line) || line < 1 || line > doc.lines) continue
+    blocks.push({
+      editor: view.lineBlockAt(doc.line(line).from).top + editorOffset,
+      preview: el.getBoundingClientRect().top + previewOffset
+    })
+  }
+  return splitScrollAnchors(
+    blocks,
+    editorEl.scrollHeight - editorEl.clientHeight,
+    previewEl.scrollHeight - previewEl.clientHeight
+  )
+}
+
 const EMPTY_COMMENTS: NoteComment[] = []
 const taskJumpHighlightEffect = StateEffect.define<number | null>()
 const taskJumpHighlightDecoration = Decoration.line({ class: 'cm-task-jump-highlight' })
@@ -586,8 +688,10 @@ function buildCommentDecorations(
 ): DecorationSet {
   const lineMarkerCounts = new Map<number, number>()
   const decoratedLines = new Set<number>()
+  // Top-level comments only: a reply shares its thread's anchor (#738), so
+  // drawing it too would double every marker and highlight.
   const ranges = comments
-    .filter((comment) => comment.resolvedAt == null)
+    .filter((comment) => comment.resolvedAt == null && !comment.parentId)
     .flatMap((comment) => {
       const anchor = resolveCommentAnchor(comment, doc)
       if (anchor.to <= anchor.from) return []
@@ -815,6 +919,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
   const vault = useStore((s) => s.vault)
   const refreshNotes = useStore((s) => s.refreshNotes)
   const refreshAssets = useStore((s) => s.refreshAssets)
+  const indexImportedAssets = useStore((s) => s.indexImportedAssets)
   const loading = useStore((s) => s.loadingNote && isActive)
 
   const setActivePane = useStore((s) => s.setActivePane)
@@ -845,6 +950,12 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
   )
   const sidebarOpen = useStore((s) => s.sidebarOpen)
   const zenMode = useStore((s) => s.zenMode)
+  // With the title bar off, the top pane's chrome is what moves the window.
+  const runtime = window.zen.getAppInfo().runtime
+  const dragsWindow = useStore(
+    (s) =>
+      chromeCarriesWindowDrag(s.showWindowTitleBar, runtime) && isPaneOnTopEdge(s.paneLayout, paneId)
+  )
   const toggleSidebar = useStore((s) => s.toggleSidebar)
   const setFocusedPanel = useStore((s) => s.setFocusedPanel)
   const focusedPanel = useStore((s) => s.focusedPanel)
@@ -905,11 +1016,61 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     keepViewModeAcrossNotes && paneStickyMode
       ? paneStickyMode
       : paneModeForPath(modesByPath, activeTab, defaultPaneMode)
-  const [connectionsOpen, setConnectionsOpen] = useState(false)
-  const [outlineOpen, setOutlineOpen] = useState(false)
+  // One sticky set per pane, or one per note when "Keep panels when switching
+  // notes" is off (#794). Same names and setter shape as the four `useState`s
+  // this replaced, so every toggle and auto-open below is unchanged.
+  const {
+    connections: connectionsOpen,
+    outline: outlineOpen,
+    comments: commentsOpen,
+    calendar: calendarPanel,
+    calendarAutoOpenAllowed,
+    setConnectionsOpen: setConnectionsOpenRaw,
+    setOutlineOpen: setOutlineOpenRaw,
+    setCommentsOpen: setCommentsOpenRaw,
+    setCalendarPanel: setCalendarPanelRaw
+  } = usePanePanels(paneId, activeTab)
+  // Which panel was asked for last, most recent first. In a pane too narrow
+  // for all the open panels the most recent ones are shown and the rest are
+  // tucked into a rail, see lib/side-panel-fit. (#805)
+  const [sidePanelRecency, setSidePanelRecency] = useState<SidePanelId[]>([])
+  const tuckedSidePanelsRef = useRef<readonly SidePanelId[]>([])
+  const revealSidePanel = useCallback((id: SidePanelId) => {
+    setSidePanelRecency((recency) => bumpSidePanel(recency, id))
+  }, [])
+  // Opening a panel that is already open has to bring it forward, or code that
+  // asks for a tucked panel (jumping to a comment opens Comments) would get
+  // nothing. A panel that goes from closed to open is picked up by the effect
+  // that keeps the recency in line with what is open.
+  const setConnectionsOpen = useCallback(
+    (next: SetStateAction<boolean>) => {
+      if (next === true) revealSidePanel('connections')
+      setConnectionsOpenRaw(next)
+    },
+    [revealSidePanel, setConnectionsOpenRaw]
+  )
+  const setOutlineOpen = useCallback(
+    (next: SetStateAction<boolean>) => {
+      if (next === true) revealSidePanel('outline')
+      setOutlineOpenRaw(next)
+    },
+    [revealSidePanel, setOutlineOpenRaw]
+  )
+  const setCommentsOpen = useCallback(
+    (next: SetStateAction<boolean>) => {
+      if (next === true) revealSidePanel('comments')
+      setCommentsOpenRaw(next)
+    },
+    [revealSidePanel, setCommentsOpenRaw]
+  )
+  const setCalendarPanel = useCallback(
+    (next: SetStateAction<CalendarPanelState>) => {
+      if (typeof next !== 'function' && next.open) revealSidePanel('calendar')
+      setCalendarPanelRaw(next)
+    },
+    [revealSidePanel, setCalendarPanelRaw]
+  )
   const [activeOutlineLine, setActiveOutlineLine] = useState<number | null>(null)
-  const [commentsOpen, setCommentsOpen] = useState(false)
-  const [calendarPanel, setCalendarPanel] = useState<CalendarPanelState>(CALENDAR_PANEL_CLOSED)
   const calendarOpen = calendarPanel.open
   // The calendar panel is a date navigator. It auto-opens while the pane shows
   // a daily/weekly note, but stays available (Obsidian-style) on any note as
@@ -968,10 +1129,14 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
   // lets us tell our own restore scroll apart from a user scroll, so we never
   // yank a reader who scrolled during the render window.
   const previewRestoreTargetRef = useRef<{ path: string; top: number } | null>(null)
-  // Set when the user switches Edit/Split → Preview: the reading view opens on
-  // the line the cursor was on, instead of the top of the note. Applied (and
-  // cleared) once the preview has rendered blocks to anchor against. (#543)
-  const pendingPreviewCursorLineRef = useRef<{ path: string; line: number } | null>(null)
+  // A source line the reading view should open on once it has rendered blocks
+  // to anchor against: the cursor's line when the user switches Edit/Split →
+  // Preview (#543), or the target of a heading/block link followed while
+  // reading (android#74). Applied and cleared from `onRendered`.
+  const pendingPreviewLineRef = useRef<{ path: string; line: number } | null>(null)
+  // The reverse trip: the line the editor opens on when the pane leaves
+  // Preview, committed once the editor is back on screen. (#822)
+  const pendingEditorLandingRef = useRef<PendingEditorLanding | null>(null)
   const lastProgrammaticPreviewTopRef = useRef<number | null>(null)
   const lastRestoredPathRef = useRef<string | null>(null)
   const vimCompartmentRef = useRef<Compartment | null>(null)
@@ -985,11 +1150,21 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
   const scrolloffCompartmentRef = useRef<Compartment | null>(null)
   const drawSelectionCompartmentRef = useRef<Compartment | null>(null)
   const tabSizeCompartmentRef = useRef<Compartment | null>(null)
+  // Review mode for an assistant's edits (AgentEditReview.tsx): empty until a
+  // review starts.
+  const agentReviewCompartmentRef = useRef<Compartment | null>(null)
   // history() lives in a compartment so we can reset undo history on a note
   // switch — otherwise Cmd+Z crosses notes and overwrites the current one (#247).
+  // The outgoing note's history is set aside first and handed back when that
+  // note returns, see lib/note-undo-history. (#793)
   const historyCompartmentRef = useRef<Compartment | null>(null)
-  const ignoreEditorScrollRef = useRef(false)
   const ignorePreviewScrollRef = useRef(false)
+  // Split mode: which pane the reader is driving and until when, and which
+  // one they drove last. The follower's scroll events are echoes while the
+  // other pane leads, and an editor re-measure only moves the preview when
+  // the editor was the pane last driven. (#859)
+  const splitScrollLeadRef = useRef<SplitScrollLead | null>(null)
+  const splitScrollDriverRef = useRef<SplitScrollPane>('editor')
   const pendingOutlineJumpLineRef = useRef<number | null>(null)
   const pendingPreviewOutlineJumpLineRef = useRef<number | null>(null)
   const outlinePreviewJumpFrameRef = useRef<number | null>(null)
@@ -999,6 +1174,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
   const hasContentRef = useRef(false)
   const editorViewportSyncFrameRef = useRef<number | null>(null)
   const syncPreviewToEditorScrollRef = useRef<() => boolean>(() => false)
+  const syncEditorToPreviewScrollRef = useRef<() => void>(() => {})
   const activeOutlineLineRef = useRef<number | null>(null)
   const activeOutlineFrameRef = useRef<number | null>(null)
   const selectionActionFrameRef = useRef<number | null>(null)
@@ -1011,6 +1187,28 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
    * sync effect updates it whenever we swap the view's document.
    */
   const viewPathRef = useRef<string | null>(null)
+  // Declared here, ahead of the layout effect that swaps the editor's
+  // document, so a review always ends before the pane shows another note.
+  const agentReviewLivePreview = useCallback(
+    (): Extension => (useStore.getState().livePreview ? currentWysiwygExtensions(viewPathRef.current) : []),
+    []
+  )
+  const agentReview = useAgentEditReview({
+    viewRef,
+    reviewCompartmentRef: agentReviewCompartmentRef,
+    livePreviewCompartmentRef,
+    livePreviewExtensions: agentReviewLivePreview,
+    activePath: activeTab
+  })
+  /** The newest entry of the store's `recentPathRewrites` this editor has
+   *  accounted for. Only newer ones can explain a path change as a rename, so
+   *  an old rename can never make a real note switch look like one. */
+  const seenPathRewriteSeqRef = useRef(0)
+  /** The store's disk revision for the note on screen that this editor has
+   *  accounted for. A body change under the same path with a newer revision
+   *  is the file changing on disk, which starts the undo history clean; a
+   *  peer pane or a rename rewrite leaves the revision alone (#852). */
+  const seenDiskRevisionRef = useRef(0)
 
   const updateSelectionCommentAction = useCallback((view: EditorView | null = viewRef.current): void => {
     setSelectionCommentAction(view ? getSelectionCommentAction(view) : null)
@@ -1064,6 +1262,11 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
   }, [])
 
   const toggleConnectionsPanel = useCallback(() => {
+    // Open but tucked away: the key that would close it shows it instead.
+    if (tuckedSidePanelsRef.current.includes('connections')) {
+      revealSidePanel('connections')
+      return
+    }
     setConnectionsOpen((open) => {
       const next = !open
       if (!next) {
@@ -1074,18 +1277,26 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
       }
       return next
     })
-  }, [focusedPanel, setConnectionPreview, setFocusedPanel])
+  }, [focusedPanel, revealSidePanel, setConnectionPreview, setConnectionsOpen, setFocusedPanel])
+
+  // The panel shortcuts act on the note this pane is showing. On a view tab
+  // (Trash, Tasks, Help, an asset) there is no panel to see, and the toggle
+  // used to flip the pane's panels anyway, so they turned up on the next note
+  // without having been asked for. Keyed on the kind of tab, not on loaded
+  // content, so a shortcut pressed while a note is still loading is kept.
+  const panelShortcutsApply =
+    isActive && activeTab != null && !isWorkspaceVirtualTabPath(activeTab)
 
   // ⌘2 toggles the connections panel — only the active pane responds so
   // the shortcut targets the pane the user is currently working in.
   useEffect(() => {
-    if (!isActive) return
+    if (!panelShortcutsApply) return
     const handler = (): void => {
       toggleConnectionsPanel()
     }
     window.addEventListener('zen:toggle-connections', handler)
     return () => window.removeEventListener('zen:toggle-connections', handler)
-  }, [isActive, toggleConnectionsPanel])
+  }, [panelShortcutsApply, toggleConnectionsPanel])
 
   // Mirror `set clipboard=unnamed`: when enabled, Vim yank/delete/change also
   // copy to the system clipboard, and `p` / `P` paste from it. The patch is
@@ -1098,19 +1309,48 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
   }, [vimYankToClipboard])
 
   const toggleOutlinePanel = useCallback(() => {
+    if (tuckedSidePanelsRef.current.includes('outline')) return revealSidePanel('outline')
     setOutlineOpen((open) => !open)
-  }, [])
+  }, [revealSidePanel, setOutlineOpen])
 
   const toggleCommentsPanel = useCallback(() => {
+    if (tuckedSidePanelsRef.current.includes('comments')) return revealSidePanel('comments')
     setCommentsOpen((open) => !open)
-  }, [])
+  }, [revealSidePanel, setCommentsOpen])
 
   const toggleCalendarPanel = useCallback(() => {
+    if (tuckedSidePanelsRef.current.includes('calendar')) return revealSidePanel('calendar')
     setCalendarPanel(calendarPanelOnToggle)
+  }, [revealSidePanel, setCalendarPanel])
+
+
+  const lockOutlinePreviewSync = useCallback((durationMs = OUTLINE_JUMP_SCROLL_SYNC_LOCK_MS): void => {
+    // Outline jumps target a rendered heading; ratio sync can otherwise override them.
+    outlinePreviewSyncLockUntilRef.current = nextOutlinePreviewSyncLockUntil(
+      performance.now(),
+      durationMs,
+      outlinePreviewSyncLockUntilRef.current
+    )
   }, [])
 
+  // The block at the top of what the reader has on screen, or null when the
+  // caret's own line is still in view (a peek at the rendering and back keeps
+  // the cursor exactly where it was) or the reading view is not this note's
+  // render yet.
+  const readingPositionLanding = useCallback((view: EditorView, path: string) => {
+    const previewEl = previewScrollRef.current
+    if (!previewShowsNote(previewEl, path)) return null
+    const visible = previewVisibleSourceLines(previewEl)
+    if (!visible) return null
+    const caretLine = view.state.doc.lineAt(view.state.selection.main.head).number
+    if (previewShowsSourceLine(visible, caretLine)) return null
+    return { line: visible.top, topMargin: OUTLINE_JUMP_TOP_MARGIN }
+  }, [])
 
-  const applyPaneMode = useCallback((nextMode: PaneMode) => {
+  const applyPaneMode = useCallback((
+    nextMode: PaneMode,
+    options: { landing?: EditorLanding } = {}
+  ) => {
     // Capture the cursor's line NOW, while the editor is still mounted:
     // preview-only mode tears the editor down, and "continue reading where I
     // was editing" needs this anchor to land the preview there. (#543)
@@ -1122,9 +1362,29 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
       view &&
       viewPathRef.current === activeTab
     ) {
-      pendingPreviewCursorLineRef.current = {
+      pendingPreviewLineRef.current = {
         path: activeTab,
         line: view.state.doc.lineAt(view.state.selection.main.head).number
+      }
+    }
+    // And the way back: read the reading view's viewport NOW, while it is
+    // still in the DOM, so the editor can open where the reader is. (#822)
+    if (nextMode !== 'preview' && modeRef.current === 'preview' && activeTab) {
+      const landing = options.landing ?? 'reading-position'
+      let target: { line: number; topMargin: number } | null = null
+      if (landing === 'reading-position') {
+        if (view && viewPathRef.current === activeTab) {
+          target = readingPositionLanding(view, activeTab)
+        }
+      } else if (landing !== 'caller') {
+        target = landing
+      }
+      if (target) {
+        pendingEditorLandingRef.current = { path: activeTab, ...target }
+        // Preview → Split: hold the split sync until the editor has landed,
+        // or its first pass would drag the reading view to the editor's stale
+        // scroll position. The landing then re-aligns the reading view itself.
+        if (nextMode === 'split') lockOutlinePreviewSync()
       }
     }
     setPaneModeForPath(paneId, activeTab, nextMode)
@@ -1137,37 +1397,65 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
       }
       focusEditorNormalMode()
     })
-  }, [activeTab, paneId, setPaneModeForPath, setActivePane, setFocusedPanel])
+  }, [
+    activeTab,
+    lockOutlinePreviewSync,
+    paneId,
+    readingPositionLanding,
+    setPaneModeForPath,
+    setActivePane,
+    setFocusedPanel
+  ])
+
+  // The palette's Review Agent Changes: the active pane opens the review,
+  // leaving Preview first, since the review happens in the editor.
+  const { requestReview: requestAgentReview } = agentReview
+  const reviewAgentChanges = useCallback(
+    (path: string) => {
+      if (modeRef.current === 'preview') applyPaneMode('edit')
+      requestAgentReview(path)
+    },
+    [applyPaneMode, requestAgentReview]
+  )
+  useEffect(() => {
+    if (!isActive) return
+    const handler = (event: Event): void => {
+      const path = (event as CustomEvent<{ path?: string }>).detail?.path
+      if (path) reviewAgentChanges(path)
+    }
+    window.addEventListener(REVIEW_AGENT_EDITS_EVENT, handler)
+    return () => window.removeEventListener(REVIEW_AGENT_EDITS_EVENT, handler)
+  }, [isActive, reviewAgentChanges])
 
   // `zen:toggle-outline` — routed only to the active pane, same pattern
   // as the connections toggle.
   useEffect(() => {
-    if (!isActive) return
+    if (!panelShortcutsApply) return
     const handler = (): void => {
       toggleOutlinePanel()
     }
     window.addEventListener('zen:toggle-outline', handler)
     return () => window.removeEventListener('zen:toggle-outline', handler)
-  }, [isActive, toggleOutlinePanel])
+  }, [panelShortcutsApply, toggleOutlinePanel])
 
   useEffect(() => {
-    if (!isActive) return
+    if (!panelShortcutsApply) return
     const handler = (): void => {
       toggleCommentsPanel()
     }
     window.addEventListener('zen:toggle-comments', handler)
     return () => window.removeEventListener('zen:toggle-comments', handler)
-  }, [isActive, toggleCommentsPanel])
+  }, [panelShortcutsApply, toggleCommentsPanel])
 
   // `zen:toggle-calendar` — same active-pane routing as the panels above.
   useEffect(() => {
-    if (!isActive) return
+    if (!panelShortcutsApply) return
     const handler = (): void => {
       toggleCalendarPanel()
     }
     window.addEventListener('zen:toggle-calendar', handler)
     return () => window.removeEventListener('zen:toggle-calendar', handler)
-  }, [isActive, toggleCalendarPanel])
+  }, [panelShortcutsApply, toggleCalendarPanel])
 
   // `zen:close-right-panel` — Esc (when a right panel is focused) or the
   // "Close right panel" command dismiss whichever right-hand panel is open in
@@ -1200,11 +1488,13 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     setCalendarPanel((state) =>
       calendarPanelOnNote(state, {
         isDateNote,
-        autoEnabled: autoCalendarPanel,
+        // With panels kept per note, a calendar the user closed on this note
+        // stays closed when they come back to it. (#794)
+        autoEnabled: autoCalendarPanel && calendarAutoOpenAllowed,
         available: calendarAvailable
       })
     )
-  }, [content?.path, isDateNote, autoCalendarPanel, calendarAvailable])
+  }, [content?.path, isDateNote, autoCalendarPanel, calendarAutoOpenAllowed, calendarAvailable])
 
   useEffect(() => {
     if (!isActive) return
@@ -1229,15 +1519,6 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     return () => window.removeEventListener(ZEN_SET_PANE_MODE_EVENT, handler)
   }, [applyPaneMode, isActive])
 
-  const lockOutlinePreviewSync = useCallback((durationMs = OUTLINE_JUMP_SCROLL_SYNC_LOCK_MS): void => {
-    // Outline jumps target a rendered heading; ratio sync can otherwise override them.
-    outlinePreviewSyncLockUntilRef.current = nextOutlinePreviewSyncLockUntil(
-      performance.now(),
-      durationMs,
-      outlinePreviewSyncLockUntilRef.current
-    )
-  }, [])
-
   const scrollPreviewToOutlineLine = useCallback((line: number): boolean => {
     // Works wherever the preview is mounted (split or preview), not in edit.
     if (mode === 'edit' || !content) return false
@@ -1255,58 +1536,42 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     return true
   }, [content?.body, lockOutlinePreviewSync, mode])
 
+  // The pane the reader drives leads for a moment; `byReader` also makes it
+  // the pane they drove last. Our own sync takes the lead for the pane it
+  // copies from, so the follower's echo is recognized as one.
+  const leadSplitScroll = useCallback((pane: SplitScrollPane, byReader: boolean): void => {
+    splitScrollLeadRef.current = { pane, until: performance.now() + SPLIT_SCROLL_LEAD_MS }
+    if (byReader) splitScrollDriverRef.current = pane
+  }, [])
+
+  // Both directions map through the same anchors (see split-scroll-sync), so
+  // the same content sits at the top of both panes however differently a
+  // block renders, and a round trip lands where it started. With no anchored
+  // block the mapping is the plain scroll ratio.
   const syncPreviewToEditorScroll = useCallback((): boolean => {
     const view = viewRef.current
     const editorEl = view?.scrollDOM
     const previewEl = previewScrollRef.current
     if (!view || !editorEl || !previewEl) return false
-
-    // Line-based sync: map the source line at the top of the editor viewport to
-    // the rendered preview block stamped with that line (data-source-line), so
-    // the same content sits at the top of both panes even when their heights
-    // differ. Falls back to a scroll ratio when no line data is available.
-    const ratioTop = (): number =>
-      scrollTopForScrollRatio(
-        editorEl.scrollTop,
-        editorEl.scrollHeight,
-        editorEl.clientHeight,
-        previewEl.scrollHeight,
-        previewEl.clientHeight
-      )
-
-    const blocks = previewEl.querySelectorAll<HTMLElement>('[data-source-line]')
-    let nextTop: number
-    if (blocks.length === 0) {
-      nextTop = ratioTop()
-    } else {
-      const topLine = view.state.doc.lineAt(view.lineBlockAtHeight(editorEl.scrollTop).from).number
-      let anchor: HTMLElement | null = null
-      let anchorLine = 0
-      for (const el of blocks) {
-        const ln = Number(el.dataset.sourceLine)
-        if (Number.isFinite(ln) && ln <= topLine) {
-          anchor = el
-          anchorLine = ln
-        } else if (ln > topLine) {
-          break
-        }
-      }
-      if (!anchor) {
-        nextTop = 0
-      } else {
-        // Shift the anchor by how far the editor has scrolled past its start
-        // line, so a mid-block scroll position carries over too.
-        const anchorEditorTop = view.lineBlockAt(view.state.doc.line(anchorLine).from).top
-        nextTop = scrollTopForElementRelativeTop(previewEl, anchor, anchorEditorTop - editorEl.scrollTop)
-      }
-    }
-
+    const nextTop = mapSplitScrollTop(splitScrollAnchorsFor(view, previewEl), 'editor', editorEl.scrollTop)
     if (Math.abs(previewEl.scrollTop - nextTop) < 1) return true
-    ignorePreviewScrollRef.current = true
+    leadSplitScroll('editor', false)
     previewEl.scrollTop = nextTop
     return true
-  }, [])
+  }, [leadSplitScroll])
   syncPreviewToEditorScrollRef.current = syncPreviewToEditorScroll
+
+  const syncEditorToPreviewScroll = useCallback((): void => {
+    const view = viewRef.current
+    const editorEl = view?.scrollDOM
+    const previewEl = previewScrollRef.current
+    if (!view || !editorEl || !previewEl) return
+    const nextTop = mapSplitScrollTop(splitScrollAnchorsFor(view, previewEl), 'preview', previewEl.scrollTop)
+    if (Math.abs(editorEl.scrollTop - nextTop) < 1) return
+    leadSplitScroll('preview', false)
+    editorEl.scrollTop = nextTop
+  }, [leadSplitScroll])
+  syncEditorToPreviewScrollRef.current = syncEditorToPreviewScroll
 
   const canSyncPreviewFromEditorViewport = useCallback((): boolean => {
     return shouldSyncPreviewFromEditorViewport(
@@ -1323,6 +1588,16 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     editorViewportSyncFrameRef.current = requestAnimationFrame(() => {
       editorViewportSyncFrameRef.current = null
       if (!canSyncPreviewFromEditorViewport()) return
+      // The reader is scrolling the preview: the editor measured the lines the
+      // sync just revealed, so it is the editor that settles onto the preview.
+      if (splitScrollEchoes(splitScrollLeadRef.current, 'editor', performance.now())) {
+        syncEditorToPreviewScrollRef.current()
+        return
+      }
+      // The reader last drove the preview. A click in the editor re-measures
+      // the line it reveals, and that must not drag the preview away from what
+      // they were reading. (#859)
+      if (splitScrollDriverRef.current === 'preview') return
       syncPreviewToEditorScrollRef.current()
     })
   }, [canSyncPreviewFromEditorViewport])
@@ -1345,7 +1620,10 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
   // Scroll the preview so the rendered block for `line` sits near the top:
   // the nearest data-source-line block at or above the line, like the split
   // sync's anchor walk, but from a bare line number (no live editor needed).
-  const scrollPreviewToSourceLine = useCallback((line: number): boolean => {
+  const scrollPreviewToSourceLine = useCallback((
+    line: number,
+    topMargin = OUTLINE_JUMP_TOP_MARGIN
+  ): boolean => {
     const previewEl = previewScrollRef.current
     if (!previewEl) return false
     const blocks = previewEl.querySelectorAll<HTMLElement>('[data-source-line]')
@@ -1360,7 +1638,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
       }
     }
     const nextTop = anchor
-      ? scrollTopForElementRelativeTop(previewEl, anchor, OUTLINE_JUMP_TOP_MARGIN)
+      ? scrollTopForElementRelativeTop(previewEl, anchor, topMargin)
       : 0
     previewEl.scrollTop = nextTop
     lastProgrammaticPreviewTopRef.current = previewEl.scrollTop
@@ -1377,12 +1655,13 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
       return
     }
     // A mode switch out of editing carries the cursor's line into the
-    // reading view; the live editing position outranks a remembered
-    // preview offset from an earlier visit. (#543)
-    const cursorTarget = pendingPreviewCursorLineRef.current
-    if (cursorTarget && cursorTarget.path === content?.path) {
-      if (scrollPreviewToSourceLine(cursorTarget.line)) {
-        pendingPreviewCursorLineRef.current = null
+    // reading view, and a heading or block link followed while reading
+    // carries its target; either outranks a remembered preview offset from
+    // an earlier visit. (#543, android#74)
+    const lineTarget = pendingPreviewLineRef.current
+    if (lineTarget && lineTarget.path === content?.path) {
+      if (scrollPreviewToSourceLine(lineTarget.line)) {
+        pendingPreviewLineRef.current = null
         previewRestoreTargetRef.current = null
         return
       }
@@ -1403,6 +1682,13 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
       return
     }
     if (!canSyncPreviewFromEditorViewport()) return
+    // A re-render while the reader drives the preview keeps their place.
+    if (
+      splitScrollDriverRef.current === 'preview' ||
+      splitScrollEchoes(splitScrollLeadRef.current, 'editor', performance.now())
+    ) {
+      return
+    }
     syncPreviewToEditorScroll()
   }, [
     canSyncPreviewFromEditorViewport,
@@ -1415,6 +1701,11 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
 
   useEffect(() => {
     pendingPreviewOutlineJumpLineRef.current = null
+    // A line the previous note never got to render must not fire on a later
+    // visit. Declared before the pending-jump effect, so a jump that opens a
+    // note in reading mode still sets its line after this reset.
+    pendingPreviewLineRef.current = null
+    pendingEditorLandingRef.current = null
     outlinePreviewSyncLockUntilRef.current = 0
   }, [content?.path])
 
@@ -1520,7 +1811,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     setActiveCommentId(comment.id)
     if (!view) return
     if (mode === 'preview') {
-      applyPaneMode('edit')
+      applyPaneMode('edit', { landing: 'caller' })
     }
     const anchor = resolveCommentAnchor(comment, view.state.doc.toString())
     const selection =
@@ -1701,6 +1992,16 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
         setSelectionCommentAction(null)
         const existingView = viewRef.current
         rememberCurrentTabScroll()
+        // The editor is torn down whenever the pane shows something that is
+        // not a note (Trash, Tasks, an asset), so this is a way of leaving a
+        // note too. (#793)
+        if (existingView && viewPathRef.current) {
+          setAsideNoteUndoHistory(
+            noteUndoHistoryKey(useStore.getState().vault?.root, viewPathRef.current),
+            existingView.state
+          )
+          saveNoteUndoFile(viewPathRef.current, existingView.state)
+        }
         if (
           existingView &&
           useStore.getState().editorViewRef === existingView
@@ -1724,6 +2025,8 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
       const drawSelectionCompartment = new Compartment()
       const tabSizeCompartment = new Compartment()
       const historyCompartment = new Compartment()
+      const agentReviewCompartment = new Compartment()
+      agentReviewCompartmentRef.current = agentReviewCompartment
       vimCompartmentRef.current = vimCompartment
       harperCompartmentRef.current = harperCompartment
       editorKeymapCompartmentRef.current = editorKeymapCompartment
@@ -1744,9 +2047,17 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
         initialBody.length >= LARGE_DOC_LIVE_PREVIEW_DEFER_CHARS && !s0.livePreview
       richMarkdownDeferredRef.current = deferInitialRichMarkdown
       const stateStartedAt = performance.now()
+      viewPathRef.current = initialPath
+      // A new editor starts on its note, so no earlier rename concerns it,
+      // and no earlier disk change either.
+      seenPathRewriteSeqRef.current = latestPathRewriteSeq(s0.recentPathRewrites)
+      seenDiskRevisionRef.current = initialPath ? noteDiskRevision(initialPath) : 0
+      followPathRewritesInNoteUndoHistories(s0.recentPathRewrites)
       const state = EditorState.create({
         doc: initialBody,
         extensions: [
+          noteEditingLockExtension(() => ({ vault: useStore.getState().vault, path: viewPathRef.current })),
+          noteEditorHostExtension(),
           appMarkdownSnippetExtension(),
           vimCompartment.of(s0.vimMode ? vim() : []),
           // No text input outside Vim insert mode, so a CJK input method
@@ -1754,10 +2065,13 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
           vimImeGuard(
             () => useStore.getState().vimBlockImeInNormalMode && !isTouchPrimaryDevice()
           ),
-          historyCompartment.of(history()),
-          drawSelectionCompartment.of(
-            drawSelection({ cursorBlinkRate: s0.cursorBlink ? 1200 : 0 })
+          historyCompartment.of(
+            noteUndoHistoryFor(
+              initialPath ? noteUndoHistoryKey(s0.vault?.root, initialPath) : null,
+              initialBody
+            )
           ),
+          drawSelectionCompartment.of(cursorDrawSelection(s0.cursorBlink)),
           tabSizeCompartment.of([
             editorTabSize(s0.editorTabSize),
             listIndentWidth(s0.editorTabSize),
@@ -1768,7 +2082,11 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
           yankHighlightExtension,
           vimVisualHighlightExtension,
           vimClipboardPasteExtension,
+          editorImagePaste.of((files, view) => {
+            void importPastedImagesRef.current?.(files, view)
+          }),
           commentDecorationField,
+          agentReviewCompartment.of([]),
           wordWrapCompartment.of(s0.wordWrap ? EditorView.lineWrapping : []),
           scrolloffCompartment.of(scrollOff(s0.editorScrollOff)),
           markdownCompartment.of(
@@ -1840,11 +2158,16 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
                   const doc = view.state.doc.toString()
                   if (event.metaKey || event.ctrlKey) {
                     const link = linkRangeAtCursor(doc, pos)
+                    // The modifier is the user's answer to "create it?": a
+                    // link at a missing note creates it at once (#768).
                     if (
                       link &&
                       pointerOverRange(view, link.from, link.to, event.clientX, event.clientY) &&
-                      followLinkTarget(link.target)
+                      followLinkTarget(link.target, { createWithoutAsking: true, kind: link.kind })
                     ) {
+                      // Following the link ends its status-bar hover; a tap
+                      // never sends the mouseleave that would (#820).
+                      setHoveredLink(null)
                       event.preventDefault()
                       return true
                     }
@@ -1858,6 +2181,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
                       const sel = view.state.selection.main
                       const rendered = sel.to < link.from || sel.from > link.to
                       if (rendered && followLinkTarget(link.href)) {
+                        setHoveredLink(null)
                         event.preventDefault()
                         return true
                       }
@@ -1995,6 +2319,13 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
       })
       viewRef.current = view
       viewPathRef.current = initialPath
+      loadNoteUndoFile(
+        view,
+        historyCompartment,
+        initialPath,
+        () => viewRef.current === view && viewPathRef.current === initialPath
+      )
+      registerNoteEditor(view, () => viewPathRef.current, paneId)
       if (initialContent && useStore.getState().activePaneId === paneId) {
         setEditorViewRef(view)
       }
@@ -2033,6 +2364,18 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     ]
   )
 
+  // The note on screen is never left, so nothing above would save its undo
+  // history when the app quits. The host finishes the write after the window
+  // is gone, the same way it finishes the note saves fired from here. (#793)
+  useEffect(() => {
+    const save = (): void => {
+      const view = viewRef.current
+      if (view) saveNoteUndoFile(viewPathRef.current, view.state)
+    }
+    window.addEventListener('beforeunload', save)
+    return () => window.removeEventListener('beforeunload', save)
+  }, [])
+
   // Register our view as the focused editor whenever our pane is active.
   useEffect(() => {
     const view = viewRef.current
@@ -2062,12 +2405,54 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     if (!view) return
     const nextPath = content?.path ?? null
     const nextBody = content?.body ?? ''
-    const pathChanged = viewPathRef.current !== nextPath
+    const prevPath = viewPathRef.current
+    const pathChanged = prevPath !== nextPath
+    const vaultRoot = useStore.getState().vault?.root ?? ''
+    // A new path is not always a new note. When the note on screen was renamed
+    // or moved (or its folder was), this editor is already showing the right
+    // document, and treating it as a tab switch threw the caret to the top,
+    // reset the scroll and dropped the undo history of a note nobody left.
+    // The store logs every such rewrite in the same update that changes the
+    // path, so a path change it explains is the same note.
+    const rewrites = useStore.getState().recentPathRewrites
+    const renamed =
+      pathChanged &&
+      prevPath !== null &&
+      nextPath !== null &&
+      pathAfterRewrites(rewrites, vaultRoot, prevPath, seenPathRewriteSeqRef.current) === nextPath
+    seenPathRewriteSeqRef.current = latestPathRewriteSeq(rewrites)
+    const switched = pathChanged && !renamed
     const bodyChanged =
-      pathChanged ||
+      switched ||
       view.state.doc.length !== nextBody.length ||
       view.state.doc.toString() !== nextBody
+    // The file changing on disk under the note on screen, as opposed to a
+    // peer pane or a rename rewrite: the store bumps the note's disk revision
+    // in the same update. Re-baseline on every path change, so a disk change
+    // a note took while off screen (already handled by the set-aside history)
+    // is not counted again when it comes back.
+    const diskRevision = nextPath ? noteDiskRevision(nextPath) : 0
+    const fromDisk = isDiskChange({
+      pathChanged,
+      bodyChanged,
+      diskRevision,
+      seenDiskRevision: seenDiskRevisionRef.current
+    })
+    seenDiskRevisionRef.current = diskRevision
     if (!pathChanged && !bodyChanged) return
+    followPathRewritesInNoteUndoHistories(rewrites)
+    if (renamed && prevPath && nextPath) {
+      // The remembered caret and scroll follow the note. The restore effect
+      // below must not run for this path change at all: it re-applies the
+      // remembered offsets on the next frame too, by which time the rename's
+      // heading rewrite has usually shifted the text under them.
+      const remembered = recallTabScroll(prevPath)
+      if (remembered) rememberTabScroll(nextPath, remembered)
+      forgetTabScroll(prevPath)
+      lastRestoredPathRef.current = nextPath
+      // A history saved under the old name would never be asked for again.
+      forgetNoteUndoFile(prevPath)
+    }
     if (deferredLivePreviewTimerRef.current != null) {
       clearTimeout(deferredLivePreviewTimerRef.current)
       deferredLivePreviewTimerRef.current = null
@@ -2082,7 +2467,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     const livePreviewCompartment = livePreviewCompartmentRef.current
     const livePreviewEnabled = useStore.getState().livePreview
     const deferRichMarkdown =
-      pathChanged &&
+      switched &&
       nextBody.length >= LARGE_DOC_LIVE_PREVIEW_DEFER_CHARS &&
       !livePreviewEnabled &&
       !!markdownCompartment &&
@@ -2112,30 +2497,82 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
       }
     }
     const dispatchStartedAt = performance.now()
-    view.dispatch({
-      changes: { from: 0, to: view.state.doc.length, insert: nextBody },
-      annotations: [
-        programmatic.of(true),
-        skipOrderedListRenumber.of(true),
-        // A programmatic swap (tab switch / external file sync) must never be
-        // undoable — otherwise Cmd+Z reverts the editor to the other document
-        // and the resulting change saves it over the current note (#247).
-        Transaction.addToHistory.of(false)
-      ],
-      effects: effects.length > 0 ? effects : undefined,
-      selection: pathChanged ? { anchor: 0 } : { anchor: clampedAnchor, head: clampedHead }
-    })
-    if (pathChanged) {
+    // While the editor still holds the outgoing note: its undo history is set
+    // aside under that note, to be handed back when it returns. (#793)
+    if (switched && prevPath) {
+      setAsideNoteUndoHistory(noteUndoHistoryKey(vaultRoot, prevPath), view.state)
+      saveNoteUndoFile(prevPath, view.state)
+    }
+    viewPathRef.current = nextPath
+    refreshNoteEditingLock(view)
+    // The same note changed underneath the editor (another pane typed, a
+    // rename rewrote its title heading or a link, the file changed on disk):
+    // say only what changed. A whole-document replace makes CodeMirror map the
+    // caret and every undo step through "everything", which clamps the one and
+    // empties the other. Text with carriage returns keeps the whole replace:
+    // CodeMirror folds `\r\n` into one line break, so offsets in it are not
+    // offsets in the document.
+    const inPlaceChange =
+      !switched && bodyChanged && !nextBody.includes('\r')
+        ? minimalTextChange(view.state.doc.toString(), nextBody)
+        : null
+    if (bodyChanged || effects.length > 0) {
+      view.dispatch({
+        changes: !bodyChanged
+          ? undefined
+          : inPlaceChange ?? { from: 0, to: view.state.doc.length, insert: nextBody },
+        annotations: [
+          noteEditingSync.of(true),
+          programmatic.of(true),
+          skipOrderedListRenumber.of(true),
+          // A programmatic swap (tab switch / external file sync) must never be
+          // undoable: otherwise Cmd+Z reverts the editor to the other document
+          // and the resulting change saves it over the current note (#247).
+          Transaction.addToHistory.of(false)
+        ],
+        effects: effects.length > 0 ? effects : undefined,
+        // A small change carries the selection along by itself.
+        selection: switched
+          ? { anchor: 0 }
+          : inPlaceChange || !bodyChanged
+            ? undefined
+            : { anchor: clampedAnchor, head: clampedHead }
+      })
+    }
+    if (fromDisk) {
+      // The text came from disk (a sync tool, an external editor, a script),
+      // not from anyone in this app. The user's undo steps were mapped through
+      // the change and still apply, but onto text nobody here wrote: undoing
+      // one made a document neither the user nor the other program ever had,
+      // and the save that follows every edit wrote it to disk (#852). A note
+      // reopened after such a change already starts clean; one that never left
+      // the screen now does too. The caret and scroll stay where they are.
+      const historyCompartment = historyCompartmentRef.current
+      if (historyCompartment) resetUndoHistory(view, historyCompartment)
+    }
+    if (switched) {
       // Switching notes: also drop the previous note's undo history so undo
       // can't cross the boundary at all. There's no "clear history" command, so
-      // remove the history field then re-add it empty. (#247)
+      // remove the history field then re-add it (#247): empty, or holding the
+      // incoming note's own history if it was set aside and the note still
+      // reads as it did then (#793).
       const historyCompartment = historyCompartmentRef.current
       if (historyCompartment) {
         view.dispatch({ effects: historyCompartment.reconfigure([]) })
-        view.dispatch({ effects: historyCompartment.reconfigure(history()) })
+        view.dispatch({
+          effects: historyCompartment.reconfigure(
+            noteUndoHistoryFor(nextPath ? noteUndoHistoryKey(vaultRoot, nextPath) : null, nextBody)
+          )
+        })
+        loadNoteUndoFile(
+          view,
+          historyCompartment,
+          nextPath,
+          () => viewRef.current === view && viewPathRef.current === nextPath
+        )
       }
     }
-    if (pathChanged && pendingJumpLocation?.path !== nextPath) {
+    if (switched && pendingJumpLocation?.path !== nextPath) {
       // Clear scroll on a genuine tab switch; the activation effect below
       // restores a remembered position afterward when there is one.
       view.scrollDOM.scrollTop = 0
@@ -2144,14 +2581,14 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     recordRendererPerf('editor.doc.sync', performance.now() - dispatchStartedAt, {
       chars: nextBody.length,
       deferred: deferRichMarkdown,
-      pathChanged
+      pathChanged: switched
     })
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         recordRendererPerf('editor.doc.paint-latency', performance.now() - dispatchStartedAt, {
           chars: nextBody.length,
           deferred: deferRichMarkdown,
-          pathChanged
+          pathChanged: switched
         })
       })
     })
@@ -2304,13 +2741,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     const view = viewRef.current
     const comp = drawSelectionCompartmentRef.current
     if (!view || !comp) return
-    // 0 disables blinking for both the drawn caret and the Vim block cursor
-    // (both read cursorBlinkRate from the drawSelection config). (#160)
-    view.dispatch({
-      effects: comp.reconfigure(
-        drawSelection({ cursorBlinkRate: cursorBlink ? 1200 : 0 })
-      )
-    })
+    view.dispatch({ effects: comp.reconfigure(cursorDrawSelection(cursorBlink)) })
   }, [cursorBlink])
   useEffect(() => {
     const view = viewRef.current
@@ -2348,28 +2779,15 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     const previewEl = previewScrollRef.current
     if (!editorEl || !previewEl) return
 
-    const syncByRatio = (
-      source: HTMLElement,
-      target: HTMLElement,
-      targetKind: 'editor' | 'preview'
-    ): void => {
-      const nextTop = scrollTopForScrollRatio(
-        source.scrollTop,
-        source.scrollHeight,
-        source.clientHeight,
-        target.scrollHeight,
-        target.clientHeight
-      )
-      if (Math.abs(target.scrollTop - nextTop) < 1) return
-      if (targetKind === 'editor') ignoreEditorScrollRef.current = true
-      else ignorePreviewScrollRef.current = true
-      target.scrollTop = nextTop
-    }
+    splitScrollLeadRef.current = null
+    splitScrollDriverRef.current = 'editor'
+    // A scroll in the pane that does not lead is the echo of our own sync, or
+    // of the editor settling onto it, and goes no further. Any other scroll is
+    // the reader's (wheel, scrollbar, keys, the caret scrolled into view): that
+    // pane leads and the other follows it.
     const onEditorScroll = (): void => {
-      if (ignoreEditorScrollRef.current) {
-        ignoreEditorScrollRef.current = false
-        return
-      }
+      if (splitScrollEchoes(splitScrollLeadRef.current, 'editor', performance.now())) return
+      leadSplitScroll('editor', true)
       if (!canSyncPreviewFromEditorViewport()) return
       syncPreviewToEditorScroll()
     }
@@ -2378,11 +2796,28 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
         ignorePreviewScrollRef.current = false
         return
       }
+      if (splitScrollEchoes(splitScrollLeadRef.current, 'preview', performance.now())) return
+      leadSplitScroll('preview', true)
       if (!canSyncPreviewFromEditorViewport()) return
-      syncByRatio(previewEl, editorEl, 'editor')
+      syncEditorToPreviewScroll()
+    }
+    // Input that scrolls a pane claims it before the scroll events arrive, so
+    // an echo landing in the same frame is already known for one. Typing makes
+    // the editor the pane last driven without taking the lead; a click does
+    // neither.
+    const leadEditor = (): void => leadSplitScroll('editor', true)
+    const leadPreview = (): void => leadSplitScroll('preview', true)
+    const typedInEditor = (): void => {
+      splitScrollDriverRef.current = 'editor'
     }
     editorEl.addEventListener('scroll', onEditorScroll, { passive: true })
     previewEl.addEventListener('scroll', onPreviewScroll, { passive: true })
+    editorEl.addEventListener('wheel', leadEditor, { passive: true })
+    previewEl.addEventListener('wheel', leadPreview, { passive: true })
+    editorEl.addEventListener('touchstart', leadEditor, { passive: true })
+    previewEl.addEventListener('touchstart', leadPreview, { passive: true })
+    editorEl.addEventListener('keydown', typedInEditor)
+    previewEl.addEventListener('keydown', leadPreview)
     const raf = requestAnimationFrame(() => {
       if (!canSyncPreviewFromEditorViewport()) return
       syncPreviewToEditorScroll()
@@ -2391,8 +2826,14 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
       cancelAnimationFrame(raf)
       editorEl.removeEventListener('scroll', onEditorScroll)
       previewEl.removeEventListener('scroll', onPreviewScroll)
-      ignoreEditorScrollRef.current = false
+      editorEl.removeEventListener('wheel', leadEditor)
+      previewEl.removeEventListener('wheel', leadPreview)
+      editorEl.removeEventListener('touchstart', leadEditor)
+      previewEl.removeEventListener('touchstart', leadPreview)
+      editorEl.removeEventListener('keydown', typedInEditor)
+      previewEl.removeEventListener('keydown', leadPreview)
       ignorePreviewScrollRef.current = false
+      splitScrollLeadRef.current = null
       outlinePreviewSyncLockUntilRef.current = 0
     }
   }, [
@@ -2400,7 +2841,9 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     content?.path,
     editorHydration?.path,
     editorHydration?.ready,
+    leadSplitScroll,
     mode,
+    syncEditorToPreviewScroll,
     syncPreviewToEditorScroll
   ])
 
@@ -2409,7 +2852,29 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     if (!isActive) return
     if (!content || !pendingJumpLocation || pendingJumpLocation.path !== content.path) return
     if (mode === 'preview') {
-      applyPaneMode('edit')
+      // Reading mode stays reading mode: a heading or block link, a search hit
+      // and Ctrl+O land the rendered preview on the spot instead of dropping
+      // the reader into the editor. Only a task jump still needs the editor,
+      // for the highlight it paints on the line. (android#74)
+      const plan = planPreviewJump(pendingJumpLocation, content.body)
+      if (plan.kind === 'edit') {
+        applyPaneMode('edit', { landing: 'caller' })
+        return
+      }
+      const previewEl = previewScrollRef.current
+      const rendered = previewShowsNote(previewEl, content.path)
+      if (plan.kind === 'restore') {
+        previewRestoreTargetRef.current = { path: content.path, top: plan.top }
+        if (rendered && previewEl) {
+          previewEl.scrollTop = plan.top
+          lastProgrammaticPreviewTopRef.current = previewEl.scrollTop
+        }
+      } else if (rendered && scrollPreviewToSourceLine(plan.line)) {
+        previewRestoreTargetRef.current = null
+      } else {
+        pendingPreviewLineRef.current = { path: content.path, line: plan.line }
+      }
+      clearPendingJumpLocation()
       return
     }
     const raf = requestAnimationFrame(() => {
@@ -2454,7 +2919,15 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
       clearPendingJumpLocation()
     })
     return () => cancelAnimationFrame(raf)
-  }, [applyPaneMode, isActive, mode, content?.path, clearPendingJumpLocation, pendingJumpLocation])
+  }, [
+    applyPaneMode,
+    isActive,
+    mode,
+    content?.path,
+    clearPendingJumpLocation,
+    pendingJumpLocation,
+    scrollPreviewToSourceLine
+  ])
 
   useEffect(() => {
     return () => {
@@ -2589,6 +3062,10 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
       const before = insertAt > 0 ? doc.sliceString(insertAt - 1, insertAt) : ''
       const after = insertAt < doc.length ? doc.sliceString(insertAt, insertAt + 1) : ''
       const insert = formatImportedAssetsForInsertion(imported, before, after)
+      // The files are on disk, but the listing that would carry them lands
+      // after the embeds; until then each embed would say its file is not on
+      // this device.
+      indexImportedAssets(imported)
       view.dispatch({
         changes: { from: insertAt, to: insertAt, insert },
         selection: { anchor: insertAt + insert.length }
@@ -2597,7 +3074,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
       setFocusedPanel('editor')
       view.focus()
     },
-    [refreshNotes, setFocusedPanel]
+    [indexImportedAssets, refreshNotes, setFocusedPanel]
   )
 
   const insertExistingVaultAssets = useCallback(
@@ -3092,7 +3569,9 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
           data-tab-pane-id={paneId}
           data-tab-path={tab.path}
           data-tab-active={active ? 'true' : undefined}
-          className="relative"
+          // A window-drag strip takes the mouse from everything in it that is
+          // not marked no-drag, and a tab is dragged and right-clicked itself.
+          className={dragsWindow ? 'relative no-drag' : 'relative'}
           draggable={!isVirtual}
           onDragStart={(e) => {
             if (isVirtual) {
@@ -3228,7 +3707,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
               onDoubleClick={() => {
                 if (tab.preview) promoteTabInPane(paneId, tab.path)
               }}
-              title={tab.preview ? `${tab.title} — preview (double-click to keep open)` : undefined}
+              title={tab.preview ? `${tab.title} · preview (double-click to keep open)` : undefined}
               className="flex min-w-0 flex-1 items-center gap-1.5 truncate px-1.5 text-left"
             >
               {tab.isTasks && (
@@ -3308,6 +3787,68 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     [comments]
   )
 
+  // The note keeps a readable width; the panels share what is left. (#805)
+  const paneRowRef = useRef<HTMLDivElement | null>(null)
+  const [paneRowWidth, setPaneRowWidth] = useState(0)
+  useLayoutEffect(() => {
+    const row = paneRowRef.current
+    if (!row) return
+    const measure = (): void => setPaneRowWidth(Math.round(row.getBoundingClientRect().width))
+    measure()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(measure)
+    observer.observe(row)
+    return () => observer.disconnect()
+  }, [])
+  const sidePanelWidths = useStore((s) => s.panelWidths)
+  const openSidePanels = useMemo(() => {
+    const open: SidePanelId[] = []
+    if (!content || zenMode) return open
+    if (connectionsOpen && isActive) open.push('connections')
+    if (commentsOpen) open.push('comments')
+    if (outlineOpen) open.push('outline')
+    if (calendarOpen && calendarAvailable) open.push('calendar')
+    return open
+  }, [
+    calendarAvailable,
+    calendarOpen,
+    commentsOpen,
+    connectionsOpen,
+    content,
+    isActive,
+    outlineOpen,
+    zenMode
+  ])
+  useEffect(() => {
+    setSidePanelRecency((recency) => syncSidePanelRecency(recency, openSidePanels))
+  }, [openSidePanels])
+  const sidePanelFit = useMemo(
+    () =>
+      fitSidePanels(
+        paneRowWidth,
+        mode === 'split' ? MIN_SPLIT_NOTE_WIDTH : MIN_NOTE_WIDTH,
+        // Synced here as well as in the effect above, so the render in which
+        // a panel opens already treats it as the most recent one.
+        syncSidePanelRecency(sidePanelRecency, openSidePanels).map((id) => ({
+          id,
+          width: sidePanelWidths[id]
+        })),
+        MIN_RIGHT_PANEL_WIDTH
+      ),
+    [mode, openSidePanels, paneRowWidth, sidePanelRecency, sidePanelWidths]
+  )
+  tuckedSidePanelsRef.current = sidePanelFit.tucked
+  const sidePanelShown = (id: SidePanelId): boolean =>
+    openSidePanels.includes(id) && !sidePanelFit.tucked.includes(id)
+  // A panel that is tucked away while it has the keyboard would leave the keys
+  // going nowhere, so they go back to the note.
+  useEffect(() => {
+    if (!isActive) return
+    if (!focusedPanel || !(sidePanelFit.tucked as readonly string[]).includes(focusedPanel)) return
+    setFocusedPanel('editor')
+    viewRef.current?.focus()
+  }, [focusedPanel, isActive, setFocusedPanel, sidePanelFit.tucked])
+
   const toolbar = useMemo(() => {
     if (!content) return null
     const folder = content.folder
@@ -3315,6 +3856,9 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     // Markdown-specific controls (edit/split/preview, connections, comments,
     // outline, calendar, PDF export) don't apply to a canvas.
     const isDrawing = isExcalidrawPath(content.path)
+    // A tucked panel is open, but the button brings it forward rather than
+    // closing it, so its tooltip has to say so.
+    const tucked = sidePanelFit.tucked
     return (
       <div className="flex items-center gap-1 text-ink-500">
         {!isDrawing && (
@@ -3322,7 +3866,11 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
             <ToggleGroup mode={mode} onChange={applyPaneMode} />
             <div className="mx-2 h-4 w-px bg-paper-300" />
             <IconBtn
-              title={connectionsOpen ? 'Hide connections' : 'Show connections'}
+              title={
+                connectionsOpen && !tucked.includes('connections')
+                  ? 'Hide connections'
+                  : 'Show connections'
+              }
               active={connectionsOpen}
               onClick={toggleConnectionsPanel}
             >
@@ -3330,7 +3878,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
             </IconBtn>
             <IconBtn
               title={
-                commentsOpen
+                commentsOpen && !tucked.includes('comments')
                   ? 'Hide comments'
                   : `Show comments${openCommentCount > 0 ? ` (${openCommentCount})` : ''}`
               }
@@ -3340,7 +3888,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
               <FeedbackIcon />
             </IconBtn>
             <IconBtn
-              title={outlineOpen ? 'Hide outline' : 'Show outline'}
+              title={outlineOpen && !tucked.includes('outline') ? 'Hide outline' : 'Show outline'}
               active={outlineOpen}
               onClick={toggleOutlinePanel}
             >
@@ -3348,7 +3896,9 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
             </IconBtn>
             {calendarAvailable && (
               <IconBtn
-                title={calendarOpen ? 'Hide calendar' : 'Show calendar'}
+                title={
+                  calendarOpen && !tucked.includes('calendar') ? 'Hide calendar' : 'Show calendar'
+                }
                 active={calendarOpen}
                 onClick={toggleCalendarPanel}
               >
@@ -3400,6 +3950,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     calendarAvailable,
     calendarOpen,
     toggleCalendarPanel,
+    sidePanelFit.tucked,
     trashActive,
     deleteActivePermanently,
     archiveActive,
@@ -3463,7 +4014,8 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
   // Outer header holds the back/forward nav buttons + the (flex-1) tab strip.
   const tabStripHeaderClass = [
     'glass-header flex shrink-0 items-stretch border-b border-paper-300/70 pl-1',
-    wrapTabs ? 'min-h-[var(--z-tab-height)]' : 'h-[var(--z-tab-height)]'
+    wrapTabs ? 'min-h-[var(--z-tab-height)]' : 'h-[var(--z-tab-height)]',
+    dragsWindow ? 'drag-region' : ''
   ].join(' ')
   const tabStripClass = [
     'workspace-tab-strip flex min-w-0 flex-1 items-stretch gap-0',
@@ -3484,6 +4036,10 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
     content?.path ?? null,
     editorHydration
   )
+  const { flushPendingReview } = agentReview
+  useEffect(() => {
+    if (editorReady && mode !== 'preview') flushPendingReview()
+  }, [editorReady, mode, content?.path, flushPendingReview])
   const previewSourceMarkdown = showPreview ? content?.body ?? '' : ''
   const previewSettleKey = showPreview && content ? content.path : ''
   const { settledMarkdown: previewMarkdown, isStale: previewIsStale } = useSettledMarkdown(
@@ -3495,13 +4051,62 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
   hasContentRef.current = content != null
   previewIsStaleRef.current = previewIsStale
 
-  const handlePreviewRequestEdit = useCallback(() => {
+  // Commit the line a reader carried out of Preview once the editor is on
+  // screen again: a frame after the mode switch, like an outline jump, so
+  // CodeMirror measures the freshly shown scroller before it scrolls. (#822)
+  useEffect(() => {
+    const target = pendingEditorLandingRef.current
+    if (!target || mode === 'preview' || !editorReady) return
+    if (target.path !== content?.path) return
+    const raf = requestAnimationFrame(() => {
+      const view = viewRef.current
+      if (!view || viewPathRef.current !== target.path) return
+      pendingEditorLandingRef.current = null
+      landEditorOnLine(view, target.line, target.topMargin)
+      if (mode === 'split') {
+        // Entering split reflowed the reading view to half its width, which
+        // moved the block the reader had at the top. Put it back there beside
+        // the editor's copy, and hold the split sync while both settle: its
+        // block-plus-pixel-offset mapping would otherwise pull the reading
+        // view a few lines off the line the editor just landed on.
+        lockOutlinePreviewSync()
+        scrollPreviewToSourceLine(target.line, target.topMargin)
+      }
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [content?.path, editorReady, lockOutlinePreviewSync, mode, scrollPreviewToSourceLine])
+
+  // A double-click on a rendered block (or the image embed's "Edit this
+  // block" button) opens that block in the editor, at the height it had on
+  // screen so the eye does not have to travel. Without a block to point at,
+  // leaving Preview still lands where the reader is. (#822)
+  const handlePreviewRequestEdit = useCallback((request?: PreviewEditRequest | null) => {
+    const previewEl = previewScrollRef.current
+    const landing: EditorLanding =
+      request?.sourceLine != null && previewEl
+        ? {
+            line: request.sourceLine,
+            topMargin: editorLandingTopMargin(
+              request.blockClientTop,
+              previewEl.getBoundingClientRect().top,
+              previewEl.clientHeight,
+              OUTLINE_JUMP_TOP_MARGIN
+            )
+          }
+        : 'reading-position'
     if (mode === 'preview') {
-      applyPaneMode('edit')
+      applyPaneMode('edit', { landing })
       return
     }
+    const view = viewRef.current
+    if (typeof landing === 'object' && view && viewPathRef.current === content?.path) {
+      // Split: the editor is already on screen. Hold the scroll sync so the
+      // reading view stays put while the editor comes to the block.
+      lockOutlinePreviewSync()
+      landEditorOnLine(view, landing.line, landing.topMargin)
+    }
     focusEditorNormalMode()
-  }, [applyPaneMode, mode])
+  }, [applyPaneMode, content?.path, lockOutlinePreviewSync, mode])
 
   // Editing follows the cursor so keyboard motion updates the Outline even
   // when the viewport barely moves. Preview mode remains scroll-driven.
@@ -3725,10 +4330,10 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
               </IconBtn>
             )}
             <IconBtn
-              title={`Go back (${getKeymapDisplay(
-                tabNavOverrides,
-                vimMode ? 'vim.historyBack' : 'global.historyBack'
-              )})`}
+              title={labelWithShortcut(
+                'Go back',
+                getKeymapDisplay(tabNavOverrides, vimMode ? 'vim.historyBack' : 'global.historyBack')
+              )}
               onClick={() => void jumpToPreviousNote()}
               disabled={!canGoBack}
               tooltipAlign="left"
@@ -3736,10 +4341,10 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
               <ArrowLeftIcon width={16} height={16} />
             </IconBtn>
             <IconBtn
-              title={`Go forward (${getKeymapDisplay(
-                tabNavOverrides,
-                vimMode ? 'vim.historyForward' : 'global.historyForward'
-              )})`}
+              title={labelWithShortcut(
+                'Go forward',
+                getKeymapDisplay(tabNavOverrides, vimMode ? 'vim.historyForward' : 'global.historyForward')
+              )}
               onClick={() => void jumpToNextNote()}
               disabled={!canGoForward}
               tooltipAlign="left"
@@ -3775,8 +4380,16 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
           </div>
         </div>
       )}
+      {dragsWindow && !hasTabs && !content && !zenMode && (
+        // No tab strip and no header: keep something to move the window by.
+        <div aria-hidden className="drag-region h-8 shrink-0" />
+      )}
       {content && !zenMode && (
-        <header className="glass-header flex h-12 shrink-0 items-center justify-between gap-3 px-4">
+        <header
+          className={`glass-header flex h-12 shrink-0 items-center justify-between gap-3 px-4${
+            dragsWindow && !hasTabs ? ' drag-region' : ''
+          }`}
+        >
           <div className="flex min-w-0 flex-1 items-center gap-1">
             <Breadcrumb
               note={content}
@@ -3800,7 +4413,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
           {toolbar}
         </header>
       )}
-      <div className="min-h-0 min-w-0 flex flex-1">
+      <div ref={paneRowRef} className="min-h-0 min-w-0 flex flex-1">
         <div
           ref={paneBodyRef}
           className={[
@@ -3854,90 +4467,109 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
               isObsidianExcalidrawMarkdown(content.body)) ? (
             <ObsidianExcalidrawPrompt path={activeTab} />
           ) : content ? (
-            <div
-              className={[
-                'min-h-0 min-w-0 flex-1 overflow-hidden',
-                splitMode ? 'flex flex-row' : 'flex flex-col'
-              ].join(' ')}
-            >
-              <div
-                ref={editorSurfaceRef}
-                className={[
-                  'relative min-h-0 min-w-0',
-                  splitMode
-                    ? 'flex min-w-0 flex-[1.05] flex-col border-r border-paper-300/70'
-                    : 'flex flex-1 flex-col'
-                ].join(' ')}
-                style={{ display: showEditor ? 'flex' : 'none' }}
-                onContextMenu={(e) => {
-                  // Native browser context menu in Electron is threadbare
-                  // (no Copy/Cut/Paste unless dev tools are open), so we
-                  // roll our own using CodeMirror's selection state.
-                  const view = viewRef.current
-                  if (!view) return
-                  e.preventDefault()
-                  view.focus()
-                  const sel = view.state.selection.main
-                  setSelectionCommentAction(null)
-                  setEditorMenu({
-                    x: e.clientX,
-                    y: e.clientY,
-                    hasSelection: !sel.empty,
-                    selFrom: sel.from,
-                    selTo: sel.to,
-                    link: copyableLinkAtPointer(view, e.clientX, e.clientY)
-                  })
-                }}
-                >
-                  {imageDropIndicatorTop != null && (
-                  <div
-                    className="pointer-events-none absolute inset-x-4 z-20"
-                    style={{ top: imageDropIndicatorTop }}
-                  >
-                    <div className="relative h-0.5 rounded-full bg-accent shadow-[0_0_0_1px_rgb(var(--z-accent)/0.18)]">
-                      <div className="absolute -left-1.5 -top-1 h-2.5 w-2.5 rounded-full border border-paper-50/70 bg-accent" />
-                      </div>
-                    </div>
-                  )}
-                  {editorReady ? (
-                    <div
-                      ref={setContainerRef}
-                      className={[
-                        'min-h-0 min-w-0 flex-1',
-                        // WYSIWYG styling (code-block cards, etc.) is gated on
-                        // the same `livePreview` condition that loads the
-                        // wysiwyg plugins, so CSS and plugins stay in lockstep.
-                        livePreview ? 'cm-wysiwyg' : ''
-                      ].join(' ')}
-                    />
-                  ) : (
-                    <div className="flex min-h-0 min-w-0 flex-1 items-center justify-center text-sm text-ink-400">
-                      Preparing editor…
-                    </div>
-                  )}
-                </div>
-              {showPreview && (
-                <div
-                  ref={previewScrollRef}
-                  data-preview-scroll
-                  tabIndex={0}
-                  aria-label="Note preview"
-                  className={[
-                    'min-h-0 min-w-0 overflow-y-auto outline-none focus:outline-none focus-visible:outline-none',
-                    splitMode
-                      ? 'flex min-w-0 flex-1 flex-col bg-paper-50/10'
-                      : 'flex-1'
-                  ].join(' ')}
-                >
-                  <Preview
-                    markdown={previewMarkdown}
-                    notePath={content.path}
-                    onRequestEdit={handlePreviewRequestEdit}
-                    onRendered={handlePreviewRendered}
-                  />
-                </div>
+            <>
+              {/* Above both surfaces, so Edit, Preview and split all show it; a
+                  sibling that renders nothing keeps the editor's DOM in place
+                  when it comes and goes. */}
+              <CloudConflictNoteBanner path={content.path} />
+              <AgentEditNoteBanner
+                path={content.path}
+                reviewing={agentReview.session?.path === content.path}
+                onReview={() => reviewAgentChanges(content.path)}
+              />
+              {agentReview.session?.path === content.path && (
+                <AgentReviewBar
+                  session={agentReview.session}
+                  onAcceptAll={agentReview.acceptAll}
+                  onRejectAll={agentReview.rejectAll}
+                  onDone={agentReview.stopReview}
+                />
               )}
-            </div>
+              <div
+                className={[
+                  'min-h-0 min-w-0 flex-1 overflow-hidden',
+                  splitMode ? 'flex flex-row' : 'flex flex-col'
+                ].join(' ')}
+              >
+                <div
+                  ref={editorSurfaceRef}
+                  className={[
+                    'relative min-h-0 min-w-0',
+                    splitMode
+                      ? 'flex min-w-0 flex-[1.05] flex-col border-r border-paper-300/70'
+                      : 'flex flex-1 flex-col'
+                  ].join(' ')}
+                  style={{ display: showEditor ? 'flex' : 'none' }}
+                  onContextMenu={(e) => {
+                    // Native browser context menu in Electron is threadbare
+                    // (no Copy/Cut/Paste unless dev tools are open), so we
+                    // roll our own using CodeMirror's selection state.
+                    const view = viewRef.current
+                    if (!view) return
+                    e.preventDefault()
+                    view.focus()
+                    const sel = view.state.selection.main
+                    setSelectionCommentAction(null)
+                    setEditorMenu({
+                      x: e.clientX,
+                      y: e.clientY,
+                      hasSelection: !sel.empty,
+                      selFrom: sel.from,
+                      selTo: sel.to,
+                      link: copyableLinkAtPointer(view, e.clientX, e.clientY)
+                    })
+                  }}
+                  >
+                    {imageDropIndicatorTop != null && (
+                    <div
+                      className="pointer-events-none absolute inset-x-4 z-20"
+                      style={{ top: imageDropIndicatorTop }}
+                    >
+                      <div className="relative h-0.5 rounded-full bg-accent shadow-[0_0_0_1px_rgb(var(--z-accent)/0.18)]">
+                        <div className="absolute -left-1.5 -top-1 h-2.5 w-2.5 rounded-full border border-paper-50/70 bg-accent" />
+                        </div>
+                      </div>
+                    )}
+                    {editorReady ? (
+                      <div
+                        ref={setContainerRef}
+                        className={[
+                          'min-h-0 min-w-0 flex-1',
+                          // WYSIWYG styling (code-block cards, etc.) is gated on
+                          // the same `livePreview` condition that loads the
+                          // wysiwyg plugins, so CSS and plugins stay in lockstep.
+                          livePreview ? 'cm-wysiwyg' : ''
+                        ].join(' ')}
+                      />
+                    ) : (
+                      <div className="flex min-h-0 min-w-0 flex-1 items-center justify-center text-sm text-ink-400">
+                        Preparing editor…
+                      </div>
+                    )}
+                  </div>
+                {showPreview && (
+                  <div
+                    ref={previewScrollRef}
+                    data-preview-scroll
+                    tabIndex={0}
+                    aria-label="Note preview"
+                    className={[
+                      'min-h-0 min-w-0 overflow-y-auto outline-none focus:outline-none focus-visible:outline-none',
+                      splitMode
+                        ? 'flex min-w-0 flex-1 flex-col bg-paper-50/10'
+                        : 'flex-1'
+                    ].join(' ')}
+                  >
+                    <Preview
+                      markdown={previewMarkdown}
+                      notePath={content.path}
+                      onRequestEdit={handlePreviewRequestEdit}
+                      onRendered={handlePreviewRendered}
+                    />
+                  </div>
+                )}
+              </div>
+            </>
           ) : loading ? (
             <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-ink-400">
               Loading…
@@ -3961,26 +4593,39 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
             />
           )}
         </div>
-        {content && connectionsOpen && isActive && !zenMode && <ConnectionsPanel note={content} />}
-        {content && commentsOpen && !zenMode && (
+        {content && sidePanelShown('connections') && (
+          <ConnectionsPanel note={content} fitWidth={sidePanelFit.widths.connections} />
+        )}
+        {content && sidePanelShown('comments') && (
           <CommentsPanel
             note={content}
+            fitWidth={sidePanelFit.widths.comments}
             draft={commentDraft}
             onCaptureDraft={captureCommentDraft}
             onClearDraft={clearCommentDraft}
             onJump={jumpToComment}
           />
         )}
-        {content && outlineOpen && !zenMode && (
+        {content && sidePanelShown('outline') && (
           <OutlinePanel
             note={content}
+            fitWidth={sidePanelFit.widths.outline}
             activeLine={activeOutlineLine}
             onJump={jumpToOutlineLine}
           />
         )}
-        {content && calendarOpen && calendarAvailable && !zenMode && (
-          <CalendarPanel note={content} />
+        {content && sidePanelShown('calendar') && (
+          <CalendarPanel note={content} fitWidth={sidePanelFit.widths.calendar} />
         )}
+        <TuckedPanelsRail
+          tucked={sidePanelFit.tucked}
+          onReveal={(id) => {
+            revealSidePanel(id)
+            // The button that was clicked is gone once its panel is showing,
+            // and focus must not fall to the page body with it.
+            viewRef.current?.focus()
+          }}
+        />
       </div>
       {content &&
         showEditor &&
@@ -4123,7 +4768,7 @@ function copyableLinkAtPointer(view: EditorView, x: number, y: number): Copyable
   if (pos == null) return null
   const range = linkRangeAtCursor(view.state.doc.toString(), pos)
   if (!range || !pointerOverRange(view, range.from, range.to, x, y)) return null
-  return copyableLink(range.target)
+  return copyableLink(range.target, range.kind)
 }
 
 function buildEditorContextItems(
@@ -4185,12 +4830,10 @@ function buildEditorContextItems(
   }
 
   const paste = async (): Promise<void> => {
-    let text = ''
-    try {
-      text = await navigator.clipboard.readText()
-    } catch {
-      return
-    }
+    // A menu click carries no clipboard data, so read it: an image takes the
+    // same import as Mod+V, anything else goes in as text.
+    const { images, text } = await readSystemClipboard()
+    if (pasteImageFilesIntoEditor(view, images)) return
     if (!text) return
     const sel = view.state.selection.main
     view.dispatch({
@@ -4308,6 +4951,60 @@ function EmptyPaneState({
   )
 }
 
+/**
+ * Undo history between launches (Vim's `undofile`, #793): only with the
+ * setting on, and only on a host that can keep it somewhere that is not the
+ * vault. Everything here is fire and forget; a note whose history cannot be
+ * saved or read simply starts a clean one next time.
+ */
+function noteUndoFileEnabled(): boolean {
+  return useStore.getState().persistUndoHistory && !!window.zen?.writeNoteUndoHistory
+}
+
+/**
+ * Save the history of the note `state` shows. With nothing to undo there is
+ * nothing to write, and nothing is erased either: the same note can be open in
+ * a second pane whose history was just saved, and a file that no longer fits
+ * the text is ignored when it is read and replaced by the next real save.
+ */
+function saveNoteUndoFile(path: string | null, state: EditorState): void {
+  if (!path || !noteUndoFileEnabled()) return
+  const saved = serializeNoteUndoHistory(state)
+  if (saved === null) return
+  void window.zen.writeNoteUndoHistory?.(path, saved)?.catch(() => undefined)
+}
+
+function forgetNoteUndoFile(path: string | null): void {
+  if (!path || !noteUndoFileEnabled()) return
+  void window.zen.writeNoteUndoHistory?.(path, null)?.catch(() => undefined)
+}
+
+/**
+ * Hand a note the history it had when the app last quit. It only applies while
+ * `view` still shows that note with nothing to undo yet: a history kept in
+ * memory, or an edit made while the file was being read, wins.
+ */
+function loadNoteUndoFile(
+  view: EditorView,
+  compartment: Compartment | null,
+  path: string | null,
+  stillShowing: () => boolean
+): void {
+  if (!path || !compartment || !noteUndoFileEnabled()) return
+  if (undoDepth(view.state) > 0 || redoDepth(view.state) > 0) return
+  void window.zen
+    .readNoteUndoHistory?.(path)
+    ?.then((saved) => {
+      if (!saved || !stillShowing()) return
+      if (undoDepth(view.state) > 0 || redoDepth(view.state) > 0) return
+      const restored = noteUndoHistoryFromFile(saved, view.state.doc.toString())
+      if (!restored) return
+      view.dispatch({ effects: compartment.reconfigure([]) })
+      view.dispatch({ effects: compartment.reconfigure(restored) })
+    })
+    .catch(() => undefined)
+}
+
 function IconBtn({
   children,
   onClick,
@@ -4365,13 +5062,16 @@ function ToggleGroup({
   return (
     <div className="flex items-center gap-1 rounded-md bg-paper-200/70 p-0.5 text-xs">
       {MODE_OPTIONS.map((option) => {
-        const shortcut = getKeymapDisplay(keymapOverrides, option.keymapId)
+        const label = labelWithShortcut(
+          option.tooltipLabel,
+          getKeymapDisplay(keymapOverrides, option.keymapId)
+        )
         return (
           <button
             key={option.mode}
             onClick={() => onChange(option.mode)}
-            title={`${option.tooltipLabel} (${shortcut})`}
-            aria-label={`${option.tooltipLabel} (${shortcut})`}
+            title={label}
+            aria-label={label}
             className={[
               'rounded px-2 py-1 transition-colors',
               mode === option.mode
@@ -4406,6 +5106,8 @@ function Breadcrumb({
   const createAndOpen = useStore((s) => s.createAndOpen)
   const createDrawingAndOpen = useStore((s) => s.createDrawingAndOpen)
   const createFolder = useStore((s) => s.createFolder)
+  // `m` on a focused crumb is VimNav's, so the tooltip names it only in Vim mode.
+  const vimMode = useStore((s) => s.vimMode)
   const [crumbMenu, setCrumbMenu] = useState<{ x: number; y: number; subpath: string } | null>(
     null
   )
@@ -4496,7 +5198,7 @@ function Breadcrumb({
               setCrumbMenu({ x: e.clientX, y: e.clientY, subpath: c.subpath })
             }}
             className="truncate rounded px-1 hover:bg-paper-200/70 hover:text-ink-800"
-            title={`Go to ${c.label} — right-click (or m) to create here`}
+            title={`Go to ${c.label}, right-click${vimMode ? ' (or m)' : ''} to create here`}
           >
             {c.label}
           </button>

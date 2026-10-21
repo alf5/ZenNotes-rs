@@ -3,11 +3,16 @@ import { useStore } from "../store";
 import type { NoteContent, NoteMeta } from "@shared/ipc";
 import { backlinksForNote } from "../lib/wikilinks";
 import { countWords } from "../lib/word-count";
-import { useHoveredLinkStore } from "../lib/hovered-link";
+import { setHoveredLink, useHoveredLinkStore } from "../lib/hovered-link";
 import {
+  cloudSyncAttentionLabel,
+  cloudSyncAttentionIsSettingsOnly,
+  cloudVaultRemovalLabel,
+  cloudVaultRemovalMessage,
   connectCloudAccountFromStatusBar,
   formatRelativeSyncTime,
   openCloudConflictReview,
+  openCloudSettingsConflictPrompt,
   resolvableCloudConflictCount,
   syncCloudVaultWithStatus,
   type CloudSyncPhase,
@@ -37,10 +42,11 @@ export function StatusBar({ note }: { note: NoteContent | null }): JSX.Element {
   }, [note?.body]);
 
   // Backlinks depend only on the active note's *path* and the vault's
-  // wikilink metadata — never on the note body. Keying the memo on
-  // `note.path` (instead of the whole `note` object, which changes on every
-  // keystroke) keeps this O(n) scan off the typing hot path while producing
-  // an identical count.
+  // wikilink metadata, never on the note body. backlinksForNote resolves the
+  // vault's links once per notes array, so a note switch is a map lookup
+  // (#880). Keying the memo on `note.path` (instead of the whole `note`
+  // object, which changes on every keystroke) keeps even that lookup off the
+  // typing hot path while producing an identical count.
   const backlinks = useMemo(() => {
     if (!note) return 0;
     return backlinksForNote(notes as NoteMeta[], note).length;
@@ -49,12 +55,22 @@ export function StatusBar({ note }: { note: NoteContent | null }): JSX.Element {
   // The target of the link the mouse is over (browser-style), shown on the left.
   const hoveredLink = useHoveredLinkStore((s) => s.href);
 
+  // A target belongs to the note it was hovered in. The preview root stays
+  // mounted across a note switch, so nothing else clears it when the note
+  // changes under a resting pointer, or after a tap on a touch screen, which
+  // synthesizes mousemove but never mouseleave. Keyed on the path, not the
+  // note object: typing must not blank a hover. (#820)
+  useEffect(() => {
+    setHoveredLink(null);
+  }, [note?.path]);
+
   return (
     <div
       className="flex h-8 shrink-0 items-center justify-between gap-2 px-3 text-xs text-ink-500 sm:gap-5 sm:px-6"
       style={{ borderTop: "1px solid var(--glass-stroke)" }}
     >
       <span
+        data-hovered-link
         className="min-w-0 flex-1 truncate font-mono text-ink-400"
         title={hoveredLink ?? undefined}
       >
@@ -99,7 +115,13 @@ function CloudSyncStatus({
   const vaultName = useCloudSyncStatusStore((state) => state.vaultName);
   const lastSyncedAt = useCloudSyncStatusStore((state) => state.lastSyncedAt);
   const error = useCloudSyncStatusStore((state) => state.error);
+  const errorKind = useCloudSyncStatusStore((state) => state.errorKind);
   const lastSummary = useCloudSyncStatusStore((state) => state.lastSummary);
+  const settingsOnly = useCloudSyncStatusStore(cloudSyncAttentionIsSettingsOnly);
+  const settingsQuestionWaiting = useCloudSyncStatusStore(
+    (state) => state.settingsConflict !== null,
+  );
+  const removedVault = useCloudSyncStatusStore((state) => state.removedVault);
   const setSettingsOpen = useStore((state) => state.setSettingsOpen);
   const [now, setNow] = useState(() => Date.now());
   const resolvableConflictCount = resolvableCloudConflictCount(lastSummary);
@@ -113,10 +135,24 @@ function CloudSyncStatus({
 
   if (phase === "hidden") return null;
 
-  const label =
-    phase === "disconnected"
+  // A device whose Cloud vault went away is unlinked without having chosen
+  // to be, so it reads as needing the person, in the attention tone and
+  // phase. The phone shells hide this row except while Cloud needs the
+  // person, and in the plain unlinked phase a phone said nothing at all
+  // while its sync had stopped.
+  const removal = phase === "unlinked" ? removedVault : null;
+  // Signed out because Cloud refused this device: the same, it stopped
+  // syncing without the person choosing to.
+  const signedOut = phase === "disconnected" && errorKind === "signed-out";
+  const shownPhase = removal || signedOut ? "attention" : phase;
+
+  const label = removal
+    ? cloudVaultRemovalLabel(removal)
+    : phase === "disconnected"
       ? error
-        ? "Cloud unavailable"
+        ? errorKind === "signed-out"
+          ? "Signed out of Cloud"
+          : "Sign-in didn't start"
         : "ZenNotes Cloud"
       : phase === "connecting"
         ? "Connecting to Cloud…"
@@ -127,34 +163,39 @@ function CloudSyncStatus({
             : phase === "attention"
               ? hasResolvableConflict
                 ? `${resolvableConflictCount} ${resolvableConflictCount === 1 ? "file needs" : "files need"} review`
-                : "Sync incomplete"
+                : settingsOnly
+                  ? "Settings need review"
+                  : (cloudSyncAttentionLabel(lastSummary) ?? "Sync incomplete")
               : phase === "error"
-                ? "Sync failed"
+                ? errorKind === "offline"
+                  ? "Can't reach Cloud"
+                  : "Sync failed"
                 : lastSyncedAt === null
                   ? "Cloud ready"
                   : `Synced ${formatRelativeSyncTime(lastSyncedAt, now)}`;
-  const title =
-    phase === "disconnected"
+  const title = removal
+    ? cloudVaultRemovalMessage(removal)
+    : phase === "disconnected"
       ? (error ?? "Connect this vault to ZenNotes Cloud.")
       : phase === "connecting"
         ? "Finish signing in in your browser."
         : phase === "unlinked"
           ? "Choose the cloud vault this device should use."
           : phase === "attention"
-            ? (error ?? "Some Cloud changes could not be synchronized.")
+            ? (error ?? "Some changes didn't sync. Open Settings → Cloud to see which files.")
             : phase === "error"
-              ? `${error ?? "Sync could not finish."} Click to retry.`
+              ? `${error ?? "Sync didn't finish."} Click to retry.`
               : phase === "syncing"
                 ? `Syncing ${vaultName ?? "this vault"}`
                 : `${vaultName ?? "Cloud vault"} is connected. Click to sync now.`;
   const statusTone =
-    phase === "error"
+    shownPhase === "error"
       ? "text-danger"
-      : phase === "attention"
+      : shownPhase === "attention"
         ? "text-warning"
-        : phase === "ready" || phase === "unlinked"
+        : shownPhase === "ready" || shownPhase === "unlinked"
           ? "text-success"
-          : phase === "disconnected"
+          : shownPhase === "disconnected"
             ? "text-ink-500"
             : "text-accent";
   // Files waiting on a decision outrank every other action: the queue stays
@@ -162,11 +203,13 @@ function CloudSyncStatus({
   // cannot finish the waiting file anyway.
   const actionLabel =
     phase === "disconnected"
-      ? error
+      ? error && errorKind !== "signed-out"
         ? "Retry"
         : "Connect"
       : phase === "unlinked"
-        ? "Set up"
+        ? removal
+          ? "Review"
+          : "Set up"
         : hasResolvableConflict
           ? "Review now"
           : phase === "attention"
@@ -195,6 +238,12 @@ function CloudSyncStatus({
       openCloudConflictReview();
       return;
     }
+    if (settingsOnly) {
+      // The prompt is where the settings decision is made; Settings only
+      // repeats the question.
+      openCloudSettingsConflictPrompt();
+      return;
+    }
     if (phase === "attention") {
       openCloudSettings();
       return;
@@ -214,13 +263,21 @@ function CloudSyncStatus({
         .filter(Boolean)
         .join(" ")}
     >
+      {/* Stable hooks for the phone shells, which style this bar from outside
+          (the iPhone shows it only while Cloud needs the user). The phase alone
+          cannot hold a row steady: every run passes through ready and syncing,
+          while a waiting decision stays until it is made. */}
       <span
         data-cloud-sync-status
+        data-cloud-sync-phase={shownPhase}
+        data-cloud-sync-review={
+          hasResolvableConflict || settingsQuestionWaiting ? "" : undefined
+        }
         role="status"
         title={title}
         className={`inline-flex items-center gap-1.5 font-medium ${statusTone}`}
       >
-        <CloudStatusIcon phase={phase} />
+        <CloudStatusIcon phase={shownPhase} />
         <span className="tabular-nums">{label}</span>
       </span>
       {showAction && (

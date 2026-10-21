@@ -1,7 +1,8 @@
 //! Filesystem watcher — port of apps/desktop/src/main/watcher.ts (chokidar →
 //! `notify-debouncer-full`). Watches the vault root, classifies each change
-//! into a `VaultChangeEvent` (with the same vault-settings / comments / content
-//! scoping), and emits `vault://change` to the frontend.
+//! into a `VaultChangeEvent` (with the same vault-settings / comments /
+//! agent-edits / templates / database / folder / content scoping), and emits
+//! `vault://change` to the frontend.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -21,7 +22,9 @@ pub type VaultDebouncer = Debouncer<RecommendedWatcher, FileIdMap>;
 const VAULT_SETTINGS_RELATIVE_PATH: &str = ".zennotes/vault.json";
 const NOTE_COMMENTS_PREFIX: &str = ".zennotes/comments/";
 const NOTE_COMMENTS_SUFFIX: &str = ".comments.json";
-const ATTACHMENTS_DIRS: [&str; 2] = ["attachements", "_assets"];
+const TEMPLATES_PREFIX: &str = ".zennotes/templates/";
+const AGENT_EDITS_PREFIX: &str = ".zennotes/agent-edits/";
+const AGENT_EDITS_SUFFIX: &str = ".json";
 const VAULT_CHANGE_EVENT: &str = "vault://change";
 
 fn relative_vault_path(root: &Path, abs: &Path) -> String {
@@ -60,6 +63,29 @@ pub fn classify_change(root: &Path, abs: &Path, kind: &str, is_dir: bool) -> Opt
         }
     }
 
+    // An assistant edited a note through MCP, or a review moved on: the
+    // note's banner and the review list follow the record. A record being
+    // written is a `.tmp` beside it and stays out until renamed into place.
+    if let Some(note_path) = agent_edit_note_path(&rel) {
+        return Some(VaultChangeEvent {
+            kind: kind.to_string(),
+            folder: folder_for_relative_path(&note_path).unwrap_or_else(|| "inbox".into()),
+            path: note_path,
+            scope: Some("agent-edits".to_string()),
+        });
+    }
+
+    // A template is not a note: its own scope has the renderer re-list
+    // templates instead of the note tree (#723).
+    if is_template_path(&rel) {
+        return Some(VaultChangeEvent {
+            kind: kind.to_string(),
+            path: rel,
+            folder: "inbox".to_string(),
+            scope: Some("templates".to_string()),
+        });
+    }
+
     // Prune dot-prefixed components (e.g. other .zennotes internals) and
     // node_modules — chokidar ignored these from the watch entirely.
     for component in rel.split('/') {
@@ -70,7 +96,7 @@ pub fn classify_change(root: &Path, abs: &Path, kind: &str, is_dir: bool) -> Opt
 
     let folder = folder_for_relative_path(&rel).or_else(|| {
         let top = rel.split('/').next().unwrap_or("");
-        if ATTACHMENTS_DIRS.contains(&top) {
+        if crate::vault::layout::ATTACHMENTS_DIRS.contains(&top) {
             Some("inbox".to_string())
         } else {
             None
@@ -111,6 +137,26 @@ pub fn classify_change(root: &Path, abs: &Path, kind: &str, is_dir: bool) -> Opt
         folder,
         scope: None,
     })
+}
+
+/// Port of watcher.ts `agentEditNotePath`: the note an agent edit record
+/// belongs to.
+fn agent_edit_note_path(rel: &str) -> Option<String> {
+    let note = rel.strip_prefix(AGENT_EDITS_PREFIX)?.strip_suffix(AGENT_EDITS_SUFFIX)?;
+    (!note.is_empty()).then(|| note.to_string())
+}
+
+/// Port of watcher.ts `templatePath`: a `.md` file directly inside
+/// `.zennotes/templates/`, the flat directory the template module serves.
+/// Dotfiles and nested paths are not templates there either.
+fn is_template_path(rel: &str) -> bool {
+    let Some(name) = rel.strip_prefix(TEMPLATES_PREFIX) else {
+        return false;
+    };
+    !name.is_empty()
+        && !name.contains('/')
+        && !name.starts_with('.')
+        && name.to_lowercase().ends_with(".md")
 }
 
 /// Rust port of shared-domain `databaseCsvPathFor` (databases.ts:300): map any
@@ -227,6 +273,40 @@ mod tests {
         assert_eq!(ev.scope.as_deref(), Some("comments"));
         assert_eq!(ev.path, "inbox/Note.md");
         assert_eq!(ev.folder, "inbox");
+    }
+
+    #[test]
+    fn classifies_agent_edit_records_by_their_note() {
+        let root = Path::new("/v");
+        let ev = classify_change(
+            root,
+            Path::new("/v/.zennotes/agent-edits/inbox/Plan.md.json"),
+            "add",
+            false,
+        )
+        .unwrap();
+        assert_eq!(ev.scope.as_deref(), Some("agent-edits"));
+        assert_eq!(ev.path, "inbox/Plan.md");
+        // The temp file a record is written through stays out.
+        assert!(classify_change(
+            root,
+            Path::new("/v/.zennotes/agent-edits/inbox/Plan.md.json.0f3a.tmp"),
+            "add",
+            false
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn classifies_templates_but_not_nested_or_dotfiles() {
+        let root = Path::new("/v");
+        let ev = classify_change(root, Path::new("/v/.zennotes/templates/Meeting.md"), "change", false)
+            .unwrap();
+        assert_eq!(ev.scope.as_deref(), Some("templates"));
+        assert_eq!(ev.path, ".zennotes/templates/Meeting.md");
+        assert!(classify_change(root, Path::new("/v/.zennotes/templates/.Draft.md"), "add", false).is_none());
+        assert!(classify_change(root, Path::new("/v/.zennotes/templates/a/b.md"), "add", false).is_none());
+        assert!(classify_change(root, Path::new("/v/.zennotes/templates/notes.txt"), "add", false).is_none());
     }
 
     #[test]

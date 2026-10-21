@@ -3,20 +3,14 @@
 //! folder-icon rewrites in vault settings.
 
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::Path;
 
+use crate::vault::comments;
 use crate::vault::config::resolve_path;
 use crate::vault::layout;
 use crate::vault::notes::{resolve_safe, to_posix};
 use crate::vault::settings;
-
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
+use crate::vault::sidecars;
 
 fn trim_slashes(s: &str) -> String {
     s.trim_matches('/').to_string()
@@ -31,6 +25,55 @@ pub fn create_folder(root: &Path, top_folder: &str, subpath: &str) -> Result<(),
     fs::create_dir_all(&abs).map_err(|e| format!("mkdir failed: {e}"))
 }
 
+/// Port of `renameFolderTrees`: the shared local folder move for ordinary
+/// folders and database containers. The folder moves together with its
+/// comment tree, its creation dates and its agent edit records; `persist`
+/// (the settings write) runs inside the same transaction, and a failure
+/// anywhere puts every tree back.
+pub fn rename_folder_trees(
+    root: &Path,
+    old_rel: &str,
+    new_rel: &str,
+    persist: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let old_abs = resolve_safe(root, old_rel)?;
+    let new_abs = resolve_safe(root, new_rel)?;
+    let root_abs = std::path::PathBuf::from(resolve_path(&root.to_string_lossy()));
+    if old_abs == root_abs || new_abs == root_abs {
+        return Err("Cannot rename the vault root".into());
+    }
+    fs::metadata(&old_abs).map_err(|e| format!("stat failed: {e}"))?;
+    if old_abs == new_abs {
+        return Ok(());
+    }
+    let sep = std::path::MAIN_SEPARATOR;
+    if format!("{}{sep}", new_abs.display()).starts_with(&format!("{}{sep}", old_abs.display())) {
+        return Err("Cannot move a folder into itself".into());
+    }
+    let old_rel = sidecars::rel_of(root, &old_abs);
+    let new_rel = sidecars::rel_of(root, &new_abs);
+    let comments_root = comments::comments_root(root);
+    sidecars::relocate_folder_trees(
+        vec![
+            (old_abs, new_abs),
+            (comments_root.join(&old_rel), comments_root.join(&new_rel)),
+            (
+                sidecars::note_metadata_path(root, &old_rel, true)?,
+                sidecars::note_metadata_path(root, &new_rel, true)?,
+            ),
+            (
+                sidecars::agent_edit_folder_path(root, &old_rel)?,
+                sidecars::agent_edit_folder_path(root, &new_rel)?,
+            ),
+        ],
+        persist,
+    )
+}
+
+/// Rename or move a subfolder. `new_subpath` is the full target path relative
+/// to the top folder, so `Work/Research` → `Projects/Research` also moves it
+/// into `Projects`. Refuses to move into itself or a descendant, and refuses
+/// to touch the top-level folder.
 pub fn rename_folder(
     root: &Path,
     top_folder: &str,
@@ -48,53 +91,66 @@ pub fn rename_folder(
     let top_root = layout::folder_root(root, top_folder);
     let old_abs = resolve_safe(&top_root, &old_clean)?;
     let new_abs = resolve_safe(&top_root, &new_clean)?;
+    fs::metadata(&old_abs).map_err(|e| format!("stat failed: {e}"))?;
     if new_abs == old_abs {
         return Ok(new_clean);
     }
     let sep = std::path::MAIN_SEPARATOR;
-    let old_str = old_abs.to_string_lossy().to_string();
-    let new_str = new_abs.to_string_lossy().to_string();
-    if format!("{new_str}{sep}").starts_with(&format!("{old_str}{sep}")) {
+    if format!("{}{sep}", new_abs.display()).starts_with(&format!("{}{sep}", old_abs.display())) {
         return Err("Cannot move a folder into itself".into());
     }
-
-    let same_dir = match (fs::canonicalize(&old_abs), fs::canonicalize(&new_abs)) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => false,
-    };
-    if new_abs.exists() && !same_dir {
-        return Err(format!("A folder already exists at \"{new_clean}\""));
+    // Same file on both sides is a case-only rename on a case-insensitive disk.
+    if let Ok(existing) = sidecars::file_identity(&new_abs) {
+        let source = sidecars::file_identity(&old_abs).map_err(|e| format!("stat failed: {e}"))?;
+        if existing != source {
+            return Err(format!("A folder already exists at \"{new_clean}\""));
+        }
     }
-    if let Some(parent) = new_abs.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("mkdir failed: {e}"))?;
-    }
-    if old_str.to_lowercase() == new_str.to_lowercase() && old_str != new_str {
-        let tmp = PathBuf::from(format!("{old_str}_rename_tmp_{}", now_ms()));
-        fs::rename(&old_abs, &tmp).map_err(|e| format!("rename failed: {e}"))?;
-        fs::rename(&tmp, &new_abs).map_err(|e| format!("rename failed: {e}"))?;
-    } else {
-        fs::rename(&old_abs, &new_abs).map_err(|e| format!("rename failed: {e}"))?;
-    }
-
-    let folder = top_folder.to_string();
-    let (oc, nc) = (old_clean.clone(), new_clean.clone());
-    settings::update_folder_icons(root, |icons| {
-        settings::rewrite_folder_icons_for_rename(icons, &folder, &oc, &nc)
+    let old_rel = sidecars::rel_of(root, &old_abs);
+    let new_rel = sidecars::rel_of(root, &new_abs);
+    let next = settings::after_folder_rename(
+        settings::settings_value(root)?,
+        top_folder,
+        &old_clean,
+        &new_clean,
+        &old_rel,
+        &new_rel,
+    );
+    rename_folder_trees(root, &old_rel, &new_rel, || {
+        settings::set_vault_settings(root, &next).map(|_| ())
     })?;
     Ok(new_clean)
 }
 
-pub fn delete_folder(root: &Path, top_folder: &str, subpath: &str) -> Result<(), String> {
+/// `deleteFolder`: the folder leaves together with its comment tree and its
+/// creation dates (detached into a temporary folder in one transaction with
+/// the settings write, then erased), and its agent edit records go too.
+pub fn delete_folder(root: &Path, top_folder: &str, subpath: &str, ephemeral: bool) -> Result<(), String> {
     let clean = trim_slashes(subpath);
     if clean.is_empty() {
         return Err("Cannot delete the top-level folder".into());
     }
     let abs = resolve_safe(&layout::folder_root(root, top_folder), &clean)?;
-    let _ = fs::remove_dir_all(&abs);
-    let folder = top_folder.to_string();
-    settings::update_folder_icons(root, |icons| {
-        settings::remove_folder_icons(icons, &folder, &clean)
-    })?;
+    let rel = sidecars::rel_of(root, &abs);
+    let comments = comments::comments_root(root).join(&rel);
+    if ephemeral && !comments.exists() {
+        let _ = fs::remove_dir_all(&abs);
+        return sidecars::remove_agent_edit_record(root, &rel, true);
+    }
+    let next = settings::after_folder_delete(settings::settings_value(root)?, top_folder, &clean);
+    let temporary = sidecars::internal_temp_dir(root, "folder-delete-")?;
+    sidecars::relocate_folder_trees(
+        vec![
+            (abs, temporary.join("content")),
+            (comments, temporary.join("comments")),
+            (sidecars::note_metadata_path(root, &rel, true)?, temporary.join("metadata")),
+        ],
+        || settings::set_vault_settings(root, &next).map(|_| ()),
+    )?;
+    sidecars::discard_temp_dir(&temporary, "Folder");
+    if let Err(error) = sidecars::remove_agent_edit_record(root, &rel, true) {
+        eprintln!("Agent edit cleanup pending: {error}");
+    }
     Ok(())
 }
 
@@ -170,7 +226,7 @@ mod tests {
         assert_eq!(nc, "Work");
         assert!(v.path().join("inbox/Work").is_dir());
         assert!(!v.path().join("inbox/Projects").exists());
-        delete_folder(v.path(), "inbox", "Work").unwrap();
+        delete_folder(v.path(), "inbox", "Work", false).unwrap();
         assert!(!v.path().join("inbox/Work").exists());
     }
 

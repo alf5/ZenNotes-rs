@@ -1,3 +1,4 @@
+import { runNoteLifecycleAction } from '../lib/note-lifecycle-actions'
 /**
  * Right-side calendar panel — a date navigator for daily and weekly notes,
  * modelled on Obsidian's Calendar plugin.
@@ -33,11 +34,10 @@ import {
 import { getISOWeek, getISOWeekYear } from '../lib/template-render'
 import { countWords } from '../lib/word-count'
 import { InlineMarkdown } from '../lib/inline-markdown'
+import { CloudTaskConflictIndicator } from './CloudTaskConflictIndicator'
 import { resolveWeekStartDay } from '../lib/week-start'
 import { ChevronLeftIcon, ChevronRightIcon } from './icons'
 import { confirmApp } from '../lib/confirm-requests'
-import { confirmMoveToTrash } from '../lib/confirm-trash'
-import { moveNoteToTrash } from '../lib/trash-note'
 import { usePanelResize } from '../lib/use-panel-resize'
 import { PanelResizeHandle } from './PanelResizeHandle'
 import { ContextMenu, type ContextMenuItem } from './ContextMenu'
@@ -111,9 +111,18 @@ function dotsFor(stats: NoteStats | undefined): { count: number; faint: boolean 
   return { count: Math.min(MAX_DOTS, Math.ceil(stats.words / WORDS_PER_DOT)), faint: false }
 }
 
-export function CalendarPanel({ note }: { note: NoteContent }): JSX.Element {
+export function CalendarPanel({
+  note,
+  fitWidth
+}: {
+  note: NoteContent
+  /** Width to render at when the pane has less room than the width the user
+   *  chose; see lib/side-panel-fit. (#805) */
+  fitWidth?: number
+}): JSX.Element {
   const notes = useStore((s) => s.notes)
   const vaultSettings = useStore((s) => s.vaultSettings)
+  const vimMode = useStore((s) => s.vimMode)
   const openDailyNoteForDate = useStore((s) => s.openDailyNoteForDate)
   const openWeeklyNoteForDate = useStore((s) => s.openWeeklyNoteForDate)
   const vaultTasks = useStore((s) => s.vaultTasks)
@@ -130,7 +139,7 @@ export function CalendarPanel({ note }: { note: NoteContent }): JSX.Element {
   const setPanelWidth = useStore((s) => s.setPanelWidth)
   const weekStart = useStore((s) => s.calendarWeekStart)
   const showWeekNumbers = useStore((s) => s.calendarShowWeekNumbers)
-  const { startResize } = usePanelResize(width, (px) => setPanelWidth('calendar', px))
+  const { startResize } = usePanelResize(fitWidth ?? width, (px) => setPanelWidth('calendar', px))
 
   const settings = useMemo(() => normalizeVaultSettings(vaultSettings), [vaultSettings])
   const dailyEnabled = settings.dailyNotes.enabled
@@ -388,10 +397,7 @@ export function CalendarPanel({ note }: { note: NoteContent }): JSX.Element {
   // --- Context menu --------------------------------------------------------
   const [menu, setMenu] = useState<{ x: number; y: number; items: ContextMenuItem[] } | null>(null)
   const trashNote = useCallback(async (meta: NoteMeta) => {
-    if (!(await confirmMoveToTrash(meta.title))) return
-    await moveNoteToTrash(meta.path, {
-      temporarySession: useStore.getState().vault?.temporary === true
-    })
+    await runNoteLifecycleAction(meta.path, 'trash')
   }, [])
   const openDayMenu = useCallback(
     (e: React.MouseEvent, day: Date, iso: string) => {
@@ -533,6 +539,12 @@ export function CalendarPanel({ note }: { note: NoteContent }): JSX.Element {
       const cur = tasks[Math.min(activeTaskIndex, Math.max(0, tasks.length - 1))]
 
       if (e.metaKey || e.ctrlKey || e.altKey) return
+      // With Vim off the single-character keys stay with the page, the rule
+      // every list in the app follows: arrows, Enter, Space, Tab and Escape
+      // are universal, the letters (and < > [ ]) are Vim's. Nothing below
+      // then names a key that is not live, and a note typed into by mistake
+      // is not toggled, moved or deleted by a stray letter.
+      if (!vimMode && e.key.length === 1 && e.key !== ' ') return
 
       if (grabbedTask) {
         if (e.key === 'Escape') {
@@ -728,6 +740,7 @@ export function CalendarPanel({ note }: { note: NoteContent }): JSX.Element {
     return () => window.removeEventListener('keydown', handler, true)
   }, [
     dailyEnabled,
+    vimMode,
     selectedDayTasks,
     activeTaskIndex,
     grabbedTask,
@@ -827,7 +840,7 @@ export function CalendarPanel({ note }: { note: NoteContent }): JSX.Element {
         }}
         onClick={() => void openTaskAt(task)}
         onContextMenu={(e) => openTaskMenu(e, task)}
-        title={`${task.content} — drag to a day to reschedule, right-click for more`}
+        title={`${task.content} · drag to a day to reschedule, right-click for more`}
         className={[
           'flex w-full cursor-grab items-center gap-2 rounded px-1.5 py-1 text-left text-xs text-ink-700 transition-colors active:cursor-grabbing',
           opts?.isActive
@@ -853,6 +866,7 @@ export function CalendarPanel({ note }: { note: NoteContent }): JSX.Element {
         {task.sourcePath !== (dailyByDate.get(dayIso)?.path ?? '') && (
           <span className="shrink-0 truncate text-2xs text-ink-400">{task.noteTitle}</span>
         )}
+        <CloudTaskConflictIndicator path={task.sourcePath} />
       </div>
     )
 
@@ -862,7 +876,7 @@ export function CalendarPanel({ note }: { note: NoteContent }): JSX.Element {
       data-calendar-panel
       aria-label="Calendar"
       tabIndex={0}
-      style={{ width }}
+      style={{ width: fitWidth ?? width }}
       className="relative flex shrink-0 flex-col border-l border-paper-300/70 bg-paper-50/18 outline-none"
     >
       <PanelResizeHandle onStart={startResize} />
@@ -1020,7 +1034,7 @@ export function CalendarPanel({ note }: { note: NoteContent }): JSX.Element {
                     if (dragged) openDropMenu(e.clientX, e.clientY, dragged, iso, day)
                   }}
                   disabled={!dailyEnabled}
-                  title={`${iso} — click to view, double-click to open`}
+                  title={`${iso} · click to view, double-click to open`}
                   className={[
                     'relative flex flex-col items-center rounded py-1 text-xs leading-tight transition-colors',
                     !dailyEnabled
@@ -1068,7 +1082,7 @@ export function CalendarPanel({ note }: { note: NoteContent }): JSX.Element {
         <div className="flex min-h-0 flex-1 flex-col border-t border-paper-300/60 px-3 py-3">
           {grabbedTask && (
             <div className="mb-2 rounded bg-accent/10 px-2 py-1 text-2xs text-accent">
-              Moving “{grabbedTask.content || 'task'}” — h/j/k/l pick a day · Enter place · Esc cancel
+              Moving “{grabbedTask.content || 'task'}”: h/j/k/l pick a day · Enter place · Esc cancel
             </div>
           )}
           <div className="mb-2 flex items-center justify-between gap-2">

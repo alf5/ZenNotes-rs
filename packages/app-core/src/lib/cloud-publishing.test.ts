@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from 'vitest'
 import type { CloudServiceAccount } from '@zennotes/bridge-contract/cloud-sync'
 import {
   collectCloudPublishAssets,
-  prepareCloudPublishLogo,
   publishCloudNote,
   type CloudPublishingBridge
 } from './cloud-publishing'
@@ -48,8 +47,7 @@ function setup(published = false, publishActive = true) {
         }]
       : []),
     publishCloudNote: createPublishedNote,
-    updateCloudPublishedNote,
-    readVaultAssetBase64: vi.fn(async () => 'AQID')
+    updateCloudPublishedNote
   }
 
   return { bridge, createPublishedNote, updateCloudPublishedNote }
@@ -63,6 +61,35 @@ const note = {
 }
 
 describe('cloud publishing', () => {
+  it('exposes a discovered public copy without claiming the uncertain request committed', async () => {
+    const { bridge, createPublishedNote } = setup()
+    vi.mocked(bridge.listCloudPublishedNotes)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{
+        id: 42, slug: 'launch', url: 'https://zennotes.org/s/launch',
+        title: 'Launch', note_path: note.path, created_at: null, updated_at: null
+      }])
+    createPublishedNote.mockRejectedValueOnce(new DOMException('Timed out', 'TimeoutError'))
+    await expect(publishCloudNote(note, bridge)).rejects.toMatchObject({
+      name: 'CloudPublishUnconfirmedError', publicNote: { id: 42 }
+    })
+    expect(createPublishedNote).toHaveBeenCalledOnce()
+  })
+
+  it('does not mistake an existing public copy for a successful update after a timeout', async () => {
+    const { bridge, updateCloudPublishedNote } = setup(true)
+    updateCloudPublishedNote.mockRejectedValueOnce(new Error('TimeoutError: The operation was aborted due to timeout.'))
+    await expect(publishCloudNote(note, bridge)).rejects.toThrow('Check the public note')
+    expect(updateCloudPublishedNote).toHaveBeenCalledOnce()
+  })
+
+  it('explains an uncertain create without blindly submitting it again', async () => {
+    const { bridge, createPublishedNote } = setup()
+    createPublishedNote.mockRejectedValueOnce(new TypeError('fetch failed'))
+    await expect(publishCloudNote(note, bridge)).rejects.toThrow('could not be confirmed')
+    expect(createPublishedNote).toHaveBeenCalledOnce()
+  })
+
   it('publishes a note for the first time', async () => {
     const { bridge, createPublishedNote } = setup()
 
@@ -96,20 +123,31 @@ describe('cloud publishing', () => {
     expect(createPublishedNote).not.toHaveBeenCalled()
   })
 
-  it('reads and publishes supported local attachments', async () => {
+  it('hands supported local attachments to the platform by vault path, without reading them', async () => {
     const { bridge, createPublishedNote } = setup()
     const withPhoto = { ...note, body: '![Photo](photo.png)', assetEmbeds: ['photo.png'] }
     useStore.setState({
       assetFiles: [{ path: 'Notes/photo.png', name: 'photo.png' } as never]
     })
 
-    const assets = await collectCloudPublishAssets(withPhoto, '/vault', bridge)
+    const assets = collectCloudPublishAssets(withPhoto, '/vault')
     await publishCloudNote(withPhoto, bridge, assets)
 
-    expect(bridge.readVaultAssetBase64).toHaveBeenCalledWith('Notes/photo.png')
     expect(createPublishedNote).toHaveBeenCalledWith(expect.objectContaining({
-      assets: [{ ref: 'photo.png', name: 'photo.png', mime: 'image/png', base64: 'AQID' }]
+      assets: [{ ref: 'photo.png', name: 'photo.png', mime: 'image/png', path: 'Notes/photo.png' }]
     }))
+  })
+
+  it('allows 50 attachments and says how many fit beyond that', () => {
+    const refs = (count: number) => Array.from({ length: count }, (_, index) => `photo-${index}.png`)
+    useStore.setState({
+      assetFiles: refs(51).map((ref) => ({ path: `Notes/${ref}`, name: ref }) as never)
+    })
+
+    expect(collectCloudPublishAssets({ ...note, assetEmbeds: refs(50) }, '/vault')).toHaveLength(50)
+    expect(() => collectCloudPublishAssets({ ...note, assetEmbeds: refs(51) }, '/vault')).toThrow(
+      'This note has 51 attached files, but a published note can have at most 50. Remove some attachments and publish again.'
+    )
   })
 
   it('requires an active publishing entitlement', async () => {
@@ -131,20 +169,5 @@ describe('cloud publishing', () => {
       markdown: note.body,
       appearance
     })
-  })
-
-  it('prepares only small safe raster logos', async () => {
-    const logo = new File([new Uint8Array([1, 2, 3])], 'brand.png', { type: 'image/png' })
-
-    await expect(prepareCloudPublishLogo(logo)).resolves.toEqual({
-      ref: 'brand-logo',
-      name: 'brand.png',
-      mime: 'image/png',
-      base64: 'AQID'
-    })
-
-    await expect(prepareCloudPublishLogo(
-      new File(['<svg/>'], 'brand.svg', { type: 'image/svg+xml' })
-    )).rejects.toThrow('PNG')
   })
 })

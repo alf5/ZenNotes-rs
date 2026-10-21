@@ -1,5 +1,8 @@
 /**
- * WYSIWYG mermaid rendering for the editor's live preview (#530).
+ * WYSIWYG diagram rendering for the editor's live preview (#530): ```mermaid
+ * fences, drawn by Pele, and ```d2 fences, drawn by D2. One widget serves both
+ * so the reveal-on-cursor, last-good-drawing and keyboard-entry rules cannot
+ * drift apart between languages.
  *
  * A ```mermaid fence draws as the diagram while the cursor is elsewhere, and
  * turns back into its source the moment the cursor lands anywhere in the block,
@@ -8,11 +11,12 @@
  *
  * Two things make this cheap enough to run on a hot editor:
  *
- *   1. The mermaid module is imported lazily and only when a fence exists, so a
- *      note without diagrams never pulls the heaviest chunk in the renderer.
- *   2. Rendered SVG is cached by (source, full theme identity) in
- *      `mermaid-render`, so a keystroke elsewhere in the note repaints from the
- *      cache, and moving the cursor in and out of a block costs nothing.
+ *   1. The renderer (Pele) is imported lazily and only when a fence exists, so
+ *      a note without diagrams never pulls diagram code into the renderer.
+ *   2. Rendered SVG is cached by (fonts, source) in `mermaid-render`, so a
+ *      keystroke elsewhere in the note repaints from the cache, and moving the
+ *      cursor in and out of a block costs nothing. Once the renderer has
+ *      loaded, a diagram it has not seen draws synchronously in `toDOM`.
  *
  * A diagram mid-edit is usually invalid, so a failed render keeps the LAST good
  * drawing of that block on screen rather than flashing an error at every
@@ -26,6 +30,7 @@ import { syntaxTree } from '@codemirror/language'
 import { Facet, RangeSetBuilder, StateField, type EditorState, type Extension } from '@codemirror/state'
 import { Decoration, type DecorationSet, EditorView, WidgetType } from '@codemirror/view'
 
+import { peekD2Svg, renderD2Svg, withUniqueD2Ids } from './d2-render'
 import { peekMermaidSvg, renderMermaidSvg } from './mermaid-render'
 
 interface DiagramThemeFacetValue {
@@ -33,17 +38,64 @@ interface DiagramThemeFacetValue {
   key: string
 }
 
-/** Which palette the widgets draw in. The full identity matters because theme
- *  variants, custom CSS, overrides, tweaks, and fonts can change while the
- *  light/dark mode stays the same. */
+/** The theme the widgets were drawn under. Colour no longer needs a redraw (the
+ *  SVG paints through CSS variables), but the identity also carries the text
+ *  font, and a font change must re-measure every label. A palette-only change
+ *  rebuilds the widgets from the cache, which costs an innerHTML each. */
 const diagramThemeFacet = Facet.define<DiagramThemeFacetValue, DiagramThemeFacetValue>({
   combine: (values) => values[values.length - 1] ?? { mode: 'light', key: 'light' }
 })
 
-/** The info string that marks a fence as mermaid: the language token only, so
- *  ```mermaid and ```mermaid title="x" both count. */
-function isMermaidInfo(info: string): boolean {
-  return info.trim().split(/\s+/)[0]?.toLowerCase() === 'mermaid'
+type FenceRenderResult = { ok: true; svg: string; ownTheme?: boolean } | { ok: false; error: string }
+
+interface FenceDiagram {
+  label: string
+  errorLabel: string
+  className: string
+  peek(source: string): FenceRenderResult | null
+  render(source: string): Promise<FenceRenderResult>
+  /** Adjust the cached SVG for one insertion (D2: ids of its own). */
+  prepare?(svg: string): string
+}
+
+const FENCE_DIAGRAMS = {
+  mermaid: {
+    label: 'Mermaid diagram',
+    errorLabel: 'Mermaid error',
+    className: 'cm-mermaid-block',
+    peek: (source: string) => peekMermaidSvg(source),
+    render: (source: string) => renderMermaidSvg(source)
+  },
+  // D2 always renders in its worker, so a new diagram passes through the
+  // pending state once; the cache makes every later paint synchronous.
+  d2: {
+    label: 'D2 diagram',
+    errorLabel: 'D2 error',
+    className: 'cm-mermaid-block cm-d2-block',
+    peek: peekD2Svg,
+    render: renderD2Svg,
+    prepare: withUniqueD2Ids
+  }
+} satisfies Record<string, FenceDiagram>
+
+type FenceLanguage = keyof typeof FENCE_DIAGRAMS
+
+/** The diagram language a fence's info string names: the language token only,
+ *  so ```mermaid and ```mermaid title="x" both count. */
+function fenceLanguage(info: string): FenceLanguage | null {
+  const token = info.trim().split(/\s+/)[0]?.toLowerCase()
+  return token === 'mermaid' || token === 'd2' ? token : null
+}
+
+/** Paint a finished drawing into a widget. A D2 diagram that chose no theme of
+ *  its own takes the app palette from `index.css`. */
+function paint(
+  el: HTMLElement,
+  result: { svg: string; ownTheme?: boolean },
+  diagram: FenceDiagram
+): void {
+  el.innerHTML = diagram.prepare ? diagram.prepare(result.svg) : result.svg
+  el.classList.toggle('zen-d2-themed', result.ownTheme === false)
 }
 
 /** Cursor/selection overlaps (or just touches an edge of) `[from, to]`. */
@@ -58,11 +110,12 @@ function selectionTouches(state: EditorState, from: number, to: number): boolean
  * be keyed by source: the whole point is to survive that source being edited
  * into a temporarily invalid value. */
 interface MermaidBlockMemory {
-  lastGood?: { themeKey: string; svg: string }
+  lastGood?: { themeKey: string; svg: string; ownTheme?: boolean }
 }
 
 class MermaidBlockWidget extends WidgetType {
   constructor(
+    readonly language: FenceLanguage,
     readonly source: string,
     readonly theme: DiagramThemeFacetValue,
     readonly memory: MermaidBlockMemory
@@ -72,6 +125,7 @@ class MermaidBlockWidget extends WidgetType {
 
   eq(other: MermaidBlockWidget): boolean {
     return (
+      other.language === this.language &&
       other.source === this.source &&
       other.theme.key === this.theme.key &&
       other.memory === this.memory
@@ -79,15 +133,16 @@ class MermaidBlockWidget extends WidgetType {
   }
 
   toDOM(): HTMLElement {
+    const diagram: FenceDiagram = FENCE_DIAGRAMS[this.language]
     const el = document.createElement('div')
-    el.className = 'cm-mermaid-block'
+    el.className = diagram.className
     el.setAttribute('role', 'img')
-    el.setAttribute('aria-label', 'Mermaid diagram')
+    el.setAttribute('aria-label', diagram.label)
 
-    const cached = peekMermaidSvg(this.source, this.theme.mode, this.theme.key)
+    const cached = diagram.peek(this.source)
     if (cached?.ok) {
-      el.innerHTML = cached.svg
-      this.memory.lastGood = { themeKey: this.theme.key, svg: cached.svg }
+      paint(el, cached, diagram)
+      this.memory.lastGood = { themeKey: this.theme.key, svg: cached.svg, ownTheme: cached.ownTheme }
       return el
     }
 
@@ -95,26 +150,26 @@ class MermaidBlockWidget extends WidgetType {
     // otherwise leave the space empty rather than collapsing the line and
     // making the note jump as diagrams arrive.
     const previous =
-      this.memory.lastGood?.themeKey === this.theme.key ? this.memory.lastGood.svg : undefined
-    if (previous) el.innerHTML = previous
+      this.memory.lastGood?.themeKey === this.theme.key ? this.memory.lastGood : undefined
+    if (previous) paint(el, previous, diagram)
     else el.classList.add('cm-mermaid-pending')
 
-    void renderMermaidSvg(this.source, this.theme.mode, this.theme.key).then((result) => {
-      // The widget may have been replaced while mermaid was working (a
+    void diagram.render(this.source).then((result) => {
+      // The widget may have been replaced while the renderer loaded (a
       // keystroke, a cursor move). Writing into a detached node is harmless and
       // the live widget renders from the cache, so no check is needed beyond
       // this one for a node that is still ours.
       if (result.ok) {
-        el.innerHTML = result.svg
+        paint(el, result, diagram)
         el.classList.remove('cm-mermaid-pending', 'cm-mermaid-error')
         el.removeAttribute('title')
-        this.memory.lastGood = { themeKey: this.theme.key, svg: result.svg }
+        this.memory.lastGood = { themeKey: this.theme.key, svg: result.svg, ownTheme: result.ownTheme }
         return
       }
       if (this.memory.lastGood?.themeKey === this.theme.key) return
       el.classList.remove('cm-mermaid-pending')
       el.classList.add('cm-mermaid-error')
-      el.textContent = `Mermaid error: ${result.error}`
+      el.textContent = `${diagram.errorLabel}: ${result.error}`
     })
     return el
   }
@@ -163,7 +218,8 @@ function buildMermaidDecorations(
       // The info string lives on the opening line, after the fence marker.
       const openLine = state.doc.lineAt(from)
       const info = openLine.text.replace(/^\s*(?:`{3,}|~{3,})/, '')
-      if (!isMermaidInfo(info)) return
+      const language = fenceLanguage(info)
+      if (!language) return
       const memory = previousMemory.get(openLine.from) ?? {}
       blocks.push({ from: openLine.from, memory })
 
@@ -186,7 +242,7 @@ function buildMermaidDecorations(
       builder.add(
         openLine.from,
         closeLine.to,
-        Decoration.replace({ block: true, widget: new MermaidBlockWidget(body, theme, memory) })
+        Decoration.replace({ block: true, widget: new MermaidBlockWidget(language, body, theme, memory) })
       )
     }
   })
@@ -216,8 +272,8 @@ const mermaidRenderField = StateField.define<MermaidRenderValue>({
 })
 
 /**
- * 1-based line ranges of every mermaid fence in the document, or `[]` when
- * mermaid rendering is not active in this editor. Read by the arrow-key and
+ * 1-based line ranges of every mermaid and d2 fence in the document, or `[]`
+ * when diagram rendering is not active in this editor. Read by the arrow-key and
  * Vim `j`/`k` helpers, which otherwise sail straight over a rendered block: it
  * is one widget with no cursor coordinates inside it, so pixel-based vertical
  * motion has nowhere to land and a keyboard-only user could never open the
@@ -227,7 +283,7 @@ export function mermaidBlockLineRanges(state: EditorState): readonly MermaidBloc
   return state.field(mermaidRenderField, false)?.blockLines ?? []
 }
 
-/** Live-preview mermaid rendering, drawn in the given palette. */
+/** Live-preview mermaid and d2 rendering, drawn in the given palette. */
 export function mermaidRenderExtension(
   mode: 'light' | 'dark',
   themeKey: string = mode

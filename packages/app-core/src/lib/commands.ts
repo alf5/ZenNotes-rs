@@ -6,10 +6,14 @@
  * reflect the store state at that moment (toggle labels flip, context-
  * sensitive commands like "Unarchive" only show up when applicable).
  */
+import { requestAgentEditReview } from './agent-review-runtime'
 import { isTagsViewActive, isTasksViewActive, isTrashViewActive, useStore } from '../store'
 import { confirmApp } from './confirm-requests'
+import { requestSettingsTarget } from './settings-navigation'
+import { hideWindowToTray, useTrayStore } from './tray-runtime'
 import { promptApp } from './prompt-requests'
-import { buildMoveNotePrompt, parseMoveNoteTarget } from './move-note'
+import { captureNavigationContext } from './navigation-context'
+import { buildMoveNotePrompt, moveNoteVocabulary, parseMoveNoteTarget } from './move-note'
 import { focusPaneInDirection } from './pane-nav'
 import { focusSidebarPanel } from './sidebar-focus'
 import { findLeaf } from './pane-layout'
@@ -28,19 +32,22 @@ import {
 } from './cm-harper'
 import { harperEditorConfig, harperSupported } from './harper-runtime'
 import { reflowParagraph } from './cm-reflow'
+import { convertTableToDatabase } from './table-to-database'
+import { canRenameVault, renameVaultWithPrompt } from './rename-vault'
 import { promptImageWidth } from './image-resize'
 import { copyLinkAtCursor } from './link-copy'
-import { getKeymapDisplay, type KeymapId } from './keymaps'
+import { getKeymapDisplay, getLeaderChordDisplay, type KeymapId } from './keymaps'
 import { dispatchKeyboardContextMenu, findTabContextMenuTarget } from './keyboard-context-menu'
 import { resolveSystemFolderLabels } from './system-folder-labels'
 import { isCalendarToggleAvailable, noteFolderSubpath } from './vault-layout'
 import { runWorkflowById } from './workflow-trigger'
 import { requestPublishNote } from './publish-note-requests'
 import {
-  hasResolvableCloudConflicts,
-  openCloudConflictReview
+  hasCloudVaultRemovalNotice,
+  hasPendingCloudReview,
+  openPendingCloudReview
 } from './cloud-auto-sync'
-import { DEMO_TOUR_START_PATH } from '@shared/demo-tour'
+import { DEMO_TOUR_START_PATH, isDemoTourStartPath } from '@shared/demo-tour'
 
 const APP_WEBSITE_URL = 'https://zennotes.org'
 const APP_DISCORD_URL = 'https://discord.gg/W4fWzapKS6'
@@ -48,13 +55,20 @@ const APP_REPOSITORY_URL = 'https://github.com/ZenNotes/zennotes'
 const APP_RELEASES_URL = 'https://github.com/ZenNotes/zennotes/releases/latest'
 const APP_ISSUES_URL = 'https://github.com/ZenNotes/zennotes/issues'
 
-type FoldCommand = 'foldCode' | 'unfoldCode' | 'foldAll' | 'unfoldAll'
+type FoldCommand = 'foldAtCursor' | 'unfoldAtCursor' | 'foldAllOutline' | 'unfoldAll'
 
 async function runFoldCommand(command: FoldCommand): Promise<void> {
   const view = useStore.getState().editorViewRef
   if (!view) return
-  const foldModule = await import('@codemirror/language')
-  foldModule[command](view)
+  if (command === 'unfoldAll') {
+    const language = await import('@codemirror/language')
+    language.unfoldAll(view)
+  } else {
+    // Headings and list items alike (#848); loaded on demand like the
+    // editor itself.
+    const folding = await import('./cm-heading-fold')
+    folding[command](view)
+  }
   view.focus()
 }
 
@@ -81,18 +95,27 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
   const pathLabel = (): string =>
     getState().workspaceMode === 'remote' ? 'Server Path' : 'Absolute Path'
   const shortcut = (id: KeymapId): string => getKeymapDisplay(getState().keymapOverrides, id)
+  // A chord with an unbound step cannot be pressed, so the palette shows no
+  // key for it rather than half a sequence.
+  const chord = (...ids: KeymapId[]): string => {
+    const parts = ids.map(shortcut)
+    return parts.every(Boolean) ? parts.join(' ') : ''
+  }
   const leaderShortcut = (id: KeymapId): string =>
-    `${shortcut('vim.leaderPrefix')} ${shortcut(id)}`
-  const paneShortcut = (id: KeymapId): string =>
-    `${shortcut('vim.panePrefix')} ${shortcut(id)}`
+    getLeaderChordDisplay(getState().keymapOverrides, id)
+  const paneShortcut = (id: KeymapId): string => chord('vim.panePrefix', id)
   const searchShortcut = (): string => {
     const state = getState()
     const primary = shortcut('global.searchNotes')
     if (state.vimMode) return primary
-    return `${primary} / ${shortcut('global.searchNotesNonVim')}`
+    return [primary, shortcut('global.searchNotesNonVim')].filter(Boolean).join(' / ')
   }
   const openExternal = (url: string): void => {
     window.open(url, '_blank')
+  }
+  const isActiveNoteFavorite = (): boolean => {
+    const state = getState()
+    return !!state.activeNote && state.vaultSettings.favorites.includes(state.activeNote.path)
   }
   const cmds: Command[] = []
 
@@ -187,7 +210,9 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       title: 'New Note from Template…',
       category: 'Note',
       keywords: 'template scaffold adr rfc meeting daily weekly boilerplate new',
-      shortcut: leaderShortcut('vim.leaderTemplatePicker'),
+      shortcut:
+        shortcut('global.newNoteFromTemplate') ||
+        (getState().vimMode ? leaderShortcut('vim.leaderTemplatePicker') : undefined),
       run: () => getState().setTemplatePaletteOpen(true)
     },
     {
@@ -195,7 +220,9 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       title: 'Insert Template into Current Note…',
       category: 'Note',
       keywords: 'template insert apply into current note scaffold fill',
-      shortcut: leaderShortcut('vim.leaderInsertTemplate'),
+      shortcut:
+        shortcut('global.insertTemplate') ||
+        (getState().vimMode ? leaderShortcut('vim.leaderInsertTemplate') : undefined),
       when: () => !!getState().activeNote,
       run: () => getState().openTemplatePaletteForInsert()
     },
@@ -310,6 +337,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       category: 'Note',
       when: () => !!getState().activeNote,
       run: async () => {
+        const isCurrent = captureNavigationContext()
         const active = getState().activeNote
         if (!active) return
         const next = await promptApp({
@@ -317,8 +345,24 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
           initialValue: active.title,
           okLabel: 'Rename'
         })
-        if (next && next !== active.title) await getState().renameActive(next)
+        if (next && next !== active.title && isCurrent() && getState().selectedPath === active.path)
+          await getState().renameActive(next)
       }
+    },
+    {
+      id: 'note.favorite',
+      // The sidebar row's context menu was the only mouse route and the
+      // leader chord the only keyboard one; the palette gives every host,
+      // phones included, a way to fill the Favorites section on Home. (#810)
+      title: isActiveNoteFavorite() ? 'Remove Note from Favorites' : 'Add Note to Favorites',
+      category: 'Note',
+      keywords: 'favourite star bookmark home sidebar',
+      shortcut: chord('vim.leaderPrefix', 'vim.leaderNoteActions', 'vim.leaderToggleFavorite'),
+      when: () => {
+        const active = getState().activeNote
+        return !!active && active.folder !== 'trash'
+      },
+      run: () => getState().toggleFavoriteActiveNote()
     },
     {
       id: 'note.archive',
@@ -520,13 +564,16 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       keywords: 'move mv relocate folder archive inbox',
       when: () => !!getState().activeNote,
       run: async () => {
+        const isCurrent = captureNavigationContext()
         const state = getState()
         const active = state.activeNote
         if (!active) return
-        const target = await promptApp(buildMoveNotePrompt(active, state.folders))
-        if (!target) return
-        const dest = parseMoveNoteTarget(target)
-        await state.moveNote(active.path, dest.folder, dest.subpath)
+        const vocabulary = moveNoteVocabulary(state.vaultSettings, state.systemFolderLabels, state.folders)
+        const target = await promptApp(buildMoveNotePrompt(active, state.folders, vocabulary))
+        // Empty is an answer (the notes root); only null is the Cancel.
+        if (target === null || !isCurrent()) return
+        const dest = parseMoveNoteTarget(target, vocabulary)
+        await state.moveNote(active.path, dest.folder, dest.subpath, isCurrent)
       }
     }
   )
@@ -805,6 +852,32 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       run: () => openExternal(APP_RELEASES_URL)
     },
     {
+      id: 'app.whatsNew',
+      title: 'What’s New in ZenNotes',
+      category: 'App',
+      keywords: "whats what's new release notes changelog update announcement",
+      when: () => window.zen.getAppInfo().runtime === 'desktop',
+      run: () => void getState().openWhatsNew()
+    },
+    {
+      id: 'app.hideToTray',
+      title: 'Hide Window to Tray',
+      category: 'App',
+      keywords: 'tray menu bar background hide window close minimize keep running',
+      shortcut: getState().vimMode ? leaderShortcut('vim.leaderHideToTray') : undefined,
+      when: () =>
+        window.zen.getAppInfo().runtime === 'desktop' && useTrayStore.getState().keepRunningInTray,
+      run: () => void hideWindowToTray()
+    },
+    {
+      id: 'app.quit',
+      title: 'Quit ZenNotes',
+      category: 'App',
+      keywords: 'quit exit close app tray background stop',
+      when: () => window.zen.getAppInfo().runtime === 'desktop' && !!window.zen.quitApp,
+      run: () => window.zen.quitApp?.()
+    },
+    {
       id: 'app.report-issue',
       title: 'Report an Issue',
       category: 'App',
@@ -813,37 +886,37 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'fold.heading',
-      title: 'Fold Heading at Cursor',
+      title: 'Fold Heading or List Item at Cursor',
       category: 'Editor',
       shortcut: shortcut('vim.foldCurrent'),
-      keywords: 'collapse fold heading section',
+      keywords: 'collapse fold heading section list item task bullet children callout',
       when: () => !!getState().editorViewRef && !!getState().activeNote,
-      run: () => runFoldCommand('foldCode')
+      run: () => runFoldCommand('foldAtCursor')
     },
     {
       id: 'fold.unfold-heading',
-      title: 'Unfold Heading at Cursor',
+      title: 'Unfold Heading or List Item at Cursor',
       category: 'Editor',
       shortcut: shortcut('vim.unfoldCurrent'),
-      keywords: 'expand unfold heading section',
+      keywords: 'expand unfold heading section list item task bullet children callout',
       when: () => !!getState().editorViewRef && !!getState().activeNote,
-      run: () => runFoldCommand('unfoldCode')
+      run: () => runFoldCommand('unfoldAtCursor')
     },
     {
       id: 'fold.all',
-      title: 'Fold All Headings',
+      title: 'Fold All Headings and Lists',
       category: 'Editor',
       shortcut: shortcut('vim.foldAll'),
-      keywords: 'collapse fold all every',
+      keywords: 'collapse fold all every heading list item task outline callout',
       when: () => !!getState().editorViewRef && !!getState().activeNote,
-      run: () => runFoldCommand('foldAll')
+      run: () => runFoldCommand('foldAllOutline')
     },
     {
       id: 'fold.unfold-all',
-      title: 'Unfold All Headings',
+      title: 'Unfold All Headings and Lists',
       category: 'Editor',
       shortcut: shortcut('vim.unfoldAll'),
-      keywords: 'expand unfold all every reset',
+      keywords: 'expand unfold all every reset heading list item task outline callout',
       when: () => !!getState().editorViewRef && !!getState().activeNote,
       run: () => runFoldCommand('unfoldAll')
     },
@@ -931,6 +1004,24 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
         if (!view) return
         reflowParagraph(view)
         view.focus()
+      }
+    },
+    {
+      id: 'table.to-database',
+      title: 'Convert Table to Database…',
+      category: 'Editor',
+      shortcut: getState().vimMode
+        ? chord('vim.leaderPrefix', 'vim.leaderNoteActions', 'vim.leaderTableToDatabase')
+        : undefined,
+      keywords: 'table database convert csv base grid board rows columns markdown pipe extract',
+      // Stays listed whenever a note is open: with no table under the cursor
+      // the run says so, which beats an entry that vanishes from the palette
+      // and an ex command that returns nothing.
+      when: () => !!getState().editorViewRef && !!getState().activeNote,
+      run: async () => {
+        const view = getState().editorViewRef
+        if (!view) return
+        await convertTableToDatabase(view)
       }
     },
     {
@@ -1336,6 +1427,34 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     }
   )
 
+  // The Kanban card order (#889), from any note: the next board opened uses it.
+  cmds.push({
+    id: 'view.kanban-card-sort',
+    title:
+      getState().kanbanCardSort === 'due'
+        ? 'Kanban: Order Cards Manually'
+        : 'Kanban: Order Cards by Due Date',
+    category: 'View',
+    keywords: 'tasks board sort due date deadline order cards columns manual',
+    run: () => getState().setKanbanCardSort(getState().kanbanCardSort === 'due' ? 'manual' : 'due')
+  })
+
+  // Saved Tasks filters (#731): one palette entry per name, so a filter is a
+  // few keystrokes away from any note. Opening the view resets the filter, so
+  // the query is applied once the open has settled.
+  for (const [name, query] of Object.entries(getState().savedTaskFilters)) {
+    cmds.push({
+      id: `tasks.savedFilter.${name}`,
+      title: `${labels().tasks}: ${name}`,
+      category: 'View',
+      keywords: `saved filter tasks ${query}`,
+      run: async () => {
+        if (!isTasksViewActive(getState())) await getState().openTasksView()
+        getState().applySavedTaskFilter(name)
+      }
+    })
+  }
+
   /* ---------------- Editor preferences ---------------- */
   cmds.push(
     {
@@ -1470,6 +1589,25 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       title: getState().tabsEnabled ? 'Disable Tabs' : 'Enable Tabs',
       category: 'Editor',
       run: () => getState().setTabsEnabled(!getState().tabsEnabled)
+    },
+    {
+      id: 'editor.keep-panels.toggle',
+      title: getState().keepPanelsAcrossNotes
+        ? 'Remember Panels per Note'
+        : 'Keep Panels When Switching Notes',
+      category: 'Editor',
+      keywords: 'panels connections outline comments calendar sticky per note remember switch',
+      run: () => getState().setKeepPanelsAcrossNotes(!getState().keepPanelsAcrossNotes)
+    },
+    {
+      id: 'editor.persist-undo-history.toggle',
+      title: getState().persistUndoHistory
+        ? 'Stop Keeping Undo History After Quitting'
+        : 'Keep Undo History After Quitting',
+      category: 'Editor',
+      keywords: 'undofile undo redo history persistent restart quit vim',
+      when: () => !!window.zen?.getCapabilities?.().supportsUndoFile,
+      run: () => getState().setPersistUndoHistory(!getState().persistUndoHistory)
     },
     {
       id: 'editor.word-wrap.toggle',
@@ -1612,7 +1750,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       category: 'Tag',
       run: async () => {
         const from = await promptApp({
-          title: 'Rename tag — old name',
+          title: 'Rename tag: old name',
           placeholder: 'tag'
         })
         if (!from) return
@@ -1649,14 +1787,14 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
   cmds.push(
     {
       id: 'demo.generate',
-      title: getState().notes.some((note) => note.path === DEMO_TOUR_START_PATH)
+      title: getState().notes.some((note) => isDemoTourStartPath(note.path))
         ? 'Regenerate Demo Tour Notes'
         : 'Generate Demo Tour Notes',
       category: 'Demo',
       keywords: 'demo onboarding starter tour sample example seed welcome',
       when: () => !!getState().vault,
       run: async () => {
-        const installed = getState().notes.some((note) => note.path === DEMO_TOUR_START_PATH)
+        const installed = getState().notes.some((note) => isDemoTourStartPath(note.path))
         const ok = await confirmApp({
           title: installed
             ? 'Regenerate the built-in demo tour in this vault?'
@@ -1672,7 +1810,10 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
         for (const path of result.notePaths) {
           await getState().applyChange({ kind: 'change', path, folder: 'inbox' })
         }
-        await getState().selectNote(DEMO_TOUR_START_PATH)
+        // A server that still writes the older note names reports them here.
+        await getState().selectNote(
+          result.notePaths.find(isDemoTourStartPath) ?? DEMO_TOUR_START_PATH
+        )
       }
     },
     {
@@ -1680,7 +1821,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       title: 'Remove Demo Tour Notes',
       category: 'Demo',
       keywords: 'demo onboarding starter tour sample example delete clear uninstall',
-      when: () => getState().notes.some((note) => note.path === DEMO_TOUR_START_PATH),
+      when: () => getState().notes.some((note) => isDemoTourStartPath(note.path)),
       run: async () => {
         const ok = await confirmApp({
           title: 'Remove the built-in demo tour from this vault?',
@@ -1770,12 +1911,45 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       id: 'app.cloud.reviewConflicts',
       title: 'Review Cloud Sync Conflicts',
       category: 'Vault',
-      keywords: 'cloud sync conflict merge review resolve queue two devices differ',
-      shortcut: leaderShortcut('vim.leaderCloudConflicts'),
-      // Hidden with an empty queue: the same dialog the status bar's Review
-      // now opens, and there is nothing to review without it.
-      when: () => hasResolvableCloudConflicts(),
-      run: () => openCloudConflictReview()
+      keywords: 'cloud sync conflict merge review resolve queue two devices differ settings',
+      shortcut: getState().vimMode ? leaderShortcut('vim.leaderCloudConflicts') : undefined,
+      // Hidden while nothing waits: the same dialogs the status bar's Review
+      // opens (the file queue first, then the vault settings question), and
+      // there is nothing to review without one of them.
+      when: () => hasPendingCloudReview(),
+      run: () => openPendingCloudReview(getState().activeNote?.path)
+    },
+    // One entry per note an assistant edited through MCP that has not been
+    // reviewed yet (docs/ideas/agent-edit-review.md), newest first. A record
+    // whose note is gone (deleted outside ZenNotes) has nothing to open.
+    ...Object.values(getState().agentEdits)
+      .filter((summary) => getState().notes.some((note) => note.path === summary.notePath))
+      .sort((a, b) => b.at - a.at)
+      .map(
+        (summary): Command => ({
+          id: `app.agentEdits.review:${summary.notePath}`,
+          title: `Review Agent Changes: ${(summary.notePath.split('/').pop() ?? summary.notePath).replace(/\.md$/i, '')}`,
+          category: 'Note',
+          keywords: `assistant agent mcp ai changes diff review accept reject ${summary.agent} ${summary.notePath}`,
+          run: async () => {
+            await getState().selectNote(summary.notePath)
+            requestAgentEditReview(summary.notePath)
+          }
+        })
+      ),
+    {
+      id: 'app.cloud.reviewVaultRemoval',
+      title: 'Review Cloud Vault',
+      category: 'Vault',
+      keywords: 'cloud sync vault deleted unavailable gone stopped syncing link choose new',
+      shortcut: getState().vimMode ? leaderShortcut('vim.leaderCloudConflicts') : undefined,
+      // While this vault's Cloud vault is gone the key opens Settings → Cloud,
+      // as the status bar's Review does. A waiting decision keeps the key.
+      when: () => !hasPendingCloudReview() && hasCloudVaultRemovalNotice(),
+      run: () => {
+        requestSettingsTarget('cloud')
+        getState().setSettingsOpen(true)
+      }
     },
     {
       id: 'app.vault.switch',
@@ -1788,6 +1962,18 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
           window.zen.getCapabilities().supportsRemoteWorkspace),
       run: () => {
         /* handled by CommandPalette */
+      }
+    },
+    {
+      id: 'vault.rename',
+      title: 'Rename Vault…',
+      category: 'Vault',
+      keywords: 'vault name display name rename label switcher sidebar header folder',
+      // Local vaults only (#692): a temporary folder session writes nothing
+      // into its folder, and a remote workspace's settings belong to its server.
+      when: () => canRenameVault(getState()),
+      run: async () => {
+        await renameVaultWithPrompt()
       }
     },
     {
@@ -1818,6 +2004,50 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
         getState().workspaceMode !== 'remote' &&
         window.zen.getAppInfo().runtime === 'desktop',
       run: () => getState().revealAssetsDir()
+    },
+    {
+      id: 'cli.check-updates',
+      title: 'Check for zn Updates…',
+      category: 'CLI',
+      keywords: 'cli zn terminal command line update upgrade version release',
+      when: () =>
+        window.zen.getAppInfo().runtime === 'desktop' &&
+        window.zen.getCapabilities().supportsCliInstall &&
+        typeof window.zen.cliUpdateCheck === 'function',
+      run: async () => {
+        const before = await window.zen.cliUpdateGetState?.()
+        if (!before?.supported) return
+        const install = await window.zen.cliGetStatus()
+        if (!install.installedAt || !install.installedByThisApp) {
+          await confirmApp({
+            title: 'zn is not managed by ZenNotes',
+            description: install.installedAt
+              ? `The zn at ${install.installedAt} came from another installer. Update it with that installer (\`zn update\` tells you how).`
+              : 'Install zn from Settings → CLI first; ZenNotes then keeps it up to date.',
+            confirmLabel: 'OK',
+            cancelLabel: 'Close'
+          })
+          return
+        }
+        let state = await window.zen.cliUpdateCheck?.({ install: before.autoUpdate })
+        if (state?.phase === 'available') {
+          const proceed = await confirmApp({
+            title: `zn ${state.availableVersion ?? ''} is available`,
+            description:
+              'Install it now? The zn you have keeps working until the new one passes its checks.',
+            confirmLabel: 'Install',
+            cancelLabel: 'Later'
+          })
+          if (!proceed) return
+          state = await window.zen.cliUpdateCheck?.({ install: true })
+        }
+        await confirmApp({
+          title: 'zn updates',
+          description: state?.message ?? 'Checked for zn updates.',
+          confirmLabel: 'OK',
+          cancelLabel: 'Close'
+        })
+      }
     },
     {
       id: 'cli.install',
@@ -1938,7 +2168,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
         const ok = await confirmApp({
           title: `Remove zn from ${status.installedAt}?`,
           description:
-            'macOS may prompt for an admin password to remove the symlink. The CLI binary inside the app stays bundled — you can reinstall any time.',
+            'macOS may prompt for an admin password to remove the symlink. The CLI binary inside the app stays bundled, so you can reinstall any time.',
           confirmLabel: 'Uninstall',
           danger: true
         })
@@ -1966,7 +2196,11 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       when: () =>
         window.zen.getAppInfo().runtime === 'desktop' &&
         window.zen.getCapabilities().supportsCliInstall,
-      run: () => getState().setSettingsOpen(true)
+      run: () => {
+        // Without a target Settings reopens on whatever page it showed last.
+        requestSettingsTarget('cli')
+        getState().setSettingsOpen(true)
+      }
     }
   )
 

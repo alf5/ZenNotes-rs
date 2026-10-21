@@ -1,3 +1,4 @@
+import { runNoteLifecycleAction, runEmptyTrash } from '../lib/note-lifecycle-actions'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useStore } from '../store'
 import { focusEditorNormalMode } from '../lib/editor-focus'
@@ -14,8 +15,7 @@ import {
 import { ContextMenu, type ContextMenuItem } from './ContextMenu'
 import { ResizeHandle } from './ResizeHandle'
 import { Button, IconButton } from './ui/Button'
-import { confirmMoveToTrash } from '../lib/confirm-trash'
-import { buildMoveNotePrompt, parseMoveNoteTarget } from '../lib/move-note'
+import { buildMoveNotePrompt, moveNoteVocabulary, parseMoveNoteTarget } from '../lib/move-note'
 import { naturalCompare } from '../lib/natural-sort'
 import { extractTags } from '../lib/tags'
 import { setDragPayload } from '../lib/dnd'
@@ -29,6 +29,7 @@ import {
 } from '../lib/vault-layout'
 import { assetTabPath } from '../lib/asset-tabs'
 import { getScrollTopForVirtualIndex, getVirtualRange } from '../lib/virtual-list'
+import { chromeCarriesWindowDrag } from '../lib/window-chrome'
 
 function formatDate(ms: number): string {
   const d = new Date(ms)
@@ -82,6 +83,8 @@ export function NoteList(): JSX.Element {
   const toggleNoteList = useStore((s) => s.toggleNoteList)
   const refreshNotes = useStore((s) => s.refreshNotes)
   const refreshAssets = useStore((s) => s.refreshAssets)
+  const renameAsset = useStore((s) => s.renameAsset)
+  const moveAsset = useStore((s) => s.moveAsset)
   const deleteAssetAction = useStore((s) => s.deleteAsset)
   const noteListWidth = useStore((s) => s.noteListWidth)
   const setNoteListWidth = useStore((s) => s.setNoteListWidth)
@@ -93,6 +96,10 @@ export function NoteList(): JSX.Element {
   const openDatabase = useStore((s) => s.openDatabase)
   const prefetchNotes = useStore((s) => s.prefetchNotes)
   const focusedPanel = useStore((s) => s.focusedPanel)
+  const vimMode = useStore((s) => s.vimMode)
+  const dragsWindow = useStore((s) =>
+    chromeCarriesWindowDrag(s.showWindowTitleBar, window.zen.getAppInfo().runtime)
+  )
   const noteListCursorIndex = useStore((s) => s.noteListCursorIndex)
   const setFocusedPanel = useStore((s) => s.setFocusedPanel)
   const systemFolderLabels = useStore((s) => s.systemFolderLabels)
@@ -153,8 +160,7 @@ export function NoteList(): JSX.Element {
     return () => observer.disconnect()
   }, [])
   const emptyTrash = async (): Promise<void> => {
-    await window.zen.emptyTrash()
-    await useStore.getState().refreshNotes()
+    await runEmptyTrash()
   }
 
   const menuItems = useMemo<ContextMenuItem[]>(() => {
@@ -176,37 +182,28 @@ export function NoteList(): JSX.Element {
       await navigator.clipboard.writeText(`[[${n.title}]]`)
     }
     const onArchive = async (): Promise<void> => {
-      if (!(await useStore.getState().confirmArchiveNotes([n.path]))) return
-      await window.zen.archiveNote(n.path)
-      await refreshNotes()
-      if (selectedPath === n.path) await selectNote(null)
+      await runNoteLifecycleAction(n.path, 'archive')
     }
     const onUnarchive = async (): Promise<void> => {
-      const meta = await window.zen.unarchiveNote(n.path)
-      await refreshNotes()
-      if (selectedPath === n.path) await selectNote(meta.path)
+      await runNoteLifecycleAction(n.path, 'restore')
     }
     const onTrash = async (): Promise<void> => {
-      if (!(await confirmMoveToTrash(n.title))) return
-      await window.zen.moveToTrash(n.path)
-      await refreshNotes()
-      if (selectedPath === n.path) await selectNote(null)
+      await runNoteLifecycleAction(n.path, 'trash')
     }
     const onMove = async (): Promise<void> => {
-      const target = await promptApp(buildMoveNotePrompt(n, folders))
-      if (!target) return
-      const dest = parseMoveNoteTarget(target)
+      const state = useStore.getState()
+      const vocabulary = moveNoteVocabulary(state.vaultSettings, state.systemFolderLabels, folders)
+      const target = await promptApp(buildMoveNotePrompt(n, folders, vocabulary))
+      // Empty is an answer (the notes root); only null is the Cancel.
+      if (target === null) return
+      const dest = parseMoveNoteTarget(target, vocabulary)
       await moveNote(n.path, dest.folder, dest.subpath)
     }
     const onRestore = async (): Promise<void> => {
-      const meta = await window.zen.restoreFromTrash(n.path)
-      await refreshNotes()
-      if (selectedPath === n.path) await selectNote(meta.path)
+      await runNoteLifecycleAction(n.path, 'restore')
     }
     const onDeleteForever = async (): Promise<void> => {
-      await window.zen.deleteNote(n.path)
-      await refreshNotes()
-      if (selectedPath === n.path) await selectNote(null)
+      await runNoteLifecycleAction(n.path, 'delete')
     }
     const onNew = async (): Promise<void> => {
       await useStore
@@ -350,8 +347,7 @@ export function NoteList(): JSX.Element {
             }
           })
           if (!next || next === asset.name) return
-          await window.zen.renameAsset(asset.path, next)
-          await refreshAssets()
+          await renameAsset(asset.path, next)
         }
       })
       items.push({
@@ -374,8 +370,7 @@ export function NoteList(): JSX.Element {
             }
           })
           if (target === null || target === currentDir) return
-          await window.zen.moveAsset(asset.path, target)
-          await refreshAssets()
+          await moveAsset(asset.path, target)
         }
       })
       items.push({
@@ -726,12 +721,18 @@ export function NoteList(): JSX.Element {
 
   return (
     <section
-      className={`glass-column relative flex shrink-0 flex-col${isNoteListFocused ? ' panel-focused' : ''}`}
+      // The pane ring is Vim pane navigation's (see the sidebar): not drawn
+      // for a click with Vim off.
+      className={`glass-column relative flex shrink-0 flex-col${isNoteListFocused && vimMode ? ' panel-focused' : ''}`}
       style={{ width: noteListWidth }}
       onMouseDownCapture={() => setFocusedPanel('notelist')}
       onFocusCapture={() => setFocusedPanel('notelist')}
     >
-      <header className="glass-header flex h-12 shrink-0 items-center justify-between px-4">
+      <header
+        className={`glass-header flex h-12 shrink-0 items-center justify-between px-4${
+          dragsWindow ? ' drag-region' : ''
+        }`}
+      >
         <div className="flex items-baseline gap-2">
           <h2 className="text-sm font-semibold text-ink-900">{heading}</h2>
           <span className="text-xs text-ink-500">

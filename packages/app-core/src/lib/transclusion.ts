@@ -75,7 +75,7 @@ function notice(
     kind === 'circular'
       ? `⚠ Circular embed skipped`
       : kind === 'too-deep'
-        ? `⚠ Embed nesting too deep — stopped here`
+        ? `⚠ Embed nesting too deep, stopped here`
         : kind === 'missing-block'
           ? `⚠ Embedded block not found`
           : `⚠ Embedded note not found`

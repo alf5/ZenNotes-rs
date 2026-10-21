@@ -1,8 +1,10 @@
+import { followApplicationLink } from "../lib/application-link-open";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import type { NoteMeta } from "@shared/ipc";
 import { renderMarkdown } from "../lib/markdown";
+import { substituteLiveTokens } from "../lib/live-template-tokens";
 import {
   setMarkdownLooseMathDelimiters,
   setMarkdownMathRenderer,
@@ -20,6 +22,10 @@ import {
 import {
   openWikilinkTarget,
 } from "../lib/wikilink-navigation";
+import { followLinkTarget } from "../lib/follow-link";
+import { findHeadingForAnchor } from "../lib/heading-anchor";
+import { parseOutline } from "../lib/outline";
+import { resolveAssetPathAmong } from "../lib/asset-path-resolution";
 import { listDatabaseLinkTargets, resolveDatabaseWikilink } from "../lib/database-links";
 import { externalLinkUrl, resolveInternalNoteHref } from "../lib/internal-links";
 import { copyableLink, linkMenuItems, type CopyableLink } from "../lib/link-copy";
@@ -29,11 +35,22 @@ import {
   hrefFragment,
   resolveAssetVaultRelativePath,
 } from "../lib/local-assets";
+import { useCloudSyncStatusStore } from "../lib/cloud-auto-sync";
+import {
+  oversizedCloudFileNotice,
+  oversizedCloudFiles,
+} from "../lib/cloud-oversized-files";
 import { assetTabPath } from "../lib/asset-tabs";
 import { isExcalidrawPath, isObsidianExcalidrawPath } from "@shared/excalidraw";
 import { resolveExcalidrawEmbedPath } from "../lib/excalidraw-preview";
 import { LazyExcalidrawPreview } from "./LazyExcalidrawPreview";
 import { enhancePreviewHeadingFolds } from "../lib/preview-heading-fold";
+import { enhancePreviewListFolds } from "../lib/preview-list-fold";
+import { wrapTaskItemOwnText } from "../lib/preview-task-body";
+import {
+  previewEditRequestForTarget,
+  type PreviewEditRequest,
+} from "../lib/preview-outline-jump";
 import { renderDiagrams } from "../lib/diagram-renderers";
 import { renderEmbeds, renderBookmarks } from "../lib/embed-renderers";
 import { renderTypstMath } from "../lib/typst-math-render";
@@ -65,11 +82,12 @@ import { NoteHoverPreview } from "./NoteHoverPreview";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import { ArrowUpRightIcon, MaximizeIcon, MinimizeIcon } from "./icons";
 import { promptApp } from "../lib/prompt-requests";
-import { peekMermaidSvg, renderMermaidSvg } from "../lib/mermaid-render";
+import { renderMermaidSvg } from "../lib/mermaid-render";
 import { confirmApp } from "../lib/confirm-requests";
 
-// Mermaid's lazy loader and theme live in `lib/mermaid-render`, shared with
-// the editor's live preview so both draw the same diagram the same way.
+// The mermaid renderer's lazy loader and options live in `lib/mermaid-render`,
+// shared with the editor's live preview so both draw the same diagram the same
+// way; its colours come from the `.pele` variables in index.css.
 
 type ExpandedDiagramKind = DiagramTabKind;
 
@@ -80,6 +98,7 @@ interface ExpandedDiagram {
 
 const DIAGRAM_CLASS_BY_KIND: Record<ExpandedDiagramKind, string> = {
   mermaid: "mermaid",
+  d2: "zen-d2",
   tikz: "zen-tikz",
   jsxgraph: "zen-jsxgraph",
   "function-plot": "zen-function-plot",
@@ -87,6 +106,7 @@ const DIAGRAM_CLASS_BY_KIND: Record<ExpandedDiagramKind, string> = {
 
 const DIAGRAM_SOURCE_ATTR_BY_KIND: Record<ExpandedDiagramKind, string> = {
   mermaid: "data-mermaid-source",
+  d2: "data-d2-source",
   tikz: "data-tikz-source",
   jsxgraph: "data-jsxgraph-source",
   "function-plot": "data-function-plot-source",
@@ -121,36 +141,18 @@ function prepareMermaidShell(el: HTMLElement, source: string): HTMLDivElement {
 }
 
 // Every preview rebuild hands over fresh DOM, so the diagrams went back
-// through mermaid's parse-and-layout on each keystroke in split view, which
+// through a full parse-and-layout on each keystroke in split view, which
 // is what made typing next to a diagram feel laggy (#184). The rendered SVG
-// only depends on the source and the theme, so it comes from the cache the
-// editor's live widget already keeps in `mermaid-render`; a rebuild costs an
-// innerHTML assignment, and the two surfaces share one render per diagram.
+// only depends on the source and the fonts (colour comes from CSS), so it
+// comes from the cache the editor's live widget already keeps in
+// `mermaid-render`; a rebuild costs an innerHTML assignment, and the two
+// surfaces share one render per diagram. Waiting for a loading font before
+// measuring labels happens there too.
 async function renderMermaidBlocks(
   root: HTMLElement,
-  mode: "light" | "dark",
-  opts: { expanded?: boolean; themeKey?: string } = {},
+  opts: { expanded?: boolean } = {},
 ): Promise<void> {
   const blocks = Array.from(root.querySelectorAll<HTMLElement>(".mermaid"));
-  if (blocks.length === 0) return;
-  const themeKey = opts.themeKey ?? mode;
-  const needsRender = blocks.some((el) => {
-    const source = el.getAttribute("data-mermaid-source") ?? el.textContent ?? "";
-    return source.trim() !== "" && peekMermaidSvg(source, mode, themeKey) === null;
-  });
-  // Mermaid measures text in a temporary element. If the active font is
-  // still loading, metrics are taken against a fallback and the rendered
-  // labels end up clipped once the real font applies. Wait for fonts first
-  // so the measured widths match the final painted text. A cached diagram
-  // was measured already and skips the wait.
-  if (needsRender && typeof document !== "undefined" && document.fonts) {
-    try {
-      await document.fonts.ready;
-    } catch {
-      /* ignore font-api failures and render anyway */
-    }
-  }
-
   for (let i = 0; i < blocks.length; i++) {
     const el = blocks[i];
     if (opts.expanded) el.dataset.zenDiagramExpanded = "true";
@@ -162,14 +164,19 @@ async function renderMermaidBlocks(
     const surface = prepareMermaidShell(el, source);
     // The preview renders into a detached stage and commits afterwards, so
     // the block is not in the document yet: always paint it.
-    const result = await renderMermaidSvg(source, mode, themeKey, "zen-mermaid-preview");
+    const result = await renderMermaidSvg(source, "zen-mermaid-preview");
     if (result.ok) {
       surface.innerHTML = result.svg;
       // Inline pan/zoom (Cmd/Ctrl+wheel, drag, dblclick reset). The
       // expanded modal has its own React pan/zoom frame.
       if (!opts.expanded) attachInlineDiagramPanZoom(surface);
     } else {
-      surface.innerHTML = `<pre class="whitespace-pre-wrap text-xs text-[color:rgb(var(--z-red))]">Mermaid error: ${result.error}</pre>`;
+      // The message quotes the diagram source back, so it is text, never
+      // markup: a note must not be able to inject elements through a typo.
+      const error = document.createElement("pre");
+      error.className = "zen-diagram-error";
+      error.textContent = `Mermaid error: ${result.error}`;
+      surface.replaceChildren(error);
     }
   }
 }
@@ -182,7 +189,7 @@ export const Preview = memo(function Preview({
 }: {
   markdown: string;
   notePath: string;
-  onRequestEdit?: (() => void) | null;
+  onRequestEdit?: ((request?: PreviewEditRequest | null) => void) | null;
   onRendered?: (() => void) | null;
 }): JSX.Element {
   const ref = useRef<HTMLDivElement | null>(null);
@@ -197,8 +204,13 @@ export const Preview = memo(function Preview({
     [folders, vaultSettings],
   );
   const assetFiles = useStore((s) => s.assetFiles);
+  // An empty listing landing leaves `assetFilesKey` as it was, and is still
+  // what lets an embed in a vault with no files say it is not on this device.
+  const assetFilesListed = useStore((s) => s.assetFilesListed);
   const customCodeLanguagesRevision = useStore((s) => s.customCodeLanguagesRevision);
   const refreshAssets = useStore((s) => s.refreshAssets);
+  const renameAsset = useStore((s) => s.renameAsset);
+  const moveAsset = useStore((s) => s.moveAsset);
   const deleteAssetAction = useStore((s) => s.deleteAsset);
   const diagramTheme = useDiagramTheme();
   const selectNote = useStore((s) => s.selectNote);
@@ -213,6 +225,12 @@ export const Preview = memo(function Preview({
   const pinnedRefVisible = useStore((s) => s.pinnedRefVisible);
   const togglePinnedRefVisible = useStore((s) => s.togglePinnedRefVisible);
   const pinnedAssetPath = pinnedRefKind === "asset" ? pinnedRefPath : null;
+  // The same object for as long as the same files are over Cloud's per-file
+  // limit (and one shared empty set while none are), so a sync run that
+  // changes nothing here never re-renders the note.
+  const oversizedFiles = useCloudSyncStatusStore((s) =>
+    oversizedCloudFiles(s.lastSummary),
+  );
   const [hovered, setHovered] = useState<{
     note: NoteMeta;
     rect: DOMRect;
@@ -317,17 +335,25 @@ export const Preview = memo(function Preview({
   const embedsReadyRef = useRef(embedsReady);
   embedsReadyRef.current = embedsReady;
 
+  // The note's last-saved time drives the live `{{modified_date}}` tokens (#784).
+  const noteUpdatedAt = useMemo(
+    () => notes.find((note) => note.path === notePath)?.updatedAt ?? null,
+    [notes, notePath],
+  );
   const html = useMemo(() => {
     // Point the pipeline at the active engine before rendering, so a toggle
     // takes effect on the very next render without an effect-ordering race.
     setMarkdownMathRenderer(mathRenderer);
     setMarkdownLooseMathDelimiters(looseMathDelimiters);
-    return renderMarkdown(expandedForCurrent ?? markdown);
+    return renderMarkdown(
+      substituteLiveTokens(expandedForCurrent ?? markdown, noteUpdatedAt),
+    );
     // customCodeLanguagesRevision re-renders when a grammar is installed,
     // toggled, or removed; renderMarkdown keys its cache on it too.
   }, [
     expandedForCurrent,
     markdown,
+    noteUpdatedAt,
     mathRenderer,
     looseMathDelimiters,
     customCodeLanguagesRevision,
@@ -464,6 +490,12 @@ export const Preview = memo(function Preview({
       }
       const anchor = target.closest("a") as HTMLAnchorElement | null;
       if (!anchor) return;
+      // Following a link ends its hover. A tap on a touch screen arrives as
+      // synthetic mouseover, mousemove and click with no mouseleave ever, so
+      // the target the mousemove put in the status bar would otherwise sit
+      // there until the next tap. A real pointer that is still over a link
+      // puts it back on its next move. (#820)
+      setHoveredLink(null);
       if (anchor.classList.contains("wikilink")) {
         e.preventDefault();
         const path = anchor.dataset.resolvedPath;
@@ -473,6 +505,14 @@ export const Preview = memo(function Preview({
           void openWikilinkTarget(path, anchor.dataset.wikilink ?? "");
         } else if (anchor.dataset.databaseCsv) {
           void useStore.getState().openDatabase(anchor.dataset.databaseCsv);
+        } else if (anchor.dataset.wikilink) {
+          // A link that reaches nothing used to be inert here while the editor
+          // offered to create the note. Same offer now, and with Cmd/Ctrl held
+          // the note is created at once at the suggested path (#768).
+          followLinkTarget(anchor.dataset.wikilink, {
+            createWithoutAsking: e.metaKey || e.ctrlKey,
+            kind: "wikilink",
+          });
         }
         return;
       }
@@ -489,6 +529,10 @@ export const Preview = memo(function Preview({
       // `data-local-asset-href`. (#201)
       const linkHref =
         anchor.dataset.localAssetHref || anchor.getAttribute("href") || "";
+      if (followApplicationLink(linkHref)) {
+        e.preventDefault();
+        return;
+      }
       const internalNote = resolveInternalNoteHref(
         notePathRef.current,
         linkHref,
@@ -551,7 +595,17 @@ export const Preview = memo(function Preview({
           window.setTimeout(() => {
             dest.style.backgroundColor = "";
           }, 900);
+          return;
         }
+        // Rendered headings carry no id, so `[jump](#section-three)` and
+        // `[jump](#Section%20Three)` found nothing above and went nowhere.
+        // A heading the anchor names is followed the way `[[#Heading]]` is,
+        // so it lands the same in reading, split and edit mode.
+        const notePath = notePathRef.current;
+        const heading = notePath
+          ? findHeadingForAnchor(parseOutline(markdownRef.current), id)
+          : undefined;
+        if (notePath && heading) void openWikilinkTarget(notePath, `#${heading.text}`);
         return;
       }
       // A link to a file outside the vault (`~/…`, `file://…`, an absolute path):
@@ -563,7 +617,18 @@ export const Preview = memo(function Preview({
       }
       e.preventDefault();
     };
+    // A tap arrives as pointer events with pointerType "touch", then the
+    // synthetic mouseover, mousemove and click. iOS WebKit turns a tap whose
+    // mouseover changes the page into a hover and drops its click, so opening
+    // the hover card from that mouseover left a tapped wikilink showing a card
+    // of its note (for `[[#Heading]]`, this very note) and never followed it.
+    // Touch never opens the card; a mouse or a pen's hover still does.
+    let lastPointerType = "";
+    const notePointerType = (e: PointerEvent): void => {
+      lastPointerType = e.pointerType;
+    };
     const onMouseOver = (e: MouseEvent): void => {
+      if (lastPointerType === "touch") return;
       const target = e.target as HTMLElement;
       const anchor = target.closest("a.wikilink") as HTMLAnchorElement | null;
       if (!anchor) return;
@@ -586,6 +651,7 @@ export const Preview = memo(function Preview({
               anyLink.getAttribute("href")
           : null,
       );
+      if (lastPointerType === "touch") return;
       const anchor = target.closest("a.wikilink") as HTMLAnchorElement | null;
       if (!anchor) {
         // Pointer moved off the link. Don't dismiss immediately — the
@@ -667,7 +733,26 @@ export const Preview = memo(function Preview({
 
     const onMouseLeave = (): void => setHoveredLink(null);
 
+    // Double-click on a rendered block edits it right there, the way the VS
+    // Code markdown preview does; the block's source line and screen position
+    // travel with the request so the editor opens on it at the same height.
+    // Links, controls, embeds and diagrams keep their own double-click. (#822)
+    const onDoubleClick = (e: MouseEvent): void => {
+      if (e.button !== 0) return;
+      const requestEdit = onRequestEditRef.current;
+      if (!requestEdit) return;
+      const request = previewEditRequestForTarget(e.target);
+      if (!request) return;
+      e.preventDefault();
+      requestEdit(request);
+    };
+
+    const pointerOptions = { capture: true, passive: true } as const;
+    root.addEventListener("pointerover", notePointerType, pointerOptions);
+    root.addEventListener("pointerdown", notePointerType, pointerOptions);
+    root.addEventListener("pointermove", notePointerType, pointerOptions);
     root.addEventListener("click", onClick);
+    root.addEventListener("dblclick", onDoubleClick);
     root.addEventListener("mouseover", onMouseOver);
     root.addEventListener("mousemove", onMouseMove);
     root.addEventListener("mouseout", onMouseOut);
@@ -676,7 +761,11 @@ export const Preview = memo(function Preview({
     root.addEventListener("contextmenu", onContextMenu);
 
     return () => {
+      root.removeEventListener("pointerover", notePointerType, pointerOptions);
+      root.removeEventListener("pointerdown", notePointerType, pointerOptions);
+      root.removeEventListener("pointermove", notePointerType, pointerOptions);
       root.removeEventListener("click", onClick);
+      root.removeEventListener("dblclick", onDoubleClick);
       root.removeEventListener("mouseover", onMouseOver);
       root.removeEventListener("mousemove", onMouseMove);
       root.removeEventListener("mouseout", onMouseOut);
@@ -719,6 +808,11 @@ export const Preview = memo(function Preview({
       if (db) {
         a.classList.remove("broken");
         a.dataset.databaseCsv = db.csvPath;
+      } else if (resolveAssetPathAmong(assetFiles, notePath ?? "", target)) {
+        // A wikilink at a file in the vault opens that file (#757); it is
+        // not a note waiting to be created, so it keeps the live-link look.
+        a.classList.remove("broken");
+        delete a.dataset.databaseCsv;
       } else {
         a.classList.add("broken");
         delete a.dataset.databaseCsv;
@@ -736,6 +830,10 @@ export const Preview = memo(function Preview({
       onOpenAsset: (path) => {
         void openNoteInTabRef.current(assetTabPath(path));
       },
+      cloudSyncNotice:
+        oversizedFiles.size > 0
+          ? (assetPath) => oversizedCloudFileNotice(oversizedFiles, assetPath)
+          : null,
     });
 
     enhancePreviewHeadingFolds(stage);
@@ -788,38 +886,17 @@ export const Preview = memo(function Preview({
         const due = chip.dataset.due ?? "";
         chip.classList.toggle("zen-task-due-overdue", !closed && due !== "" && due < today);
       });
-      // Wrap the item's OWN inline text in a span, so state styling (strike/gray
-      // for done and cancelled) targets just this line and never bleeds onto
-      // nested sub-tasks. Loose items keep their <p>, which the CSS targets
-      // directly; only bare-text (tight) items get the wrapper. The state marker
-      // span stays outside it: it sits in the gutter and must not be struck
-      // along with the text. (#512)
-      if (!li.querySelector(":scope > .task-item-body")) {
-        const own = Array.from(li.childNodes).filter((node) => {
-          if (node === input) return false;
-          if (node.nodeType === Node.ELEMENT_NODE) {
-            const el = node as Element;
-            if (el.tagName === "UL" || el.tagName === "OL" || el.tagName === "P") return false;
-            if (el.classList.contains("zen-task-state")) return false;
-          }
-          return true;
-        });
-        const hasText = own.some(
-          (node) =>
-            node.nodeType !== Node.TEXT_NODE || (node.textContent ?? "").trim() !== "",
-        );
-        if (hasText && own.length > 0) {
-          const body = document.createElement("span");
-          body.className = "task-item-body";
-          li.insertBefore(body, own[0]);
-          for (const node of own) body.appendChild(node);
-        }
-      }
+      // Wrap the item's own text so done and cancelled styling lands on it
+      // alone, never on a sub-task or a block such as a code block. (#512, #849)
+      wrapTaskItemOwnText(li, input);
     });
+    // After the task pass: wrapTaskItemOwnText gathers every inline node of a
+    // task item into its body span, and would take a fold arrow in with them.
+    enhancePreviewListFolds(stage);
 
     const applyRenderedDom = async (): Promise<void> => {
       try {
-        await renderMermaidBlocks(stage, diagramTheme.mode, { themeKey: diagramTheme.key });
+        await renderMermaidBlocks(stage);
       } catch {
         /* render errors are surfaced inline per block */
       }
@@ -830,6 +907,11 @@ export const Preview = memo(function Preview({
       // not found" and zero-size boards (#68). Mermaid renders to inline SVG, so
       // it is safe to render in the detached buffer above.
       root.replaceChildren(...Array.from(stage.childNodes));
+      // Which note these blocks belong to. Until this swap the article still
+      // shows the previous note, and a jump that lands while a render is in
+      // flight must wait for `onRendered` instead of scrolling against the
+      // wrong blocks (see previewShowsNote).
+      root.dataset.notePath = notePath;
       await renderDiagrams(root, { themeKey: diagramTheme.key, expanded: false });
       if (cancelled) return;
       // Typst math (a no-op when the KaTeX renderer is active, since it emits no
@@ -898,6 +980,7 @@ export const Preview = memo(function Preview({
     };
   }, [
     assetFilesKey,
+    assetFilesListed,
     diagramTheme.key,
     diagramTheme.mode,
     databaseTargets,
@@ -905,6 +988,7 @@ export const Preview = memo(function Preview({
     notePath,
     notes,
     onRequestEdit,
+    oversizedFiles,
     pinnedAssetPath,
     pinnedRefVisible,
     togglePinnedRefVisible,
@@ -961,8 +1045,7 @@ export const Preview = memo(function Preview({
             },
           });
           if (!next || next === asset.name) return;
-          await window.zen.renameAsset(vaultRel, next);
-          await refreshAssets();
+          await renameAsset(vaultRel, next);
         },
       });
       items.push({
@@ -985,8 +1068,7 @@ export const Preview = memo(function Preview({
             },
           });
           if (target === null || target === currentDir) return;
-          await window.zen.moveAsset(vaultRel, target);
-          await refreshAssets();
+          await moveAsset(vaultRel, target);
         },
       });
       items.push({
@@ -1330,7 +1412,7 @@ function DiagramPanZoomFrame({
 
     const render = async (): Promise<void> => {
       if (diagram.kind === "mermaid") {
-        await renderMermaidBlocks(host, diagramMode, { expanded: true, themeKey });
+        await renderMermaidBlocks(host, { expanded: true });
       } else {
         await renderDiagrams(host, { themeKey, expanded: true });
       }

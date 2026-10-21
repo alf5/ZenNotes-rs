@@ -1,10 +1,17 @@
 import { defaultKeymap } from '@codemirror/commands'
 import { markdownKeymap } from '@codemirror/lang-markdown'
 import { Prec, type Extension } from '@codemirror/state'
-import { keymap, type EditorView, type KeyBinding } from '@codemirror/view'
-import { searchKeymap } from '@codemirror/search'
+import { keymap, type Command, type EditorView, type KeyBinding } from '@codemirror/view'
+import {
+  findNext,
+  findPrevious,
+  openSearchPanel,
+  searchKeymap,
+  searchPanelOpen
+} from '@codemirror/search'
 import { getCM } from '@replit/codemirror-vim'
 import { insertNewlineContinueFencedCodeIndent } from './cm-code-fence-indent'
+import { insertNewlineContinueFrontmatterList } from './cm-frontmatter'
 import { isMacPlatform } from './keymaps'
 
 /**
@@ -110,21 +117,79 @@ function deferKeysToVim(
   })
 }
 
-/** Vim-mode keymap: emacs chords stripped, motion keys made Vim-aware (see above). */
-const vimModeKeymap: readonly KeyBinding[] = deferKeysToVim(
-  defaultKeymapWithoutMacEmacs,
-  VIM_MOTION_KEYS
+/**
+ * Escape belongs to Vim while Vim has a mode to leave (#803).
+ *
+ * `defaultKeymap` binds Escape to `simplifySelection`, which reports the key
+ * handled whenever there is more than one range or a non-empty one, and (like
+ * every binding here) runs ahead of the Vim plugin. Since block edits became
+ * real multi-cursors (#792), that is exactly the state Vim is in when Escape
+ * should end a block `I`/`A`/`c`: CodeMirror collapsed the cursors, Vim never
+ * saw the key, and the editor stayed in insert mode. Visual block needed two
+ * presses for the same reason, and a plain `v`/`V` selection was left through
+ * the selection listener with the cursor on CodeMirror's head instead of the
+ * character Vim keeps it on.
+ *
+ * This is the inverse of `deferKeysToVim`: Vim owns Escape in insert, replace
+ * and visual mode. Normal mode keeps the native command, because there Vim
+ * itself hands Escape back to the editor so stray extra cursors can collapse.
+ */
+function deferEscapeToVim(bindings: readonly KeyBinding[]): KeyBinding[] {
+  return bindings.map((binding) => {
+    if (binding.key !== 'Escape' || !binding.run) return binding
+    const native = binding.run
+    return {
+      ...binding,
+      // Same constraint as above: preventDefault would consume the key even
+      // when the command defers.
+      preventDefault: false,
+      run: (view: EditorView): boolean => {
+        const vim = (
+          getCM(view) as { state?: { vim?: { insertMode?: boolean; visualMode?: boolean } } } | null
+        )?.state?.vim
+        if (vim && (vim.insertMode || vim.visualMode)) return false
+        return native(view)
+      }
+    }
+  })
+}
+
+/** Vim-mode keymap: emacs chords stripped, motion keys and Escape made Vim-aware (see above). */
+const vimModeKeymap: readonly KeyBinding[] = deferEscapeToVim(
+  deferKeysToVim(defaultKeymapWithoutMacEmacs, VIM_MOTION_KEYS)
 )
 
 /**
  * CodeMirror's `defaultKeymap`, made Vim-aware: in Vim mode the macOS
  * emacs-style control chords are stripped so Vim's `<C-d>`/`<C-a>`/`<C-v>`/…
- * bindings work, and the arrow keys defer to Vim in normal/visual mode so they
- * move/extend like `hjkl`; with Vim off the full keymap is used unchanged.
+ * bindings work, the arrow keys defer to Vim in normal/visual mode so they
+ * move/extend like `hjkl`, and Escape defers to Vim in insert/visual mode so it
+ * leaves the mode; with Vim off the full keymap is used unchanged.
  */
 export function vimAwareDefaultKeymap(vimMode: boolean): readonly KeyBinding[] {
   return vimMode ? vimModeKeymap : defaultKeymap
 }
+
+/**
+ * F3 and Mod-G run CodeMirror's `findNext`/`findPrevious`, which open the find
+ * bar only while no query is set. Once one search had run and the bar was
+ * closed, they jumped to the next match of that old query out of sight (the
+ * selection toolbar popping up over it), and the bar never came back to the
+ * keyboard, in every note, until a restart. In the main window, where Mod+F
+ * opens note search with Vim off, F3 was the only key into the bar. (#860)
+ * With the bar closed they now open it, the last query prefilled and selected
+ * as Mod+F does; with it open they step through the matches as before.
+ */
+const reopenFirst =
+  (step: Command): Command =>
+  (view) =>
+    searchPanelOpen(view.state) ? step(view) : openSearchPanel(view)
+
+const reopeningSearchKeymap: readonly KeyBinding[] = searchKeymap.map((binding) =>
+  binding.run === findNext
+    ? { ...binding, run: reopenFirst(findNext), shift: reopenFirst(findPrevious) }
+    : binding
+)
 
 /**
  * CodeMirror's `searchKeymap`, made Vim-aware where Mod is Ctrl.
@@ -135,11 +200,12 @@ export function vimAwareDefaultKeymap(vimMode: boolean): readonly KeyBinding[] {
  * Vim: the one motion chord the editor still took from Vim (#510). With Vim
  * mode on, Vim users search with `/`, so the binding is dropped there and
  * Ctrl+F pages like Ctrl+B. macOS keeps it: Cmd+F never collided with Vim.
- * The rest of the keymap (find next, replace, select matches) stays as is.
+ * The rest of the keymap (replace, select matches) stays as is; find next and
+ * previous reopen a closed bar (above).
  */
 export function vimAwareSearchKeymap(vimMode: boolean, mac: boolean = isMacPlatform()): readonly KeyBinding[] {
-  if (!vimMode || mac) return searchKeymap
-  return searchKeymap.filter((binding) => binding.key !== 'Mod-f')
+  if (!vimMode || mac) return reopeningSearchKeymap
+  return reopeningSearchKeymap.filter((binding) => binding.key !== 'Mod-f')
 }
 
 /**
@@ -166,8 +232,20 @@ const fencedCodeIndentEnter: KeyBinding = {
   run: insertNewlineContinueFencedCodeIndent
 }
 
+// #827: the frontmatter is no longer markdown to the parser, so the markdown
+// Enter command never sees a `tags:` list there. This keeps `- item` + Enter
+// continuing the YAML sequence. It returns false outside the frontmatter and
+// on non-list lines, so the markdown command runs as before.
+const frontmatterListEnter: KeyBinding = {
+  key: 'Enter',
+  run: insertNewlineContinueFrontmatterList
+}
+
 export const vimAwareMarkdownKeymap: Extension = Prec.high(
   keymap.of(
-    deferKeysToVim([fencedCodeIndentEnter, ...markdownKeymap], new Set(['Enter', 'Backspace']))
+    deferKeysToVim(
+      [frontmatterListEnter, fencedCodeIndentEnter, ...markdownKeymap],
+      new Set(['Enter', 'Backspace'])
+    )
   )
 )

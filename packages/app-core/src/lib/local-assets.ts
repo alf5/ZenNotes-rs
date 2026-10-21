@@ -2,6 +2,15 @@ import { useStore } from '../store'
 import { externalLinkUrl } from './internal-links'
 import { openVaultAssetExternally } from './external-file-link'
 import { isExcalidrawPath, isObsidianExcalidrawPath } from '@shared/excalidraw'
+import {
+  decodeHrefPath,
+  resolveAssetPathAmong,
+  stripQueryAndHash,
+  type AssetPathRef
+} from './asset-path-resolution'
+import type { PreviewEditRequest } from './preview-outline-jump'
+
+type RequestEdit = (request?: PreviewEditRequest | null) => void
 
 const IMAGE_EXTENSIONS = new Set([
   '.apng',
@@ -19,44 +28,9 @@ const VIDEO_EXTENSIONS = new Set(['.m4v', '.mov', '.mp4', '.ogv', '.webm'])
 
 export type LocalAssetKind = 'image' | 'pdf' | 'audio' | 'video' | 'excalidraw' | 'file'
 
-function stripQueryAndHash(href: string): string {
-  return href.split('#')[0]?.split('?')[0] ?? href
-}
-
 export function hrefFragment(href: string): string {
   const hashIdx = href.indexOf('#')
   return hashIdx >= 0 ? href.slice(hashIdx) : ''
-}
-
-function decodeHrefPath(value: string): string {
-  const cleaned = stripQueryAndHash(value)
-  try {
-    return decodeURIComponent(cleaned)
-  } catch {
-    return cleaned
-  }
-}
-
-function posixJoin(a: string, b: string): string {
-  if (!a) return b
-  if (!b) return a
-  if (a.endsWith('/')) return `${a}${b}`
-  return `${a}/${b}`
-}
-
-function posixNormalize(input: string): string {
-  const parts = input.split('/')
-  const out: string[] = []
-  for (const part of parts) {
-    if (!part || part === '.') continue
-    if (part === '..') {
-      if (out.length === 0) return '..'
-      out.pop()
-    } else {
-      out.push(part)
-    }
-  }
-  return out.join('/')
 }
 
 function assetExtension(href: string): string {
@@ -77,24 +51,62 @@ export function classifyLocalAssetHref(href: string): LocalAssetKind | null {
   return 'file'
 }
 
-export function resolveLocalAssetUrl(
+/** Where an embed's href leads, as `resolveLocalAsset` finds it. */
+export interface LocalAsset {
+  url: string
+  /** Vault-relative path of the listed file the href names; null when no
+   *  listed file answers it and `url` is the guess beside the note. */
+  path: string | null
+  /** No file in the vault's own listing carries the name the href points
+   *  at, so this device does not have it. An embed of it says so instead of
+   *  drawing a player, picture or document with nothing to load. */
+  missing: boolean
+}
+
+export function resolveLocalAsset(
   vaultRoot: string | null | undefined,
   notePath: string | null | undefined,
   href: string
-): string | null {
+): LocalAsset | null {
   if (!vaultRoot || !notePath) return null
-  const resolvedRel = resolveAssetVaultRelativePath(vaultRoot, notePath, href)
-  if (resolvedRel) {
-    return window.zen.resolveVaultAssetUrl(vaultRoot, resolvedRel)
+  const { assetFiles, assetFilesListed } = useStore.getState()
+  const path = resolveAssetPathAmong(assetFiles, notePath, href)
+  if (path) {
+    const url = window.zen.resolveVaultAssetUrl(vaultRoot, path)
+    return url ? { url, path, missing: false } : null
   }
   // If the asset list hasn't arrived yet (cold start, before
   // `listAssets` resolves), skip producing a URL rather than baking in
   // the notedir-relative fallback. The cm-live-preview plugin
   // re-decorates as soon as `assetFiles` populates and the basename
   // search will then run with real data. This stops the wrong URL from
-  // being cached by the widget on the first paint.
-  if (useStore.getState().assetFiles.length === 0) return null
-  return window.zen.resolveLocalAssetUrl(vaultRoot, notePath, href)
+  // being cached by the widget on the first paint, and stops every embed
+  // from reading as missing until then.
+  if (assetFiles.length === 0 && !assetFilesListed) return null
+  const url = window.zen.resolveLocalAssetUrl(vaultRoot, notePath, href)
+  if (!url) return null
+  // A list seeded by hand (the share viewer's, PDF export's) never says a
+  // file is missing: the share viewer serves the files its list leaves out
+  // from this very URL.
+  return { url, path: null, missing: assetFilesListed && !listsFileNamed(assetFiles, href) }
+}
+
+// A name two listed files share is a link that cannot choose between them,
+// not a file this device lacks; it keeps the guessed URL it always had.
+function listsFileNamed(assetFiles: ReadonlyArray<AssetPathRef>, href: string): boolean {
+  const name = decodeHrefPath(href.trim()).split('/').filter(Boolean).pop()?.toLowerCase()
+  if (!name) return false
+  return assetFiles.some(
+    (asset) => asset.path.slice(asset.path.lastIndexOf('/') + 1).toLowerCase() === name
+  )
+}
+
+export function resolveLocalAssetUrl(
+  vaultRoot: string | null | undefined,
+  notePath: string | null | undefined,
+  href: string
+): string | null {
+  return resolveLocalAsset(vaultRoot, notePath, href)?.url ?? null
 }
 
 /**
@@ -109,60 +121,10 @@ export function resolveAssetVaultRelativePath(
   href: string
 ): string | null {
   if (!vaultRoot || !notePath) return null
-  const trimmed = href.trim()
-  if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('//')) return null
-  if (/^[a-zA-Z][a-zA-Z\d+.-]*:/.test(trimmed)) return null
-
-  const noteDir = notePath.includes('/') ? notePath.slice(0, notePath.lastIndexOf('/')) : ''
-  const decodedHref = decodeHrefPath(trimmed)
-  const isAbsolute = decodedHref.startsWith('/')
-  let target = isAbsolute
-    ? decodedHref.replace(/^\/+/, '')
-    : noteDir
-      ? posixJoin(noteDir, decodedHref)
-      : decodedHref
-  target = posixNormalize(target)
-  if (target.startsWith('../') || target === '..') return null
-
-  const assets = useStore.getState().assetFiles
-  if (assets.some((asset) => asset.path === target)) return target
-
-  // A wikilink embed (`![[assets/img.png]]`) — and any path written relative
-  // to the vault root — resolves from the root, not the note's folder, which
-  // is what Obsidian does with wikilinks. When the note-relative join above
-  // didn't hit an asset, try the path as vault-root-relative before the fuzzy
-  // basename search below. This is what makes a pasted `![[assets/img.png]]`
-  // render from a note in a subfolder (e.g. a daily note under
-  // `Daily Notes/`), and it's more precise than the basename fallback when
-  // several files share a name. (#459)
-  if (!isAbsolute && noteDir) {
-    const rootTarget = posixNormalize(decodedHref)
-    if (
-      rootTarget &&
-      rootTarget !== target &&
-      !rootTarget.startsWith('../') &&
-      rootTarget !== '..' &&
-      assets.some((asset) => asset.path === rootTarget)
-    ) {
-      return rootTarget
-    }
-  }
-
-  const targetBase = target.split('/').filter(Boolean).pop()?.toLowerCase()
-  if (!targetBase) return null
-
-  const basenameMatches = assets.filter((asset) => {
-    const assetBase = asset.path.split('/').filter(Boolean).pop()?.toLowerCase()
-    return assetBase === targetBase
-  })
-  if (basenameMatches.length === 1) {
-    return basenameMatches[0]!.path
-  }
-
-  return null
+  return resolveAssetPathAmong(useStore.getState().assetFiles, notePath, href)
 }
 
-function localAssetLabel(href: string, fallback: string): string {
+export function localAssetLabel(href: string, fallback: string): string {
   const clean = href.split('#')[0]?.split('?')[0] ?? href
   const parts = clean.split('/').filter(Boolean)
   const last = parts[parts.length - 1]
@@ -215,11 +177,24 @@ function buildImageEmbed(
   img: HTMLImageElement,
   rawHref: string,
   resolvedUrl: string,
-  onRequestEdit?: (() => void) | null,
+  sourceLine: number | null,
+  onRequestEdit?: RequestEdit | null,
   onOpenAsset?: (() => void) | null
 ): HTMLElement {
   const figure = document.createElement('figure')
   figure.className = 'local-image-embed not-prose'
+  // Tag the host the way PDF / audio / video embeds and attachment chips are,
+  // so the reading view's right-click asset menu (Open, Rename…, Move…,
+  // Reveal, Delete…) finds an image too. Only the `<img>` carried the URL
+  // before, and the menu handler looks for kind + url on one host, so images
+  // were the one embed with no menu.
+  figure.dataset.localAssetUrl = resolvedUrl
+  figure.dataset.localAssetKind = 'image'
+  figure.dataset.localAssetHref = rawHref
+  // The figure stands in for the stamped paragraph it replaces, so the
+  // split scroll sync and the reading position carried into Edit still see
+  // this block's source line. (#822)
+  if (sourceLine != null) figure.dataset.sourceLine = String(sourceLine)
 
   const frame = document.createElement('div')
   frame.className = 'local-image-embed-frame'
@@ -232,7 +207,7 @@ function buildImageEmbed(
     editButton.addEventListener('click', (e) => {
       e.preventDefault()
       e.stopPropagation()
-      onRequestEdit()
+      onRequestEdit({ sourceLine, blockClientTop: figure.getBoundingClientRect().top })
     })
     controlsTop.append(editButton)
   }
@@ -268,12 +243,34 @@ function buildImageEmbed(
   return figure
 }
 
-function buildEmbed(
+function buildEmbedEditButton(onEdit: () => void): HTMLButtonElement {
+  const edit = document.createElement('button')
+  edit.type = 'button'
+  edit.className = 'local-asset-embed-edit'
+  edit.textContent = '</>'
+  edit.title = 'Edit this block'
+  edit.setAttribute('aria-label', 'Edit this block')
+  edit.addEventListener('click', (event) => {
+    event.preventDefault()
+    event.stopPropagation()
+    onEdit()
+  })
+  return edit
+}
+
+/**
+ * The PDF, audio and video embed of the reading view. The editor's live
+ * preview draws a standalone audio or video line with this same builder, so
+ * the two surfaces show one player; it passes `onEdit` for the `</>` action
+ * that the editor's image and PDF blocks carry too.
+ */
+export function buildEmbed(
   kind: Exclude<LocalAssetKind, 'image' | 'file' | 'excalidraw'>,
   url: string,
   label: string,
   href: string,
-  onOpenAsset?: (() => void) | null
+  onOpenAsset?: (() => void) | null,
+  onEdit?: (() => void) | null
 ): HTMLElement {
   const figure = document.createElement('figure')
   figure.className = 'local-asset-embed not-prose'
@@ -312,6 +309,7 @@ function buildEmbed(
   }
 
   header.append(title, open)
+  if (onEdit) header.append(buildEmbedEditButton(onEdit))
   figure.append(header)
 
   if (kind === 'pdf') {
@@ -421,7 +419,7 @@ function buildPinnedRefPlaceholder(
   const button = document.createElement('button')
   button.type = 'button'
   button.className = 'local-asset-pinned-ref-button'
-  button.title = 'Showing in the reference pane — click to focus'
+  button.title = 'Showing in the reference pane (click to focus)'
   button.addEventListener('click', (event) => {
     event.preventDefault()
     event.stopPropagation()
@@ -445,17 +443,97 @@ function buildPinnedRefPlaceholder(
   return figure
 }
 
+const CLOUD_SYNC_NOTICE_CLASS = 'local-asset-cloud-notice'
+
+/**
+ * Puts the line under an embed that says Cloud sync keeps its file on this
+ * device, or takes it away again (`text` null). The editor's widgets call it
+ * again when only that line changed, so a video playing above it keeps
+ * playing while the notice comes and goes.
+ */
+export function setCloudSyncNotice(host: HTMLElement, text: string | null): void {
+  let notice: HTMLElement | null = null
+  for (const child of Array.from(host.children)) {
+    if (child instanceof HTMLElement && child.classList.contains(CLOUD_SYNC_NOTICE_CLASS)) {
+      notice = child
+      break
+    }
+  }
+  if (!text) {
+    notice?.remove()
+    return
+  }
+  if (!notice) {
+    notice = document.createElement('div')
+    notice.className = 'local-asset-cloud-notice whitespace-normal break-words text-xs text-warning'
+    notice.setAttribute('role', 'note')
+    notice.dataset.cloudSyncNotice = ''
+    host.append(notice)
+  }
+  if (notice.textContent !== text) notice.textContent = text
+}
+
+/** The embeds that say so when their file is not on this device. Any other
+ *  attachment keeps its chip: the vault listing leaves out files a chip can
+ *  still name (notes, drawings, dotfiles), so it cannot vouch for those. */
+export type MissingAssetKind = 'image' | 'pdf' | 'audio' | 'video'
+
+export function isMissingAssetKind(kind: LocalAssetKind | null): kind is MissingAssetKind {
+  return kind === 'image' || kind === 'pdf' || kind === 'audio' || kind === 'video'
+}
+
+/**
+ * Stands in for the picture, document or player of an embed whose file is not
+ * on this device, the state every other device is in when a file too large for
+ * Cloud stays on the one that has it. One line in the embed's card, worded and
+ * coloured as the Cloud notice that device shows under its player. The reading
+ * view and the editor build the same card; the editor passes `onEdit` for the
+ * `</>` action its other embeds carry, and the reading view the block's
+ * `sourceLine`, so a double-click edits the line as on any block.
+ */
+export function buildMissingAssetNotice(
+  kind: MissingAssetKind,
+  href: string,
+  options: { sourceLine?: number | null; onEdit?: (() => void) | null } = {}
+): HTMLElement {
+  const figure = document.createElement('figure')
+  figure.className = 'local-asset-embed local-asset-missing not-prose'
+  // Not `data-local-asset-kind`: that marks a file the asset menu can act on,
+  // and keeps a double-click from editing the block. There is no file here.
+  figure.dataset.localAssetMissing = kind
+  figure.dataset.localAssetHref = href
+  if (options.sourceLine != null) figure.dataset.sourceLine = String(options.sourceLine)
+
+  const notice = document.createElement('div')
+  notice.className = 'local-asset-missing-notice whitespace-normal break-words text-xs text-warning'
+  notice.setAttribute('role', 'note')
+  notice.textContent = `${localAssetLabel(href, 'This file')} isn't on this device.`
+  figure.append(notice)
+
+  if (options.onEdit) figure.append(buildEmbedEditButton(options.onEdit))
+  return figure
+}
+
+function blockSourceLine(block: HTMLElement): number | null {
+  const line = Number(block.dataset.sourceLine)
+  return Number.isFinite(line) && line >= 1 ? line : null
+}
+
 export function enhanceLocalAssetNodes(
   root: HTMLElement,
   options: {
     vaultRoot: string | null | undefined
     notePath: string | null | undefined
-    onRequestEdit?: (() => void) | null
+    onRequestEdit?: RequestEdit | null
     /** When set, PDF embeds matching this vault-relative path are
      *  collapsed to a compact placeholder instead of a full iframe. */
     pinnedAssetPath?: string | null
     onActivatePinnedRef?: (() => void) | null
     onOpenAsset?: ((assetPath: string) => void) | null
+    /** The Cloud notice for the file at a vault-relative path, or null.
+     *  Left out while no file is over the limit, and then no embed is
+     *  looked up for it at all. */
+    cloudSyncNotice?: ((assetPath: string) => string | null) | null
   }
 ): void {
   const {
@@ -464,15 +542,20 @@ export function enhanceLocalAssetNodes(
     onRequestEdit,
     pinnedAssetPath,
     onActivatePinnedRef,
-    onOpenAsset
+    onOpenAsset,
+    cloudSyncNotice
   } = options
   if (!vaultRoot || !notePath) return
+  const withCloudNotice = (host: HTMLElement, assetPath: string | null): HTMLElement => {
+    if (cloudSyncNotice && assetPath) setCloudSyncNotice(host, cloudSyncNotice(assetPath))
+    return host
+  }
 
   root.querySelectorAll<HTMLImageElement>('img[src]').forEach((img) => {
     const raw = img.getAttribute('src') || ''
-    const resolved = resolveLocalAssetUrl(vaultRoot, notePath, raw)
-    if (!resolved) return
-    const assetVaultRel = resolveAssetVaultRelativePath(vaultRoot, notePath, raw)
+    const asset = resolveLocalAsset(vaultRoot, notePath, raw)
+    if (!asset) return
+    const { url: resolved, path: assetVaultRel } = asset
 
     // #463: a non-image file embedded with image syntax (`![](file.tldraw)`)
     // is a broken <img> with no indication it's an attachment. Denote it — a
@@ -493,7 +576,33 @@ export function enhanceLocalAssetNodes(
       const standalone = isStandaloneImageParagraph(img)
       if (standalone && standalone.dataset.assetEmbed !== 'true') {
         standalone.dataset.assetEmbed = 'true'
-        standalone.replaceWith(buildAttachmentChip(resolved, raw, label, openAsset))
+        if (asset.missing && isMissingAssetKind(imgKind)) {
+          standalone.replaceWith(
+            buildMissingAssetNotice(imgKind, raw, { sourceLine: blockSourceLine(standalone) })
+          )
+          return
+        }
+        // Audio and video in image syntax (`![](clip.mp4)`, the Markdown
+        // spelling of `![[clip.mp4]]`) play here as the wikilink form does,
+        // and as the editor draws both. PDFs in this form still chip.
+        if (imgKind === 'audio' || imgKind === 'video') {
+          standalone.replaceWith(
+            withCloudNotice(
+              buildEmbed(
+                imgKind,
+                resolved,
+                label,
+                raw,
+                assetVaultRel && onOpenAsset ? () => onOpenAsset(assetVaultRel) : null
+              ),
+              assetVaultRel
+            )
+          )
+          return
+        }
+        standalone.replaceWith(
+          withCloudNotice(buildAttachmentChip(resolved, raw, label, openAsset), assetVaultRel)
+        )
       } else {
         const link = document.createElement('a')
         link.className = 'local-file-attachment-inline'
@@ -517,6 +626,18 @@ export function enhanceLocalAssetNodes(
       return
     }
 
+    // Ahead of `img.src`, so no request goes out for a file that is not here.
+    // A picture inside a sentence stays in the sentence.
+    if (asset.missing && imgKind === 'image') {
+      const standalone = isStandaloneImageParagraph(img)
+      if (standalone && standalone.dataset.assetEmbed !== 'true') {
+        standalone.replaceWith(
+          buildMissingAssetNotice('image', raw, { sourceLine: blockSourceLine(standalone) })
+        )
+        return
+      }
+    }
+
     img.src = resolved
     img.loading = 'lazy'
     img.dataset.localAssetUrl = resolved
@@ -524,13 +645,18 @@ export function enhanceLocalAssetNodes(
     const paragraph = isStandaloneImageParagraph(img)
     if (!paragraph || paragraph.dataset.assetEmbed === 'true') return
     paragraph.dataset.assetEmbed = 'true'
+    const sourceLine = Number(paragraph.dataset.sourceLine)
     paragraph.replaceWith(
-      buildImageEmbed(
-        img,
-        raw,
-        resolved,
-        onRequestEdit,
-        assetVaultRel && onOpenAsset ? () => onOpenAsset(assetVaultRel) : null
+      withCloudNotice(
+        buildImageEmbed(
+          img,
+          raw,
+          resolved,
+          Number.isFinite(sourceLine) && sourceLine >= 1 ? sourceLine : null,
+          onRequestEdit,
+          assetVaultRel && onOpenAsset ? () => onOpenAsset(assetVaultRel) : null
+        ),
+        assetVaultRel
       )
     )
   })
@@ -542,10 +668,10 @@ export function enhanceLocalAssetNodes(
     // `https://…`) isn't a vault asset — leave both for the link-navigation
     // handlers instead of rewriting them to a zen-asset URL. (#201)
     if (/\.md(?:[#?].*)?$/i.test(raw.trim()) || externalLinkUrl(raw)) return
-    const resolved = resolveLocalAssetUrl(vaultRoot, notePath, raw)
-    if (!resolved) return
+    const asset = resolveLocalAsset(vaultRoot, notePath, raw)
+    if (!asset) return
 
-    const assetVaultRel = resolveAssetVaultRelativePath(vaultRoot, notePath, raw)
+    const { url: resolved, path: assetVaultRel } = asset
     const kind = classifyLocalAssetHref(raw) ?? 'file'
     anchor.href = resolved + hrefFragment(raw)
     anchor.dataset.localAssetUrl = resolved
@@ -566,24 +692,36 @@ export function enhanceLocalAssetNodes(
     const paragraph = isStandaloneAnchorParagraph(anchor)
     if (!paragraph || paragraph.dataset.assetEmbed === 'true') return
     paragraph.dataset.assetEmbed = 'true'
+    if (asset.missing) {
+      paragraph.replaceWith(
+        buildMissingAssetNotice(kind, raw, { sourceLine: blockSourceLine(paragraph) })
+      )
+      return
+    }
     const label = localAssetLabel(raw, anchor.textContent?.trim() || 'Asset')
     if (kind === 'pdf' && pinnedAssetPath) {
       if (assetVaultRel === pinnedAssetPath) {
         paragraph.replaceWith(
-          buildPinnedRefPlaceholder(resolved, raw, label, () => {
-            onActivatePinnedRef?.()
-          })
+          withCloudNotice(
+            buildPinnedRefPlaceholder(resolved, raw, label, () => {
+              onActivatePinnedRef?.()
+            }),
+            assetVaultRel
+          )
         )
         return
       }
     }
     paragraph.replaceWith(
-      buildEmbed(
-        kind,
-        resolved,
-        label,
-        raw,
-        assetVaultRel && onOpenAsset ? () => onOpenAsset(assetVaultRel) : null
+      withCloudNotice(
+        buildEmbed(
+          kind,
+          resolved,
+          label,
+          raw,
+          assetVaultRel && onOpenAsset ? () => onOpenAsset(assetVaultRel) : null
+        ),
+        assetVaultRel
       )
     )
   })

@@ -1,12 +1,12 @@
+import { runNoteLifecycleAction } from '../lib/note-lifecycle-actions'
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ContextMenuItem } from './ContextMenu'
 import type { NoteMeta } from '@shared/ipc'
 import { isArchiveViewActive, useStore } from '../store'
 import { ArchiveIcon, ArrowUpRightIcon, TrashIcon } from './icons'
 import { CollectionViewHeader } from './CollectionViewHeader'
-import { confirmMoveToTrash } from '../lib/confirm-trash'
 import { ContextMenu } from './ContextMenu'
-import { buildMoveNotePrompt, parseMoveNoteTarget } from '../lib/move-note'
+import { buildMoveNotePrompt, moveNoteVocabulary, parseMoveNoteTarget } from '../lib/move-note'
 import { promptApp } from '../lib/prompt-requests'
 import { advanceSequence, getKeymapBinding, matchesSequenceToken } from '../lib/keymaps'
 import { resolveSystemFolderLabels } from '../lib/system-folder-labels'
@@ -44,6 +44,7 @@ export function ArchiveView(): JSX.Element {
   const vimMode = useStore((s) => s.vimMode)
   const setFocusedPanel = useStore((s) => s.setFocusedPanel)
   const systemFolderLabels = useStore((s) => s.systemFolderLabels)
+  const vaultSettings = useStore((s) => s.vaultSettings)
   const workspaceMode = useStore((s) => s.workspaceMode)
   const amActive = useStore(isArchiveViewActive)
   const folderLabels = useMemo(
@@ -108,17 +109,14 @@ export function ArchiveView(): JSX.Element {
 
   const unarchiveNote = useCallback(
     async (note: NoteMeta) => {
-      await window.zen.unarchiveNote(note.path)
-      await refreshNotes()
+      await runNoteLifecycleAction(note.path, 'restore')
     },
     [refreshNotes]
   )
 
   const moveNoteToTrash = useCallback(
     async (note: NoteMeta) => {
-      if (!(await confirmMoveToTrash(note.title))) return
-      await window.zen.moveToTrash(note.path)
-      await refreshNotes()
+      await runNoteLifecycleAction(note.path, 'trash')
     },
     [refreshNotes]
   )
@@ -179,9 +177,11 @@ export function ArchiveView(): JSX.Element {
     items.push({
       label: 'Move…',
       onSelect: async () => {
-        const target = await promptApp(buildMoveNotePrompt(note, folders))
-        if (!target) return
-        const dest = parseMoveNoteTarget(target)
+        const vocabulary = moveNoteVocabulary(vaultSettings, systemFolderLabels, folders)
+        const target = await promptApp(buildMoveNotePrompt(note, folders, vocabulary))
+        // Empty is an answer (the notes root); only null is the Cancel.
+        if (target === null) return
+        const dest = parseMoveNoteTarget(target, vocabulary)
         await moveNote(note.path, dest.folder, dest.subpath)
       }
     })
@@ -233,9 +233,7 @@ export function ArchiveView(): JSX.Element {
       label: `Move to ${folderLabels.inbox}`,
       icon: <ArrowUpRightIcon />,
       onSelect: async () => {
-        const meta = await window.zen.unarchiveNote(note.path)
-        await refreshNotes()
-        if (selectedPath === note.path) await selectNote(meta.path)
+        await runNoteLifecycleAction(note.path, 'restore')
       }
     })
     items.push({
@@ -243,10 +241,7 @@ export function ArchiveView(): JSX.Element {
       icon: <TrashIcon />,
       danger: true,
       onSelect: async () => {
-        if (!(await confirmMoveToTrash(note.title))) return
-        await window.zen.moveToTrash(note.path)
-        await refreshNotes()
-        if (selectedPath === note.path) await selectNote(null)
+        await runNoteLifecycleAction(note.path, 'trash')
       }
     })
 

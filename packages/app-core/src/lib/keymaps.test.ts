@@ -1,10 +1,19 @@
 import { describe, expect, it } from 'vitest'
 import {
+  advanceSequence,
   eventMatchesUserOverride,
   findKeymapConflict,
   getDefaultKeymapBinding,
+  getKeymapBinding,
   getKeymapDefinition,
   getKeymapDefinitions,
+  getKeymapDisplay,
+  getSequenceTokens,
+  isKeymapUnbound,
+  keymapAvailableOnHost,
+  labelWithShortcut,
+  matchesSequenceToken,
+  matchesShortcut,
   matchesShortcutBinding,
   normalizeKeymapOverrides,
   normalizeShortcutBinding,
@@ -222,6 +231,49 @@ describe('sequenceTokenFromEvent', () => {
   })
 })
 
+describe('template shortcuts (#847)', () => {
+  it('bind New note from template to ⌘⌥T on the Mac and leave Linux and Windows unbound', () => {
+    withPlatform('darwin', () => {
+      expect(getDefaultKeymapBinding('global.newNoteFromTemplate')).toBe('Alt+Mod+T')
+      expect(getDefaultKeymapBinding('global.insertTemplate')).toBe('')
+    })
+    for (const platform of ['linux', 'win32'] as const) {
+      withPlatform(platform, () => {
+        expect(getDefaultKeymapBinding('global.newNoteFromTemplate')).toBe('')
+        expect(getDefaultKeymapBinding('global.insertTemplate')).toBe('')
+      })
+    }
+  })
+
+  it('fire on the chord a Mac actually sends, and never while unbound', () => {
+    withPlatform('darwin', () => {
+      // Option turns T into †; the binding still has to match the physical key.
+      const cmdOptionT = fakeEvent({ key: '†', code: 'KeyT', metaKey: true, altKey: true })
+      expect(matchesShortcut(cmdOptionT, {}, 'global.newNoteFromTemplate')).toBe(true)
+      expect(matchesShortcut(cmdOptionT, {}, 'global.insertTemplate')).toBe(false)
+    })
+    withPlatform('linux', () => {
+      const ctrlAltT = fakeEvent({ key: 't', code: 'KeyT', ctrlKey: true, altKey: true })
+      expect(matchesShortcut(ctrlAltT, {}, 'global.newNoteFromTemplate')).toBe(false)
+      const bound = { 'global.newNoteFromTemplate': 'Alt+Mod+T' }
+      expect(matchesShortcut(ctrlAltT, bound, 'global.newNoteFromTemplate')).toBe(true)
+    })
+  })
+
+  it('have no key to show while unbound, and never clash with each other', () => {
+    withPlatform('linux', () => {
+      expect(getKeymapDisplay({}, 'global.insertTemplate')).toBe('')
+      expect(findKeymapConflict({}, 'global.newNoteFromTemplate', '')).toBeNull()
+      expect(findKeymapConflict({}, 'global.insertTemplate', 'Alt+Mod+Y')).toBeNull()
+    })
+    withPlatform('darwin', () => {
+      expect(findKeymapConflict({}, 'global.insertTemplate', 'Alt+Mod+T')?.id).toBe(
+        'global.newNoteFromTemplate'
+      )
+    })
+  })
+})
+
 describe('leader keymap definitions', () => {
   it('keeps the recent-note toggle portable with a literal Ctrl+Tab Mac default', () => {
     withPlatform('darwin', () => {
@@ -244,6 +296,9 @@ describe('leader keymap definitions', () => {
     // unchanged on every platform.
     for (const def of getKeymapDefinitions()) {
       if (def.kind !== 'shortcut') continue
+      // An action that ships unbound (the template shortcuts off the Mac,
+      // #847) has no spelling to round-trip.
+      if (def.defaultBinding === '') continue
       for (const platform of ['darwin', 'linux', 'win32'] as const) {
         const roundTripped = withPlatform(platform, () =>
           normalizeShortcutBinding(def.defaultBinding)
@@ -385,5 +440,102 @@ describe('normalizeKeymapOverrides', () => {
         'editor.hopMarkerForward': 'Mod+.'
       })
     })
+  })
+})
+
+describe('unbound keymaps (an override of "")', () => {
+  it('keeps an empty or blank override as an unbind instead of dropping it', () => {
+    expect(normalizeKeymapOverrides({ 'global.zoomIn': '' })).toEqual({ 'global.zoomIn': '' })
+    expect(normalizeKeymapOverrides({ 'global.zoomIn': '   ' })).toEqual({ 'global.zoomIn': '' })
+    expect(normalizeKeymapOverrides({ 'vim.leaderPrefix': '' })).toEqual({
+      'vim.leaderPrefix': ''
+    })
+  })
+
+  it('resolves an unbound action to no binding, not to its default', () => {
+    const overrides = { 'global.zoomIn': '' }
+    expect(getKeymapBinding(overrides, 'global.zoomIn')).toBe('')
+    expect(isKeymapUnbound(overrides, 'global.zoomIn')).toBe(true)
+    expect(isKeymapUnbound(overrides, 'global.zoomOut')).toBe(false)
+    expect(getKeymapBinding(overrides, 'global.zoomOut')).toBe(
+      getDefaultKeymapBinding('global.zoomOut')
+    )
+    expect(getSequenceTokens({ 'vim.leaderPrefix': '' }, 'vim.leaderPrefix')).toEqual([])
+    expect(getKeymapDisplay(overrides, 'global.zoomIn')).toBe('')
+  })
+
+  it('never matches a key event against an unbound shortcut or sequence', () => {
+    withPlatform('darwin', () => {
+      const overrides = { 'global.zoomIn': '', 'nav.moveDown': '' }
+      const zoomIn = fakeEvent({ key: '=', code: 'Equal', metaKey: true })
+      expect(matchesShortcut(zoomIn, {}, 'global.zoomIn')).toBe(true)
+      expect(matchesShortcut(zoomIn, overrides, 'global.zoomIn')).toBe(false)
+      const j = fakeEvent({ key: 'j', code: 'KeyJ' })
+      expect(matchesSequenceToken(j, {}, 'nav.moveDown')).toBe(true)
+      expect(matchesSequenceToken(j, overrides, 'nav.moveDown')).toBe(false)
+      // A keydown with no key at all must not "match" the empty binding either.
+      expect(matchesShortcutBinding(fakeEvent({ key: '', code: '' }), '')).toBe(false)
+    })
+  })
+
+  it('does not advance a sequence for an unbound binding', () => {
+    const pending = { current: 0 }
+    const timer: { current?: ReturnType<typeof setTimeout> } = {}
+    let matched = 0
+    const consumed = advanceSequence(
+      fakeEvent({ key: 'g', code: 'KeyG' }),
+      '',
+      pending,
+      timer,
+      () => {
+        matched += 1
+      },
+      () => {}
+    )
+    expect(consumed).toBe(false)
+    expect(matched).toBe(0)
+    expect(pending.current).toBe(0)
+  })
+
+  it('takes an unbound action out of global-shortcut conflict checks both ways', () => {
+    expect(findKeymapConflict({ 'global.zoomIn': '' }, 'global.zoomIn', '')).toBeNull()
+    // Zoom out may take the key that zoom in used to hold.
+    expect(findKeymapConflict({ 'global.zoomIn': '' }, 'global.zoomOut', 'Mod+=')).toBeNull()
+    expect(findKeymapConflict({}, 'global.zoomOut', 'Mod+=')?.id).toBe('global.zoomIn')
+    withPlatform('darwin', () => {
+      const zoomIn = fakeEvent({ key: '=', code: 'Equal', metaKey: true })
+      expect(eventMatchesUserOverride(zoomIn, { 'global.zoomIn': '' }, 'global.zoomOut')).toBe(
+        false
+      )
+    })
+  })
+
+  it('labels a tooltip with the key only while there is one', () => {
+    expect(labelWithShortcut('Go back', '⌃O')).toBe('Go back (⌃O)')
+    expect(labelWithShortcut('Go back', '')).toBe('Go back')
+  })
+})
+
+describe('keymapAvailableOnHost', () => {
+  const ids = getKeymapDefinitions().map((definition) => definition.id)
+  const review = ids.filter((id) => /^(editor|vim)\.review/.test(id))
+  const harper = ids.filter((id) => id.startsWith('vim.harper'))
+
+  it('leaves out the review and Harper keys where those features are missing', () => {
+    expect(review).toHaveLength(8)
+    expect(harper.length).toBeGreaterThan(0)
+    for (const id of [...review, ...harper]) expect(keymapAvailableOnHost(id, {})).toBe(false)
+  })
+
+  it('keeps each one on a host that has its feature', () => {
+    for (const id of review) expect(keymapAvailableOnHost(id, { supportsAgentEditReview: true })).toBe(true)
+    for (const id of harper) expect(keymapAvailableOnHost(id, { supportsHarper: true })).toBe(true)
+    expect(keymapAvailableOnHost(review[0], { supportsHarper: true })).toBe(false)
+  })
+
+  it('keeps every other key everywhere', () => {
+    const rest = ids.filter((id) => !review.includes(id) && !harper.includes(id))
+    expect(rest.length).toBeGreaterThan(50)
+    for (const id of rest) expect(keymapAvailableOnHost(id, {})).toBe(true)
   })
 })

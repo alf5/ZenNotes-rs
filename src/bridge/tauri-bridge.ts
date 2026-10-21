@@ -27,8 +27,12 @@ import {
   type ZenBridge,
   type ZenCapabilities
 } from '@zennotes/bridge-contract/bridge'
+import type { ZenPlatform } from '@zennotes/bridge-contract/platform'
+import type { ExternalUrlResult } from '@zennotes/bridge-contract/application-links'
 import {
   DEFAULT_VAULT_SETTINGS,
+  type AgentEditRecord,
+  type AgentEditSummary,
   type AppUpdateState,
   type AssetMeta,
   type CliInstallStatus,
@@ -54,6 +58,7 @@ import {
   type ServerCapabilities,
   type ServerSessionStatus,
   type TikzRenderResponse,
+  type TraySyncStatus,
   type VaultChangeEvent,
   type VaultDemoTourResult,
   type VaultInfo,
@@ -83,6 +88,7 @@ import {
 } from '@zennotes/shared-domain/excalidraw'
 import type {
   DatabaseDoc,
+  DatabaseSeed,
   DatabaseSidecar,
   DatabaseSummary,
   DbRow
@@ -114,17 +120,28 @@ import * as databases from './databases'
 import { cloudSyncSurface } from './cloud-sync'
 import * as codeLanguages from './code-languages'
 import * as workflows from './workflows'
+import * as tasks from './tasks'
+import * as agentEdits from './agent-edits'
+import { relocateAssetWithReferences, renameNoteWithLinks } from './link-rewrites'
 
 const APP_INFO: ZenAppInfo = {
   name: 'zennotes-rs',
   productName: 'ZenNotes-rs',
-  version: '2.45.0',
+  version: '2.73.0',
   description: 'ZenNotes-rs desktop',
   homepage: 'https://github.com/alf5/ZenNotes-rs',
-  runtime: 'desktop'
+  runtime: 'desktop',
+  hostKind: 'desktop'
 }
 
-function detectPlatform(): NodeJS.Platform {
+// What a bug report needs beside the version (#814): architecture, OS,
+// renderer engine and install format, answered by Rust. getAppInfo() is
+// synchronous and called many times at boot, so this is fetched once when the
+// bridge is created and merged in when it arrives; `:version` and Settings >
+// About read it long after. A field never answered stays out of the report.
+let installInfo: Pick<ZenAppInfo, 'arch' | 'os' | 'engine' | 'install'> = {}
+
+function detectPlatform(): ZenPlatform {
   const ua =
     (typeof navigator !== 'undefined' && (navigator.userAgent || navigator.platform)) || ''
   if (/Mac|iPhone|iPad|iPod/i.test(ua)) return 'darwin'
@@ -217,11 +234,11 @@ function unavailableRaycastStatus(): RaycastExtensionStatus {
 const bridge: ZenBridge = {
   // ---- Sync, app-level ---------------------------------------------------
   getCapabilities: (): ZenCapabilities => TAURI_CAPABILITIES,
-  getAppInfo: (): ZenAppInfo => APP_INFO,
-  platformSync: (): NodeJS.Platform => PLATFORM,
+  getAppInfo: (): ZenAppInfo => ({ ...APP_INFO, ...installInfo }),
+  platformSync: (): ZenPlatform => PLATFORM,
 
   // ---- Platform / system (M0 + M12) -------------------------------------
-  platform: (): Promise<NodeJS.Platform> => invoke('app_platform'),
+  platform: (): Promise<ZenPlatform> => invoke('app_platform'),
   listSystemFonts: (): Promise<string[]> => invoke('app_list_fonts'),
   getAppIconDataUrl: (): Promise<string | null> => invoke('app_icon_data_url'),
   zoomInApp: (): Promise<number> => invoke('app_zoom_in'),
@@ -282,8 +299,11 @@ const bridge: ZenBridge = {
   listFolders: (): Promise<FolderEntry[]> => invoke('vault_list_folders'),
   listAssets: (): Promise<AssetMeta[]> => invoke('vault_list_assets'),
   hasAssetsDir: (): Promise<boolean> => invoke('vault_has_assets_dir'),
-  generateDemoTour: (): Promise<VaultDemoTourResult> => invoke('vault_generate_demo_tour'),
-  removeDemoTour: (): Promise<VaultDemoTourResult> => invoke('vault_remove_demo_tour'),
+  // Placed from vendored @shared/demo-tour-data; imported on demand.
+  generateDemoTour: async (): Promise<VaultDemoTourResult> =>
+    (await import('./demo-tour')).generateDemoTour(),
+  removeDemoTour: async (): Promise<VaultDemoTourResult> =>
+    (await import('./demo-tour')).removeDemoTour(),
   listTemplates: (): Promise<CustomTemplateFile[]> => invoke('vault_list_templates'),
   readTemplate: (sourcePath: string): Promise<string> =>
     invoke('vault_read_template', { sourcePath }),
@@ -306,17 +326,18 @@ const bridge: ZenBridge = {
     invoke('vault_read_comments', { relPath }),
   writeNoteComments: (relPath: string, comments: NoteCommentInput[]): Promise<NoteComment[]> =>
     invoke('vault_write_comments', { relPath, comments }),
-  scanTasks: (): Promise<VaultTask[]> => invoke('vault_scan_tasks'),
-  scanTasksForPath: (relPath: string): Promise<VaultTask[]> =>
-    invoke('vault_scan_tasks_for', { relPath }),
+  // Parsed in the webview through vendored @shared/tasks; see tasks.ts.
+  scanTasks: (): Promise<VaultTask[]> => tasks.scanTasks(),
+  scanTasksForPath: (relPath: string): Promise<VaultTask[]> => tasks.scanTasksForPath(relPath),
   writeNote: (relPath: string, body: string): Promise<NoteMeta> =>
     invoke('vault_write_note', { relPath, body }),
   appendToNote: (relPath: string, body: string, position: 'start' | 'end'): Promise<NoteMeta> =>
     invoke('vault_append_note', { relPath, body, position }),
   createNote: (folder: NoteFolder, title?: string, subpath?: string): Promise<NoteMeta> =>
     invoke('vault_create_note', { folder, title: title ?? null, subpath: subpath ?? null }),
+  // Inbound [[wikilinks]] follow the new name (upstream #111); see link-rewrites.ts.
   renameNote: (relPath: string, nextTitle: string): Promise<NoteMeta> =>
-    invoke('vault_rename_note', { relPath, nextTitle }),
+    renameNoteWithLinks(relPath, nextTitle),
   deleteNote: (relPath: string): Promise<void> => invoke('vault_delete_note', { relPath }),
   moveToTrash: (relPath: string): Promise<NoteMeta> => invoke('vault_move_to_trash', { relPath }),
   restoreFromTrash: (relPath: string): Promise<NoteMeta> =>
@@ -346,10 +367,11 @@ const bridge: ZenBridge = {
   },
 
   // ---- Assets (M7) ------------------------------------------------------
+  // References to the asset follow it (#785); see link-rewrites.ts.
   renameAsset: (relPath: string, nextName: string): Promise<AssetMeta> =>
-    invoke('vault_rename_asset', { relPath, nextName }),
+    relocateAssetWithReferences(relPath, () => invoke('vault_rename_asset', { relPath, nextName })),
   moveAsset: (relPath: string, targetDir: string): Promise<AssetMeta> =>
-    invoke('vault_move_asset', { relPath, targetDir }),
+    relocateAssetWithReferences(relPath, () => invoke('vault_move_asset', { relPath, targetDir })),
   duplicateAsset: (relPath: string): Promise<AssetMeta> =>
     invoke('vault_duplicate_asset', { relPath }),
   deleteAsset: (relPath: string): Promise<DeletedAsset> =>
@@ -519,8 +541,12 @@ const bridge: ZenBridge = {
     sidecar: DatabaseSidecar,
     rows: DbRow[]
   ): Promise<DatabaseDoc> => databases.writeDatabaseSchema(relPath, sidecar, rows),
-  createDatabase: (folder: NoteFolder, subpath: string, title?: string): Promise<DatabaseDoc> =>
-    databases.createDatabase(folder, subpath, title),
+  createDatabase: (
+    folder: NoteFolder,
+    subpath: string,
+    title?: string,
+    seed?: DatabaseSeed
+  ): Promise<DatabaseDoc> => databases.createDatabase(folder, subpath, title, seed),
   renameDatabase: (csvPath: string, newTitle: string): Promise<string> =>
     databases.renameDatabase(csvPath, newTitle),
   createRecordPage: (csvPath: string, title: string, body: string): Promise<string> =>
@@ -670,9 +696,87 @@ const bridge: ZenBridge = {
     invoke('external_file_follow_link', { link }),
 
   // Native "Open File…" for a markdown file, opened the vault-aware way.
-  openFileDialog: (): Promise<boolean> => invoke('app_open_file_dialog')
+  openFileDialog: (): Promise<boolean> => invoke('app_open_file_dialog'),
+
+  // ---- v2.73 contract surface --------------------------------------------
+  // Added by the v2.45.0 -> v2.73.0 re-vendor; see GAP-ANALYSIS.md.
+
+  // Open a URL from a note. Rust owns the permission: http(s)/mailto/tel, or
+  // an application scheme enabled in Settings (external_application_schemes).
+  openExternalUrl: (url: string): Promise<ExternalUrlResult> =>
+    invoke('app_open_external_url', { url }),
+
+  // Undo history kept between launches (#793): machine-local, under the app's
+  // data folder, never in the vault; Rust hashes the note path into a name.
+  readNoteUndoHistory: (path: string): Promise<string | null> =>
+    invoke('undo_history_read', { notePath: path }),
+  writeNoteUndoHistory: (path: string, json: string | null): Promise<void> =>
+    invoke('undo_history_write', { notePath: path, json }),
+  clearNoteUndoHistories: (): Promise<void> => invoke('undo_history_clear'),
+
+  // Agent edit records left by an assistant editing through upstream's MCP
+  // server, reviewed change by change; see agent-edits.ts.
+  listAgentEdits: (): Promise<AgentEditSummary[]> => agentEdits.listAgentEdits(),
+  readAgentEdit: (relPath: string): Promise<AgentEditRecord | null> =>
+    agentEdits.readAgentEdit(relPath),
+  writeAgentEdit: (relPath: string, record: AgentEditRecord | null): Promise<void> =>
+    agentEdits.writeAgentEdit(relPath, record),
+
+  // Close to the tray (#947): closing the last workspace window hides it and
+  // the tray icon brings it back, so the Quick capture hotkey keeps working.
+  // Rust owns the setting (machine-local) and refuses to hide while it is
+  // off; without an appindicator library on Linux it stays off.
+  getKeepRunningInTray: (): Promise<boolean> => invoke('app_get_keep_running_in_tray'),
+  setKeepRunningInTray: (enabled: boolean): Promise<boolean> =>
+    invoke('app_set_keep_running_in_tray', { enabled }),
+  hideWindowToTray: (): Promise<boolean> => invoke('window_hide_to_tray'),
+  reportTraySyncStatus: (status: TraySyncStatus | null): void => {
+    void invoke('app_tray_sync_status', { status }).catch(() => {})
+  },
+  quitApp: (): void => {
+    void invoke('app_quit').catch(() => {})
+  }
+
+  // Deliberately absent (all optional in the contract, so app-core hides
+  // what they drive): sendUsageCount (upstream's anonymous install count goes
+  // to zennotes.org and would count this port as upstream), the MCP server
+  // token and managed-CLI update members (no MCP server or CLI ships here),
+  // and the cloud encryption members (cloud sync is out of scope).
+}
+
+/**
+ * Send `window.open` of an outside URL to the OS, the way Electron's
+ * `setWindowOpenHandler` does upstream (`openAllowedExternalUrl`). app-core
+ * opens every external link this way (preview links, Help, release notes),
+ * and WebKitGTK under Tauri does nothing with such a request: no window, no
+ * browser. The URL goes through `app_open_external_url`, so the same Rust gate
+ * decides (http(s)/mailto/tel, or an application scheme enabled in Settings).
+ * Anything else, a relative URL or the app's own origin, keeps the native
+ * behaviour.
+ */
+function routeExternalWindowOpens(): void {
+  const nativeOpen = window.open.bind(window)
+  window.open = (url?: string | URL, target?: string, features?: string): WindowProxy | null => {
+    const href = url === undefined ? '' : String(url).trim()
+    let external = false
+    try {
+      const parsed = new URL(href)
+      external = parsed.origin !== window.location.origin && parsed.protocol !== 'tauri:'
+    } catch {
+      external = false
+    }
+    if (!external) return nativeOpen(url, target, features)
+    void invoke('app_open_external_url', { url: href }).catch(() => {})
+    return null
+  }
 }
 
 export function createTauriBridge(): ZenBridge {
+  routeExternalWindowOpens()
+  void invoke<typeof installInfo>('app_install_info')
+    .then((info) => {
+      installInfo = info
+    })
+    .catch(() => {})
   return installZenBridge(bridge)
 }

@@ -8,7 +8,7 @@ use tauri::{AppHandle, Manager};
 use tauri_plugin_opener::OpenerExt;
 
 use crate::state::AppState;
-use crate::vault::layout::{self, PRIMARY_ATTACHMENTS_DIR};
+use crate::vault::layout::{self, ASSETS_DIR};
 use crate::vault::notes::resolve_safe;
 
 const APP_ICON: &[u8] = include_bytes!("../icons/128x128.png");
@@ -83,7 +83,7 @@ pub fn reveal_folder(
 }
 
 pub fn reveal_assets_dir(app: &AppHandle, state: &AppState) -> Result<(), String> {
-    let dir = require_root(state)?.join(PRIMARY_ATTACHMENTS_DIR);
+    let dir = require_root(state)?.join(ASSETS_DIR);
     let _ = std::fs::create_dir_all(&dir);
     reveal(app, &dir)
 }

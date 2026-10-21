@@ -68,3 +68,11 @@ describe('renderNoteEmailHtml', () => {
     ).toEqual(['assets/chart.png', 'my pic.png', 'chart.png'])
   })
 })
+
+describe('renderNoteEmailHtml: a lone dash under a line (#898)', () => {
+  it('keeps the line a paragraph', () => {
+    const { html } = renderNoteEmailHtml('# Title\n\nSome text\n-\n', 'file')
+    expect(html).not.toContain('<h2')
+    expect(html).toContain('Some text\n-')
+  })
+})

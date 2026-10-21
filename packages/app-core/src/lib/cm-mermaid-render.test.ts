@@ -79,7 +79,10 @@ describe('mermaidRenderExtension', () => {
     view.destroy()
   })
 
-  it('redraws when the theme identity changes without changing light/dark mode', async () => {
+  // The theme identity carries the text font, and a new font has to be measured
+  // again, so the widget is rebuilt and asks the renderer (which answers from
+  // its cache when only the palette changed).
+  it('rebuilds when the theme identity changes without changing light/dark mode', async () => {
     mermaidMocks.renderMermaidSvg.mockResolvedValue({ ok: true, svg: '<svg data-theme="a" />' })
     const theme = new Compartment()
     const view = mount(DIAGRAM, undefined, theme.of(mermaidRenderExtension('light', 'theme-a')))
@@ -89,13 +92,8 @@ describe('mermaidRenderExtension', () => {
       effects: theme.reconfigure(mermaidRenderExtension('light', 'theme-b'))
     })
 
-    await vi.waitFor(() =>
-      expect(mermaidMocks.renderMermaidSvg).toHaveBeenCalledWith(
-        expect.stringContaining('flowchart LR'),
-        'light',
-        'theme-b'
-      )
-    )
+    await vi.waitFor(() => expect(mermaidMocks.renderMermaidSvg).toHaveBeenCalledTimes(2))
+    expect(mermaidMocks.renderMermaidSvg).toHaveBeenLastCalledWith(expect.stringContaining('flowchart LR'))
     view.destroy()
   })
 

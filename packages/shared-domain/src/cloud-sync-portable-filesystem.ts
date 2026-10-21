@@ -14,6 +14,9 @@ import {
 } from './cloud-sync'
 import type { CloudSyncRepository, CloudSyncRepositoryConflict } from './cloud-sync-coordinator'
 import type { CloudSyncLocalItem, CloudSyncTrackedItem } from './cloud-sync-engine'
+import type { CloudSyncDownloadSource, CloudSyncStagedFile, CloudSyncStagedConflict } from './cloud-sync-content'
+import { randomUUID } from './random-uuid'
+import { cloudProtocolError } from './cloud-error-copy'
 
 const TEXT_EXTENSIONS = new Set([
   '.base',
@@ -60,6 +63,12 @@ const MEDIA_TYPES: Record<string, string> = {
   '.yml': 'application/yaml'
 }
 
+/** Where matchCase notes a respelling in progress. `zennotes-cloud-sync` is a
+ *  local-only folder name, so scans never list it and it never syncs. */
+const RESPELLING_RECORDS = '.zennotes/zennotes-cloud-sync/respellings'
+const RESPELLING_RECORD_NAME =
+  /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.json$/i
+
 export interface CloudSyncFileEntry {
   name: string
   type: 'file' | 'directory'
@@ -67,6 +76,9 @@ export interface CloudSyncFileEntry {
 
 /** The minimal vault-relative filesystem surface implemented by both mobile shells. */
 export interface PortableCloudSyncFileSystem {
+  stageCloudContent?(source: CloudSyncDownloadSource): Promise<CloudSyncStagedFile>
+  applyStagedCloudContent?(change: CloudSyncChange, previous: CloudSyncTrackedItem | undefined, file: CloudSyncStagedFile): Promise<CloudSyncRepositoryConflict | void>
+  resolveStagedCloudConflict?(input: CloudSyncStagedConflict): Promise<void>
   readdir(directory: string): Promise<CloudSyncFileEntry[]>
   stat(path: string): Promise<'file' | 'directory' | null>
   readBase64(path: string): Promise<string>
@@ -74,6 +86,11 @@ export interface PortableCloudSyncFileSystem {
   writeBase64(path: string, value: string): Promise<void>
   deleteFile(path: string): Promise<void>
   rename(from: string, to: string): Promise<void>
+  /** Native hosts can fingerprint and copy large files without bridge-sized bodies. */
+  readItem?(path: string): Promise<CloudSyncLocalItem>
+  validateContent?(content: CloudSyncContent): Promise<void>
+  /** Must preserve the previous file if a write fails, including partial native writes. */
+  writeContent?(path: string, content: CloudSyncContent): Promise<void>
 }
 
 export class CloudSyncLocalEditConflictError extends Error {
@@ -100,7 +117,23 @@ function localConflict(
 
 /** Web-API implementation shared by iOS and Android Capacitor filesystems. */
 export class PortableCloudSyncRepository implements CloudSyncRepository {
-  constructor(private readonly fs: PortableCloudSyncFileSystem) {}
+  readonly stageCloudContent?: CloudSyncRepository['stageCloudContent']
+  readonly applyStagedCloudContent?: CloudSyncRepository['applyStagedCloudContent']
+  readonly resolveStagedCloudConflict?: CloudSyncRepository['resolveStagedCloudConflict']
+
+  constructor(private readonly fs: PortableCloudSyncFileSystem) {
+    if (fs.stageCloudContent && fs.applyStagedCloudContent && fs.resolveStagedCloudConflict) {
+      this.stageCloudContent = fs.stageCloudContent.bind(fs)
+      this.applyStagedCloudContent = fs.applyStagedCloudContent.bind(fs)
+      this.resolveStagedCloudConflict = fs.resolveStagedCloudConflict.bind(fs)
+    }
+  }
+
+  async matchesCloudContent(path: string, reference: CloudSyncStagedFile['reference']): Promise<boolean> {
+    if (!this.fs.readItem) return false
+    const local = await this.readItemOrNull(this.path(path))
+    return local?.content.sha256 === reference.sha256 && local.content.byte_length === reference.byte_length
+  }
 
   async scan(): Promise<CloudSyncLocalItem[]> {
     const items: CloudSyncLocalItem[] = []
@@ -154,7 +187,8 @@ export class PortableCloudSyncRepository implements CloudSyncRepository {
       return
     }
 
-    if (!change.content) throw new Error(`Upsert change ${change.sequence} did not include content`)
+    if (!change.content) throw cloudProtocolError(`Upsert change ${change.sequence} did not include content`)
+    await this.validateContent(change.content)
 
     const previousPath = this.path(previous?.path ?? change.previous_path ?? change.path)
     const nextPath = this.path(change.path)
@@ -163,8 +197,12 @@ export class PortableCloudSyncRepository implements CloudSyncRepository {
         ? [await this.readItemOrNull(previousPath), null]
         : await Promise.all([this.readItemOrNull(previousPath), this.readItemOrNull(nextPath)])
     const currentAtTarget = previousPath === nextPath ? source : destination
+    const oneFile = source !== null && destination !== null && (await this.sameFile(previousPath, nextPath))
 
     if (currentAtTarget?.content.sha256 === change.content.sha256) {
+      // Only the spelling is left to change: the file already holds the Cloud
+      // bytes, so there is nothing of this device's to vouch for or lose.
+      if (oneFile) return await this.matchCase(nextPath)
       if (previousPath !== nextPath && source) {
         if (!vouchedFor(source, previous)) return localConflict(previousPath, source)
         await this.fs.deleteFile(previousPath)
@@ -177,13 +215,14 @@ export class PortableCloudSyncRepository implements CloudSyncRepository {
         return await this.keepBoth(nextPath, change.content)
       return localConflict(previousPath, source)
     }
-    if (destination) {
+    if (destination && !oneFile) {
       if (isCloudSyncVaultSettingsPath(nextPath))
         return await this.keepBoth(nextPath, change.content)
       return localConflict(nextPath, destination)
     }
     await this.write(nextPath, change.content)
-    if (previousPath !== nextPath && source) await this.fs.deleteFile(previousPath)
+    if (oneFile) await this.matchCase(nextPath)
+    else if (previousPath !== nextPath && source) await this.fs.deleteFile(previousPath)
   }
 
   async resolveBootstrapConflict(input: {
@@ -193,6 +232,7 @@ export class PortableCloudSyncRepository implements CloudSyncRepository {
     resolution: CloudSyncBootstrapConflictResolution
   }): Promise<void> {
     const originalPath = this.path(input.path)
+    await this.validateContent(input.cloudContent)
     const current = await this.readItemOrNull(originalPath)
     if (!current || current.content.sha256 !== input.expectedLocalSha256) {
       throw new Error(
@@ -209,7 +249,12 @@ export class PortableCloudSyncRepository implements CloudSyncRepository {
       if (input.cloudContent.encoding !== 'utf8' || input.resolution.merged_text === undefined) {
         throw new Error('Only text conflicts can be merged.')
       }
-      await this.fs.writeText(originalPath, input.resolution.merged_text)
+      const bytes = new TextEncoder().encode(input.resolution.merged_text)
+      await this.write(originalPath, {
+        encoding: 'utf8', data: input.resolution.merged_text,
+        sha256: await sha256(bytes), byte_length: bytes.byteLength,
+        media_type: input.cloudContent.media_type
+      })
       return
     }
 
@@ -226,7 +271,7 @@ export class PortableCloudSyncRepository implements CloudSyncRepository {
       throw new Error('Choose a different filename inside the synced vault.')
     }
     if ((await this.fs.stat(localCopyPath)) !== null) {
-      throw new Error(`${localCopyPath} already exists.`)
+      throw new Error(`A file named “${localCopyPath}” already exists. Choose another name.`)
     }
 
     await this.fs.rename(originalPath, localCopyPath)
@@ -271,11 +316,13 @@ export class PortableCloudSyncRepository implements CloudSyncRepository {
     }
 
     const files = normalizedResolutionFiles(input.files)
+    // Validate every source before creating a copy or replacing the original.
+    for (const file of files) await this.validateContent(file.content)
     const expectedKey = expectedPath ? cloudSyncPathKey(expectedPath) : null
     for (const file of files) {
       if (cloudSyncPathKey(file.path) === expectedKey) continue
       if ((await this.fs.stat(file.path)) !== null) {
-        throw new Error(`${file.path} already exists. Choose another filename.`)
+        throw new Error(`A file named “${file.path}” already exists. Choose another name.`)
       }
     }
 
@@ -307,6 +354,131 @@ export class PortableCloudSyncRepository implements CloudSyncRepository {
       }
       throw error
     }
+  }
+
+  /**
+   * Whether two spellings of one path key reach the same file. A
+   * case-insensitive volume (Android's shared storage, an external drive, the
+   * simulator on a Mac) answers both with one file, and deleting the old
+   * spelling there deleted the only copy. A case-sensitive volume can hold
+   * both as separate files, so finding a file under each spelling proves
+   * nothing. This layer cannot compare inodes; it asks the directory where the
+   * spellings part instead, since a listing names one file once, under its
+   * stored name.
+   */
+  private async sameFile(left: string, right: string): Promise<boolean> {
+    if (cloudSyncPathKey(left) !== cloudSyncPathKey(right)) return false
+    const leftSegments = left.split('/')
+    const rightSegments = right.split('/')
+    const index = leftSegments.findIndex((segment, position) => segment !== rightSegments[position])
+    if (index < 0) return true
+    const names = new Set(
+      (await this.fs.readdir(leftSegments.slice(0, index).join('/'))).map((entry) =>
+        entry.name.normalize('NFC')
+      )
+    )
+    return !(names.has(leftSegments[index]!) && names.has(rightSegments[index]!))
+  }
+
+  /**
+   * Give the one file of a case-only rename its new spelling. The volume
+   * keeps whatever case the file already had, and the next scan would report
+   * that and push the rename back. A native rename that overwrites removes an
+   * existing destination before moving onto it, and here that destination is
+   * the file itself, so the rename detours through a name nothing else holds
+   * and that sync ignores. A record written before the first step lets the
+   * next run finish the rename if the app stops between the two
+   * (recoverInterruptedWork); without it the note sat under the detour name
+   * for good, out of sight of the app and of sync.
+   */
+  private async matchCase(path: string): Promise<void> {
+    const slash = path.lastIndexOf('/')
+    const name = path.slice(slash + 1)
+    const entries = await this.fs.readdir(slash < 0 ? '' : path.slice(0, slash))
+    if (entries.some((entry) => entry.name.normalize('NFC') === name)) return
+    const id = randomUUID()
+    const detour = `${path}.${id}.tmp`
+    const record = `${RESPELLING_RECORDS}/${id}.json`
+    await this.fs.writeText(record, JSON.stringify({ path, detour }))
+    try {
+      await this.fs.rename(path, detour)
+    } catch (error) {
+      await this.fs.deleteFile(record).catch(() => undefined)
+      throw error
+    }
+    // A save that landed under the old spelling since the first step is the
+    // note's newest version, and the second step would remove it as an
+    // existing destination. It stays where it is, and the record is left for
+    // the next run to settle the parked copy against it.
+    if ((await this.fs.stat(path)) !== null) return
+    await this.fs.rename(detour, path)
+    await this.fs.deleteFile(record).catch(() => undefined)
+  }
+
+  /**
+   * Finish the case-only renames (matchCase) an earlier run was stopped in
+   * the middle of. The coordinator calls this before a run pulls or scans.
+   * A parked note whose name is free goes back under it; one whose name holds
+   * the same bytes again (a replay wrote them back) is a duplicate and goes;
+   * anything else stays, since it may be the only copy of one side. A record
+   * that cannot be trusted is dropped without touching any file.
+   *
+   * Never fails a run. The change that was being applied when the app stopped
+   * was not saved as applied, so the run replays it and writes the note again
+   * on its own; this only spares that rewrite and the parked duplicate. A
+   * record that cannot be settled now is kept for the next run.
+   */
+  async recoverInterruptedWork(): Promise<void> {
+    let entries: CloudSyncFileEntry[]
+    try {
+      if ((await this.fs.stat(RESPELLING_RECORDS)) !== 'directory') return
+      entries = await this.fs.readdir(RESPELLING_RECORDS)
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (entry.type !== 'file') continue
+      const recordPath = `${RESPELLING_RECORDS}/${entry.name}`
+      try {
+        const respelling = await this.readRespelling(recordPath, entry.name)
+        if (respelling) await this.finishRespelling(respelling)
+        await this.fs.deleteFile(recordPath)
+      } catch {
+        // Kept for the next run.
+      }
+    }
+  }
+
+  private async readRespelling(
+    recordPath: string,
+    fileName: string
+  ): Promise<{ path: string; detour: string } | null> {
+    const id = RESPELLING_RECORD_NAME.exec(fileName)?.[1]
+    if (!id) return null
+    try {
+      const value: unknown = JSON.parse(
+        new TextDecoder().decode(base64ToBytes(await this.fs.readBase64(recordPath)))
+      )
+      if (!value || typeof value !== 'object') return null
+      const { path, detour } = value as Record<string, unknown>
+      if (typeof path !== 'string' || detour !== `${path}.${id}.tmp`) return null
+      if (!shouldSyncVaultPath(path) || this.path(path) !== path) return null
+      return { path, detour }
+    } catch {
+      return null
+    }
+  }
+
+  private async finishRespelling({ path, detour }: { path: string; detour: string }): Promise<void> {
+    if ((await this.fs.stat(detour)) !== 'file') return
+    const current = await this.fs.stat(path)
+    if (current === null) {
+      await this.fs.rename(detour, path)
+      return
+    }
+    if (current !== 'file') return
+    const [kept, parked] = await Promise.all([this.readItem(path), this.readItem(detour)])
+    if (kept.content.sha256 === parked.content.sha256) await this.fs.deleteFile(detour)
   }
 
   /** Park the incoming version beside the local file rather than over it. */
@@ -348,6 +520,7 @@ export class PortableCloudSyncRepository implements CloudSyncRepository {
   }
 
   private async readItem(path: string): Promise<CloudSyncLocalItem> {
+    if (this.fs.readItem) return this.fs.readItem(path)
     const bytes = base64ToBytes(await this.fs.readBase64(path))
     const text = decodeText(path, bytes)
     return {
@@ -364,6 +537,8 @@ export class PortableCloudSyncRepository implements CloudSyncRepository {
   }
 
   private async write(path: string, content: CloudSyncContent): Promise<void> {
+    await this.validateContent(content)
+    if (this.fs.writeContent) return this.fs.writeContent(path, content)
     if (content.encoding === 'utf8') {
       await this.fs.writeText(path, content.data)
       return
@@ -372,7 +547,15 @@ export class PortableCloudSyncRepository implements CloudSyncRepository {
       await this.fs.writeBase64(path, content.data)
       return
     }
-    throw new Error('Encrypted cloud sync content must be decrypted before filesystem apply')
+    throw cloudProtocolError('Encrypted cloud sync content must be decrypted before filesystem apply')
+  }
+
+  private async validateContent(content: CloudSyncContent): Promise<void> {
+    if (content.data === '' && content.byte_length > 0 &&
+        (!this.fs.validateContent || !this.fs.writeContent)) {
+      throw cloudProtocolError('File content has no readable source bytes.')
+    }
+    await this.fs.validateContent?.(content)
   }
 
   private path(value: string): string {

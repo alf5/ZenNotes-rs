@@ -1,6 +1,6 @@
 const DIAGRAM_TAB_PREFIX = 'zen://diagram/'
 
-export type DiagramTabKind = 'mermaid' | 'tikz' | 'jsxgraph' | 'function-plot'
+export type DiagramTabKind = 'mermaid' | 'd2' | 'tikz' | 'jsxgraph' | 'function-plot'
 
 export interface DiagramTabPayload {
   id: string
@@ -13,6 +13,7 @@ let diagramTabSequence = 0
 
 const DIAGRAM_KIND_LABELS: Record<DiagramTabKind, string> = {
   mermaid: 'Mermaid diagram',
+  d2: 'D2 diagram',
   tikz: 'TikZ diagram',
   jsxgraph: 'JSXGraph diagram',
   'function-plot': 'Function plot'

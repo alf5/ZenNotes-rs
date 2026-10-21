@@ -6,10 +6,12 @@
 //! here (see src/bridge/tauri-bridge.ts on the frontend side).
 
 mod app_config;
+mod app_info;
 mod asset_protocol;
 mod code_languages;
 mod custom_css;
 mod deep_links;
+mod external_urls;
 mod ipc;
 mod link_metadata;
 mod os;
@@ -18,6 +20,8 @@ mod search;
 mod secrets;
 mod standalone_links;
 mod state;
+mod tray;
+mod undo_history;
 mod vault;
 mod watcher;
 mod windows;
@@ -62,9 +66,8 @@ pub fn run() {
             for arg in argv.iter().skip(1) {
                 deep_links::handle_url_or_path(app, arg);
             }
-            if let Some(win) = app.get_webview_window("main") {
-                let _ = win.set_focus();
-            }
+            // Focuses the main window, and shows any the tray is holding (#947).
+            tray::on_reopen(app);
         }))
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
@@ -74,7 +77,14 @@ pub fn run() {
             asset_protocol::handle(ctx.app_handle(), request)
         })
         .manage(AppState::default())
+        .manage(tray::TrayState::default())
+        .on_window_event(tray::on_window_event)
         .setup(|app| {
+            // Saved undo histories (#793) expire and are capped per vault; off
+            // the boot path, so a slow sweep never delays the first window.
+            undo_history::spawn_prune(app.handle());
+            // Put the tray icon back when "Keep running in the tray" was left on.
+            tray::restore_at_launch(app.handle());
             // Watch the portable config.toml for external edits (synced
             // dotfiles / hand-edits) and push changes to every window.
             match app_config::spawn_watcher(app.handle().clone()) {
@@ -165,8 +175,9 @@ pub fn run() {
             vault_cmds::vault_restore_deleted_asset,
             vault_cmds::vault_import_files,
             vault_cmds::vault_import_pasted_image,
-            vault_cmds::vault_scan_tasks,
-            vault_cmds::vault_scan_tasks_for,
+            vault_cmds::vault_task_sources,
+            vault_cmds::vault_task_source_for,
+            vault_cmds::db_read_texts,
             vault_cmds::vault_read_comments,
             vault_cmds::vault_write_comments,
             vault_cmds::vault_get_settings,
@@ -175,8 +186,8 @@ pub fn run() {
             vault_cmds::vault_read_template,
             vault_cmds::vault_write_template,
             vault_cmds::vault_delete_template,
-            vault_cmds::vault_generate_demo_tour,
-            vault_cmds::vault_remove_demo_tour,
+            vault_cmds::db_ensure_vault_layout,
+            vault_cmds::db_remove_dir_if_empty,
             window_cmds::window_open_note,
             window_cmds::window_open_vault,
             window_cmds::window_toggle_quick_capture,
@@ -224,7 +235,7 @@ pub fn run() {
             vault_cmds::db_write_text,
             vault_cmds::db_exists,
             vault_cmds::db_mkdir,
-            vault_cmds::db_rename,
+            vault_cmds::db_rename_form_dir,
             vault_cmds::db_folder_root_rel,
             vault_cmds::db_create_record_page,
             vault_cmds::vault_write_drawing,
@@ -257,6 +268,28 @@ pub fn run() {
             code_languages::code_languages_write_manifest,
             code_languages::code_languages_delete,
             code_languages::code_languages_reveal,
+            // v2.73 mirror
+            vault_cmds::vault_list_agent_edits,
+            vault_cmds::vault_read_agent_edit,
+            vault_cmds::vault_write_agent_edit,
+            undo_history::undo_history_read,
+            undo_history::undo_history_write,
+            undo_history::undo_history_clear,
+            external_urls::app_open_external_url,
+            app_info::app_install_info,
+            vault_cmds::db_link_text,
+            vault_cmds::db_path_taken,
+            vault_cmds::db_respell_link,
+            vault_cmds::db_rename_entry,
+            vault_cmds::db_remove_entry,
+            vault_cmds::db_sidecar_rel,
+            vault_cmds::db_prepare_note_creation,
+            vault_cmds::db_prune_sidecar_dirs,
+            tray::app_get_keep_running_in_tray,
+            tray::app_set_keep_running_in_tray,
+            tray::window_hide_to_tray,
+            tray::app_quit,
+            tray::app_tray_sync_status,
         ])
         .build(tauri::generate_context!())
         .expect("error while building ZenNotes-rs")
@@ -266,10 +299,16 @@ pub fn run() {
             // exists on Apple platforms; on Linux/Windows these arrive via the
             // deep-link plugin + single-instance, so gate it by target.
             #[cfg(any(target_os = "macos", target_os = "ios"))]
-            if let tauri::RunEvent::Opened { urls } = _event {
+            if let tauri::RunEvent::Opened { urls } = &_event {
                 for url in urls {
                     deep_links::handle_url_or_path(_app, url.as_str());
                 }
+            }
+            // A dock click must bring back a usable window, including the ones
+            // the tray is holding.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                tray::on_reopen(_app);
             }
         });
 }

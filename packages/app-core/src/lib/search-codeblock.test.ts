@@ -6,6 +6,7 @@ import {
   HighlightStyle,
   LanguageDescription,
   defaultHighlightStyle,
+  forceParsing,
   syntaxHighlighting
 } from '@codemirror/language'
 import { SearchQuery, openSearchPanel, search, setSearchQuery } from '@codemirror/search'
@@ -52,7 +53,7 @@ const resolveCodeLanguage = (info: string): LanguageDescription | null => {
 function mountEditor(doc: string): EditorView {
   const parent = document.createElement('div')
   document.body.append(parent)
-  return new EditorView({
+  const view = new EditorView({
     parent,
     state: EditorState.create({
       doc,
@@ -68,6 +69,10 @@ function mountEditor(doc: string): EditorView {
       ]
     })
   })
+  // The first parse runs on a time budget; on a slow CI runner it stopped
+  // before the code block, whose tokens the tests read straight away.
+  forceParsing(view, view.state.doc.length, 5000)
+  return view
 }
 
 function runSearch(view: EditorView, query: string): void {

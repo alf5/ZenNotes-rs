@@ -1,6 +1,8 @@
 // Shared IPC channel names and types between main + renderer.
 // Keeping these in one file gives us a single source of truth.
 
+import type { ZenPlatform } from './platform.js'
+
 export const IPC = {
   WORKSPACE_GET_INFO: 'workspace:get-info',
   WORKSPACE_CONNECT_REMOTE: 'workspace:connect-remote',
@@ -45,6 +47,9 @@ export const IPC = {
   VAULT_READ_NOTE: 'vault:read-note',
   VAULT_READ_COMMENTS: 'vault:read-comments',
   VAULT_WRITE_COMMENTS: 'vault:write-comments',
+  VAULT_LIST_AGENT_EDITS: 'vault:list-agent-edits',
+  VAULT_READ_AGENT_EDIT: 'vault:read-agent-edit',
+  VAULT_WRITE_AGENT_EDIT: 'vault:write-agent-edit',
   VAULT_WRITE_NOTE: 'vault:write-note',
   VAULT_APPEND_NOTE: 'vault:append-note',
   VAULT_CREATE_NOTE: 'vault:create-note',
@@ -97,6 +102,7 @@ export const IPC = {
   APP_LIST_FONTS: 'app:list-fonts',
   APP_ICON_DATA_URL: 'app:icon-data-url',
   APP_OPEN_SETTINGS: 'app:open-settings',
+  APP_OPEN_EXTERNAL_URL: 'app:open-external-url',
   APP_OPEN_NOTE_REQUESTED: 'app:open-note-requested',
   APP_FRAME_ESCAPE: 'app:frame-escape',
   APP_RENDERER_READY: 'app:renderer-ready',
@@ -105,6 +111,7 @@ export const IPC = {
   APP_ZOOM_RESET: 'app:zoom-reset',
   APP_UPDATER_GET_STATE: 'app-updater:get-state',
   APP_UPDATER_CHECK: 'app-updater:check',
+  APP_USAGE_COUNT: 'app:usage-count',
   APP_UPDATER_CHECK_WITH_UI: 'app-updater:check-with-ui',
   APP_UPDATER_DOWNLOAD: 'app-updater:download',
   APP_UPDATER_INSTALL: 'app-updater:install',
@@ -114,6 +121,15 @@ export const IPC = {
   CLOUD_ACCOUNT_LOGOUT: 'cloud-account:logout',
   CLOUD_ACCOUNT_ON_CHANGE: 'cloud-account:on-change',
   CLOUD_VAULTS_LIST: 'cloud-vaults:list',
+  CLOUD_ENCRYPTION_STATUS: 'cloud-encryption:status',
+  CLOUD_ENCRYPTION_SETUP_PREPARE: 'cloud-encryption:setup-prepare',
+  CLOUD_ENCRYPTION_SETUP_FINISH: 'cloud-encryption:setup-finish',
+  CLOUD_ENCRYPTION_UNLOCK: 'cloud-encryption:unlock',
+  CLOUD_ENCRYPTION_PASSPHRASE_CHANGE: 'cloud-encryption:passphrase-change',
+  CLOUD_ENCRYPTION_RECOVERY_PREPARE: 'cloud-encryption:recovery-prepare',
+  CLOUD_ENCRYPTION_RECOVERY_FINISH: 'cloud-encryption:recovery-finish',
+  CLOUD_ENCRYPTION_LOCK: 'cloud-encryption:lock',
+  CLOUD_VAULT_ENCRYPT: 'cloud-vault:encrypt',
   CLOUD_SERVICE_ACCOUNT_GET: 'cloud-service-account:get',
   CLOUD_PUBLISHED_NOTES_LIST: 'cloud-published-notes:list',
   CLOUD_PUBLISHED_NOTE_CREATE: 'cloud-published-note:create',
@@ -125,6 +141,10 @@ export const IPC = {
   CLOUD_VAULT_LINK_DELETE: 'cloud-vault-link:delete',
   CLOUD_VAULT_DELETE: 'cloud-vault:delete',
   CLOUD_VAULT_SYNC: 'cloud-vault:sync',
+  CLOUD_VAULT_HAS_CHANGES: 'cloud-vault:has-changes',
+  CLOUD_VAULT_SYNC_WINDOW: 'cloud-vault:sync-window',
+  CLOUD_VAULT_SYNC_WINDOW_ACK: 'cloud-vault:sync-window-ack',
+  CLOUD_VAULT_CONFLICT_REVIEW_RELEASE: 'cloud-vault:conflict-review-release',
   CLOUD_VAULT_BOOTSTRAP_CONFLICT_GET: 'cloud-vault-bootstrap-conflict:get',
   CLOUD_VAULT_BOOTSTRAP_CONFLICT_RESOLVE: 'cloud-vault-bootstrap-conflict:resolve',
   CLOUD_VAULT_CONFLICT_GET: 'cloud-vault-conflict:get',
@@ -136,6 +156,7 @@ export const IPC = {
   CLOUD_BACKUP_SCHEDULE_GET: 'cloud-backup-schedule:get',
   CLOUD_BACKUP_SCHEDULE_UPDATE: 'cloud-backup-schedule:update',
   CLOUD_BACKUP_ITEMS_LIST: 'cloud-backup-items:list',
+  CLOUD_BACKUP_ITEMS_PAGE: 'cloud-backup-items:page',
   CLOUD_BACKUP_CREATE: 'cloud-backup:create',
   CLOUD_BACKUP_DOWNLOAD: 'cloud-backup:download',
   CLOUD_BACKUP_DELETE: 'cloud-backup:delete',
@@ -153,6 +174,11 @@ export const IPC = {
   APP_SET_QUICK_CAPTURE_HOTKEY: 'app:set-quick-capture-hotkey',
   APP_GET_QUICK_CAPTURE_PINNED: 'app:get-quick-capture-pinned',
   APP_SET_QUICK_CAPTURE_PINNED: 'app:set-quick-capture-pinned',
+  APP_GET_KEEP_RUNNING_IN_TRAY: 'app:get-keep-running-in-tray',
+  APP_SET_KEEP_RUNNING_IN_TRAY: 'app:set-keep-running-in-tray',
+  APP_TRAY_SYNC_STATUS: 'app:tray-sync-status',
+  WINDOW_HIDE_TO_TRAY: 'window:hide-to-tray',
+  APP_QUIT: 'app:quit',
   APP_READ_EXTERNAL_FILE: 'app:read-external-file',
   APP_WRITE_EXTERNAL_FILE: 'app:write-external-file',
   APP_MOVE_EXTERNAL_FILE_TO_VAULT: 'app:move-external-file-to-vault',
@@ -165,14 +191,22 @@ export const IPC = {
   MCP_INSTALL: 'mcp:install',
   MCP_UNINSTALL: 'mcp:uninstall',
   MCP_RUNTIME: 'mcp:runtime',
+  MCP_SERVER_TOKEN_STATE: 'mcp:server-token-state',
+  MCP_SHARE_SERVER_TOKEN: 'mcp:share-server-token',
+  MCP_REMOVE_SERVER_TOKEN: 'mcp:remove-server-token',
   MCP_GET_INSTRUCTIONS: 'mcp:get-instructions',
   MCP_SET_INSTRUCTIONS: 'mcp:set-instructions',
   CLI_GET_STATUS: 'cli:get-status',
   CLI_INSTALL: 'cli:install',
   CLI_UNINSTALL: 'cli:uninstall',
+  CLI_UPDATE_GET_STATE: 'cli:update-get-state',
+  CLI_UPDATE_CHECK: 'cli:update-check',
+  CLI_SET_AUTO_UPDATE: 'cli:set-auto-update',
+  CLI_UPDATE_ON_STATE: 'cli:update-on-state',
   RAYCAST_GET_STATUS: 'raycast:get-status',
   RAYCAST_INSTALL: 'raycast:install',
   CONFIG_GET_SYNC: 'config:get-sync',
+  APP_INSTALL_INFO_SYNC: 'app:install-info-sync',
   CONFIG_SET: 'config:set',
   CONFIG_GET_PATH: 'config:get-path',
   CONFIG_REVEAL: 'config:reveal',
@@ -197,7 +231,12 @@ export const IPC = {
   // Per-vault workspace state (open tabs, layout, cursor) persisted to
   // <vault>/.zennotes/workspace.json so it syncs with the vault. (#292)
   WORKSPACE_STATE_READ: 'workspace-state:read',
-  WORKSPACE_STATE_WRITE: 'workspace-state:write'
+  WORKSPACE_STATE_WRITE: 'workspace-state:write',
+  // Per-note undo history kept between launches, in the app's own user-data
+  // folder and never in the vault (Vim's `undofile`). (#793)
+  UNDO_HISTORY_READ: 'undo-history:read',
+  UNDO_HISTORY_WRITE: 'undo-history:write',
+  UNDO_HISTORY_CLEAR: 'undo-history:clear'
 } as const
 
 export interface TikzRenderResponse {
@@ -214,10 +253,80 @@ export type AppUpdatePhase =
   | 'not-available'
   | 'downloading'
   | 'downloaded'
+  | 'installing'
+  /**
+   * The last check could not reach GitHub at all (no network, DNS down,
+   * connection refused). Not an error the user has to act on: the host keeps
+   * watching and checks again on its own once the connection is back.
+   */
+  | 'offline'
   | 'error'
 
-/** Where on disk the `zen` shim is currently installed (or could be). */
+/** What a window reports about its Cloud sync for the tray icon (#947). Only
+ *  a connected, linked vault has a state worth showing; anything else is
+ *  reported as null and leaves the tray without a sync line. */
+export type TraySyncState = 'idle' | 'syncing' | 'attention' | 'error'
+
+export interface TraySyncStatus {
+  state: TraySyncState
+  vaultName: string | null
+  /** Epoch milliseconds of the last finished sync, when there was one. */
+  lastSyncedAt: number | null
+}
+
+export interface CliInstallRequest {
+  /** Main-issued approval for a specific dangling historical shortcut. */
+  repairToken: string
+}
+
+/** Where on disk the `zn` shim is currently installed (or could be). */
+/**
+ * The desktop-managed `zn` and its updates. ZenNotes installs newer CLI
+ * releases itself from a signed manifest on the latest ZenNotes/tui release,
+ * so a CLI fix no longer waits for a desktop release.
+ */
+export interface CliUpdateState {
+  /** False on platforms without a managed CLI (Windows). */
+  supported: boolean
+  /** Install newer releases as they appear, or only report them. */
+  autoUpdate: boolean
+  phase:
+    | 'idle'
+    | 'checking'
+    | 'up-to-date'
+    | 'available'
+    | 'updated'
+    | 'incompatible'
+    | 'not-installed'
+    | 'error'
+  /** The version `zn` runs now, from this build's bundle or a later update. */
+  installedVersion: string | null
+  /** The version this desktop build ships, the floor it always keeps. */
+  bundledVersion: string | null
+  /** Set when a newer release was found, installed or not. */
+  availableVersion: string | null
+  /** Epoch ms of the last finished check. */
+  lastCheckedAt: number | null
+  message: string | null
+}
+
+export interface CliUpdateCheckRequest {
+  /** Install a newer compatible release instead of only reporting it. */
+  install: boolean
+}
+
 export interface CliInstallStatus {
+  /** Runtime supplied by this desktop build or its retained managed install. */
+  runtime?: 'go' | 'node'
+  runtimeVersion?: string
+  runtimeError?: string
+  /** Offered only for a missing historical app target without an ownership receipt. */
+  repair?: {
+    token: string
+    oldTarget: string
+    newTarget: string
+    backupPath: string
+  }
   /** True if the wrapper script is shipped with this build. False in
    *  dev runs where electron-vite has not bundled the CLI yet. */
   available: boolean
@@ -437,6 +546,9 @@ export interface VaultViewSettings {
   groupByKind?: boolean
   tasksViewMode?: string
   kanbanGroupBy?: string
+  /** Folder board: group by the children of this folder (relative to the
+   *  notes area); empty groups by each note's own folder. (#730) */
+  kanbanFolderRoot?: string
   kanbanColumnTitles?: Record<string, string>
   kanbanColumnOrder?: Record<string, string[]>
   kanbanCardOrder?: Record<string, string[]>
@@ -447,6 +559,18 @@ export interface VaultViewSettings {
 }
 
 export interface VaultSettings {
+  /**
+   * The name the vault goes by in the app (#692): the sidebar header, the
+   * vault switcher, the title bar, the CLI's vault list. Absent means the
+   * folder's own name, which is what every vault had before. It lives in
+   * vault.json rather than the app's config so it travels with the vault
+   * (a `docs/` folder inside a repo can be "Acme API docs" on every machine
+   * that opens it), and it is deliberately not a portable app preference for
+   * the same reason. Normalized by `normalizeVaultDisplayName` in
+   * shared-domain: trimmed, inner whitespace collapsed, control characters
+   * dropped, capped, and omitted rather than stored empty.
+   */
+  displayName?: string
   primaryNotesLocation: PrimaryNotesLocation
   dailyNotes: DailyNotesSettings
   weeklyNotes: WeeklyNotesSettings
@@ -484,11 +608,14 @@ export interface VaultSettings {
   /**
    * Tasks-system settings (#458). `excludedFolders` lists vault-relative
    * directory paths (as they exist on disk) whose notes never feed the Tasks
-   * surfaces, on any runtime. Absent means nothing is excluded. An object
-   * rather than a bare list so the deferred per-vault `mode: all | tagged`
-   * can land beside it without another migration.
+   * surfaces, on any runtime. Absent means nothing is excluded.
+   * `includedFolders`, the Task folders (#962), narrows Tasks to the notes
+   * inside the folders it lists; absent or empty means the whole vault, and
+   * `excludedFolders` still applies inside them. An object rather than a bare
+   * list so the deferred per-vault `mode: all | tagged` can land beside it
+   * without another migration.
    */
-  tasks?: { excludedFolders?: string[] }
+  tasks?: { excludedFolders?: string[]; includedFolders?: string[] }
   /**
    * Typst preamble settings (#486, #562). `folder` names the directory whose
    * notes are Typst preambles, matched at any depth; absent means `typst`.
@@ -597,6 +724,42 @@ export interface NoteContent extends NoteMeta {
   body: string
 }
 
+/** One assistant edit in an agent edit record (docs/ideas/agent-edit-review.md). */
+export interface AgentEditEntry {
+  /** Epoch milliseconds. */
+  at: number
+  /** The assistant's display name, as comments carry it ("Claude Code"). */
+  agent: string
+  /** The MCP tool that made the edit. */
+  tool: string
+}
+
+/** A change someone else made between two assistant edits. */
+export interface AgentEditOutsideChange {
+  from: string
+  to: string
+}
+
+/** What a note said before an assistant changed it through MCP, kept beside
+ *  the note at `.zennotes/agent-edits/<note>.json` until the user reviews the
+ *  change. Built and read by `@shared/agent-edits`. */
+export interface AgentEditRecord {
+  version: 1
+  before: string
+  after: string | null
+  edits: AgentEditEntry[]
+  outside: AgentEditOutsideChange[]
+}
+
+/** A note with assistant edits to review, for the banner and the palette. */
+export interface AgentEditSummary {
+  notePath: string
+  agent: string
+  /** The newest edit, epoch milliseconds. */
+  at: number
+  edits: number
+}
+
 export interface NoteComment {
   id: string
   /** Path relative to the vault root for the note this comment belongs to. */
@@ -610,6 +773,11 @@ export interface NoteComment {
   createdAt: number
   updatedAt: number
   resolvedAt: number | null
+  /** Who wrote it. Absent for the vault's owner; an assistant's name (via the
+   *  MCP server or the CLI) otherwise, so a discussion reads like one. (#738) */
+  author?: string
+  /** Threads a reply under a top-level comment's id. Absent on top-level comments. */
+  parentId?: string | null
 }
 
 export interface NoteCommentInput {
@@ -622,6 +790,8 @@ export interface NoteCommentInput {
   createdAt?: number
   updatedAt?: number
   resolvedAt?: number | null
+  author?: string
+  parentId?: string | null
 }
 
 export type VaultTextSearchBackendPreference = 'auto' | 'builtin' | 'ripgrep' | 'fzf'
@@ -703,6 +873,16 @@ export interface PastedImageInput {
 export interface VaultInfo {
   root: string
   name: string
+  /**
+   * The folder's own name on disk, for a host whose `root` is not a path
+   * (the phone shells describe a vault as "On this device › ZenNotes › docs").
+   * The display name (#692) falls back to this when it is cleared, and the
+   * Vault name field shows it as the placeholder; without it the app takes
+   * the root's last path segment, which is right for every host whose root
+   * is a path (desktop, the web client, a remote workspace) and wrong for
+   * one whose root is a label.
+   */
+  folderName?: string
   /** True when this is a temporary folder session (a folder dropped on the app
    *  to read, not opened as a vault): edits save to the files in place, but no
    *  ZenNotes state is written into the folder and it isn't remembered. The
@@ -758,7 +938,7 @@ export interface LocalVaultEntry extends VaultInfo {
 
 export interface ServerCapabilities {
   version: string
-  platform: NodeJS.Platform
+  platform: ZenPlatform
   authRequired: boolean
   supportsSessionLogin: boolean
   browseRootsEnforced: boolean
@@ -776,6 +956,11 @@ export interface ServerCapabilities {
   /** Server-side workflow file CRUD plus journalled apply/undo. Absent before
    *  2.29, where the web client must keep Workflows read-only. */
   supportsWorkflows?: boolean
+  /** Custom-template CRUD under `.zennotes/templates/` (the `/templates`
+   *  routes), the same files the desktop keeps for a local vault. Absent
+   *  before 2.46, which keeps Settings, Templates read-only on the web client
+   *  and on a desktop connected to that server (#723). */
+  supportsCustomTemplates?: boolean
 }
 
 export interface ServerSessionStatus {
@@ -850,12 +1035,20 @@ export type VaultChangeKind = 'add' | 'change' | 'unlink'
  *  watch socket that reconnected): anything may have happened while the feed
  *  was down, so the renderer re-pulls every surface the feed keeps fresh.
  *  Servers never emit it. */
+/** `templates` is a custom template under `.zennotes/templates/` changing on
+ *  disk; the path is that file's vault-relative path, and the client re-lists
+ *  templates rather than notes. */
+/** `agent-edits` is a note's agent edit record under `.zennotes/agent-edits/`
+ *  changing (an assistant edited the note through MCP, or a review moved on);
+ *  like `comments`, the path is the NOTE's vault-relative path. */
 export type VaultChangeScope =
   | 'content'
   | 'vault-settings'
   | 'comments'
+  | 'agent-edits'
   | 'database'
   | 'folder'
+  | 'templates'
   | 'resync'
 
 export interface VaultChangeEvent {

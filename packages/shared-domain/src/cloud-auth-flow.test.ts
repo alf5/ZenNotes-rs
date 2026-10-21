@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { CloudAccount } from '@zennotes/bridge-contract/cloud-sync'
+import { CLOUD_SIGN_IN_TROUBLE_MESSAGE, describeCloudError } from './cloud-error-copy'
 import {
   CloudAuthFlow,
   createCloudAuthChallenge,
@@ -111,7 +112,7 @@ describe('CloudAuthFlow', () => {
     await flow.connect('https://zennotes.org')
 
     await expect(flow.complete({ code: 'OneTimeCode', state: 'other-state' })).rejects.toThrow(
-      'invalid or has expired'
+      'This sign-in has expired.'
     )
     storage.pending = {
       base_url: 'https://zennotes.org',
@@ -120,7 +121,7 @@ describe('CloudAuthFlow', () => {
       expires_at: '2026-08-10T11:59:59.000Z'
     }
     await expect(flow.complete({ code: 'OneTimeCode', state: 'fixed-state' })).rejects.toThrow(
-      'invalid or has expired'
+      'This sign-in has expired.'
     )
     expect(exchange).not.toHaveBeenCalled()
     expect(storage.pending).toBeNull()
@@ -140,9 +141,19 @@ describe('CloudAuthFlow', () => {
       device: { id: 'device-1', name: 'Ada’s iPhone', platform: 'ios' }
     })
     await expect(flow.complete({ code: 'OneTimeCode', state: 'fixed-state' })).rejects.toThrow(
-      'invalid sign-in response'
+      'unexpected answer while signing you in'
     )
     expect(storage.credential).toBeNull()
+  })
+
+  it('words a busy or broken service during the exchange as connect again', async () => {
+    const { exchange, flow } = setup()
+    await flow.connect('https://zennotes.org')
+    exchange.mockRejectedValueOnce(
+      Object.assign(new Error('Server Error'), { name: 'CloudServiceRequestError', status: 503, code: null })
+    )
+    const failure = await flow.complete({ code: 'OneTimeCode', state: 'fixed-state' }).catch((error: unknown) => error)
+    expect(describeCloudError(failure).message).toBe(CLOUD_SIGN_IN_TROUBLE_MESSAGE)
   })
 
   it('clears pending state if the external browser cannot open and clears credentials on logout', async () => {
@@ -162,6 +173,118 @@ describe('CloudAuthFlow', () => {
 
     await expect(flow.logout()).resolves.toEqual({ state: 'disconnected', account: null })
     expect(storage.credential).toBeNull()
+  })
+})
+
+describe('CloudAuthFlow logout revokes the device', () => {
+  const account: CloudAccount = {
+    base_url: 'https://zennotes.org',
+    user: { name: 'Ada', email: 'ada@example.com' },
+    device: { id: 'device-1', name: 'Ada’s iPhone', platform: 'ios' },
+    connected_at: '2026-08-10T12:00:00.000Z'
+  }
+
+  function setupRevoke(
+    revoke: (baseUrl: string, token: string) => Promise<void>,
+    baseUrl = account.base_url
+  ) {
+    const storage = new MemoryCloudAuthStorage()
+    storage.credential = {
+      base_url: baseUrl,
+      token: 'secret-token',
+      account: { ...account, base_url: baseUrl }
+    }
+    const flow = new CloudAuthFlow({
+      platform: 'ios',
+      appVersion: '1.5.0',
+      deviceName: 'Ada’s iPhone',
+      storage,
+      openExternal: vi.fn(async () => {}),
+      exchange: vi.fn(async () => ({})),
+      revoke
+    })
+    return { flow, storage }
+  }
+
+  it('asks the service with the stored token before deleting the credential', async () => {
+    let credentialWhileRevoking: unknown = 'not called'
+    const { flow, storage } = setupRevoke(async () => {
+      credentialWhileRevoking = storage.credential
+    })
+
+    await expect(flow.logout()).resolves.toEqual({ state: 'disconnected', account: null })
+
+    expect(credentialWhileRevoking).toMatchObject({ token: 'secret-token' })
+    expect(storage.credential).toBeNull()
+  })
+
+  it('passes the stored origin and token', async () => {
+    const revoke = vi.fn(async () => {})
+    const { flow } = setupRevoke(revoke)
+
+    await flow.logout()
+
+    expect(revoke).toHaveBeenCalledExactlyOnceWith('https://zennotes.org', 'secret-token')
+  })
+
+  it('still signs out when the service refuses or cannot be reached', async () => {
+    for (const failure of [
+      async () => {
+        throw new Error('offline')
+      },
+      () => {
+        throw new Error('thrown before any promise')
+      }
+    ]) {
+      const { flow, storage } = setupRevoke(failure as (baseUrl: string, token: string) => Promise<void>)
+
+      await expect(flow.logout()).resolves.toEqual({ state: 'disconnected', account: null })
+      expect(storage.credential).toBeNull()
+    }
+  })
+
+  it('stops waiting for a service that never answers', async () => {
+    vi.useFakeTimers()
+    try {
+      const { flow, storage } = setupRevoke(() => new Promise<void>(() => {}))
+
+      const logout = flow.logout()
+      await vi.advanceTimersByTimeAsync(4_999)
+      expect(storage.credential).not.toBeNull()
+      await vi.advanceTimersByTimeAsync(1)
+
+      await expect(logout).resolves.toEqual({ state: 'disconnected', account: null })
+      expect(storage.credential).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('never sends the token to an origin it would not connect to', async () => {
+    const revoke = vi.fn(async () => {})
+    const { flow, storage } = setupRevoke(revoke, 'http://zennotes.org')
+
+    await expect(flow.logout()).resolves.toEqual({ state: 'disconnected', account: null })
+
+    expect(revoke).not.toHaveBeenCalled()
+    expect(storage.credential).toBeNull()
+  })
+
+  it('has nothing to revoke while a sign-in is only pending', async () => {
+    const revoke = vi.fn(async () => {})
+    const { flow, storage } = setupRevoke(revoke)
+    storage.credential = null
+    storage.pending = {
+      base_url: 'https://zennotes.org',
+      state: 'fixed-state',
+      code_verifier: 'dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk',
+      expires_at: '2999-01-01T00:00:00.000Z'
+    }
+
+    await expect(flow.logout()).resolves.toEqual({ state: 'disconnected', account: null })
+
+    expect(revoke).not.toHaveBeenCalled()
+    expect(storage.pending).toBeNull()
   })
 })
 

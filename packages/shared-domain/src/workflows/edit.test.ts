@@ -354,6 +354,29 @@ describe('setStepArg', () => {
     expect(setStepArg(workflow, { statement: 0, index: 1 }, 'tag', '')).toBe(workflow)
   })
 
+  it('stores a tag list the way the parser does, typed or pasted', () => {
+    const workflow = load('a = all | tagged #book')
+    const at = { statement: 0, index: 1 }
+    const typed = setStepArg(workflow, at, 'tag', 'book, article, Book')
+    const pasted = setStepArg(workflow, at, 'tag', '#book,#article')
+    expect(typed.statements[0].steps[1].args.tag).toBe('book,article')
+    expect(pasted.statements[0].steps[1].args.tag).toBe('book,article')
+    expect(body(typed)).toContain('tagged #book, #article')
+    expectSurvivesSave(typed)
+  })
+
+  it('reads a trailing comma as a tag list still being typed', () => {
+    const workflow = load('a = all | tagged #book')
+    const next = setStepArg(workflow, { statement: 0, index: 1 }, 'tag', 'book, ')
+    expect(next.statements[0].steps[1].args.tag).toBe('book')
+  })
+
+  it('refuses a tag list holding something that is not a tag', () => {
+    const workflow = load('a = all | tagged #book')
+    expect(setStepArg(workflow, { statement: 0, index: 1 }, 'tag', 'book, two words')).toBe(workflow)
+    expect(setStepArg(workflow, { statement: 0, index: 1 }, 'tag', ', ')).toBe(workflow)
+  })
+
   it('accepts a numeric string for a number param', () => {
     const workflow = load('a = all | limit 5')
     const next = setStepArg(workflow, { statement: 0, index: 1 }, 'count', '25')

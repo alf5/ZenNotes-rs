@@ -1,4 +1,5 @@
-import { lazy, Suspense, useEffect, useMemo, useRef } from 'react'
+import { requestSettingsTarget } from './lib/settings-navigation'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import {
   useStore,
   initConfigSync,
@@ -7,6 +8,7 @@ import {
   initOverrides
 } from './store'
 import { resolveAuto, findTheme } from './lib/themes'
+import { applyTypographyVariables } from './lib/typography-variables'
 import {
   injectActiveTheme,
   injectOverrides,
@@ -20,10 +22,13 @@ import { NoteList } from './components/NoteList'
 import { TitleBar } from './components/TitleBar'
 import { PromptHost } from './components/PromptHost'
 import { ConfirmHost } from './components/ConfirmHost'
+import { DatePickerHost } from './components/DatePickerHost'
 import { PublishNoteHost } from './components/PublishNoteHost'
 import { CloudConflictReviewHost } from './components/CloudConflictReviewHost'
+import { CloudSettingsConflictHost } from './components/CloudSettingsConflictHost'
 import { ServerDirectoryPickerHost } from './components/ServerDirectoryPickerHost'
-import { ToastHost } from './components/ui'
+import { IconButton, ToastHost } from './components/ui'
+import { CloseIcon } from './components/icons'
 import { ExcalidrawEmbedMenuHost } from './components/ExcalidrawEmbedMenuHost'
 import { resolveQuickNoteTitle } from './lib/quick-note-title'
 import { escapeEmbedFrame } from './lib/embed-renderers'
@@ -31,10 +36,10 @@ import {
   eventMatchesUserOverride,
   isMacPlatform,
   matchesShortcut,
-  matchesSequenceToken,
   TAB_SELECT_KEYMAP_IDS
 } from './lib/keymaps'
 import { selectActiveBuffer } from './lib/buffer-navigation'
+import { resolveCloseShortcut } from './lib/close-shortcut'
 import { focusPaneOrEdgePanel } from './lib/pane-nav'
 import {
   activatePanelRow,
@@ -46,7 +51,7 @@ import {
 import { requestPaneMode } from './lib/pane-mode'
 import { recordRendererPerf } from './lib/perf'
 import { focusEditorNormalMode } from './lib/editor-focus'
-import { isAppOverlayOpen } from './lib/overlay-open'
+import { isAppOverlayOpen, isOverlayOrDialogOpen } from './lib/overlay-open'
 import { installMarkdownFileDropHandler } from './lib/markdown-file-drop'
 import {
   setMarkdownLooseMathDelimiters,
@@ -58,7 +63,15 @@ import {
   useAppUpdateState
 } from './lib/app-update-state'
 import { ensureCloudAutoSyncStarted, stopCloudAutoSync } from './lib/cloud-auto-sync'
+import { loadKeepRunningInTray, startTraySyncStatusReporter } from './lib/tray-runtime'
 import { installHarperRuntime } from './lib/harper-runtime'
+import { installIgnoredKeysGuard } from './lib/ignored-keys'
+
+// The ignored-keys guard (#732) has to be on `window` before any component
+// registers a capture listener there, so it is installed at import time,
+// not from an effect: children's effects run before App's, and VimNav's
+// would otherwise see the stray key first. Reads the live list on each key.
+installIgnoredKeysGuard(() => useStore.getState().ignoredKeys)
 
 let editorModulePromise: Promise<typeof import('./components/Editor')> | null = null
 const EDITOR_MODULE_WARMUP_GRACE_MS = 40
@@ -211,6 +224,12 @@ const SettingsModal = lazy(async () => {
   return { default: module.SettingsModal }
 })
 
+const WhatsNewModal = lazy(() => import('./components/WhatsNewModal'))
+
+/** How long after launch What's New waits, so it opens over a settled
+ *  window rather than racing the vault and the restored tabs. */
+const WHATS_NEW_DELAY_MS = 1200
+
 const EmptyVault = lazy(async () => {
   const module = await import('./components/EmptyVault')
   return { default: module.EmptyVault }
@@ -231,14 +250,23 @@ function AppUpdateNotice({
   hidden: boolean
 }): JSX.Element | null {
   const updateState = useAppUpdateState()
+  const [dismissedNotice, setDismissedNotice] = useState<string | null>(null)
+  const noticeKey = updateState
+    ? `${updateState.availableVersion ?? ''}:${updateState.phase}`
+    : null
   const label = appUpdateNoticeLabel(updateState)
   const actionLabel = appUpdatePrimaryActionLabel(updateState)
 
-  if (hidden || !label) return null
+  if (hidden || !label || dismissedNotice === noticeKey) return null
 
   const runPrimaryAction = (): void => {
     if (updateState?.phase === 'available') {
       void window.zen.downloadAppUpdate()
+      return
+    }
+    if (updateState?.phase === 'error') {
+      requestSettingsTarget('about')
+      useStore.getState().setSettingsOpen(true)
       return
     }
     if (updateState?.phase === 'downloaded') {
@@ -253,7 +281,7 @@ function AppUpdateNotice({
       className="fixed bottom-4 right-4 z-40 flex max-w-[min(28rem,calc(100vw-2rem))] items-center gap-2 rounded-xl border border-accent/30 bg-paper-50/95 px-3 py-2 text-sm text-ink-800 shadow-float backdrop-blur"
     >
       <span className="h-2 w-2 shrink-0 rounded-full bg-accent shadow-[0_0_0_4px_rgb(var(--z-accent)/0.12)]" />
-      <span className="min-w-0 truncate font-medium">{label}</span>
+      <span className="min-w-0 font-medium">{label}</span>
       {updateState?.phase === 'downloading' && (
         <span className="shrink-0 rounded-md bg-paper-200/80 px-1.5 py-0.5 text-xs font-medium text-ink-600">
           {Math.round(updateState.progressPercent ?? 0)}%
@@ -268,6 +296,13 @@ function AppUpdateNotice({
           {actionLabel}
         </button>
       )}
+      <IconButton
+        size="sm"
+        aria-label="Dismiss update notification"
+        onClick={() => setDismissedNotice(noticeKey)}
+      >
+        <CloseIcon className="h-3.5 w-3.5" />
+      </IconButton>
     </div>
   )
 }
@@ -286,6 +321,10 @@ function AppUpdateNotice({
  */
 function handlePanelKeyWithoutVim(e: KeyboardEvent, focusedPanel: string | null): void {
   if (e.metaKey || e.ctrlKey || e.altKey) return
+  // A dialog over the panel owns its keys: the focused panel stays set while
+  // one is open, so arrows would move the row behind it and Enter would open
+  // that row instead of pressing the dialog's focused button (#960).
+  if (isOverlayOrDialogOpen()) return
   // Text entry inside a panel (the outline filter, a comment draft) keeps its keys.
   const target = e.target instanceof HTMLElement ? e.target : null
   if (target) {
@@ -326,10 +365,10 @@ function App(): JSX.Element {
   const mountedAtRef = useRef(performance.now())
   const workspaceReadyLoggedRef = useRef(false)
   const searchPaletteWarmupCleanupRef = useRef<(() => void) | null>(null)
-  const pendingOpenNoteRequestsRef = useRef<string[]>([])
+  const pendingOpenNoteRequestsRef = useRef<Array<{ path: string; vault: ReturnType<typeof useStore.getState>['vault'] }>>([])
   const vault = useStore((s) => s.vault)
   const init = useStore((s) => s.init)
-  const workspaceRestored = useStore((s) => s.workspaceRestored)
+  const workspaceRestored = useStore((s) => s.workspaceRestored && !s.workspaceTransitioning)
   const searchOpen = useStore((s) => s.searchOpen)
   const setSearchOpen = useStore((s) => s.setSearchOpen)
   const vaultTextSearchOpen = useStore((s) => s.vaultTextSearchOpen)
@@ -359,6 +398,7 @@ function App(): JSX.Element {
   const unifiedSidebar = useStore((s) => s.unifiedSidebar)
   const settingsOpen = useStore((s) => s.settingsOpen)
   const setSettingsOpen = useStore((s) => s.setSettingsOpen)
+  const whatsNewOpen = useStore((s) => s.whatsNewOpen)
   const themeId = useStore((s) => s.themeId)
   const themeFamily = useStore((s) => s.themeFamily)
   const themeMode = useStore((s) => s.themeMode)
@@ -393,11 +433,32 @@ function App(): JSX.Element {
     void init()
   }, [init])
 
+  // The first launch after an update shows what it brought (lib/whats-new.ts).
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void useStore.getState().showWhatsNewAfterUpdate()
+    }, WHATS_NEW_DELAY_MS)
+    return () => window.clearTimeout(timer)
+  }, [])
+
   useEffect(() => {
     if (!vault) return undefined
-    ensureCloudAutoSyncStarted()
+    ensureCloudAutoSyncStarted(vault.root)
     return stopCloudAutoSync
   }, [vault?.root])
+  // Keep running in the tray (#947): the setting for the palette and leader,
+  // and this window's sync state for the tray icon.
+  useEffect(() => {
+    void loadKeepRunningInTray()
+    // Another window's Settings may have changed it meanwhile.
+    const refresh = (): void => void loadKeepRunningInTray()
+    window.addEventListener('focus', refresh)
+    const stopReporting = startTraySyncStatusReporter()
+    return () => {
+      window.removeEventListener('focus', refresh)
+      stopReporting()
+    }
+  }, [])
   useEffect(() => installHarperRuntime(), [])
 
   useEffect(() => {
@@ -437,6 +498,11 @@ function App(): JSX.Element {
 
   useEffect(() => {
     return window.zen.onOpenSettings(() => {
+      // The macOS menu takes Mod+, before the page does. Asking for Settings
+      // while What's New is up replaces it, as the shortcut does below,
+      // instead of opening Settings underneath with the keyboard in it.
+      const state = useStore.getState()
+      if (state.whatsNewOpen) state.closeWhatsNew()
       setSettingsOpen(true)
     })
   }, [setSettingsOpen])
@@ -444,11 +510,11 @@ function App(): JSX.Element {
   useEffect(() => {
     return window.zen.onOpenNoteRequested((relPath) => {
       const state = useStore.getState()
-      if (state.vault && state.workspaceRestored) {
+      if (state.vault && state.workspaceRestored && !state.workspaceTransitioning) {
         void state.openNoteInTab(relPath)
         return
       }
-      pendingOpenNoteRequestsRef.current.push(relPath)
+      pendingOpenNoteRequestsRef.current.push({ path: relPath, vault: state.vault })
     })
   }, [])
 
@@ -509,8 +575,9 @@ function App(): JSX.Element {
   useEffect(() => {
     if (!vault || !workspaceRestored || pendingOpenNoteRequestsRef.current.length === 0) return
     const requests = pendingOpenNoteRequestsRef.current.splice(0)
-    for (const relPath of requests) {
-      void useStore.getState().openNoteInTab(relPath)
+    for (const request of requests) {
+      if (request.vault && request.vault !== vault) continue
+      void useStore.getState().openNoteInTab(request.path)
     }
   }, [vault, workspaceRestored])
 
@@ -556,6 +623,20 @@ function App(): JSX.Element {
     window.addEventListener('beforeunload', flush)
     return () => window.removeEventListener('beforeunload', flush)
   }, [flushDirtyNotes])
+
+  // "Keep undo history after quitting" off means the saved histories go too:
+  // they hold text the user deleted, so they do not outlive the setting that
+  // asked for them. Watched here rather than in the setter, because the
+  // preference can also be turned off from config.toml. (#793)
+  const persistUndoHistory = useStore((s) => s.persistUndoHistory)
+  const persistedUndoHistoryRef = useRef(persistUndoHistory)
+  useEffect(() => {
+    const was = persistedUndoHistoryRef.current
+    persistedUndoHistoryRef.current = persistUndoHistory
+    if (was && !persistUndoHistory) {
+      void window.zen?.clearNoteUndoHistories?.()?.catch(() => undefined)
+    }
+  }, [persistUndoHistory])
 
   // Apply theme: set html[data-theme=...] + html[data-theme-mode=...] based on
   // mode/family/id. Custom themes keep one id (`custom-<slug>`) and express
@@ -613,39 +694,22 @@ function App(): JSX.Element {
   }, [themeTweaks])
 
   // Apply editor font size + line height + all three font families as
-  // CSS variables. Each family has its own fallback stack so leaving it
-  // unset gracefully uses the platform default.
+  // CSS variables (shared with the Quick Look preview).
   useEffect(() => {
-    const html = document.documentElement
-    html.style.setProperty('--z-editor-font-size', `${editorFontSize}px`)
-    html.style.setProperty('--z-math-scale', String(mathFontScale / 100))
-    html.style.setProperty('--z-editor-line-height', String(editorLineHeight))
-    html.style.setProperty('--z-preview-max-width', `${previewMaxWidth}px`)
-    html.style.setProperty('--z-editor-max-width', `${editorMaxWidth}px`)
-    html.dataset.contentAlign = contentAlign
-    html.dataset.completedTaskStyle = completedTaskStyle
-    html.dataset.mathRenderer = mathRenderer
-    html.dataset.lineNumberPosition = lineNumberPosition
-
-    const setFont = (name: string, value: string | null, fallback: string): void => {
-      if (value) html.style.setProperty(name, `"${value}", ${fallback}`)
-      else html.style.removeProperty(name)
-    }
-    setFont(
-      '--z-interface-font',
+    applyTypographyVariables(document.documentElement, {
+      editorFontSize,
+      mathFontScale,
+      editorLineHeight,
+      previewMaxWidth,
+      editorMaxWidth,
+      contentAlign,
+      completedTaskStyle,
+      mathRenderer,
+      lineNumberPosition,
       interfaceFont,
-      '-apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, system-ui, sans-serif'
-    )
-    setFont(
-      '--z-text-font',
       textFont,
-      '"SF Mono", "SFMono-Regular", ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace'
-    )
-    setFont(
-      '--z-mono-font',
-      monoFont,
-      '"SF Mono", "SFMono-Regular", ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace'
-    )
+      monoFont
+    })
   }, [editorFontSize, mathFontScale, editorLineHeight, previewMaxWidth, editorMaxWidth, contentAlign, completedTaskStyle, mathRenderer, lineNumberPosition, interfaceFont, textFont, monoFont])
 
   // Keep the markdown/preview pipeline pointed at the active math engine, even
@@ -679,6 +743,41 @@ function App(): JSX.Element {
       const state = useStore.getState()
       const overrides = state.keymapOverrides
 
+      // What's New opens by itself on the first launch after an update, so
+      // the keys people press out of habit land on it. No app shortcut acts
+      // behind it: Mod+N made a note under it and moved the keyboard there,
+      // Mod+P opened a search nobody could see. Its own buttons, Tab and
+      // Escape are its own. Asking for Settings replaces it, as the macOS
+      // menu does.
+      if (state.whatsNewOpen) {
+        if (matchesShortcut(e, overrides, 'global.openSettings')) {
+          e.preventDefault()
+          state.closeWhatsNew()
+          state.setSettingsOpen(true)
+        }
+        return
+      }
+
+      // A modal, palette, menu, or Settings (with its keymap recorder) is
+      // open. Per the house rule for global key handlers, a shortcut that
+      // switches, reopens or creates the note must not act under it: it
+      // strands the user on a different note than they left, and a new note
+      // pulls the keyboard into a title field nobody can see. The DOM check
+      // also covers every dialog the shared Modal shell draws without a
+      // data-* hook of its own (the sidebar icon and color pickers, Publish,
+      // the workflow pickers), where Shift+Mod+N used to make a quick note
+      // behind the picker.
+      const overlayOpen =
+        state.settingsOpen ||
+        state.searchOpen ||
+        state.vaultTextSearchOpen ||
+        state.commandPaletteOpen ||
+        state.bufferPaletteOpen ||
+        state.templatePaletteOpen ||
+        state.embedDrawingPaletteOpen ||
+        state.outlinePaletteOpen ||
+        isOverlayOrDialogOpen()
+
       if (isUndoShortcut(e)) {
         const assetUndoEntry = state.assetUndoStack.at(-1)
         if (assetUndoEntry) {
@@ -710,6 +809,7 @@ function App(): JSX.Element {
       }
       if (matchesShortcut(e, overrides, 'global.newQuickNote')) {
         // ⇧⌘N — new quick note
+        if (overlayOpen) return
         e.preventDefault()
         const title = resolveQuickNoteTitle(
           state.notes,
@@ -727,23 +827,8 @@ function App(): JSX.Element {
       }
       // Alt+1..9 (⌃1..9 on macOS): jump straight to tab N (#497). Position
       // counts across panes in the same order gt cycles through. Bails while
-      // a modal, palette, menu, or Settings (with its keymap recorder) is
-      // open, per the house rule for global key handlers: switching the tab
-      // under an overlay strands the user on a different note than they left.
-      const tabSelectBlocked =
-        state.settingsOpen ||
-        state.searchOpen ||
-        state.vaultTextSearchOpen ||
-        state.commandPaletteOpen ||
-        state.bufferPaletteOpen ||
-        state.templatePaletteOpen ||
-        state.embedDrawingPaletteOpen ||
-        state.outlinePaletteOpen ||
-        document.querySelector('[data-ctx-menu]') ||
-        document.querySelector('[data-prompt-modal]') ||
-        document.querySelector('[data-confirm-modal]') ||
-        document.querySelector('[data-cloud-conflict-dialog]')
-      if (!tabSelectBlocked) {
+      // an overlay is open (the rule above).
+      if (!overlayOpen) {
         for (let i = 0; i < TAB_SELECT_KEYMAP_IDS.length; i += 1) {
           const id = TAB_SELECT_KEYMAP_IDS[i]
           if (!matchesShortcut(e, overrides, id)) continue
@@ -755,6 +840,23 @@ function App(): JSX.Element {
           selectActiveBuffer(state, i + 1)
           return
         }
+      }
+      // The template pickers as plain shortcuts, so they no longer need Vim's
+      // leader (#847). Same overlay rule as tab selection: a picker opened
+      // under Settings or another palette would strand the user behind it.
+      if (!overlayOpen && matchesShortcut(e, overrides, 'global.newNoteFromTemplate')) {
+        e.preventDefault()
+        state.setTemplatePaletteOpen(true)
+        return
+      }
+      if (
+        !overlayOpen &&
+        state.activeNote &&
+        matchesShortcut(e, overrides, 'global.insertTemplate')
+      ) {
+        e.preventDefault()
+        state.openTemplatePaletteForInsert()
+        return
       }
       if (matchesShortcut(e, overrides, 'global.exportNotePdf')) {
         e.preventDefault()
@@ -789,46 +891,40 @@ function App(): JSX.Element {
         isEditableShortcutTarget(e.target)
       if (!isMacWordMotion && matchesShortcut(e, overrides, 'global.historyBack')) {
         // Back in note navigation history (works in any mode).
+        if (overlayOpen) return
         e.preventDefault()
         void state.jumpToPreviousNote()
         return
       }
       if (!isMacWordMotion && matchesShortcut(e, overrides, 'global.historyForward')) {
+        if (overlayOpen) return
         e.preventDefault()
         void state.jumpToNextNote()
         return
       }
       if (matchesShortcut(e, overrides, 'global.toggleRecentNote')) {
+        if (overlayOpen) return
         e.preventDefault()
         void state.toggleRecentNote()
         return
       }
-      if (matchesShortcut(e, overrides, 'global.closeActiveTab')) {
-        // On Linux/Windows `Mod+W` (close tab) resolves to Ctrl+W, which is also
-        // the vim pane-focus prefix (`<C-w>hjkl`) and insert-mode word delete.
-        // When vim mode is on AND a tab is open, reserve Ctrl+W for vim (close
-        // tabs via :q / :bd / the palette). With no tab open the prefix has
-        // nothing to act on, so fall through and close the window. On macOS
-        // close-tab is Cmd+W, so the vim guard never matches there.
-        const hasActiveTab = !!state.selectedPath
-        if (
-          state.vimMode &&
-          hasActiveTab &&
-          matchesSequenceToken(e, overrides, 'vim.panePrefix')
-        ) {
-          return
-        }
+      const closeAction = resolveCloseShortcut(e, state)
+      if (closeAction) {
+        if (closeAction === 'vim') return
         e.preventDefault()
-        if (hasActiveTab) {
+        if (closeAction === 'close-settings') {
+          // The same hand-off as Settings' own Escape and Done (#415).
+          state.setSettingsOpen(false)
+          focusEditorNormalMode()
+        } else if (closeAction === 'close-tab') {
           void state.closeActiveNote()
-        } else {
-          // No tab left to close — close the window, matching native Cmd+W
-          // (macOS) / Ctrl+W behavior even with vim mode on (#192).
+        } else if (closeAction === 'close-window') {
           window.zen.windowClose()
         }
         return
       }
       if (matchesShortcut(e, overrides, 'global.reopenClosedTab')) {
+        if (overlayOpen) return
         e.preventDefault()
         void state.reopenLastClosedTab()
         return
@@ -945,29 +1041,20 @@ function App(): JSX.Element {
       // Don't move focus (or swallow the key) while a modal, palette, or the
       // Settings keybinding recorder is open — the recorder also captures keys
       // in this phase, so a focusPane shortcut bound to e.g. Ctrl+H must not
-      // intercept it. (#124)
+      // intercept it. (#124) Any dialog the shared Modal shell draws counts
+      // too: under the sidebar color picker Alt+L moved focus into the editor
+      // behind it, and Mod+N made a note there.
       const overrides = state.keymapOverrides
-      const modalOrMenuOpen =
-        !!document.querySelector('[data-ctx-menu]') ||
-        !!document.querySelector('[data-prompt-modal]') ||
-        !!document.querySelector('[data-confirm-modal]') ||
-        !!document.querySelector('[data-cloud-conflict-dialog]')
-      // Search Notes is a toggle: its own shortcut closes the palette it
-      // opened (#510 moved it here from the bubble handler, which had no
-      // overlay guard at all). A confirm on top of the palette, such as the
-      // Ctrl+D trash confirmation, keeps the key to itself.
-      if (
-        state.searchOpen &&
-        !modalOrMenuOpen &&
-        matchesShortcut(e, overrides, 'global.searchNotes')
-      ) {
-        e.preventDefault()
-        e.stopImmediatePropagation()
-        setSearchOpen(false)
-        return
-      }
+      const modalOrMenuOpen = isOverlayOrDialogOpen()
+      // `global.searchNotes` is deliberately not a toggle. `Mod+P` resolves to
+      // `Ctrl+P` on Linux and Windows, which is also the Emacs previous-item
+      // chord every palette handles via `isPalettePreviousKey()`. A toggle here
+      // ran capture-phase and called `stopImmediatePropagation()`, making that
+      // branch unreachable while the palette was open (#938). Escape dismisses.
+      // Do not reinstate a toggle above the overlay guard.
       if (
         state.settingsOpen ||
+        state.whatsNewOpen ||
         state.searchOpen ||
         state.vaultTextSearchOpen ||
         state.commandPaletteOpen ||
@@ -1114,15 +1201,35 @@ function App(): JSX.Element {
     }
   }, [])
 
+  // A window-drag strip belongs to the window, not the page, so a tab or note
+  // dragged inside the app may not be able to drop on one (the blank end of a
+  // tab strip with the title bar off). Nothing moves the window mid-drag, so
+  // the strips stand down until the drag ends.
+  useEffect(() => {
+    const root = document.documentElement
+    const start = (): void => root.classList.add('zn-app-dragging')
+    const end = (): void => root.classList.remove('zn-app-dragging')
+    window.addEventListener('dragstart', start, true)
+    window.addEventListener('dragend', end, true)
+    window.addEventListener('drop', end, true)
+    return () => {
+      window.removeEventListener('dragstart', start, true)
+      window.removeEventListener('dragend', end, true)
+      window.removeEventListener('drop', end, true)
+      end()
+    }
+  }, [])
+
   if (!hasCompletedOnboarding) {
     return (
       <div className="zn-app-shell w-screen bg-paper-100 text-ink-900">
-        {!zenMode && <TitleBar />}
+        {!zenMode && <TitleBar standalone />}
         <Suspense fallback={<div className="flex-1" />}>
           <OnboardingWizard />
         </Suspense>
         <PromptHost />
         <ConfirmHost />
+        <DatePickerHost />
         <PublishNoteHost />
         <ToastHost />
         <ExcalidrawEmbedMenuHost />
@@ -1135,12 +1242,13 @@ function App(): JSX.Element {
   if (!vault) {
     return (
       <div className="zn-app-shell w-screen bg-paper-100 text-ink-900">
-        {!zenMode && <TitleBar />}
+        {!zenMode && <TitleBar standalone />}
         <Suspense fallback={<div className="flex-1" />}>
           <EmptyVault />
         </Suspense>
         <PromptHost />
         <ConfirmHost />
+        <DatePickerHost />
         <PublishNoteHost />
         <ToastHost />
         <ExcalidrawEmbedMenuHost />
@@ -1212,10 +1320,17 @@ function App(): JSX.Element {
           <SettingsModal />
         </Suspense>
       )}
+      {whatsNewOpen && (
+        <Suspense fallback={null}>
+          <WhatsNewModal />
+        </Suspense>
+      )}
       <PromptHost />
       <ConfirmHost />
+      <DatePickerHost />
       <PublishNoteHost />
       <CloudConflictReviewHost />
+      <CloudSettingsConflictHost />
       <ToastHost />
       <ExcalidrawEmbedMenuHost />
       <ServerDirectoryPickerHost />

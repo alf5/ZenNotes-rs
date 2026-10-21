@@ -10,6 +10,7 @@ import {
 import type { NoteComment, NoteContent } from '@shared/ipc'
 import { useStore } from '../store'
 import { commentQuote } from '../lib/comments'
+import { threadNoteComments, type NoteCommentThread } from '@shared/note-comments'
 import { renderMarkdown } from '../lib/markdown'
 import { usePanelResize } from '../lib/use-panel-resize'
 import { PanelResizeHandle } from './PanelResizeHandle'
@@ -30,6 +31,9 @@ export interface CommentDraft {
 }
 
 interface Props {
+  /** Width to render at when the pane has less room than the width the user
+   *  chose; see lib/side-panel-fit. (#805) */
+  fitWidth?: number
   note: NoteContent
   draft: CommentDraft | null
   onCaptureDraft: () => CommentDraft | null
@@ -59,7 +63,8 @@ export function CommentsPanel({
   draft,
   onCaptureDraft,
   onClearDraft,
-  onJump
+  onJump,
+  fitWidth
 }: Props): JSX.Element {
   const comments = useStore((s) => s.noteComments[note.path] ?? EMPTY_COMMENTS)
   const activeCommentId = useStore((s) => s.activeCommentId)
@@ -72,7 +77,9 @@ export function CommentsPanel({
   const focusedPanel = useStore((s) => s.focusedPanel)
   const panelWidth = useStore((s) => s.panelWidths.comments)
   const setPanelWidth = useStore((s) => s.setPanelWidth)
-  const { startResize } = usePanelResize(panelWidth, (px) => setPanelWidth('comments', px))
+  const { startResize } = usePanelResize(fitWidth ?? panelWidth, (px) =>
+    setPanelWidth('comments', px)
+  )
 
   const [body, setBody] = useState('')
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -81,6 +88,11 @@ export function CommentsPanel({
   const panelRef = useRef<HTMLElement | null>(null)
   const notePathRef = useRef(note.path)
   const commentsFocused = focusedPanel === 'comments'
+  // The strip and the badges name VimNav's keys, which stand down with Vim
+  // off, so neither exists then: a row of letters that do nothing reads as
+  // a terminal to someone who never asked for one, and a strip that can
+  // never fade in would only hold its blank row open under the header.
+  const vimMode = useStore((s) => s.vimMode)
 
   useEffect(() => {
     void loadNoteComments(note.path)
@@ -98,6 +110,8 @@ export function CommentsPanel({
     setBody('')
     setEditingId(null)
     setEditBody('')
+    setReplyingId(null)
+    setReplyBody('')
     onClearDraft()
   }, [note.path])
 
@@ -111,15 +125,23 @@ export function CommentsPanel({
     return () => cancelAnimationFrame(raf)
   }, [activeCommentId, comments])
 
+  // Threads (#738): a top-level comment with its replies. The panel's rows are
+  // the threads; a reply lives inside its card, so j/k walk conversations.
+  const threads = useMemo(() => threadNoteComments(comments), [comments])
   const unresolved = useMemo(
-    () => comments.filter((comment) => comment.resolvedAt == null),
-    [comments]
+    () => threads.filter((thread) => thread.comment.resolvedAt == null),
+    [threads]
   )
   const resolved = useMemo(
-    () => comments.filter((comment) => comment.resolvedAt != null),
-    [comments]
+    () => threads.filter((thread) => thread.comment.resolvedAt != null),
+    [threads]
   )
-  const orderedComments = useMemo(() => [...unresolved, ...resolved], [resolved, unresolved])
+  const orderedComments = useMemo(
+    () => [...unresolved, ...resolved].map((thread) => thread.comment),
+    [resolved, unresolved]
+  )
+  const [replyingId, setReplyingId] = useState<string | null>(null)
+  const [replyBody, setReplyBody] = useState('')
 
   useEffect(() => {
     if (!commentsFocused) return
@@ -174,6 +196,31 @@ export function CommentsPanel({
     setEditBody('')
   }
 
+  const startReply = (thread: NoteCommentThread): void => {
+    setReplyingId(thread.comment.id)
+    setReplyBody('')
+    setActiveCommentId(thread.comment.id)
+  }
+
+  // A reply keeps the thread's anchor, so the editor keeps one marker per
+  // conversation and re-anchoring moves the whole thread together.
+  const submitReply = async (thread: NoteCommentThread): Promise<void> => {
+    const trimmed = replyBody.trim()
+    if (!trimmed) return
+    const root = thread.comment
+    await addNoteComment({
+      notePath: note.path,
+      anchorStart: root.anchorStart,
+      anchorEnd: root.anchorEnd,
+      anchorText: root.anchorText,
+      body: trimmed,
+      parentId: root.id
+    })
+    setReplyingId(null)
+    setReplyBody('')
+    setActiveCommentId(root.id)
+  }
+
   let rowIndex = 0
 
   return (
@@ -184,7 +231,7 @@ export function CommentsPanel({
       tabIndex={-1}
       onMouseDownCapture={() => setFocusedPanel('comments')}
       onFocusCapture={() => setFocusedPanel('comments')}
-      style={{ width: panelWidth }}
+      style={{ width: fitWidth ?? panelWidth }}
       className={[
         'relative flex shrink-0 flex-col border-l border-paper-300/70 bg-paper-50/24 shadow-[inset_1px_0_0_rgb(var(--z-bg)/0.25)] outline-none transition-shadow',
         commentsFocused ? 'ring-1 ring-inset ring-accent/18' : ''
@@ -213,21 +260,24 @@ export function CommentsPanel({
             <PlusIcon width={15} height={15} />
           </button>
         </div>
-        <div
-          aria-hidden={!commentsFocused}
-          className={[
-            'mt-3 flex h-5 items-center gap-1 overflow-hidden transition-opacity',
-            commentsFocused ? 'opacity-100' : 'pointer-events-none opacity-0'
-          ].join(' ')}
-        >
-          <CommentKeyHint keyLabel="j/k" label="Move" />
-          <CommentKeyHint keyLabel="↵" label="Jump" />
-          <CommentKeyHint keyLabel="n" label="New" />
-          <CommentKeyHint keyLabel="e" label="Edit" />
-          <CommentKeyHint keyLabel="r" label="Resolve" />
-          <CommentKeyHint keyLabel="d" label="Delete" />
-          <CommentKeyHint keyLabel="esc" label="Back to note" />
-        </div>
+        {vimMode && (
+          <div
+            aria-hidden={!commentsFocused}
+            className={[
+              'mt-3 flex h-5 items-center gap-1 overflow-hidden transition-opacity',
+              commentsFocused ? 'opacity-100' : 'pointer-events-none opacity-0'
+            ].join(' ')}
+          >
+            <CommentKeyHint keyLabel="j/k" label="Move" />
+            <CommentKeyHint keyLabel="↵" label="Jump" />
+            <CommentKeyHint keyLabel="n" label="New" />
+            <CommentKeyHint keyLabel="a" label="Reply" />
+            <CommentKeyHint keyLabel="e" label="Edit" />
+            <CommentKeyHint keyLabel="r" label="Resolve" />
+            <CommentKeyHint keyLabel="d" label="Delete" />
+            <CommentKeyHint keyLabel="esc" label="Back to note" />
+          </div>
+        )}
 
         {draft && (
           <div className="mt-4 rounded-lg border border-accent/35 bg-paper-100/72 p-3 shadow-[0_14px_32px_-28px_rgb(var(--z-shadow)/0.85)]">
@@ -291,30 +341,40 @@ export function CommentsPanel({
           </div>
         ) : (
           <div className="flex flex-col gap-3">
-            {unresolved.map((comment) => (
+            {unresolved.map((thread) => (
               <CommentCard
-                key={comment.id}
-                comment={comment}
+                key={thread.comment.id}
+                comment={thread.comment}
+                replies={thread.replies}
                 rowIndex={rowIndex++}
-                active={activeCommentId === comment.id}
+                active={activeCommentId === thread.comment.id}
                 commentsFocused={commentsFocused}
-                editing={editingId === comment.id}
+                editing={editingId === thread.comment.id}
                 editBody={editBody}
                 onEditBody={setEditBody}
-                onJump={() => {
-                  setActiveCommentId(comment.id)
-                  onJump(comment)
+                replying={replyingId === thread.comment.id}
+                replyBody={replyBody}
+                onReplyBody={setReplyBody}
+                onReply={() => startReply(thread)}
+                onCancelReply={() => {
+                  setReplyingId(null)
+                  setReplyBody('')
                 }}
-                onEdit={() => startEdit(comment)}
+                onSubmitReply={() => void submitReply(thread)}
+                onJump={() => {
+                  setActiveCommentId(thread.comment.id)
+                  onJump(thread.comment)
+                }}
+                onEdit={() => startEdit(thread.comment)}
                 onCancelEdit={() => {
                   setEditingId(null)
                   setEditBody('')
                 }}
-                onSave={() => void saveEdit(comment)}
+                onSave={() => void saveEdit(thread.comment)}
                 onResolve={() =>
-                  void updateNoteComment(note.path, comment.id, { resolvedAt: Date.now() })
+                  void updateNoteComment(note.path, thread.comment.id, { resolvedAt: Date.now() })
                 }
-                onDelete={() => void deleteNoteComment(note.path, comment.id)}
+                onDelete={() => void deleteNoteComment(note.path, thread.comment.id)}
               />
             ))}
             {resolved.length > 0 && unresolved.length > 0 && (
@@ -322,30 +382,40 @@ export function CommentsPanel({
                 Resolved
               </div>
             )}
-            {resolved.map((comment) => (
+            {resolved.map((thread) => (
               <CommentCard
-                key={comment.id}
-                comment={comment}
+                key={thread.comment.id}
+                comment={thread.comment}
+                replies={thread.replies}
                 rowIndex={rowIndex++}
-                active={activeCommentId === comment.id}
+                active={activeCommentId === thread.comment.id}
                 commentsFocused={commentsFocused}
-                editing={editingId === comment.id}
+                editing={editingId === thread.comment.id}
                 editBody={editBody}
                 onEditBody={setEditBody}
-                onJump={() => {
-                  setActiveCommentId(comment.id)
-                  onJump(comment)
+                replying={replyingId === thread.comment.id}
+                replyBody={replyBody}
+                onReplyBody={setReplyBody}
+                onReply={() => startReply(thread)}
+                onCancelReply={() => {
+                  setReplyingId(null)
+                  setReplyBody('')
                 }}
-                onEdit={() => startEdit(comment)}
+                onSubmitReply={() => void submitReply(thread)}
+                onJump={() => {
+                  setActiveCommentId(thread.comment.id)
+                  onJump(thread.comment)
+                }}
+                onEdit={() => startEdit(thread.comment)}
                 onCancelEdit={() => {
                   setEditingId(null)
                   setEditBody('')
                 }}
-                onSave={() => void saveEdit(comment)}
+                onSave={() => void saveEdit(thread.comment)}
                 onResolve={() =>
-                  void updateNoteComment(note.path, comment.id, { resolvedAt: null })
+                  void updateNoteComment(note.path, thread.comment.id, { resolvedAt: null })
                 }
-                onDelete={() => void deleteNoteComment(note.path, comment.id)}
+                onDelete={() => void deleteNoteComment(note.path, thread.comment.id)}
               />
             ))}
           </div>
@@ -355,14 +425,30 @@ export function CommentsPanel({
   )
 }
 
+/** Display name and avatar letter: the vault's owner has no stored author. */
+function authorLabel(comment: Pick<NoteComment, 'author'>): string {
+  return comment.author?.trim() || 'You'
+}
+
+function authorInitial(comment: Pick<NoteComment, 'author'>): string {
+  return authorLabel(comment).slice(0, 1).toUpperCase()
+}
+
 function CommentCard({
   comment,
+  replies,
   rowIndex,
   active,
   commentsFocused,
   editing,
   editBody,
   onEditBody,
+  replying,
+  replyBody,
+  onReplyBody,
+  onReply,
+  onCancelReply,
+  onSubmitReply,
   onJump,
   onEdit,
   onCancelEdit,
@@ -371,12 +457,19 @@ function CommentCard({
   onDelete
 }: {
   comment: NoteComment
+  replies: NoteComment[]
   rowIndex: number
   active: boolean
   commentsFocused: boolean
   editing: boolean
   editBody: string
   onEditBody: (body: string) => void
+  replying: boolean
+  replyBody: string
+  onReplyBody: (body: string) => void
+  onReply: () => void
+  onCancelReply: () => void
+  onSubmitReply: () => void
   onJump: () => void
   onEdit: () => void
   onCancelEdit: () => void
@@ -385,10 +478,13 @@ function CommentCard({
   onDelete: () => void
 }): JSX.Element {
   const resolved = comment.resolvedAt != null
+  const assistant = !!comment.author
   // Render the comment body as Markdown (sanitized). Cached by renderMarkdown,
   // memoized per-body so card re-renders (hover/selection) don't re-parse.
   const bodyHtml = useMemo(() => renderMarkdown(comment.body), [comment.body])
-  const showActionShortcuts = active && commentsFocused && !editing
+  // One subscription per card: the badges exist only for Vim's keys.
+  const vimMode = useStore((s) => s.vimMode)
+  const showActionShortcuts = vimMode && active && commentsFocused && !editing
   const handleCardClick = (event: MouseEvent<HTMLElement>): void => {
     const target = event.target as HTMLElement | null
     if (target?.closest('button, textarea, input, select, a, [data-comment-card-control]')) return
@@ -412,12 +508,21 @@ function CommentCard({
       ].join(' ')}
     >
       <div className="flex items-start gap-3">
-        <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-paper-300/70 bg-paper-200/80 text-xs font-semibold text-ink-700">
-          Y
+        <div
+          className={[
+            'mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-xs font-semibold',
+            assistant
+              ? 'border-accent/40 bg-accent/15 text-accent'
+              : 'border-paper-300/70 bg-paper-200/80 text-ink-700'
+          ].join(' ')}
+        >
+          {authorInitial(comment)}
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-2">
-            <span className="truncate text-sm font-semibold text-ink-900">You</span>
+            <span data-comment-author className="truncate text-sm font-semibold text-ink-900">
+              {authorLabel(comment)}
+            </span>
             <span className="shrink-0 text-xs text-ink-400">
               {dateFormatter.format(new Date(comment.updatedAt))}
             </span>
@@ -504,6 +609,78 @@ function CommentCard({
               dangerouslySetInnerHTML={{ __html: bodyHtml }}
             />
           )}
+
+          {replies.length > 0 && (
+            <div data-comment-replies className="mt-3 flex flex-col gap-2 border-l-2 border-paper-300/70 pl-3">
+              {replies.map((reply) => (
+                <ReplyRow key={reply.id} reply={reply} />
+              ))}
+            </div>
+          )}
+
+          {replying && (
+            <div className="mt-3" data-comment-card-control>
+              <textarea
+                data-comment-reply-input
+                value={replyBody}
+                onChange={(event) => onReplyBody(event.target.value)}
+                autoFocus
+                placeholder="Reply…"
+                onKeyDown={(event) => {
+                  if (isCommitShortcut(event)) {
+                    event.preventDefault()
+                    if (replyBody.trim()) onSubmitReply()
+                    return
+                  }
+                  if (event.key === 'Escape') {
+                    event.preventDefault()
+                    onCancelReply()
+                  }
+                }}
+                aria-keyshortcuts="Meta+Enter Control+Enter Escape"
+                rows={3}
+                className="w-full resize-none rounded-md border border-paper-300/70 bg-paper-50 px-3 py-2 text-sm leading-5 text-ink-900 outline-none focus:border-accent/60 focus:ring-1 focus:ring-accent/20"
+              />
+              <div className="relative z-10 mt-2 flex justify-end gap-2">
+                <button
+                  type="button"
+                  data-comment-card-control
+                  onMouseDown={(event) => {
+                    event.stopPropagation()
+                  }}
+                  onClick={(event) => {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    onCancelReply()
+                  }}
+                  title="Cancel (Esc)"
+                  className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs text-ink-500 transition-colors hover:bg-paper-200 hover:text-ink-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/45"
+                >
+                  <span>Cancel</span>
+                  <InlineShortcut>Esc</InlineShortcut>
+                </button>
+                <button
+                  type="button"
+                  data-comment-card-control
+                  data-comment-action="send-reply"
+                  disabled={!replyBody.trim()}
+                  onMouseDown={(event) => {
+                    event.stopPropagation()
+                  }}
+                  onClick={(event) => {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    onSubmitReply()
+                  }}
+                  title="Reply (⌘↵)"
+                  className="flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-accent/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/45 disabled:cursor-default disabled:bg-paper-300 disabled:text-ink-500"
+                >
+                  <span>Reply</span>
+                  <InlineShortcut tone="light">⌘↵</InlineShortcut>
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -512,17 +689,28 @@ function CommentCard({
           <IconTextButton
             title="Jump"
             action="jump"
-            shortcut="↵"
+            shortcut={vimMode ? '↵' : undefined}
             showShortcut={showActionShortcuts}
             onClick={onJump}
           >
             <ArrowUpRightIcon width={13} height={13} />
           </IconTextButton>
+          {!editing && !replying && (
+            <IconTextButton
+              title="Reply"
+              action="reply"
+              shortcut={vimMode ? 'a' : undefined}
+              showShortcut={showActionShortcuts}
+              onClick={onReply}
+            >
+              <ReplyIcon width={13} height={13} />
+            </IconTextButton>
+          )}
           {!editing && (
             <IconTextButton
               title="Edit"
               action="edit"
-              shortcut="e"
+              shortcut={vimMode ? 'e' : undefined}
               showShortcut={showActionShortcuts}
               onClick={onEdit}
             >
@@ -532,7 +720,7 @@ function CommentCard({
           <IconTextButton
             title={resolved ? 'Reopen' : 'Resolve'}
             action="resolve"
-            shortcut="r"
+            shortcut={vimMode ? 'r' : undefined}
             showShortcut={showActionShortcuts}
             onClick={onResolve}
           >
@@ -541,7 +729,7 @@ function CommentCard({
           <IconTextButton
             title="Delete"
             action="delete"
-            shortcut="d"
+            shortcut={vimMode ? 'd' : undefined}
             showShortcut={showActionShortcuts}
             onClick={onDelete}
             danger
@@ -551,6 +739,59 @@ function CommentCard({
         </div>
       </div>
     </article>
+  )
+}
+
+function ReplyRow({ reply }: { reply: NoteComment }): JSX.Element {
+  const html = useMemo(() => renderMarkdown(reply.body), [reply.body])
+  const assistant = !!reply.author
+  return (
+    <div data-comment-reply-id={reply.id} className="flex items-start gap-2">
+      <div
+        className={[
+          'mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-2xs font-semibold',
+          assistant
+            ? 'border-accent/40 bg-accent/15 text-accent'
+            : 'border-paper-300/70 bg-paper-200/80 text-ink-700'
+        ].join(' ')}
+      >
+        {authorInitial(reply)}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex min-w-0 items-center gap-2">
+          <span data-comment-author className="truncate text-xs font-semibold text-ink-900">
+            {authorLabel(reply)}
+          </span>
+          <span className="shrink-0 text-2xs text-ink-400">
+            {dateFormatter.format(new Date(reply.createdAt))}
+          </span>
+        </div>
+        <div
+          className="comment-prose prose-zen mt-1 text-sm leading-5 text-ink-900"
+          dangerouslySetInnerHTML={{ __html: html }}
+        />
+      </div>
+    </div>
+  )
+}
+
+/** A small "reply" arrow, drawn inline so the panel stays icon-set agnostic. */
+function ReplyIcon({ width = 13, height = 13 }: { width?: number; height?: number }): JSX.Element {
+  return (
+    <svg
+      width={width}
+      height={height}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <polyline points="9 17 4 12 9 7" />
+      <path d="M20 18v-2a4 4 0 0 0-4-4H4" />
+    </svg>
   )
 }
 

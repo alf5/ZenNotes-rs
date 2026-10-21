@@ -24,7 +24,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
 
-import { COMPARE_OPS, RENDER_STYLES, nodeDef, sanitizeTagChars } from '@shared/workflows/nodes'
+import { COMPARE_OPS, RENDER_STYLES, joinTagList, nodeDef, sanitizeTagChars } from '@shared/workflows/nodes'
 import type { NodeDef, ParamSpec } from '@shared/workflows/nodes'
 import { RAW_ARG } from '@shared/workflows/parse'
 import type { ArgValue, WorkflowStatement, WorkflowStep } from '@shared/workflows/types'
@@ -48,9 +48,21 @@ export interface InspectorVocabulary {
   tags: readonly string[]
   fields: readonly string[]
   paths: readonly string[]
-  folders: readonly string[]
+  folders: readonly ComboboxOption[]
   wires: readonly string[]
   workflows: readonly string[]
+}
+
+/**
+ * An entry a combobox can offer: the value the argument takes, and a hint
+ * shown beside it when the value alone does not say what it means. `inbox`
+ * reads as "Vault root" on a vault whose notes live there, which is the one
+ * folder a list of directories could never carry (#840). Typing matches the
+ * hint too, so "root" finds it.
+ */
+export interface ComboboxOption {
+  value: string
+  hint?: string
 }
 
 /**
@@ -65,11 +77,21 @@ const BUILTIN_FIELDS: readonly string[] = ['title', 'path', 'folder', 'created',
 /** Enough options to recognize what exists, not a whole vault in a dropdown. */
 const OPTION_LIMIT = 60
 
-function optionsFor(all: readonly string[], text: string): string[] {
+function optionsFor(
+  all: readonly (string | ComboboxOption)[],
+  text: string
+): ComboboxOption[] {
   const needle = text.trim().toLowerCase()
-  const out: string[] = []
-  for (const option of all) {
-    if (needle !== '' && !option.toLowerCase().includes(needle)) continue
+  const out: ComboboxOption[] = []
+  for (const entry of all) {
+    const option = typeof entry === 'string' ? { value: entry } : entry
+    if (
+      needle !== '' &&
+      !option.value.toLowerCase().includes(needle) &&
+      !(option.hint ?? '').toLowerCase().includes(needle)
+    ) {
+      continue
+    }
     out.push(option)
     if (out.length >= OPTION_LIMIT) break
   }
@@ -97,6 +119,15 @@ const WIRE_NAME_RE = /^[A-Za-z_][\w-]*$/
 
 function displayValue(value: ArgValue | undefined): string {
   return value === undefined ? '' : String(value)
+}
+
+/** A tag list the way the field shows it, `book, article`: the stored value
+ *  (`book,article`), or what a typed list stores as once it comes back. */
+function tagListDisplay(raw: string): string {
+  return joinTagList(raw.split(',').map((piece) => piece.trim()).filter(Boolean))
+    .split(',')
+    .filter(Boolean)
+    .join(', ')
 }
 
 const INPUT_CLASS =
@@ -128,7 +159,7 @@ function ThemedCombobox({
   onChange
 }: {
   value: string
-  options: readonly string[]
+  options: readonly ComboboxOption[]
   disabled: boolean
   label: string
   placeholder?: string
@@ -192,7 +223,7 @@ function ThemedCombobox({
             setCursor((c) => (c - 1 + visible.length) % visible.length)
           } else if (event.key === 'Enter') {
             event.preventDefault()
-            commit(visible[active])
+            commit(visible[active].value)
           } else if (event.key === 'Escape') {
             // Swallowed so the inspector stays open: Escape here means "I am
             // done with this list", not "leave the workflow".
@@ -209,7 +240,7 @@ function ThemedCombobox({
           className="absolute left-0 right-0 z-dropdown mt-1 max-h-48 overflow-auto rounded-md border border-paper-300 bg-paper-100 py-1 shadow-float"
         >
           {visible.map((option, index) => (
-            <li key={option}>
+            <li key={option.value}>
               <button
                 type="button"
                 role="option"
@@ -218,14 +249,17 @@ function ThemedCombobox({
                 // the list before a click could register.
                 onMouseDown={(event) => {
                   event.preventDefault()
-                  commit(option)
+                  commit(option.value)
                 }}
                 onMouseEnter={() => setCursor(index)}
                 className={`block w-full px-2 py-1 text-left text-xs ${
                   index === active ? 'bg-paper-300/70 text-ink-900' : 'text-ink-700'
                 }`}
               >
-                {option}
+                {option.value}
+                {option.hint !== undefined && (
+                  <span className="ml-2 text-ink-500">{option.hint}</span>
+                )}
               </button>
             </li>
           ))}
@@ -251,13 +285,22 @@ function ParamControl({
   disabled: boolean
   onChange: (value: ArgValue) => void
 }): JSX.Element {
-  const stored = displayValue(value)
+  const stored = spec.type === 'tags' ? tagListDisplay(displayValue(value)) : displayValue(value)
   const [text, setText] = useState(stored)
+  const echo = useRef<string | null>(null)
+  const seededFor = useRef(nodeKey)
 
   // Re-seed from the file whenever the step changes or the stored value moves
   // underneath us (a text edit, an undo). A value we just pushed comes back
   // identical, so this is a no-op for our own echo and the caret stays put.
+  // A tag list is the exception: `book, ` comes back as `book`, so its echo is
+  // recognized by value instead, or the re-seed would eat the separator the
+  // author is about to type after.
   useEffect(() => {
+    const sameStep = seededFor.current === nodeKey
+    seededFor.current = nodeKey
+    if (sameStep && echo.current === stored) return
+    echo.current = null
     setText(stored)
   }, [nodeKey, stored])
 
@@ -271,6 +314,23 @@ function ParamControl({
         // field. `bindParams` strips the `#`, so the stored value never has one.
         const clean = sanitizeTagChars(next)
         setText(clean)
+        onChange(clean)
+        return
+      }
+      case 'tags': {
+        // Each comma-separated entry is cleaned like a single tag; the commas,
+        // and the space after one, stay so the next tag can be typed.
+        const clean = next
+          .split(',')
+          .map((piece, i) => {
+            const name = sanitizeTagChars(piece.trim())
+            if (i === 0) return name
+            // An entry still empty keeps the author's spacing, so Backspace works.
+            return name ? ` ${name}` : piece.startsWith(' ') ? ' ' : ''
+          })
+          .join(',')
+        setText(clean)
+        echo.current = tagListDisplay(clean)
         onChange(clean)
         return
       }
@@ -318,7 +378,10 @@ function ParamControl({
     )
   }
 
-  const combobox = (all: readonly string[], placeholder?: string): JSX.Element => (
+  const combobox = (
+    all: readonly (string | ComboboxOption)[],
+    placeholder?: string
+  ): JSX.Element => (
     <ThemedCombobox
       value={text}
       options={optionsFor(all, text)}
@@ -358,6 +421,8 @@ function ParamControl({
         return select(vocabulary.wires)
       case 'tag':
         return combobox(vocabulary.tags, 'book')
+      case 'tags':
+        return plain('book, article')
       case 'field':
         return combobox([...BUILTIN_FIELDS, ...vocabulary.fields], 'updated')
       case 'path':
@@ -402,6 +467,12 @@ function ParamControl({
       {spec.type === 'tag' && (
         <span className="text-2xs text-ink-400">
           Written to the file with a #. Nested tags match, so book keeps book/scifi.
+        </span>
+      )}
+      {spec.type === 'tags' && (
+        <span className="text-2xs text-ink-400">
+          One tag, or several separated by commas: book, article. Written to the file with #s,
+          and nested tags match.
         </span>
       )}
       {spec.type === 'rest' && (

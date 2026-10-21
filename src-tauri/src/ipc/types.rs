@@ -110,13 +110,6 @@ pub struct MoveExternalFileResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct VaultDemoTourResult {
-    pub note_paths: Vec<String>,
-    pub asset_paths: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct CustomTemplateFile {
     pub source_path: String,
     pub raw: String,
@@ -167,26 +160,13 @@ pub struct NoteComment {
     pub updated_at: i64,
     /// Resolved timestamp, or null when unresolved.
     pub resolved_at: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct VaultTask {
-    pub id: String,
-    pub source_path: String,
-    pub note_title: String,
-    pub note_folder: String,
-    pub line_number: i64,
-    pub task_index: i64,
-    pub raw_text: String,
-    pub content: String,
-    pub checked: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub due: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub priority: Option<String>,
-    pub waiting: bool,
-    pub tags: Vec<String>,
+    /// Who wrote it (#738): absent for the vault's owner, an assistant's name
+    /// (via MCP or the CLI) otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    /// Threads a reply under a top-level comment's id; absent on top-level ones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -317,7 +297,8 @@ pub struct VaultChangeEvent {
     pub path: String,
     /// inbox | quick | archive | trash.
     pub folder: String,
-    /// "content" | "vault-settings" | "comments" (omitted for plain content).
+    /// "vault-settings" | "comments" | "agent-edits" | "database" | "folder" |
+    /// "templates" (omitted for plain content).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
 }

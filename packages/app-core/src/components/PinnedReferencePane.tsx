@@ -1,3 +1,4 @@
+import { noteEditingSync, noteEditingLockExtension, refreshNoteEditingLock } from '../lib/note-lifecycle-lock'
 /**
  * Always-visible side panel that shows a single companion note — a
  * "reference pane" writers and researchers can keep open while drafting
@@ -18,7 +19,6 @@ import {
 } from '@codemirror/state'
 import {
   EditorView,
-  drawSelection,
   highlightActiveLine,
   highlightActiveLineGutter,
   keymap,
@@ -28,10 +28,13 @@ import {
 import { vim } from '@replit/codemirror-vim'
 import { history, historyKeymap, indentWithTab } from '@codemirror/commands'
 import { vimAwareDefaultKeymap, vimAwareMarkdownKeymap, vimAwareSearchKeymap } from '../lib/cm-vim-default-keymap'
+import { isTouchPrimaryDevice, vimImeGuard } from '../lib/cm-vim-ime-guard'
+import { getKeymapBinding, type KeymapOverrides } from '../lib/keymaps'
+import { keyBindingsFor } from '../lib/vim-half-page-keymap'
 import { vimVisualHighlightExtension } from '../lib/cm-vim-visual-highlight'
-import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
-import { resolveCodeLanguage } from '../lib/cm-code-languages'
+import { noteMarkdown } from '../lib/cm-markdown-language'
 import { customCodeFenceHighlightExtension } from '../lib/cm-custom-code-languages'
+import { markdownLinkExtension } from '../lib/cm-markdown-links'
 import {
   listIndentGuides as listIndentGuidesExt,
   listIndentWidth,
@@ -61,6 +64,7 @@ import { LazyPreview as Preview } from './LazyPreview'
 import { CloseIcon, PanelLeftIcon, PinIcon } from './icons'
 import { editorTabSize } from '../lib/editor-tab-size'
 import { appMarkdownSnippetExtension } from '../lib/markdown-snippets-config'
+import { cursorDrawSelection } from '../lib/cm-cursor-blink'
 
 const PINNED_REF_PANE_ID = 'pinned-ref'
 export const pinnedRefPaneId = PINNED_REF_PANE_ID
@@ -77,7 +81,6 @@ const paperHighlight = HighlightStyle.define([
   { tag: t.emphasis, class: 'tok-emphasis' },
   { tag: t.strong, class: 'tok-strong' },
   { tag: t.strikethrough, class: 'tok-strikethrough' },
-  { tag: t.link, class: 'tok-link' },
   { tag: t.url, class: 'tok-url' },
   { tag: t.monospace, class: 'tok-monospace' },
   { tag: t.quote, class: 'tok-quote' },
@@ -128,6 +131,22 @@ function lineNumberExtension(mode: LineNumberMode): Extension {
   ]
 }
 
+function buildReferenceKeymap(vimMode: boolean, overrides: KeymapOverrides): Extension {
+  return keymap.of([
+    // Note search must precede the find bar only while its binding is set.
+    ...keyBindingsFor(getKeymapBinding(overrides, 'global.searchNotesNonVim'), () => {
+      const state = useStore.getState()
+      if (state.vimMode) return false
+      state.setSearchOpen(true)
+      return true
+    }),
+    indentWithTab,
+    ...vimAwareDefaultKeymap(vimMode),
+    ...historyKeymap,
+    ...vimAwareSearchKeymap(vimMode)
+  ])
+}
+
 export function PinnedReferencePane(): JSX.Element | null {
   const globalRefPath = useStore((s) => s.pinnedRefPath)
   const globalRefKind = useStore((s) => s.pinnedRefKind)
@@ -165,10 +184,12 @@ export function PinnedReferencePane(): JSX.Element | null {
   const updateNoteBody = useStore((s) => s.updateNoteBody)
   const persistNote = useStore((s) => s.persistNote)
   const vimMode = useStore((s) => s.vimMode)
+  const keymapOverrides = useStore((s) => s.keymapOverrides)
   const livePreview = useStore((s) => s.livePreview)
   const showHeadingLevelLabels = useStore((s) => s.showHeadingLevelLabels)
   const lineNumberMode = useStore((s) => s.lineNumberMode)
   const editorTabSizeValue = useStore((s) => s.editorTabSize)
+  const cursorBlink = useStore((s) => s.cursorBlink)
   const listIndentGuidesOn = useStore((s) => s.listIndentGuides)
   const editorFontSize = useStore((s) => s.editorFontSize)
   const editorLineHeight = useStore((s) => s.editorLineHeight)
@@ -178,10 +199,12 @@ export function PinnedReferencePane(): JSX.Element | null {
   const viewRef = useRef<EditorView | null>(null)
   const viewPathRef = useRef<string | null>(null)
   const vimCompartmentRef = useRef<Compartment | null>(null)
+  const keymapCompartmentRef = useRef<Compartment | null>(null)
   const livePreviewCompartmentRef = useRef<Compartment | null>(null)
   const lineNumbersCompartmentRef = useRef<Compartment | null>(null)
   const headingCompartmentRef = useRef<Compartment | null>(null)
   const tabSizeCompartmentRef = useRef<Compartment | null>(null)
+  const drawSelectionCompartmentRef = useRef<Compartment | null>(null)
 
   const [resizing, setResizing] = useState(false)
 
@@ -196,26 +219,36 @@ export function PinnedReferencePane(): JSX.Element | null {
       }
       if (viewRef.current) return
       const vimCompartment = new Compartment()
+      const keymapCompartment = new Compartment()
       const livePreviewCompartment = new Compartment()
       const lineNumbersCompartment = new Compartment()
       const headingCompartment = new Compartment()
       const tabSizeCompartment = new Compartment()
+      const drawSelectionCompartment = new Compartment()
       vimCompartmentRef.current = vimCompartment
+      keymapCompartmentRef.current = keymapCompartment
       livePreviewCompartmentRef.current = livePreviewCompartment
       lineNumbersCompartmentRef.current = lineNumbersCompartment
       headingCompartmentRef.current = headingCompartment
       tabSizeCompartmentRef.current = tabSizeCompartment
+      drawSelectionCompartmentRef.current = drawSelectionCompartment
       const s0 = useStore.getState()
       const initialPath = s0.pinnedRefPath
       const initialContent = initialPath ? s0.noteContents[initialPath] ?? null : null
+      viewPathRef.current = initialPath
       const state = EditorState.create({
         doc: initialContent?.body ?? '',
         extensions: [
+          noteEditingLockExtension(() => ({ vault: useStore.getState().vault, path: viewPathRef.current })),
           appMarkdownSnippetExtension(),
           vimCompartment.of(s0.vimMode ? vim() : []),
+          // The same input-method guard as the main editor (#84, #464, #921).
+          vimImeGuard(
+            () => useStore.getState().vimBlockImeInNormalMode && !isTouchPrimaryDevice()
+          ),
           vimVisualHighlightExtension,
           history(),
-          drawSelection(),
+          drawSelectionCompartment.of(cursorDrawSelection(s0.cursorBlink)),
           tabSizeCompartment.of([
             editorTabSize(s0.editorTabSize),
             listIndentWidth(s0.editorTabSize),
@@ -223,8 +256,9 @@ export function PinnedReferencePane(): JSX.Element | null {
           ]),
           highlightActiveLine(),
           EditorView.lineWrapping,
-          markdown({ base: markdownLanguage, codeLanguages: resolveCodeLanguage, addKeymap: false }),
+          noteMarkdown(),
           customCodeFenceHighlightExtension,
+          markdownLinkExtension,
           vimAwareMarkdownKeymap,
           markdownListIndentPlugin,
           frontmatterStyle,
@@ -262,21 +296,7 @@ export function PinnedReferencePane(): JSX.Element | null {
           }),
           completionNavKeymap,
           completionKeymapExtension,
-          keymap.of([
-            {
-              key: 'Mod-f',
-              run: () => {
-                const state = useStore.getState()
-                if (state.vimMode) return false
-                state.setSearchOpen(true)
-                return true
-              }
-            },
-            indentWithTab,
-            ...vimAwareDefaultKeymap(s0.vimMode),
-            ...historyKeymap,
-            ...vimAwareSearchKeymap(s0.vimMode)
-          ]),
+          keymapCompartment.of(buildReferenceKeymap(s0.vimMode, s0.keymapOverrides)),
           EditorView.updateListener.of((upd) => {
             if (!upd.docChanged) return
             if (upd.transactions.some((tr: Transaction) => tr.annotation(programmatic))) return
@@ -305,9 +325,11 @@ export function PinnedReferencePane(): JSX.Element | null {
     const sel = view.state.selection.main
     const clampedAnchor = Math.min(sel.anchor, nextBody.length)
     const clampedHead = Math.min(sel.head, nextBody.length)
+    viewPathRef.current = nextPath
+    refreshNoteEditingLock(view)
     view.dispatch({
       changes: { from: 0, to: view.state.doc.length, insert: nextBody },
-      annotations: programmatic.of(true),
+      annotations: [programmatic.of(true), noteEditingSync.of(true)],
       selection: pathChanged ? { anchor: 0 } : { anchor: clampedAnchor, head: clampedHead }
     })
     viewPathRef.current = nextPath
@@ -320,6 +342,12 @@ export function PinnedReferencePane(): JSX.Element | null {
     if (!view || !comp) return
     view.dispatch({ effects: comp.reconfigure(vimMode ? vim() : []) })
   }, [vimMode])
+  useEffect(() => {
+    const view = viewRef.current
+    const comp = keymapCompartmentRef.current
+    if (!view || !comp) return
+    view.dispatch({ effects: comp.reconfigure(buildReferenceKeymap(vimMode, keymapOverrides)) })
+  }, [vimMode, keymapOverrides])
   useEffect(() => {
     const view = viewRef.current
     const comp = livePreviewCompartmentRef.current
@@ -354,6 +382,12 @@ export function PinnedReferencePane(): JSX.Element | null {
       ])
     })
   }, [editorTabSizeValue, listIndentGuidesOn])
+  useEffect(() => {
+    const view = viewRef.current
+    const comp = drawSelectionCompartmentRef.current
+    if (!view || !comp) return
+    view.dispatch({ effects: comp.reconfigure(cursorDrawSelection(cursorBlink)) })
+  }, [cursorBlink])
 
   /* -------- Re-measure on font changes -------- */
   useEffect(() => {

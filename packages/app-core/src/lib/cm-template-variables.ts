@@ -16,10 +16,25 @@ export const TEMPLATE_VARIABLES: TemplateVariable[] = [
   {
     name: 'date:FORMAT',
     insert: '{{date:YYYY-MM-DD}}',
-    detail: 'Custom date format — yyyy MM dd EEEE ww (same tokens as note patterns)'
+    detail: 'Custom date format: yyyy MM dd EEEE ww (same tokens as note patterns)'
   },
   { name: 'time', insert: '{{time}}', detail: 'Current time (HH:mm)' },
   { name: 'week', insert: '{{week}}', detail: 'ISO week number' },
+  {
+    name: 'modified_date',
+    insert: '{{modified_date}}',
+    detail: 'Live: the date the note was last saved (stays in the note, always current)'
+  },
+  {
+    name: 'modified_time',
+    insert: '{{modified_time}}',
+    detail: 'Live: the time the note was last saved (HH:mm)'
+  },
+  {
+    name: 'modified_datetime',
+    insert: '{{modified_datetime}}',
+    detail: 'Live: date and time the note was last saved'
+  },
   { name: 'cursor', insert: '{{cursor}}', detail: 'Where the caret lands' }
 ]
 

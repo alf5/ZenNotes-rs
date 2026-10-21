@@ -7,7 +7,7 @@
  * mental model matches what they see on screen — sibling panes in a
  * deeply nested split still look like simple neighbors.
  */
-import { isAtlasViewActive, isTasksViewActive, useStore } from '../store'
+import { isAtlasViewActive, isTagsViewActive, isTasksViewActive, useStore } from '../store'
 import { getVisiblePanelsNow, resolveNextPanel, type Panel } from './vim-nav'
 import {
   ROW_PANEL_DEFS,
@@ -106,7 +106,8 @@ function getVisiblePanelList(state: ReturnType<typeof useStore.getState>): Panel
     noteListOpen: state.noteListOpen,
     unifiedSidebar: state.unifiedSidebar,
     tasksViewOpen: isTasksViewActive(state),
-    atlasViewOpen: isAtlasViewActive(state)
+    atlasViewOpen: isAtlasViewActive(state),
+    tagsViewOpen: isTagsViewActive(state)
   })
 }
 

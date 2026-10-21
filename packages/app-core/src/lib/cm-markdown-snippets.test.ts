@@ -151,6 +151,50 @@ describe('markdownSnippetTransaction', () => {
   })
 })
 
+// #770: Space with the cursor just inside the opening marker of existing markup
+// (`**|word**`) expanded the opener into a second empty pair, `**|**word**`,
+// and the Backspace that followed then removed the empty pair, four characters
+// for the two that were typed. An opener whose partner is already ahead on the
+// line is not a snippet trigger: Space inserts a space.
+describe('markdownSnippetTransaction at the front of existing markup (#770)', () => {
+  it('leaves the opener of an existing bold span alone', () => {
+    expect(applySnippet('**word**', 'Space', 2)).toBeNull()
+    expect(applySnippet('__word__', 'Space', 2)).toBeNull()
+  })
+
+  it('leaves the other symmetric pairs alone too', () => {
+    expect(applySnippet('`code`', 'Space', 1)).toBeNull()
+    expect(applySnippet('~~done~~', 'Space', 2)).toBeNull()
+    expect(applySnippet('==mark==', 'Space', 2)).toBeNull()
+    expect(applySnippet('%%note%%', 'Space', 2)).toBeNull()
+  })
+
+  it('leaves the opener of an existing wikilink alone', () => {
+    expect(applySnippet('[[Note]]', 'Space', 2)).toBeNull()
+    expect(applySnippet('see [[Note]] and [[Other]]', 'Space', 6)).toBeNull()
+  })
+
+  it('still expands an opener whose only closers ahead belong to a later pair', () => {
+    const state = applySnippet('** and **bold**', 'Space', 2)
+
+    expect(state?.doc.toString()).toBe('**** and **bold**')
+    expect(state?.selection.main.head).toBe(2)
+  })
+
+  it('still expands a wikilink opener ahead of a complete link', () => {
+    const state = applySnippet('[[ and [[Other]]', 'Space', 2)
+
+    expect(state?.doc.toString()).toBe('[[]] and [[Other]]')
+    expect(state?.selection.main.head).toBe(2)
+  })
+
+  it('ignores an escaped closer when deciding', () => {
+    const state = applySnippet('**word\\**', 'Space', 2)
+
+    expect(state?.doc.toString()).toBe('****word\\**')
+  })
+})
+
 // #405: a fenced/math block opened inside a bullet list must auto-close with the
 // content and closing fence indented to the fence column, not escape to col 0.
 describe('block snippets inside list items (#405)', () => {
@@ -186,6 +230,61 @@ describe('block snippets inside list items (#405)', () => {
   it('still opens a new fence on a fresh list item after a closed block', () => {
     const state = typeThenTrigger('- ```bash\n  x\n  ```\n- ', '```', 'Enter')
     expect(state?.doc.toString()).toBe('- ```bash\n  x\n  ```\n- ```\n  \n  ```')
+  })
+})
+
+// #961: inside a quote or callout every line of the block needs its `>`, or
+// the body and closing fence leave the quote and the block does not render.
+describe('block snippets inside quotes and callouts (#961)', () => {
+  function caretLine(state: EditorState | null): string | undefined {
+    if (!state) return undefined
+    const head = state.selection.main.head
+    const line = state.doc.lineAt(head)
+    return head === line.to ? line.text : undefined
+  }
+
+  it('keeps the quote marker on a math block in a callout', () => {
+    const state = typeThenTrigger('> [!note] Note heading\n> ', '$$', 'Enter')
+    expect(state?.doc.toString()).toBe('> [!note] Note heading\n> $$\n> \n> $$')
+    expect(caretLine(state)).toBe('> ')
+  })
+
+  it('keeps it on a fenced code block in a quote', () => {
+    const state = typeThenTrigger('> ', '```js', 'Enter')
+    expect(state?.doc.toString()).toBe('> ```js\n> \n> ```')
+  })
+
+  it('keeps every marker of a nested quote', () => {
+    const state = typeThenTrigger('> > ', '$$', 'Enter')
+    expect(state?.doc.toString()).toBe('> > $$\n> > \n> > $$')
+  })
+
+  it('keeps a quote marker written without its space', () => {
+    const state = typeThenTrigger('>', '$$', 'Enter')
+    expect(state?.doc.toString()).toBe('>$$\n>\n>$$')
+    expect(caretLine(state)).toBe('>')
+  })
+
+  it('indents under a list item inside a quote, keeping the quote', () => {
+    const state = typeThenTrigger('> - ', '$$', 'Enter')
+    expect(state?.doc.toString()).toBe('> - $$\n>   \n>   $$')
+  })
+
+  it('opens on a list item continuation inside a callout', () => {
+    const state = typeThenTrigger('> [!note] Outer\n> - item\n>   ', '$$', 'Enter')
+    expect(state?.doc.toString()).toBe('> [!note] Outer\n> - item\n>   $$\n>   \n>   $$')
+    expect(caretLine(state)).toBe('>   ')
+  })
+
+  it('keeps a quote nested in a list item', () => {
+    const state = typeThenTrigger('- > ', '$$', 'Enter')
+    expect(state?.doc.toString()).toBe('- > $$\n  > \n  > $$')
+  })
+
+  it('reads a quoted closer as the end of the block, not a new opener', () => {
+    const doc = '> $$\n> x\n> '
+    const typed = typeInput(createState(doc, doc.length), '$$')
+    expect(markdownSnippetTransaction(typed, 'Enter')).toBeNull()
   })
 })
 

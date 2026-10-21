@@ -19,13 +19,15 @@ import { RAW_ARG } from './types'
 
 /**
  * `rest` swallows every remaining token as a space-joined string (used by
- * `render` for its column list and by `append` for free text). Every other type
- * consumes exactly one token.
+ * `render` for its column list and by `append` for free text), and `tags`
+ * swallows them as a comma-separated list of tags. Every other type consumes
+ * exactly one token.
  */
 export type ParamType =
   | 'string'
   | 'number'
   | 'tag'
+  | 'tags'
   | 'path'
   | 'folder'
   | 'field'
@@ -153,7 +155,7 @@ export const NODE_DEFS: readonly NodeDef[] = [
     category: 'source',
     title: 'Notes in folder',
     description:
-      'Starts a pipeline with the notes in a folder, subfolders included.',
+      'Starts a pipeline with the notes in a folder, subfolders included. The four system names (inbox, quick, archive, trash) mean those folders wherever the vault keeps them: on a vault whose notes live at the root, `folder inbox` is the vault root.',
     example: 'inbox = folder inbox',
     params: [p('folder', 'folder')],
     source: true,
@@ -165,9 +167,9 @@ export const NODE_DEFS: readonly NodeDef[] = [
     category: 'source',
     title: 'Notes with tag',
     description:
-      'Starts a pipeline with the notes carrying a tag. Trashed and archived notes stay out, like `all`.',
+      'Starts a pipeline with the notes carrying a tag, or any tag of a comma-separated list. Trashed and archived notes stay out, like `all`.',
     example: 'books = tag #book',
-    params: [p('tag', 'tag')],
+    params: [p('tag', 'tags')],
     source: true,
     mutating: false,
     terminal: false
@@ -235,9 +237,9 @@ export const NODE_DEFS: readonly NodeDef[] = [
     category: 'filter',
     title: 'Tagged',
     description:
-      'Keeps only the notes carrying a tag. Tags nest, so #project also keeps #project/compiler.',
-    example: 'tagged #book',
-    params: [p('tag', 'tag')],
+      'Keeps only the notes carrying a tag, or any tag of a comma-separated list. Tags nest, so #project also keeps #project/compiler.',
+    example: 'tagged #book, #article',
+    params: [p('tag', 'tags')],
     source: false,
     mutating: false,
     terminal: false
@@ -247,9 +249,24 @@ export const NODE_DEFS: readonly NodeDef[] = [
     category: 'filter',
     title: 'Not tagged',
     description:
-      'Drops the notes carrying a tag and keeps the rest. Nested tags count as carrying it.',
-    example: 'not-tagged #someday',
-    params: [p('tag', 'tag')],
+      'Drops the notes carrying a tag, or any tag of a comma-separated list, and keeps the rest. Nested tags count as carrying it.',
+    example: 'not-tagged #someday, #reference',
+    params: [p('tag', 'tags')],
+    source: false,
+    mutating: false,
+    terminal: false
+  },
+  {
+    // Not `untagged`: a step kind wins over a wire of the same name (see the
+    // header of `./parse`), and `untagged` is exactly how wires get named, next
+    // to the recipes' `unfiled` and `strays`. Reading as a verb keeps it clear.
+    kind: 'no-tags',
+    category: 'filter',
+    title: 'Without tags',
+    description:
+      'Keeps only the notes that carry no tag at all, in the frontmatter or the text.',
+    example: 'no-tags',
+    params: [],
     source: false,
     mutating: false,
     terminal: false
@@ -259,7 +276,7 @@ export const NODE_DEFS: readonly NodeDef[] = [
     category: 'filter',
     title: 'In folder',
     description:
-      'Keeps only the notes that live inside a folder, subfolders included.',
+      'Keeps only the notes that live inside a folder, subfolders included. The four system names mean the system folders wherever the vault keeps them, as with `folder`.',
     example: 'in inbox/projects',
     params: [p('folder', 'folder')],
     source: false,
@@ -657,6 +674,25 @@ export function bindParams(def: NodeDef, tokens: string[], line: number): BindRe
   let index = 0
 
   for (const spec of def.params) {
+    if (spec.type === 'tags') {
+      const listed = tokens.slice(index)
+      index = tokens.length
+      if (listed.length === 0) {
+        if (spec.required) {
+          diagnostics.push({ severity: 'error', message: `\`${def.kind}\` needs ${spec.name}`, line })
+        }
+        continue
+      }
+      const bound = coerceTagList(listed, def.kind, line)
+      if (bound.value !== undefined) {
+        args[spec.name] = bound.value
+        continue
+      }
+      if (bound.diagnostic) diagnostics.push(bound.diagnostic)
+      // Parked like any other failed token, so the author's text survives a save.
+      args[RAW_ARG] = listed.join(' ')
+      return { args, diagnostics }
+    }
     if (spec.type === 'rest') {
       const rest = tokens.slice(index).join(' ')
       index = tokens.length
@@ -715,6 +751,50 @@ export function bindParams(def: NodeDef, tokens: string[], line: number): BindRe
   }
 
   return { args, diagnostics }
+}
+
+/**
+ * A comma-separated tag list (`#a, #b`), stored comma-joined without the `#`s.
+ *
+ * Tags separated only by spaces are an error, not a list. Before lists existed,
+ * `not-tagged #a #b` bound as `not-tagged #a` and dropped `#b` with a warning,
+ * so reading the spaces as a list now would quietly change what an existing
+ * `tagged #a #b | trash` touches. The comma form is just as safe going the other
+ * way: a build without lists rejects `#a,` as a tag, and an errored statement
+ * plans no changes.
+ */
+function coerceTagList(
+  tokens: string[],
+  kind: string,
+  line: number
+): { value?: string; diagnostic?: Diagnostic } {
+  const bad = (message: string): { diagnostic: Diagnostic } => ({
+    diagnostic: { severity: 'error', message, line }
+  })
+  const pieces = tokens.join(' ').split(',').map((piece) => piece.trim())
+  if (pieces.some((piece) => piece === '')) return bad(`\`${kind}\` has an empty entry in its tag list`)
+  for (const piece of pieces) {
+    if (/\s/.test(piece)) {
+      return bad(`separate tags with commas: \`${kind} ${piece.split(/\s+/).join(', ')}\``)
+    }
+    if (!TAG_RE.test(piece)) return bad(`\`${piece}\` is not a valid tag`)
+  }
+  return { value: joinTagList(pieces) }
+}
+
+/**
+ * Valid tags as a list argument stores them: no `#`, comma-joined, and a repeat
+ * dropped whatever its case (tags match case-insensitively). The parser and the
+ * inspector both store through here, so a list typed into the inspector saves
+ * as exactly what the file reads back.
+ */
+export function joinTagList(tags: string[]): string {
+  const names: string[] = []
+  for (const tag of tags) {
+    const name = tag.replace(/^#/, '')
+    if (!names.some((known) => known.toLowerCase() === name.toLowerCase())) names.push(name)
+  }
+  return names.join(',')
 }
 
 function coerce(

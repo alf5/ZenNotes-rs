@@ -5,6 +5,9 @@ import type {
   CloudSyncBootstrapConflictResolution,
   CloudSyncConflict,
   CloudSyncContent,
+  CloudSyncContentReference,
+  CloudSyncContentRequestOptions,
+  CloudSyncDownloadResponse,
   CloudSyncLocalConflict,
   CloudSyncManifestItem,
   CloudSyncManifestResponse,
@@ -35,11 +38,32 @@ import {
   type CloudSyncTrackedItem
 } from './cloud-sync-engine'
 import { mergeCloudSyncText, resolveCloudSyncMerge } from './cloud-sync-merge'
+import { CloudIssueError, cloudProtocolError } from './cloud-error-copy'
+import {
+  validateCloudSyncContentReference, validateCloudSyncDownloadInstruction,
+  cloudSyncStagedHandle, releaseCloudSyncStagedFile, throwIfCloudSyncCancelled,
+  type CloudContentDecryptor, type CloudSyncDownloadSource, type CloudSyncStagedFile, type CloudSyncStagedConflict
+} from './cloud-sync-content'
+
+/** A decision another window or device already made. */
+const CONFLICT_SETTLED =
+  'This file was already settled, in another window or on another device. Nothing else is needed.'
+/** The other side moved on while the person was choosing. */
+const CONFLICT_CHANGED_AGAIN =
+  'The file changed again on another device while you were reviewing it. Choose Sync now to load the newest version, then choose again.'
+const CHOICE_UNCONFIRMED = "ZenNotes Cloud didn't confirm your choice, so nothing changed yet. Try again."
+const NEEDS_UPDATE = "This version of ZenNotes can't do that yet. Update ZenNotes, then try again."
 
 const MUTATION_BATCH_SIZE = 100
 const MANIFEST_PAGE_SIZE = 250
 const CHANGE_PAGE_SIZE = 250
 const MANIFEST_RETRIES = 3
+const BOOTSTRAP_BULK_MIN_ITEMS = 5
+const BOOTSTRAP_BULK_FILE_LIMIT_BYTES = 1024 * 1024
+const BOOTSTRAP_BULK_RESPONSE_LIMIT_BYTES = 16 * 1024 * 1024
+// Every size divides its predecessor, so subdivision preserves the offset
+// using only the existing page/per_page API, including around a large asset.
+const BOOTSTRAP_PAGE_SIZES = [MANIFEST_PAGE_SIZE, 125, 25, 5, 1]
 const CONFLICT_PREVIEW_LIMIT_BYTES = 256 * 1024
 /** Conflict snapshots above this size keep only their metadata in state. The
  * local bytes stay on disk untouched while the decision waits, and the Cloud
@@ -47,25 +71,44 @@ const CONFLICT_PREVIEW_LIMIT_BYTES = 256 * 1024
 const CONFLICT_SNAPSHOT_INLINE_LIMIT_BYTES = CONFLICT_PREVIEW_LIMIT_BYTES
 
 export interface CloudSyncRemote {
+  readonly downloadSignal?: AbortSignal
+  readonly allowInsecureLoopbackDownloads?: boolean
+  readonly requiresContentReferenceHost?: boolean
+  negotiateContentReferences?(): Promise<boolean>
+  download?(vaultId: string, itemId: string, revision: number): Promise<CloudSyncDownloadResponse>
+  /** The decryptor for an end-to-end encrypted vault, or null for a readable one. */
+  contentDecryptor?(vaultId: string): Promise<CloudContentDecryptor | null>
+  /** Host memory budget for estimated bulk responses, capped at the shared
+   * default. Hosts must preserve requested manifest page/perPage values. */
+  readonly bootstrapContentPageBytes?: number
   manifest(
     vaultId: string,
-    options: { includeContent?: boolean; page?: number; perPage?: number }
+    options: { includeContent?: boolean; page?: number; perPage?: number } & CloudSyncContentRequestOptions
   ): Promise<CloudSyncManifestResponse>
   changes(
     vaultId: string,
     after: number,
-    limit?: number
+    limit?: number,
+    options?: CloudSyncContentRequestOptions
   ): Promise<{
     data: CloudSyncChange[]
     cursor: number
     has_more: boolean
   }>
   mutate(vaultId: string, body: CloudSyncMutationRequest): Promise<CloudSyncMutationResponse>
-  revision?(vaultId: string, itemId: string, revision: number): Promise<CloudSyncRevisionResponse>
+  revision?(vaultId: string, itemId: string, revision: number, options?: CloudSyncContentRequestOptions): Promise<CloudSyncRevisionResponse>
 }
 
 export interface CloudSyncRepository {
+  /** Native fingerprint fast path, including acknowledged echoes after restart. */
+  matchesCloudContent?(path: string, reference: CloudSyncContentReference): Promise<boolean>
+  stageCloudContent?(source: CloudSyncDownloadSource): Promise<CloudSyncStagedFile>
+  applyStagedCloudContent?(change: CloudSyncChange, previous: CloudSyncTrackedItem | undefined, file: CloudSyncStagedFile): Promise<CloudSyncRepositoryConflict | void>
+  resolveStagedCloudConflict?(input: CloudSyncStagedConflict): Promise<void>
   scan(): Promise<CloudSyncLocalItem[]>
+  /** Finish filesystem work an earlier run was stopped in the middle of. Runs
+   *  first in every sync run, before anything is pulled or scanned. */
+  recoverInterruptedWork?(): Promise<void>
   /** Paths with a durable user decision still pending. The coordinator leaves
    *  both their tracked and local versions out of mutation planning until the
    *  host removes the pending marker. */
@@ -128,6 +171,8 @@ export interface CloudSyncRunResult {
  */
 export class CloudSyncCoordinator {
   private running: Promise<CloudSyncRunResult> | null = null
+  private referencesEnabled = false
+  private referenceNegotiation?: Promise<void>
 
   constructor(
     private readonly vaultId: string,
@@ -148,11 +193,12 @@ export class CloudSyncCoordinator {
   }
 
   async getConflict(conflictId: string): Promise<CloudSyncPendingConflictDetails> {
+    await this.ensureReferences()
     const state = await this.requireState()
     const stored = state.pending_conflicts?.[conflictId]
-    if (!stored) throw new Error('This conflict is no longer waiting for a decision.')
+    if (!stored) throw new Error(CONFLICT_SETTLED)
     const current = await this.currentLocalSnapshot(stored)
-    const conflict = { ...stored, local: current }
+    const conflict = { ...stored, local: current, cloud: await this.previewSnapshot(stored.cloud) }
     const merge = conflictTextMerge(conflict)
     return {
       conflict: pendingConflictSummary(conflict),
@@ -174,7 +220,7 @@ export class CloudSyncCoordinator {
   async saveConflictDraft(conflictId: string, draftText: string | null): Promise<void> {
     const state = await this.requireState()
     const conflict = state.pending_conflicts?.[conflictId]
-    if (!conflict) throw new Error('This conflict is no longer waiting for a decision.')
+    if (!conflict) throw new Error(CONFLICT_SETTLED)
     const pending = { ...state.pending_conflicts }
     pending[conflictId] = {
       ...conflict,
@@ -184,12 +230,13 @@ export class CloudSyncCoordinator {
   }
 
   async resolveConflict(resolution: CloudSyncPendingConflictResolution): Promise<void> {
+    await this.ensureReferences()
     if (!['local', 'cloud', 'both', 'merged', 'changes'].includes(resolution.choice)) {
       throw new Error('That conflict resolution choice is not valid.')
     }
     const state = await this.requireState()
     const stored = state.pending_conflicts?.[resolution.conflict_id]
-    if (!stored) throw new Error('This conflict is no longer waiting for a decision.')
+    if (!stored) throw new Error(CONFLICT_SETTLED)
     const local = await this.currentLocalSnapshot(stored)
     if ((local.content?.sha256 ?? null) !== resolution.expected_local_sha256) {
       throw new Error(
@@ -197,23 +244,34 @@ export class CloudSyncCoordinator {
       )
     }
     if (stored.cloud.revision !== resolution.expected_cloud_revision) {
-      throw new Error('The Cloud version changed. Sync again before choosing a version.')
+      throw new Error(CONFLICT_CHANGED_AGAIN)
     }
-    const manifest = await this.stableManifest()
-    assertCloudSnapshotIsCurrent(stored, manifest)
-
-    if (resolution.choice === 'cloud') {
-      await this.applyCloudChoice(await this.withCloudBytes(stored, manifest), local)
-      await this.saveWithoutConflict(state, stored.id)
-      return
-    }
-
-    if (resolution.choice === 'both') {
-      await this.applyKeepBothChoice(
-        await this.withCloudBytes(stored, manifest),
-        local,
-        resolution.keep_both_path
-      )
+    if (resolution.choice === 'cloud' || resolution.choice === 'both') {
+      // These choices consume Cloud bytes locally rather than writing a
+      // revision. Check freshness using metadata, fetching only this file's
+      // retained bytes when they are not already in the conflict snapshot.
+      // Older hosts without a revision reader still need the content manifest.
+      const needsContentFallback =
+        !this.referencesEnabled && !this.remote.revision && stored.cloud.content !== null &&
+        !hasInlineData(stored.cloud.content)
+      const manifest = await this.stableManifest(needsContentFallback)
+      assertCloudSnapshotIsCurrent(stored, manifest)
+      const referenced = manifest.items.find((item) => item.item_id === stored.item_id)?.content_ref
+      if (referenced && stored.cloud.path !== null) {
+        if (resolution.choice === 'both' && (typeof resolution.keep_both_path !== 'string' || !resolution.keep_both_path.trim() || !local.path || !local.content)) {
+          throw new Error('Choose a filename for this device’s version.')
+        }
+        await this.withStaged(referenced, (file) => this.repository.resolveStagedCloudConflict!({
+          expected_path: local.path, expected_sha256: local.content?.sha256 ?? null,
+          cloud_path: stored.cloud.path!, file,
+          ...(resolution.choice === 'both' ? { keep_both_path: resolution.keep_both_path } : {})
+        }))
+        await this.saveWithoutConflict(state, stored.id)
+        return
+      }
+      const current = await this.withCloudBytes(stored, manifest)
+      if (resolution.choice === 'cloud') await this.applyCloudChoice(current, local)
+      else await this.applyKeepBothChoice(current, local, resolution.keep_both_path)
       await this.saveWithoutConflict(state, stored.id)
       return
     }
@@ -225,14 +283,14 @@ export class CloudSyncCoordinator {
       }
       chosen = await textContent(
         resolution.merged_text,
-        local.content?.media_type ?? stored.cloud.content?.media_type ?? 'text/markdown'
+        local.content?.media_type ?? stored.cloud.content?.media_type ?? stored.cloud.content_ref?.media_type ?? 'text/markdown'
       )
     } else if (resolution.choice === 'changes') {
-      const merge = conflictTextMerge({ ...stored, local })
+      const merge = conflictTextMerge({ ...stored, local, cloud: await this.previewSnapshot(stored.cloud) })
       if (!merge) throw new Error('This file cannot be combined as text.')
       chosen = await textContent(
         resolveCloudSyncMerge(merge, resolution.change_choices ?? {}),
-        local.content?.media_type ?? stored.cloud.content?.media_type ?? 'text/markdown'
+        local.content?.media_type ?? stored.cloud.content?.media_type ?? stored.cloud.content_ref?.media_type ?? 'text/markdown'
       )
     }
 
@@ -243,13 +301,21 @@ export class CloudSyncCoordinator {
       throw new Error('Choose a filename inside the synced vault.')
     }
 
+    // A delete found by rebuilding from the manifest has no revision to build
+    // on, so this device's version goes back to Cloud as a new file, and a
+    // file deleted on both sides leaves nothing to send.
+    const recreate = stored.cloud.path === null && stored.cloud.revision === null
+    if (recreate && !chosen) {
+      await this.saveWithoutConflict(state, stored.id)
+      return
+    }
     const operationId = this.ids.operationId()
     const mutation: CloudSyncMutation = chosen
       ? {
           type: 'upsert',
           operation_id: operationId,
-          item_id: stored.item_id,
-          base_revision: stored.cloud.revision,
+          item_id: recreate ? this.ids.itemId() : stored.item_id,
+          base_revision: recreate ? null : stored.cloud.revision,
           path: resolvedPath ?? '',
           kind: local.kind,
           content: chosen
@@ -264,15 +330,16 @@ export class CloudSyncCoordinator {
       throw new Error('The resolved file path is no longer available.')
     }
     const request = { mutations: [mutation] }
+    // The server atomically checks base_revision and destination ownership.
+    // A full-vault content download cannot strengthen that check and makes
+    // resolving one small note depend on every unrelated asset in the vault.
     const response = await this.remote.mutate(this.vaultId, request)
     const conflict = response.conflicts.find((item) => item.operation_id === operationId)
     if (conflict) {
-      throw new Error(
-        'The Cloud version changed while saving. Sync again to review the latest changes.'
-      )
+      throw new Error(CONFLICT_CHANGED_AGAIN)
     }
     if (!response.acknowledged.some((item) => item.operation_id === operationId)) {
-      throw new Error('Cloud did not confirm the resolution. Try again.')
+      throw new Error(CHOICE_UNCONFIRMED)
     }
 
     // Save to Cloud first. If the request fails, the file the user is looking
@@ -305,20 +372,24 @@ export class CloudSyncCoordinator {
   async getBootstrapConflict(
     conflict: CloudSyncBootstrapConflict
   ): Promise<CloudSyncBootstrapConflictDetails> {
+    await this.ensureReferences()
     const current = await this.currentBootstrapConflict(conflict)
+    const preview = await this.previewSnapshot({ path: current.item.path, revision: current.item.revision,
+      kind: current.item.kind, content: current.item.content ?? null, content_ref: current.item.content_ref })
     return {
       conflict,
       kind: current.item.kind,
       local: conflictVersion(current.local.content),
-      cloud: conflictVersion(current.item.content)
+      cloud: conflictVersion(preview.content ?? preview.content_ref!)
     }
   }
 
   async resolveBootstrapConflict(resolution: CloudSyncBootstrapConflictResolution): Promise<void> {
+    await this.ensureReferences()
     if (!['local', 'cloud', 'both', 'merged'].includes(resolution.choice)) {
       throw new Error('That Cloud conflict resolution choice is not valid.')
     }
-    if (resolution.choice === 'both' && typeof resolution.keep_both_path !== 'string') {
+    if (resolution.choice === 'both' && (typeof resolution.keep_both_path !== 'string' || !resolution.keep_both_path.trim())) {
       throw new Error('Choose a filename for this device’s version.')
     }
     if (resolution.choice === 'merged' && typeof resolution.merged_text !== 'string') {
@@ -326,29 +397,27 @@ export class CloudSyncCoordinator {
     }
 
     const current = await this.currentBootstrapConflict(resolution.conflict)
-    if (resolution.choice !== 'local') {
-      if (!this.repository.resolveBootstrapConflict) {
-        throw new Error('This device cannot resolve Cloud file conflicts yet.')
-      }
-      await this.repository.resolveBootstrapConflict({
-        path: current.item.path,
-        expectedLocalSha256: current.local.content.sha256,
-        cloudContent: current.item.content,
-        resolution
-      })
+    if (current.item.content_ref && (resolution.choice === 'cloud' || resolution.choice === 'both')) {
+      await this.withStaged(current.item.content_ref, (file) => this.repository.resolveStagedCloudConflict!({
+        expected_path: current.local.path, expected_sha256: current.local.content.sha256,
+        cloud_path: current.item.path, file,
+        ...(resolution.choice === 'both' ? { keep_both_path: resolution.keep_both_path } : {})
+      }))
+      return
+    }
+    if (resolution.choice !== 'local' && !this.repository.resolveBootstrapConflict &&
+        !(current.item.content_ref && this.repository.replaceConflictFile)) {
+      throw new Error(NEEDS_UPDATE)
     }
 
     if (resolution.choice === 'local' || resolution.choice === 'merged') {
+      if (resolution.choice === 'merged' && (current.item.content ?? current.item.content_ref)?.encoding !== 'utf8') {
+        throw new Error('Only text conflicts can be merged.')
+      }
       const chosen =
         resolution.choice === 'local'
-          ? current.local
-          : (await this.repository.scan()).find(
-              (candidate) =>
-                cloudSyncPathKey(candidate.path) === cloudSyncPathKey(current.item.path)
-            )
-      if (!chosen) {
-        throw new Error('The resolved file is no longer available on this device.')
-      }
+          ? current.local.content
+          : await textContent(resolution.merged_text!, current.local.content.media_type)
 
       const operationId = this.ids.operationId()
       const response = await this.remote.mutate(this.vaultId, {
@@ -359,26 +428,45 @@ export class CloudSyncCoordinator {
             item_id: current.item.item_id,
             base_revision: current.item.revision,
             path: current.item.path,
-            kind: chosen.kind,
-            content: chosen.content
+            kind: current.local.kind,
+            content: chosen
           }
         ]
       })
       const conflict = response.conflicts.find((item) => item.operation_id === operationId)
       if (conflict) {
-        throw new Error(
-          `Cloud changed while resolving this file (${conflict.code}). Sync again to compare the latest versions.`
-        )
+        throw new Error(CONFLICT_CHANGED_AGAIN)
       }
       if (!response.acknowledged.some((item) => item.operation_id === operationId)) {
-        throw new Error('Cloud did not confirm the conflict resolution. Try again.')
+        throw new Error(CHOICE_UNCONFIRMED)
       }
+    }
+    // A merged choice must reach Cloud before replacing the local version,
+    // so a failed request leaves the original conflict safe to review again.
+    if (resolution.choice !== 'local') {
+      if (current.item.content_ref) {
+        if (!this.repository.replaceConflictFile) throw new Error(NEEDS_UPDATE)
+        await this.repository.replaceConflictFile({ path: current.item.path,
+          expectedSha256: current.local.content.sha256,
+          content: await textContent(resolution.merged_text!, current.local.content.media_type) })
+        return
+      }
+      await this.repository.resolveBootstrapConflict!({
+        path: current.item.path,
+        expectedLocalSha256: current.local.content.sha256,
+        cloudContent: current.item.content!,
+        resolution
+      })
     }
     // Do not initialize state here. The follow-up sync must still pull other
     // Cloud-only files and report any other first-sync conflicts.
   }
 
   private async run(): Promise<CloudSyncRunResult> {
+    // An app stopped mid-rename leaves the note under a name scans skip; it
+    // goes back under its own name before this run looks at the vault.
+    await this.repository.recoverInterruptedWork?.()
+    await this.ensureReferences()
     const bootstrap = await this.loadOrBootstrap()
     if (bootstrap.conflicts.length > 0) {
       return {
@@ -396,14 +484,27 @@ export class CloudSyncCoordinator {
     let state = bootstrap.state
     let pulled = bootstrap.pulled
     const localConflicts = [...bootstrap.localConflicts]
-    const initialPull = await this.pullChanges(state)
+    const initialPull = await this.pullOrRebuild(state)
     state = initialPull.state
     pulled += initialPull.pulled
     localConflicts.push(...initialPull.localConflicts)
 
-    const localItems = await this.repository.scan()
+    let localItems = await this.repository.scan()
+    const repositoryPendingPaths = (await this.repository.pendingConflictPaths?.()) ?? []
+    const reconciled = clearConvergedConflicts(state, localItems, repositoryPendingPaths)
+    if (reconciled !== state) {
+      state = reconciled
+      await this.states.save(state)
+    }
+    const merged = await this.retryPendingMerges(state, localItems, repositoryPendingPaths)
+    if (merged !== state) {
+      state = merged
+      await this.states.save(state)
+      // Plan from the merged bytes, never from the scan preceding the write.
+      localItems = await this.repository.scan()
+    }
     const pendingPathKeys = new Set([
-      ...((await this.repository.pendingConflictPaths?.()) ?? []).map(cloudSyncPathKey),
+      ...repositoryPendingPaths.map(cloudSyncPathKey),
       ...pendingConflictPaths(state).map(cloudSyncPathKey)
     ])
     const mutationState =
@@ -468,7 +569,7 @@ export class CloudSyncCoordinator {
     }
 
     if (mutationCursor > state.cursor) {
-      const finalPull = await this.pullChanges(state, acknowledgedSequences)
+      const finalPull = await this.pullOrRebuild(state, acknowledgedSequences)
       state = finalPull.state
       pulled += finalPull.pulled
       localConflicts.push(...finalPull.localConflicts)
@@ -498,29 +599,228 @@ export class CloudSyncCoordinator {
     }
   }
 
+  /**
+   * Cloud keeps its change log for a limited time (90 days by default) and
+   * answers 410 CURSOR_EXPIRED to a cursor older than what is left. Every run
+   * used to fail there, and relinking reused the same state, so a device away
+   * that long could not sync again. It catches up from the manifest instead,
+   * then follows the log again from the manifest's cursor.
+   */
+  private async pullOrRebuild(
+    state: CloudSyncState,
+    acknowledgedSequences?: ReadonlySet<number>
+  ): Promise<CloudSyncPull> {
+    try {
+      return await this.pullChanges(state, acknowledgedSequences)
+    } catch (error) {
+      if (!isCloudCursorExpired(error)) throw error
+    }
+    // pullChanges saved the changes that landed before the log ran out.
+    const rebuilt = await this.rebuildFromManifest((await this.states.load(this.vaultId)) ?? state)
+    const pull = await this.pullChanges(rebuilt.state, acknowledgedSequences)
+    return {
+      state: pull.state,
+      pulled: rebuilt.pulled + pull.pulled,
+      localConflicts: [...rebuilt.localConflicts, ...pull.localConflicts]
+    }
+  }
+
+  /**
+   * Replay what the pruned log would have said, item by item, from the
+   * difference between the tracked state and the manifest. A first sync
+   * knows nothing about this device's files; this one still knows what sync
+   * last agreed on for each, so an offline edit is pushed as an edit, an
+   * offline delete as a delete, and a Cloud change lands only on a file this
+   * device can vouch for. Anything else is queued as a conflict, exactly as
+   * the change feed would have queued it.
+   *
+   * The order is the only thing lost: deletes go first so the paths they free
+   * are free, then renames and edits, each rename after whatever is leaving
+   * its destination, then files new to this device. Only a ring of renames
+   * through each other's paths comes out as conflicts, never as an overwrite.
+   */
+  private async rebuildFromManifest(previous: CloudSyncState): Promise<CloudSyncPull> {
+    const manifest = await this.stableManifest(!this.referencesEnabled && !this.remote.revision)
+    const localByPath = new Map((await this.repository.scan()).map((item) => [cloudSyncPathKey(item.path), item]))
+    const holds = (item: CloudSyncManifestItem) =>
+      localByPath.get(cloudSyncPathKey(item.path))?.content.sha256 === item.sha256
+    const listed = new Map(manifest.items.map((item) => [item.item_id, item]))
+    const pending = previous.pending_conflicts ?? {}
+
+    const deletes: string[] = []
+    const moves: string[] = []
+    const edits = new Set<string>()
+    const arrivals = new Set<string>()
+    for (const id of new Set([...Object.keys(previous.items), ...Object.keys(pending), ...listed.keys()])) {
+      const tracked = previous.items[id]
+      const cloud = listed.get(id)
+      const conflict = pending[id]
+      if (conflict) {
+        // A queued decision moves to the Cloud version it now has to be
+        // made against, without touching the file, like the change feed.
+        if (!cloud) {
+          if (conflict.cloud.path !== null) deletes.push(id)
+        } else if (conflict.cloud.path === null || conflict.cloud.revision !== cloud.revision) {
+          edits.add(id)
+        }
+      } else if (!cloud) {
+        if (tracked) deletes.push(id)
+      } else if (!tracked) {
+        arrivals.add(id)
+      } else if (!sameTrackedItem(tracked, cloud)) {
+        if (tracked.sha256 === cloud.sha256 && tracked.kind === cloud.kind) {
+          if (tracked.path !== cloud.path) moves.push(id)
+        } else if (tracked.path !== cloud.path || !holds(cloud)) {
+          edits.add(id)
+        }
+      }
+    }
+
+    const items = { ...previous.items }
+    let state: CloudSyncState = { ...previous, pending_conflicts: { ...pending } }
+    const localConflicts: CloudSyncLocalConflict[] = []
+    let pulled = 0
+    const land = async (change: CloudSyncChange, cloud: CloudSyncManifestItem | undefined) => {
+      throwIfCloudSyncCancelled(this.remote.downloadSignal)
+      const queued = state.pending_conflicts?.[change.item_id]
+      state = queued
+        ? withConflict(state, advancePendingConflict(queued, change))
+        : await this.landRemoteChange(state, change, previous.items[change.item_id], localConflicts)
+      const conflict = state.pending_conflicts?.[change.item_id]
+      if (change.type === 'delete' && conflict?.cloud.path === null) {
+        // The manifest lists only live files, so the revision that deleted
+        // this one is unknown. Keeping this device's version sends it back
+        // as a new file (see resolveConflict).
+        state = withConflict(state, { ...conflict, cloud: { ...conflict.cloud, revision: null } })
+      }
+      if (cloud) items[change.item_id] = trackedManifestItem(cloud)
+      else delete items[change.item_id]
+      pulled++
+    }
+
+    try {
+      for (const id of deletes) {
+        const path = previous.items[id]?.path ?? pending[id]?.cloud.path ?? pending[id]?.local.path ?? ''
+        await land({
+          sequence: manifest.cursor, item_id: id, type: 'delete', path, previous_path: null,
+          revision: previous.items[id]?.revision ?? pending[id]?.cloud.revision ?? 0
+        }, undefined)
+      }
+      // A rename, with or without new bytes, lands only once no other file
+      // still waiting to leave holds its destination. Cloud renamed B to C and
+      // then A to B: moving A first found B taken, queued a false conflict
+      // whose local side later matched the note at C by hash, and choosing
+      // Cloud there removed it. Renames that wait on each other in a ring
+      // cannot be ordered without a temporary name; they land as they are,
+      // and the repository queues each one without moving anything.
+      const leaving = new Map<string, string>()
+      const destination = new Map<string, string>()
+      for (const id of [...moves, ...edits]) {
+        const tracked = previous.items[id]
+        const target = cloudSyncPathKey(listed.get(id)!.path)
+        // A queued decision never moves its file, so it frees nothing.
+        if (pending[id] || !tracked || cloudSyncPathKey(tracked.path) === target) continue
+        leaving.set(cloudSyncPathKey(tracked.path), id)
+        destination.set(id, target)
+      }
+      const waiting = new Set([...moves, ...edits])
+      const blocked = (id: string) => {
+        const occupant = leaving.get(destination.get(id) ?? '')
+        return occupant !== undefined && occupant !== id
+      }
+      while (waiting.size > 0) {
+        const ready = [...waiting].filter((id) => !blocked(id))
+        const now = new Set(ready.length > 0 ? ready : waiting)
+        for (const id of moves) {
+          if (!now.has(id)) continue
+          const cloud = listed.get(id)!
+          await land({
+            sequence: manifest.cursor, item_id: id, type: 'move', path: cloud.path,
+            previous_path: previous.items[id]!.path, revision: cloud.revision,
+            ...(cloud.content_ref ? { content_ref: cloud.content_ref } : {})
+          }, cloud)
+        }
+        const editing = (candidate: CloudSyncManifestItem) => now.has(candidate.item_id) && edits.has(candidate.item_id)
+        for await (const item of this.bootstrapItems(manifest, editing)) {
+          const before = previous.items[item.item_id]
+          await land(manifestUpsert(item, manifest.cursor, before && before.path !== item.path ? before.path : null), item)
+        }
+        for (const id of now) {
+          waiting.delete(id)
+          const tracked = previous.items[id]
+          if (tracked && leaving.get(cloudSyncPathKey(tracked.path)) === id) leaving.delete(cloudSyncPathKey(tracked.path))
+        }
+      }
+      // A file new to this device may already be here, but only the vault as
+      // it is now can say: a delete or rename above may have just taken away
+      // the file at its path.
+      const current = arrivals.size === 0 ? localByPath
+        : new Map((await this.repository.scan()).map((item) => [cloudSyncPathKey(item.path), item]))
+      const arriving = (item: CloudSyncManifestItem) => arrivals.has(item.item_id) &&
+        current.get(cloudSyncPathKey(item.path))?.content.sha256 !== item.sha256
+      for await (const item of this.bootstrapItems(manifest, arriving)) {
+        await land(manifestUpsert(item, manifest.cursor), item)
+      }
+      throwIfCloudSyncCancelled(this.remote.downloadSignal)
+    } catch (error) {
+      // What landed stays landed, still at the old cursor: a retry rebuilds
+      // from these items and never redoes a change undone since (#813).
+      await this.states.save({ ...state, items })
+      throw error
+    }
+
+    state = { ...state, cursor: manifest.cursor, items: manifestState(this.vaultId, manifest.cursor, manifest.items).items }
+    await this.states.save(state)
+    return { state, pulled, localConflicts }
+  }
+
   private async pullChanges(
     initialState: CloudSyncState,
     acknowledgedSequences: ReadonlySet<number> = new Set()
-  ): Promise<{
-    state: CloudSyncState
-    pulled: number
-    localConflicts: CloudSyncLocalConflict[]
-  }> {
+  ): Promise<CloudSyncPull> {
     let state = initialState
     let pulled = 0
     const localConflicts: CloudSyncLocalConflict[] = []
     const changes: CloudSyncChange[] = []
+    const pages: Array<{ after: number; start: number; end: number }> = []
     let after = state.cursor
 
     for (;;) {
-      const response = await this.remote.changes(this.vaultId, after, CHANGE_PAGE_SIZE)
-      changes.push(...response.data)
-      const last = response.data.at(-1)
+      // Coalescing needs the entire history's metadata, never its file bodies.
+      // Content is hydrated one bounded page at a time after obsolete writes
+      // and acknowledged echoes have been identified.
+      const response = this.referencesEnabled
+        ? await this.remote.changes(this.vaultId, after, CHANGE_PAGE_SIZE, { contentMode: 'references', maxInlineBytes: 0 })
+        : await this.remote.changes(this.vaultId, after, CHANGE_PAGE_SIZE)
+      let expectedSequence = after + 1
+      for (const change of response.data) {
+        this.validateWireItem(change)
+        if (this.referencesEnabled && change.sequence !== expectedSequence++) {
+          throw cloudProtocolError(`Expected sync sequence ${expectedSequence - 1}, received ${change.sequence}`)
+        }
+        if (this.referencesEnabled && change.type === 'upsert' && !change.content_ref && !change.content) {
+          throw cloudProtocolError('Reference-mode change feed returned an upsert without content or a reference.')
+        }
+      }
+      pages.push({ after, start: changes.length, end: changes.length + response.data.length })
+      for (const change of response.data) {
+        if (this.referencesEnabled && change.content) {
+          const { content, ...metadata } = change
+          const { data: _bytes, ...contentMetadata } = content
+          changes.push({
+            ...metadata,
+            content_ref: { ...contentMetadata, item_id: change.item_id, revision: change.revision }
+          })
+        } else {
+          changes.push(change)
+        }
+      }
+      const last = response.data[response.data.length - 1]
       if (last) after = last.sequence
 
       if (!response.has_more) break
       if (response.data.length === 0) {
-        throw new Error('Cloud sync change feed reported another page without returning a change')
+        throw cloudProtocolError('Cloud sync change feed reported another page without returning a change')
       }
     }
 
@@ -553,52 +853,167 @@ export class CloudSyncCoordinator {
     // just received. Remember what was on disk before the first skipped
     // revision and give the change that finally lands that instead.
     const onDisk = new Map<string, CloudSyncTrackedItem | undefined>()
-    for (const change of changes) {
-      const acknowledged = acknowledgedSequences.has(change.sequence)
-      if (acknowledged) {
-        // This device's own push: the file already holds these bytes.
-        onDisk.delete(change.item_id)
-      } else if (supersededUpserts.has(change.sequence)) {
-        if (!onDisk.has(change.item_id)) onDisk.set(change.item_id, state.items[change.item_id])
-        pulled++
-      } else {
-        const previous = onDisk.has(change.item_id)
-          ? onDisk.get(change.item_id)
-          : state.items[change.item_id]
-        onDisk.delete(change.item_id)
-        const existingConflict = state.pending_conflicts?.[change.item_id]
-        if (existingConflict) {
-          state = {
-            ...state,
-            pending_conflicts: {
-              ...state.pending_conflicts,
-              [change.item_id]: advancePendingConflict(existingConflict, change)
-            }
-          }
-        } else {
-          const conflict = await this.repository.apply(change, previous)
-          if (conflict?.code === 'LOCAL_EDIT_CONFLICT') {
-            const pending = await this.storedConflict(change, previous, conflict.local ?? null)
-            if (!(await this.applyAutomaticMerge(pending))) {
-              state = {
-                ...state,
-                pending_conflicts: {
-                  ...state.pending_conflicts,
-                  [pending.id]: pending
-                }
-              }
-            }
-          } else if (conflict) {
-            localConflicts.push(publicLocalConflict(conflict))
-          }
+    // The files a change touched stay changed when a later change in the same
+    // batch fails, but the cursor used to move only once the whole batch was
+    // through. Every retry then replayed the applied changes from the old
+    // cursor: an upsert re-created a note the user had since deleted on this
+    // device, and the batch failed again on the same change (#813). Remember
+    // the newest state that can be persisted on its own (no coalesced
+    // revision still waiting for the change that lands it) and save that
+    // before the error escapes, so a retry resumes at the failing change.
+    let landed = initialState
+    let hydratedPage = -1
+    let pageBodies = new Map<number, CloudSyncChange>()
+    try {
+      for (let index = 0; index < changes.length; index++) {
+        throwIfCloudSyncCancelled(this.remote.downloadSignal)
+        let change = changes[index]
+        if (this.referencesEnabled && change.type === 'move' && change.content_ref && state.items[change.item_id]) {
+          validateCloudSyncContentReference(change.content_ref, { ...state.items[change.item_id], revision: change.revision })
         }
-        pulled++
+        const acknowledged = acknowledgedSequences.has(change.sequence)
+        if (acknowledged) {
+          if (this.referencesEnabled && change.type === 'upsert') {
+            const expected = state.items[change.item_id]
+            const content = change.content ?? change.content_ref
+            if (!expected || !content || expected.revision !== change.revision || expected.path !== change.path ||
+                expected.sha256 !== content.sha256 || expected.byte_length !== content.byte_length) {
+              throw cloudProtocolError('Cloud echo did not match its acknowledged mutation.')
+            }
+          }
+          // This device's own push: the file already holds these bytes.
+          onDisk.delete(change.item_id)
+        } else if (supersededUpserts.has(change.sequence)) {
+          if (!onDisk.has(change.item_id)) onDisk.set(change.item_id, state.items[change.item_id])
+          pulled++
+        } else {
+          const previous = onDisk.has(change.item_id)
+            ? onDisk.get(change.item_id)
+            : state.items[change.item_id]
+          onDisk.delete(change.item_id)
+          const existingConflict = state.pending_conflicts?.[change.item_id]
+          if (existingConflict) {
+            state = withConflict(state, advancePendingConflict(existingConflict, change))
+          } else {
+            if (this.referencesEnabled && change.type === 'upsert') {
+              const pageIndex = pages.findIndex((page) => page.start <= index && index < page.end)
+              if (pageIndex !== hydratedPage) {
+                const page = pages[pageIndex]
+                const response = await this.remote.changes(this.vaultId, page.after, page.end - page.start, { contentMode: 'references' })
+                if (response.data.length !== page.end - page.start ||
+                    response.data.some((body, offset) => !sameChangeMetadata(body, changes[page.start + offset]))) {
+                  throw new CloudIssueError('remote-changed', 'Cloud change page changed while its content was loading.')
+                }
+                for (const body of response.data) this.validateWireItem(body)
+                pageBodies = new Map(response.data.map((body) => [body.sequence, body]))
+                hydratedPage = pageIndex
+              }
+              change = pageBodies.get(change.sequence)!
+              if (change.content) await this.validatedManifestContent({
+                item_id: change.item_id, revision: change.revision, path: change.path,
+                kind: change.content.encoding === 'utf8' ? 'text' : 'binary', ...change.content
+              }, change.content)
+            }
+            state = await this.landRemoteChange(state, change, previous, localConflicts)
+          }
+          pulled++
+        }
+        state = reduceCloudSyncChange(state, change)
+        if (onDisk.size === 0) landed = state
       }
-      state = reduceCloudSyncChange(state, change)
+      throwIfCloudSyncCancelled(this.remote.downloadSignal)
+    } catch (error) {
+      if (landed !== initialState) await this.states.save(landed)
+      throw error
     }
     if (changes.length > 0) await this.states.save(state)
 
     return { state, pulled, localConflicts }
+  }
+
+  /** Put one Cloud change on disk, or queue it for a decision when the local
+   * file is not what sync last agreed on with Cloud. */
+  private async landRemoteChange(
+    state: CloudSyncState,
+    change: CloudSyncChange,
+    previous: CloudSyncTrackedItem | undefined,
+    localConflicts: CloudSyncLocalConflict[]
+  ): Promise<CloudSyncState> {
+    const applied = await this.applyRemoteChange(change, previous)
+    const conflict = applied.conflict
+    if (conflict?.code === 'LOCAL_EDIT_CONFLICT') {
+      const pending = await this.storedConflict(applied.change, previous, conflict.local ?? null)
+      if (!(await this.applyAutomaticMerge(pending))) return withConflict(state, pending)
+    } else if (conflict) {
+      localConflicts.push(publicLocalConflict(conflict))
+    }
+    return state
+  }
+
+  private async retryPendingMerges(
+    initialState: CloudSyncState,
+    localItems: CloudSyncLocalItem[],
+    repositoryPendingPaths: string[]
+  ): Promise<CloudSyncState> {
+    let state = initialState
+    const blocked = new Set(repositoryPendingPaths.map(cloudSyncPathKey))
+    const locals = new Map<string, CloudSyncLocalItem>()
+    for (const item of localItems) {
+      const key = cloudSyncPathKey(item.path)
+      if (locals.has(key)) blocked.add(key)
+      locals.set(key, item)
+    }
+    const pendingPaths = new Set<string>()
+    for (const conflict of Object.values(state.pending_conflicts ?? {})) {
+      const keys = new Set(
+        pendingConflictPaths({
+          ...state,
+          pending_conflicts: { [conflict.id]: conflict }
+        }).map(cloudSyncPathKey)
+      )
+      for (const key of keys) {
+        if (pendingPaths.has(key)) blocked.add(key)
+        pendingPaths.add(key)
+      }
+    }
+    for (const conflict of Object.values(state.pending_conflicts ?? {})) {
+      const cloud = conflict.cloud
+      const tracked = state.items[conflict.item_id]
+      if (
+        conflict.kind !== 'content' ||
+        conflict.draft_text !== undefined ||
+        (conflict.paused_paths?.length ?? 0) > 0 ||
+        cloud.path === null ||
+        cloud.path !== conflict.local.path ||
+        cloud.path !== conflict.base.path ||
+        cloud.kind !== 'text' ||
+        !cloud.content ||
+        !tracked ||
+        tracked.item_id !== conflict.item_id ||
+        tracked.path !== cloud.path ||
+        tracked.revision !== cloud.revision ||
+        tracked.kind !== cloud.kind ||
+        tracked.sha256 !== cloud.content.sha256 ||
+        tracked.byte_length !== cloud.content.byte_length
+      ) {
+        continue
+      }
+      const key = cloudSyncPathKey(cloud.path)
+      if (blocked.has(key)) continue
+      const local = locals.get(key)
+      if (!local || local.path !== cloud.path || local.kind !== 'text') continue
+      // Identical bytes have their own stricter convergence checks above.
+      if (inlineText(local.content) === inlineText(cloud.content)) continue
+      if (
+        await this.applyAutomaticMerge({
+          ...conflict,
+          local: { path: local.path, kind: local.kind, revision: null, content: local.content }
+        })
+      ) {
+        state = withoutConflict(state, conflict.id)
+      }
+    }
+    return state
   }
 
   private async applyAutomaticMerge(conflict: CloudSyncStoredConflict): Promise<boolean> {
@@ -644,6 +1059,13 @@ export class CloudSyncCoordinator {
     previous: CloudSyncTrackedItem | undefined,
     local: CloudSyncLocalItem | null
   ): Promise<CloudSyncStoredConflict> {
+    // A supplied reference identifies its immutable upsert. Only fall back to
+    // the state revision (resolved by the server) when the move omitted one.
+    if (this.referencesEnabled && change.type === 'move' && previous && !change.content_ref) {
+      change = { ...change, content_ref: { item_id: change.item_id, revision: change.revision,
+        encoding: previous.kind === 'text' ? 'utf8' : 'base64', sha256: previous.sha256,
+        byte_length: previous.byte_length, media_type: previous.media_type } }
+    }
     const conflict = storedConflict(change, previous, local)
     if (previous && !conflict.base.content) {
       conflict.base.content = await this.retainedText(previous.item_id, previous.revision, {
@@ -652,6 +1074,7 @@ export class CloudSyncCoordinator {
         text: previous.kind === 'text'
       })
     }
+    if (conflict.cloud.content_ref) conflict.cloud = await this.previewSnapshot(conflict.cloud)
     // A move carries no body, so its Cloud side starts as metadata. Small
     // text is fetched now so the resolver can offer a merge; anything else is
     // fetched when a decision needs the bytes.
@@ -683,9 +1106,23 @@ export class CloudSyncCoordinator {
     }
     try {
       const response = await this.remote.revision(this.vaultId, itemId, revision)
+      if (this.referencesEnabled && (response.data.item_id !== itemId || response.data.revision !== revision || response.data.deleted)) return null
+      if (response.data.content_ref) {
+        if (response.data.content) throw cloudProtocolError('Ambiguous Cloud revision content.')
+        if (response.data.item_id !== itemId || response.data.revision !== revision || response.data.deleted) return null
+        const ref = validateCloudSyncContentReference(response.data.content_ref, { item_id: itemId, revision, ...expected })
+        return await this.withStaged(ref, async (file) => file.preview ?? null)
+      }
       const content = response.data.content
-      if (content?.encoding === 'utf8' && content.sha256 === expected.sha256) return content
+      if (content?.encoding === 'utf8' && content.sha256 === expected.sha256) {
+        if (this.referencesEnabled) return await this.validatedManifestContent({
+          item_id: itemId, revision, path: response.data.path, kind: response.data.kind,
+          sha256: expected.sha256, byte_length: expected.byte_length, media_type: content.media_type
+        }, content)
+        return content
+      }
     } catch {
+      throwIfCloudSyncCancelled(this.remote.downloadSignal)
       // Retention is finite and older servers do not expose revision reads.
       // The conflict remains safely two-way instead of blocking all sync.
     }
@@ -705,16 +1142,15 @@ export class CloudSyncCoordinator {
       !!content && content.sha256 === snapshot.sha256 && hasInlineData(content)
     const item = manifest.items.find((candidate) => candidate.item_id === conflict.item_id)
     let content: CloudSyncContent | null = matches(item?.content) ? item.content : null
-    if (!content && this.remote.revision && conflict.cloud.revision !== null) {
+    if (!content && item && this.remote.revision && conflict.cloud.revision !== null) {
       try {
-        const response = await this.remote.revision(
-          this.vaultId,
-          conflict.item_id,
-          conflict.cloud.revision
+        const hydrated = await this.hydrateManifestItem(item)
+        if (matches(hydrated.content)) content = hydrated.content
+      } catch (cause) {
+        throw new Error(
+          'The Cloud version of this file is not available right now. Sync again and retry.',
+          { cause }
         )
-        if (matches(response.data.content)) content = response.data.content
-      } catch {
-        // Fall through to the error below.
       }
     }
     if (!content) {
@@ -757,7 +1193,7 @@ export class CloudSyncCoordinator {
     local: CloudSyncStoredConflict['local']
   ): Promise<void> {
     if (!this.repository.applyConflictResolutionFiles && !this.repository.replaceConflictFile) {
-      throw new Error('This device cannot resolve Cloud file conflicts yet.')
+      throw new Error(NEEDS_UPDATE)
     }
     // An empty file list below means "remove the local file", which is only
     // right when Cloud deleted it. A Cloud file whose bytes are missing must
@@ -781,7 +1217,7 @@ export class CloudSyncCoordinator {
     const localPath = local.path ?? conflict.base.path
     if (!localPath) throw new Error('The local file path is no longer available.')
     if (conflict.cloud.path !== null && conflict.cloud.path !== localPath) {
-      throw new Error('This device needs an update before it can resolve moved files.')
+      throw new Error(NEEDS_UPDATE)
     }
     await this.repository.replaceConflictFile!({
       path: localPath,
@@ -811,7 +1247,7 @@ export class CloudSyncCoordinator {
       return
     }
     if (!this.repository.resolveBootstrapConflict || conflict.cloud.path !== local.path) {
-      throw new Error('This device needs an update before it can keep both moved files.')
+      throw new Error(NEEDS_UPDATE)
     }
     await this.repository.resolveBootstrapConflict({
       path: local.path,
@@ -835,6 +1271,115 @@ export class CloudSyncCoordinator {
     await this.states.save(withoutConflict(state, conflictId))
   }
 
+  private async ensureReferences(): Promise<void> {
+    if (!this.remote.negotiateContentReferences || !this.remote.download ||
+        !this.repository.stageCloudContent || !this.repository.applyStagedCloudContent ||
+        !this.repository.resolveStagedCloudConflict) {
+      if (this.remote.requiresContentReferenceHost) throw cloudProtocolError('This host needs all Cloud staging and conflict hooks before streaming sync.')
+      return
+    }
+    this.referenceNegotiation ??= this.remote.negotiateContentReferences().then((enabled) => {
+      this.referencesEnabled = enabled
+    }).finally(() => { this.referenceNegotiation = undefined })
+    await this.referenceNegotiation
+  }
+
+  private async withStaged<Result>(reference: CloudSyncContentReference, use: (file: CloudSyncStagedFile) => Promise<Result>): Promise<Result> {
+    if (!this.referencesEnabled || !this.remote.download || !this.repository.stageCloudContent) {
+      throw cloudProtocolError('This host cannot safely download Cloud content references.')
+    }
+    const ref = Object.freeze(validateCloudSyncContentReference(reference))
+    throwIfCloudSyncCancelled(this.remote.downloadSignal)
+    const decryptor = ref.encrypted ? await this.remote.contentDecryptor?.(this.vaultId) : undefined
+    if (ref.encrypted && !decryptor) {
+      throw new Error(NEEDS_UPDATE)
+    }
+    const file = await this.repository.stageCloudContent({
+      reference: ref, signal: this.remote.downloadSignal, previewLimitBytes: CONFLICT_PREVIEW_LIMIT_BYTES,
+      allowInsecureLoopback: this.remote.allowInsecureLoopbackDownloads,
+      ...(decryptor ? { decryptor } : {}),
+      getInstruction: async () => {
+        throwIfCloudSyncCancelled(this.remote.downloadSignal)
+        return validateCloudSyncDownloadInstruction(
+          await this.remote.download!(this.vaultId, ref.item_id, ref.revision), ref,
+          this.remote.allowInsecureLoopbackDownloads
+        )
+      }
+    })
+    try {
+      cloudSyncStagedHandle(file, ref)
+      throwIfCloudSyncCancelled(this.remote.downloadSignal)
+      if (file.preview) {
+        if (ref.byte_length > CONFLICT_PREVIEW_LIMIT_BYTES || typeof file.preview.data !== 'string' || file.preview.data.length > CONFLICT_PREVIEW_LIMIT_BYTES * 2) {
+          throw cloudProtocolError('Cloud staging preview exceeded its byte budget.')
+        }
+        const item: CloudSyncManifestItem = { ...ref, path: 'preview', kind: ref.encoding === 'utf8' ? 'text' : 'binary', content: file.preview }
+        this.validateWireItem(item)
+        await this.validatedManifestContent(item, file.preview)
+      }
+      return await use(file)
+    } finally {
+      await releaseCloudSyncStagedFile(file)
+    }
+  }
+
+  private async previewSnapshot(snapshot: CloudSyncStoredConflict['cloud']): Promise<CloudSyncStoredConflict['cloud']> {
+    const ref = snapshot.content_ref
+    if (!ref || ref.encoding !== 'utf8' || ref.byte_length > CONFLICT_PREVIEW_LIMIT_BYTES) return snapshot
+    return this.withStaged(ref, async (file) => file.preview ? { ...snapshot, content: file.preview } : snapshot)
+  }
+
+  private async applyRemoteChange(change: CloudSyncChange, previous: CloudSyncTrackedItem | undefined): Promise<{
+    change: CloudSyncChange; conflict: CloudSyncRepositoryConflict | void
+  }> {
+    throwIfCloudSyncCancelled(this.remote.downloadSignal)
+    if (!change.content_ref || change.type !== 'upsert') return { change, conflict: await this.repository.apply(change, previous) }
+    const ref = validateCloudSyncContentReference(change.content_ref, change)
+    // Matching bytes settle an upsert in place, but one that also moves the
+    // item (a Cloud restore out of Trash) leaves an old file behind that only
+    // the repository can vouch for and remove. A case-only rename keeps the
+    // shortcut: on a case-insensitive volume both spellings are one file.
+    const moving = previous !== undefined && cloudSyncPathKey(previous.path) !== cloudSyncPathKey(change.path)
+    if (!moving && await this.repository.matchesCloudContent?.(change.path, ref)) return { change, conflict: undefined }
+    return this.withStaged(ref, async (file) => {
+      const applied = file.preview ? { ...change, content: file.preview, content_ref: undefined } : change
+      const conflict = file.preview ? await this.repository.apply(applied, previous) :
+        await this.repository.applyStagedCloudContent!(change, previous, file)
+      return { change: applied, conflict }
+    })
+  }
+
+  private validateWireItem(item: CloudSyncManifestItem | CloudSyncChange): void {
+    if (this.referencesEnabled) {
+      if (typeof item.item_id !== 'string' || !item.item_id || !Number.isSafeInteger(item.revision) || item.revision < 1) {
+        throw cloudProtocolError('Invalid Cloud item identity or revision.')
+      }
+      normalizeCloudSyncPath(item.path)
+      if ('sequence' in item) {
+        if (!Number.isSafeInteger(item.sequence) || item.sequence < 1 || !['upsert', 'move', 'delete'].includes(item.type)) {
+          throw cloudProtocolError('Invalid Cloud change sequence or type.')
+        }
+      } else if (!['text', 'binary'].includes(item.kind) || typeof item.sha256 !== 'string' ||
+          !/^[a-f0-9]{64}$/.test(item.sha256) || !Number.isSafeInteger(item.byte_length) || item.byte_length < 0 ||
+          typeof item.media_type !== 'string' || !item.media_type) {
+        throw cloudProtocolError('Invalid Cloud manifest metadata.')
+      }
+    }
+    if (item.content_ref) {
+      if (!this.referencesEnabled || item.content) throw cloudProtocolError('Unexpected or ambiguous Cloud content reference.')
+      validateCloudSyncContentReference(item.content_ref, item)
+    }
+    if (this.referencesEnabled && item.content) {
+      if (typeof item.content.data !== 'string' || item.content.byte_length > 1_048_576 ||
+          item.content.data.length > 2_097_152 || Object.keys(item.content).some((key) =>
+        !['encoding', 'data', 'sha256', 'byte_length', 'media_type'].includes(key))) {
+        throw cloudProtocolError('Invalid inline Cloud content or remote staging handle.')
+      }
+      const { data: _bytes, ...metadata } = item.content
+      validateCloudSyncContentReference({ ...metadata, item_id: item.item_id, revision: item.revision }, item)
+    }
+  }
+
   private async loadOrBootstrap(): Promise<{
     state: CloudSyncState
     pulled: number
@@ -844,47 +1389,30 @@ export class CloudSyncCoordinator {
     const existing = await this.states.load(this.vaultId)
     if (existing) return { state: existing, pulled: 0, conflicts: [], localConflicts: [] }
 
-    const manifest = await this.stableManifest()
+    const manifest = await this.stableManifest(!this.referencesEnabled && !this.remote.revision)
     const localItems = await this.repository.scan()
     const localByPath = new Map(localItems.map((item) => [cloudSyncPathKey(item.path), item]))
     const conflicts: CloudSyncBootstrapConflict[] = []
     const localConflicts: CloudSyncLocalConflict[] = []
     let pulled = 0
-
-    for (const item of manifest.items) {
-      const local = localByPath.get(cloudSyncPathKey(item.path))
-      if (local && local.content.sha256 !== item.sha256) {
-        if (isCloudSyncVaultSettingsPath(item.path)) {
-          if (!item.content)
-            throw new Error(`Manifest item ${item.item_id} did not include content`)
-          const conflict = await this.repository.apply(manifestUpsert(item), undefined)
-          if (conflict) localConflicts.push(conflict)
-          pulled++
-          continue
-        }
-        if (!item.content) throw new Error(`Manifest item ${item.item_id} did not include content`)
-        continue
-      }
-
-      if (!local) {
-        if (!item.content) throw new Error(`Manifest item ${item.item_id} did not include content`)
-        const conflict = await this.repository.apply(manifestUpsert(item), undefined)
-        if (conflict) localConflicts.push(conflict)
-        pulled++
-      }
-    }
-
     const state = manifestState(this.vaultId, manifest.cursor, manifest.items)
-    for (const item of manifest.items) {
+
+    const needsBytes = (item: CloudSyncManifestItem) =>
+      localByPath.get(cloudSyncPathKey(item.path))?.content.sha256 !== item.sha256
+    for await (const item of this.bootstrapItems(manifest, needsBytes)) {
+      throwIfCloudSyncCancelled(this.remote.downloadSignal)
       const local = localByPath.get(cloudSyncPathKey(item.path))
-      if (
-        !local ||
-        local.content.sha256 === item.sha256 ||
-        isCloudSyncVaultSettingsPath(item.path)
-      ) {
+
+      if (!local || isCloudSyncVaultSettingsPath(item.path)) {
+        const applied = await this.applyRemoteChange(manifestUpsert(item), undefined)
+        const conflict = applied.conflict
+        if (conflict?.code === 'LOCAL_EDIT_CONFLICT') {
+          state.pending_conflicts ??= {}
+          state.pending_conflicts[item.item_id] = await this.storedConflict(applied.change, undefined, conflict.local ?? null)
+        } else if (conflict) localConflicts.push(conflict)
+        pulled++
         continue
       }
-      if (!item.content) throw new Error(`Manifest item ${item.item_id} did not include content`)
       state.pending_conflicts ??= {}
       state.pending_conflicts[item.item_id] = {
         id: item.item_id,
@@ -907,26 +1435,125 @@ export class CloudSyncCoordinator {
           path: item.path,
           revision: item.revision,
           kind: item.kind,
-          content: snapshotContent(item.content)
+          content: item.content ? snapshotContent(item.content) : null,
+          ...(item.content_ref ? { content_ref: item.content_ref } : {})
         }
       }
     }
+    throwIfCloudSyncCancelled(this.remote.downloadSignal)
     await this.states.save(state)
 
     return { state, pulled, conflicts, localConflicts }
   }
 
+  /** The manifest items `needsBytes` selects, with their content, one bounded
+   * page at a time in manifest order. */
+  private async *bootstrapItems(
+    manifest: { cursor: number; items: CloudSyncManifestItem[] },
+    needsBytes: (item: CloudSyncManifestItem) => boolean
+  ): AsyncGenerator<CloudSyncManifestItem> {
+    const budget = this.remote.bootstrapContentPageBytes ?? BOOTSTRAP_BULK_RESPONSE_LIMIT_BYTES
+    if (!Number.isSafeInteger(budget) || budget <= 0) {
+      throw new Error('The bootstrap content-page byte budget must be a positive integer.')
+    }
+    const limits = {
+      pageSize: MANIFEST_PAGE_SIZE,
+      contentBytes: Math.min(budget, BOOTSTRAP_BULK_RESPONSE_LIMIT_BYTES)
+    }
+    for (let offset = 0; offset < manifest.items.length; offset += MANIFEST_PAGE_SIZE) {
+      yield* this.bootstrapPage(manifest, needsBytes, offset, MANIFEST_PAGE_SIZE, limits)
+    }
+  }
+
+  private async *bootstrapPage(
+    manifest: { cursor: number; items: CloudSyncManifestItem[] },
+    needsBytes: (item: CloudSyncManifestItem) => boolean,
+    offset: number,
+    pageSize: number,
+    limits: { pageSize: number; contentBytes: number }
+  ): AsyncGenerator<CloudSyncManifestItem> {
+    const items = manifest.items.slice(offset, offset + pageSize)
+    const needed = items.filter(needsBytes)
+    if (needed.length === 0) return
+    if (
+      (!this.referencesEnabled && !this.remote.revision) ||
+      needed.every((item) => item.content) ||
+      (this.referencesEnabled
+        ? needed.every((item) => item.content_ref && item.byte_length > CONFLICT_PREVIEW_LIMIT_BYTES)
+        : needed.length < BOOTSTRAP_BULK_MIN_ITEMS)
+    ) {
+      for (const item of needed) yield await this.hydrateManifestItem(item)
+      return
+    }
+
+    // JSON can expand one text byte to six escaped characters. Leave space
+    // below the server's 32 MiB limit for framing, and never put a large file
+    // in a content page just because the other files already exist locally.
+    const estimatedBytes = items.reduce(
+      (total, item) =>
+        total +
+        item.byte_length * 6 +
+        (item.path.length + item.item_id.length + item.media_type.length) * 12 +
+        1024,
+      0
+    )
+    if (
+      pageSize <= limits.pageSize &&
+      (this.referencesEnabled || (items.every((item) => item.byte_length <= BOOTSTRAP_BULK_FILE_LIMIT_BYTES) &&
+      estimatedBytes <= limits.contentBytes))
+    ) {
+      let response: CloudSyncManifestResponse | undefined
+      try {
+        response = await this.remote.manifest(this.vaultId, {
+          includeContent: true,
+          page: offset / pageSize + 1,
+          perPage: pageSize
+        })
+      } catch (error) {
+        if (!isCloudManifestTooLarge(error)) throw error
+        limits.pageSize = BOOTSTRAP_PAGE_SIZES.find((size) => size < pageSize)!
+      }
+      if (response) {
+        // Page offsets are meaningful only for the captured inventory. Do
+        // not turn cursor drift, 429s or aborts into a per-file retry storm.
+        if (
+          response.cursor !== manifest.cursor ||
+          response.data.length !== items.length ||
+          response.data.some((item, index) => !sameManifestItem(item, items[index]))
+        ) {
+          throw new CloudIssueError('remote-changed', 'Vault changed while bootstrap content was loading. Retry sync.')
+        }
+        const neededIds = new Set(needed.map((item) => item.item_id))
+        for (const item of response.data) {
+          this.validateWireItem(item)
+          if (!neededIds.has(item.item_id)) continue
+          if (item.content_ref) { yield item; continue }
+          yield {
+            ...item,
+            content: await this.validatedManifestContent(item, item.content)
+          }
+        }
+        // The page is consumed before the next is fetched. Only metadata and
+        // bounded conflict previews survive in the inventory and sync state.
+        return
+      }
+    }
+
+    const smallerSize = BOOTSTRAP_PAGE_SIZES.find((size) => size < pageSize)!
+    for (let start = offset; start < offset + items.length; start += smallerSize) {
+      yield* this.bootstrapPage(manifest, needsBytes, start, smallerSize, limits)
+    }
+  }
+
   private async currentBootstrapConflict(conflict: CloudSyncBootstrapConflict): Promise<{
-    item: CloudSyncManifestItem & { content: CloudSyncContent }
+    item: CloudSyncManifestItem
     local: CloudSyncLocalItem
   }> {
     if (await this.states.load(this.vaultId)) {
-      throw new Error(
-        'This Cloud conflict is no longer pending. Sync again to see the latest state.'
-      )
+      throw new Error(CONFLICT_SETTLED)
     }
 
-    const manifest = await this.stableManifest()
+    const manifest = await this.stableManifest(!this.referencesEnabled && !this.remote.revision)
     const item = manifest.items.find(
       (candidate) =>
         candidate.item_id === conflict.item_id &&
@@ -936,20 +1563,99 @@ export class CloudSyncCoordinator {
       (candidate) => cloudSyncPathKey(candidate.path) === cloudSyncPathKey(conflict.path)
     )
     if (
-      !item?.content ||
+      !item ||
       !local ||
       item.sha256 !== conflict.remote_sha256 ||
       local.content.sha256 !== conflict.local_sha256
     ) {
-      throw new Error('This Cloud conflict changed. Sync again to compare the latest versions.')
+      throw new Error(CONFLICT_CHANGED_AGAIN)
     }
     return {
-      item: item as CloudSyncManifestItem & { content: CloudSyncContent },
+      item: await this.hydrateManifestItem(item),
       local
     }
   }
 
-  private async stableManifest(): Promise<{
+  private async hydrateManifestItem(
+    item: CloudSyncManifestItem
+  ): Promise<CloudSyncManifestItem> {
+    this.validateWireItem(item)
+    if (item.content_ref) return item
+    if (item.content) return { ...item, content: item.content }
+    if (!this.remote.revision) {
+      throw cloudProtocolError(`Manifest item ${item.item_id} did not include content`)
+    }
+
+    const { data } = await this.remote.revision(this.vaultId, item.item_id, item.revision)
+    if (
+      data.item_id !== item.item_id ||
+      data.revision !== item.revision ||
+      data.path !== item.path ||
+      data.kind !== item.kind ||
+      data.deleted
+    ) {
+      throw new CloudIssueError(
+        'download-damaged',
+        `Cloud revision for ${item.path} did not match the sync manifest. Retry sync.`,
+        item.path
+      )
+    }
+    if (data.content_ref) {
+      if (data.content) throw cloudProtocolError('Ambiguous Cloud revision content.')
+      const referenced = { ...item, content: undefined, content_ref: data.content_ref }
+      this.validateWireItem(referenced)
+      return referenced
+    }
+    return {
+      ...item,
+      content: await this.validatedManifestContent(item, data.content)
+    }
+  }
+
+  private async validatedManifestContent(
+    item: CloudSyncManifestItem,
+    content: CloudSyncContent | null | undefined
+  ): Promise<CloudSyncContent> {
+    if (
+      !content ||
+      content.sha256 !== item.sha256 ||
+      content.byte_length !== item.byte_length ||
+      content.media_type !== item.media_type ||
+      !hasInlineData(content)
+    ) {
+      throw new CloudIssueError(
+        'download-damaged',
+        `Cloud revision for ${item.path} did not match the sync manifest. Retry sync.`,
+        item.path
+      )
+    }
+
+    // A content response is independent of the metadata request. Check its
+    // actual bytes too before a host writes them or stores a conflict preview.
+    let bytes: Uint8Array<ArrayBuffer>
+    if (content.encoding === 'utf8') {
+      bytes = new TextEncoder().encode(content.data)
+    } else if (content.encoding === 'base64') {
+      const binary = atob(content.data)
+      bytes = new Uint8Array(binary.length)
+      for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index)
+    } else {
+      throw cloudProtocolError('Encrypted cloud sync content must be decrypted before filesystem apply')
+    }
+    if (bytes.byteLength !== item.byte_length) {
+      throw new CloudIssueError('download-damaged', `Cloud revision for ${item.path} has invalid bytes. Retry sync.`, item.path)
+    }
+    const digest = await crypto.subtle.digest('SHA-256', bytes.buffer)
+    const hash = [...new Uint8Array(digest)]
+      .map((byte) => byte.toString(16).padStart(2, '0'))
+      .join('')
+    if (hash !== item.sha256) {
+      throw new CloudIssueError('download-damaged', `Cloud revision for ${item.path} has an invalid hash. Retry sync.`, item.path)
+    }
+    return content
+  }
+
+  private async stableManifest(includeContent: boolean): Promise<{
     cursor: number
     items: CloudSyncManifestItem[]
   }> {
@@ -961,17 +1667,27 @@ export class CloudSyncCoordinator {
 
       for (;;) {
         const response = await this.remote.manifest(this.vaultId, {
-          includeContent: true,
+          includeContent,
           page,
           perPage: MANIFEST_PAGE_SIZE
         })
+        if (this.referencesEnabled && (!Number.isSafeInteger(response.cursor) || response.cursor < 0 ||
+            !Array.isArray(response.data) ||
+            (response.next_page !== null && (response.next_page !== page + 1 || response.data.length !== MANIFEST_PAGE_SIZE)))) {
+          throw cloudProtocolError('Invalid reference-mode manifest cursor or pagination.')
+        }
         cursor ??= response.cursor
 
         if (cursor !== response.cursor) {
           stable = false
           break
         }
-
+        for (const item of response.data) {
+          this.validateWireItem(item)
+          if (this.referencesEnabled && !includeContent && !item.content_ref) {
+            throw cloudProtocolError('Reference-mode manifest omitted a content reference.')
+          }
+        }
         items.push(...response.data)
         if (response.next_page === null) break
         page = response.next_page
@@ -980,11 +1696,42 @@ export class CloudSyncCoordinator {
       if (stable && cursor !== null) return { cursor, items }
     }
 
-    throw new Error('Vault changed repeatedly while the initial sync manifest was loading')
+    throw new CloudIssueError('remote-changed', 'Vault changed repeatedly while the initial sync manifest was loading')
   }
 }
 
-function conflictVersion(content: CloudSyncContent): {
+type CloudSyncPull = {
+  state: CloudSyncState
+  pulled: number
+  localConflicts: CloudSyncLocalConflict[]
+}
+
+/** Cloud pruned the part of the change log this cursor still needed. */
+function isCloudCursorExpired(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const value = error as { status?: unknown; code?: unknown }
+  return value.status === 410 && value.code === 'CURSOR_EXPIRED'
+}
+
+function isCloudManifestTooLarge(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const value = error as { status?: unknown; code?: unknown }
+  return value.status === 413 && value.code === 'SYNC_RESPONSE_TOO_LARGE'
+}
+
+function sameManifestItem(left: CloudSyncManifestItem, right: CloudSyncManifestItem): boolean {
+  return (
+    left.item_id === right.item_id &&
+    left.path === right.path &&
+    left.kind === right.kind &&
+    left.revision === right.revision &&
+    left.sha256 === right.sha256 &&
+    left.byte_length === right.byte_length &&
+    left.media_type === right.media_type
+  )
+}
+
+function conflictVersion(content: CloudSyncContent | CloudSyncContentReference): {
   sha256: string
   byte_length: number
   media_type: string
@@ -996,6 +1743,7 @@ function conflictVersion(content: CloudSyncContent): {
     media_type: content.media_type,
     text:
       content.encoding === 'utf8' &&
+      'data' in content &&
       content.byte_length <= CONFLICT_PREVIEW_LIMIT_BYTES &&
       (content.data.length > 0 || content.byte_length === 0)
         ? content.data
@@ -1067,6 +1815,12 @@ function cloudSnapshot(
       content: null
     }
   }
+  const ref = change.content_ref ?? (change.type === 'move' ? prior?.content_ref : undefined)
+  if (ref) return {
+    path: change.path, revision: change.revision,
+    kind: ref.encoding === 'utf8' ? 'text' : 'binary', content: null,
+    content_ref: validateCloudSyncContentReference(ref, { item_id: change.item_id, revision: change.revision })
+  }
   return {
     path: change.path,
     revision: change.revision,
@@ -1087,16 +1841,17 @@ function assertCloudSnapshotIsCurrent(
 ): void {
   const current = manifest.items.find((item) => item.item_id === conflict.item_id)
   if (conflict.cloud.path === null) {
-    if (current) throw new Error('The Cloud version changed. Sync again before choosing a version.')
+    if (current) throw new Error(CONFLICT_CHANGED_AGAIN)
     return
   }
   if (
     !current ||
     current.revision !== conflict.cloud.revision ||
     cloudSyncPathKey(current.path) !== cloudSyncPathKey(conflict.cloud.path) ||
-    current.sha256 !== conflict.cloud.content?.sha256
+    current.sha256 !== (conflict.cloud.content ?? conflict.cloud.content_ref)?.sha256 ||
+    current.byte_length !== (conflict.cloud.content ?? conflict.cloud.content_ref)?.byte_length
   ) {
-    throw new Error('The Cloud version changed. Sync again before choosing a version.')
+    throw new Error(CONFLICT_CHANGED_AGAIN)
   }
 }
 
@@ -1158,7 +1913,7 @@ function publicConflictVersion(
   snapshot: CloudSyncStoredConflict['local'],
   role: 'base' | 'local' | 'cloud'
 ): CloudSyncPendingConflictDetails['local'] {
-  const content = snapshot.content
+  const content = snapshot.content ?? snapshot.content_ref ?? null
   return {
     path: snapshot.path,
     revision: snapshot.revision,
@@ -1167,12 +1922,17 @@ function publicConflictVersion(
     media_type: content?.media_type ?? null,
     text:
       content?.encoding === 'utf8' &&
+      'data' in content &&
       content.byte_length <= CONFLICT_PREVIEW_LIMIT_BYTES &&
       (content.data.length > 0 || content.byte_length === 0)
         ? content.data
         : null,
     deleted: role === 'local' ? content === null : role === 'cloud' ? snapshot.path === null : false
   }
+}
+
+function withConflict(state: CloudSyncState, conflict: CloudSyncStoredConflict): CloudSyncState {
+  return { ...state, pending_conflicts: { ...state.pending_conflicts, [conflict.id]: conflict } }
 }
 
 function withoutConflict(state: CloudSyncState, conflictId: string): CloudSyncState {
@@ -1198,6 +1958,57 @@ function pendingConflictPaths(state: CloudSyncState): string[] {
       ...(conflict.paused_paths ?? [])
     ].filter((path): path is string => path !== null)
   )
+}
+
+function clearConvergedConflicts(
+  state: CloudSyncState,
+  localItems: CloudSyncLocalItem[],
+  repositoryPendingPaths: string[]
+): CloudSyncState {
+  const blocked = new Set(repositoryPendingPaths.map(cloudSyncPathKey))
+  const locals = new Map<string, CloudSyncLocalItem>()
+  for (const item of localItems) {
+    const key = cloudSyncPathKey(item.path)
+    if (locals.has(key)) blocked.add(key)
+    locals.set(key, item)
+  }
+  let next = state
+  for (const conflict of Object.values(state.pending_conflicts ?? {})) {
+    const cloud = conflict.cloud
+    const cloudContent = cloud.content ?? cloud.content_ref
+    const tracked = state.items[conflict.item_id]
+    if (
+      conflict.kind !== 'content' ||
+      (conflict.paused_paths?.length ?? 0) > 0 ||
+      cloud.path === null ||
+      cloud.path !== conflict.local.path ||
+      cloud.path !== conflict.base.path ||
+      !cloudContent ||
+      !tracked ||
+      tracked.item_id !== conflict.item_id ||
+      tracked.path !== cloud.path ||
+      tracked.revision !== cloud.revision ||
+      tracked.kind !== cloud.kind ||
+      tracked.sha256 !== cloudContent.sha256 ||
+      tracked.byte_length !== cloudContent.byte_length ||
+      blocked.has(cloudSyncPathKey(cloud.path))
+    ) continue
+
+    const local = locals.get(cloudSyncPathKey(cloud.path))
+    if (
+      !local ||
+      local.path !== cloud.path ||
+      local.kind !== cloud.kind ||
+      local.content.sha256 !== cloudContent.sha256 ||
+      local.content.byte_length !== cloudContent.byte_length ||
+      (conflict.draft_text !== undefined && conflict.draft_text !== inlineText(local.content))
+    ) continue
+
+    // The change feed already advanced the tracked revision. Agreement only
+    // removes the pause; it never rewrites either file or sends a new version.
+    next = withoutConflict(next, conflict.id)
+  }
+  return next
 }
 
 function withAdditionalPausedPaths(
@@ -1309,28 +2120,57 @@ function manifestState(
   state.cursor = cursor
 
   for (const item of items) {
-    state.items[item.item_id] = {
-      item_id: item.item_id,
-      path: item.path,
-      kind: item.kind,
-      revision: item.revision,
-      sha256: item.sha256,
-      byte_length: item.byte_length,
-      media_type: item.media_type
-    }
+    state.items[item.item_id] = trackedManifestItem(item)
   }
 
   return state
 }
 
-function manifestUpsert(item: CloudSyncManifestItem): CloudSyncChange {
+function trackedManifestItem(item: CloudSyncManifestItem): CloudSyncTrackedItem {
   return {
-    sequence: 0,
+    item_id: item.item_id,
+    path: item.path,
+    kind: item.kind,
+    revision: item.revision,
+    sha256: item.sha256,
+    byte_length: item.byte_length,
+    media_type: item.media_type
+  }
+}
+
+function sameTrackedItem(tracked: CloudSyncTrackedItem, item: CloudSyncManifestItem): boolean {
+  return (
+    tracked.revision === item.revision &&
+    tracked.path === item.path &&
+    tracked.kind === item.kind &&
+    tracked.sha256 === item.sha256 &&
+    tracked.byte_length === item.byte_length &&
+    tracked.media_type === item.media_type
+  )
+}
+
+function manifestUpsert(
+  item: CloudSyncManifestItem,
+  sequence = 0,
+  previousPath: string | null = null
+): CloudSyncChange {
+  return {
+    sequence,
     item_id: item.item_id,
     type: 'upsert',
     path: item.path,
-    previous_path: null,
+    previous_path: previousPath,
     revision: item.revision,
-    content: item.content
+    content: item.content,
+    ...(item.content_ref ? { content_ref: item.content_ref } : {})
   }
+}
+
+function sameChangeMetadata(left: CloudSyncChange, right: CloudSyncChange): boolean {
+  const a = left.content ?? left.content_ref
+  const b = right.content ?? right.content_ref
+  return left.sequence === right.sequence && left.item_id === right.item_id &&
+    left.revision === right.revision && left.type === right.type && left.path === right.path &&
+    left.previous_path === right.previous_path && a?.sha256 === b?.sha256 &&
+    a?.byte_length === b?.byte_length && a?.encoding === b?.encoding && a?.media_type === b?.media_type
 }

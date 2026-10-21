@@ -19,7 +19,6 @@ import {
 } from '@codemirror/state'
 import {
   EditorView,
-  drawSelection,
   highlightActiveLine,
   highlightActiveLineGutter,
   keymap,
@@ -29,13 +28,15 @@ import { Vim, vim } from '@replit/codemirror-vim'
 import { history, historyKeymap, indentWithTab } from '@codemirror/commands'
 import { vimAwareDefaultKeymap, vimAwareMarkdownKeymap, vimAwareSearchKeymap } from '../lib/cm-vim-default-keymap'
 import { vimVisualHighlightExtension } from '../lib/cm-vim-visual-highlight'
-import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
-import { resolveCodeLanguage } from '../lib/cm-code-languages'
+import { noteMarkdown } from '../lib/cm-markdown-language'
 import { customCodeFenceHighlightExtension } from '../lib/cm-custom-code-languages'
+import { markdownLinkExtension } from '../lib/cm-markdown-links'
 import { applyVimInsertEscape } from '../lib/vim-insert-escape'
 import { registerDisplayLineMotion } from '../lib/cm-vim-display-line'
+import { mapDefaultHalfPageKeys, registerHalfPageMotion } from '../lib/cm-vim-half-page-motion'
 import { registerHeadingMotion } from '../lib/cm-vim-heading-motion'
 import { registerReflowOperator } from '../lib/cm-vim-reflow'
+import { vimHalfPageKeymap } from '../lib/vim-half-page-keymap'
 import { isTouchPrimaryDevice, vimImeGuard } from '../lib/cm-vim-ime-guard'
 import { markdownListIndentPlugin } from '../lib/cm-markdown-list-indent'
 import { appMarkdownSnippetExtension } from '../lib/markdown-snippets-config'
@@ -56,6 +57,8 @@ import {
   type ThemeMode
 } from '../lib/themes'
 import { editorTabSize, normalizeEditorTabSize } from '../lib/editor-tab-size'
+import { storedCursorDrawSelection } from '../lib/cm-cursor-blink'
+import { useCloseWindowShortcut } from '../lib/close-shortcut'
 
 const PREFS_KEY = 'zen:prefs:v2'
 const SAVE_DEBOUNCE_MS = 350
@@ -72,7 +75,6 @@ export const paperHighlight = HighlightStyle.define([
   { tag: t.emphasis, class: 'tok-emphasis' },
   { tag: t.strong, class: 'tok-strong' },
   { tag: t.strikethrough, class: 'tok-strikethrough' },
-  { tag: t.link, class: 'tok-link' },
   { tag: t.url, class: 'tok-url' },
   { tag: t.monospace, class: 'tok-monospace' },
   { tag: t.quote, class: 'tok-quote' },
@@ -112,6 +114,7 @@ export interface FloatingPrefs {
   showHeadingLevelLabels: boolean
   lineNumberMode: LineNumberMode
   wordWrap: boolean
+  cursorBlink: boolean
   interfaceFont: string | null
   textFont: string | null
   monoFont: string | null
@@ -133,6 +136,7 @@ export function loadFloatingPrefs(): FloatingPrefs {
     showHeadingLevelLabels: false,
     lineNumberMode: 'off',
     wordWrap: true,
+    cursorBlink: true,
     interfaceFont: null,
     textFont: null,
     monoFont: null
@@ -153,6 +157,7 @@ export function loadFloatingPrefs(): FloatingPrefs {
       vimWrappedLineMotions:
         parsed.vimWrappedLineMotions === 'logical' ? 'logical' : 'display',
       vimBlockImeInNormalMode: parsed.vimBlockImeInNormalMode !== false,
+      cursorBlink: parsed.cursorBlink !== false,
       themeFamily: (parsed.themeFamily as ThemeFamily) ?? fallback.themeFamily,
       themeMode: (parsed.themeMode as ThemeMode) ?? fallback.themeMode,
       lineNumberMode,
@@ -175,6 +180,12 @@ export function lineNumberExtension(mode: LineNumberMode): Extension {
     }),
     highlightActiveLineGutter()
   ]
+}
+
+/** drawSelection for the floating and external-file windows: the Blinking
+ *  cursor preference at open, and again whenever Settings saves it. */
+export function floatingCursorDrawSelection(): Extension {
+  return storedCursorDrawSelection(PREFS_KEY, () => loadFloatingPrefs().cursorBlink)
 }
 
 export function applyTheme(prefs: FloatingPrefs): void {
@@ -337,12 +348,13 @@ export function FloatingNoteApp({ notePath }: { notePath: string }): JSX.Element
           vimImeGuard(() => prefs.vimBlockImeInNormalMode && !isTouchPrimaryDevice()),
           vimVisualHighlightExtension,
           history(),
-          drawSelection(),
+          floatingCursorDrawSelection(),
           editorTabSize(prefs.editorTabSize),
           highlightActiveLine(),
           prefs.wordWrap ? EditorView.lineWrapping : [],
-          markdown({ base: markdownLanguage, codeLanguages: resolveCodeLanguage, addKeymap: false }),
+          noteMarkdown(),
           customCodeFenceHighlightExtension,
+          markdownLinkExtension,
           vimAwareMarkdownKeymap,
           markdownListIndentPlugin,
           headingFolding({ showLevelLabels: prefs.showHeadingLevelLabels }),
@@ -351,6 +363,9 @@ export function FloatingNoteApp({ notePath }: { notePath: string }): JSX.Element
           prefs.livePreview ? livePreviewPlugin : [],
           lineNumberExtension(prefs.lineNumberMode),
           keymap.of([
+            // No keymap overrides in this window, so the default Ctrl+D /
+            // Ctrl+U reach Vim ahead of the search and history keymaps (#825).
+            ...vimHalfPageKeymap(prefs.vimMode, {}),
             indentWithTab,
             ...vimAwareDefaultKeymap(prefs.vimMode),
             ...historyKeymap,
@@ -412,20 +427,9 @@ export function FloatingNoteApp({ notePath }: { notePath: string }): JSX.Element
     return () => window.removeEventListener('beforeunload', flush)
   }, [persist])
 
-  // Floating windows have no tab strip, so browser-style window close
-  // shortcuts should close the OS window itself rather than trying to
-  // mimic the main app's "close active tab" behavior.
-  useEffect(() => {
-    const handler = (event: KeyboardEvent): void => {
-      const mod = event.metaKey || event.ctrlKey
-      if (!mod || event.altKey) return
-      if (event.key.toLowerCase() !== 'w') return
-      event.preventDefault()
-      window.zen.windowClose()
-    }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
-  }, [])
+  // No tab strip here: the close shortcut closes the window itself, through
+  // the same path as the close button, so the pending save flushes on unload.
+  useCloseWindowShortcut()
 
   // Vim ex commands scoped to the floating window. The main-window
   // `registerVimCommands` never runs here (each Electron window has its
@@ -564,6 +568,8 @@ function registerFloatingVimCommands(
   floatingVimRegistered = true
 
   registerHeadingMotion()
+  registerHalfPageMotion()
+  mapDefaultHalfPageKeys()
   registerReflowOperator()
 
   Vim.defineEx('write', 'w', () => {

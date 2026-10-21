@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { isSameFileHeadingLink, wikilinkHeadingAnchor } from './wikilinks'
 
@@ -50,6 +51,19 @@ describe('[[#heading]] same-file navigation (#291)', () => {
     // The offset lands exactly on the heading line.
     expect(body.slice(offset)).toMatch(/^#+\s*My Heading/)
     expect(opts).toMatchObject({ scrollMode: 'start' })
+  })
+
+  // `[jump](#my-heading)` in the editor reaches here with the slug, and
+  // `[jump](#My%20Heading)` with the escaped text. Both used to fall back to
+  // the top of the note.
+  it('lands Markdown heading links written as a slug or URL-encoded', async () => {
+    noteContents = { [currentNote]: { body } }
+    for (const anchor of ['my-heading', 'My%20Heading']) {
+      openNoteAtOffset.mockClear()
+      await openWikilinkTarget(currentNote, `#${anchor}`)
+      expect(selectNote).not.toHaveBeenCalled()
+      expect(body.slice(openNoteAtOffset.mock.calls[0][1])).toMatch(/^#+\s*My Heading/)
+    }
   })
 
   it('matches the heading case-insensitively (like Obsidian)', async () => {

@@ -14,8 +14,10 @@ import {
   noteFolderSubpath,
   normalizeVaultSettings,
   resolveCreateLocation,
+  specificFolderDestination,
   parseFavoriteFolderKey,
   removeFavoritesForFolder,
+  resolveFavoriteItems,
   rewriteFavoriteNotePath,
   rewriteFavoritesForFolderRename,
   toggleFavorite,
@@ -676,6 +678,60 @@ describe('favorites', () => {
     const settings = normalizeVaultSettings({} as unknown as VaultSettings)
     expect(settings.favorites).toEqual([])
   })
+
+  describe('resolveFavoriteItems', () => {
+    const notes = [
+      note('inbox/Plan.md', 'Plan'),
+      note('inbox/Projects/Sketch.excalidraw', 'Sketch'),
+      { ...note('trash/Old.md', 'Old'), folder: 'trash' as const },
+      note('inbox/Untitled.md', '')
+    ]
+    const folders = [
+      { folder: 'inbox' as const, subpath: 'Projects' },
+      { folder: 'inbox' as const, subpath: 'Projects/Sub' }
+    ]
+
+    it('keeps the stored order and resolves notes and folders to live rows', () => {
+      const items = resolveFavoriteItems(
+        ['inbox:Projects/Sub', 'inbox/Plan.md', 'inbox/Projects/Sketch.excalidraw'],
+        notes,
+        folders
+      )
+      expect(items).toEqual([
+        {
+          kind: 'folder',
+          key: 'inbox:Projects/Sub',
+          folder: 'inbox',
+          subpath: 'Projects/Sub',
+          label: 'Sub'
+        },
+        { kind: 'note', key: 'inbox/Plan.md', path: 'inbox/Plan.md', title: 'Plan', isDrawing: false },
+        {
+          kind: 'note',
+          key: 'inbox/Projects/Sketch.excalidraw',
+          path: 'inbox/Projects/Sketch.excalidraw',
+          title: 'Sketch',
+          isDrawing: true
+        }
+      ])
+    })
+
+    it('skips keys whose target is gone, trashed, or a top-level folder key', () => {
+      const items = resolveFavoriteItems(
+        ['inbox/Missing.md', 'trash/Old.md', 'inbox:Archive2020', 'inbox:', 'inbox/Untitled.md'],
+        notes,
+        folders
+      )
+      // The untitled note is the only live target; its empty title is passed
+      // through untouched so each surface picks its own placeholder.
+      expect(items.map((i) => i.key)).toEqual(['inbox/Untitled.md'])
+      expect(items[0]).toMatchObject({ kind: 'note', title: '' })
+    })
+
+    it('returns nothing for a vault without favorites', () => {
+      expect(resolveFavoriteItems([], notes, folders)).toEqual([])
+    })
+  })
 })
 
 describe('resolveCreateLocation (#362)', () => {
@@ -729,6 +785,32 @@ describe('resolveCreateLocation (#362)', () => {
       folder: 'inbox',
       subpath: ''
     })
+  })
+})
+
+describe('specificFolderDestination', () => {
+  const inboxVault = normalizeVaultSettings(null)
+  const rootVault = normalizeVaultSettings({ primaryNotesLocation: 'root' } as VaultSettings)
+
+  it('nests the folder inside the inbox of an Inbox vault, not at the vault root', () => {
+    expect(specificFolderDestination('Tasks', inboxVault)).toBe('inbox/Tasks')
+    expect(specificFolderDestination('/Projects/Inbox/', inboxVault)).toBe('inbox/Projects/Inbox')
+  })
+
+  it('is the vault-root folder in a root vault', () => {
+    expect(specificFolderDestination('Tasks', rootVault)).toBe('Tasks')
+  })
+
+  it('follows a remapped inbox', () => {
+    const remapped = normalizeVaultSettings({
+      systemFolderPaths: { inbox: '01 - Entry' }
+    } as unknown as VaultSettings)
+    expect(specificFolderDestination('Tasks', remapped)).toBe('01 - Entry/Tasks')
+  })
+
+  it('is the primary notes root while no folder is named', () => {
+    expect(specificFolderDestination('', inboxVault)).toBe('inbox')
+    expect(specificFolderDestination(undefined, rootVault)).toBe('')
   })
 })
 

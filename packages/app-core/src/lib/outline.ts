@@ -9,7 +9,8 @@
  *   - Skip headings inside fenced code blocks (``` or ~~~), so code
  *     snippets that start lines with `#` don't pollute the outline.
  *   - Accept setext-style underline headings (`Title\n====`) and
- *     normalize them to level 1 (=) or 2 (-).
+ *     normalize them to level 1 (=) or 2 (-). A lone `-` starts a list,
+ *     not a heading, so a dash underline needs two or more (#898).
  *
  * The `line` field is the 1-based line number so callers can feed it
  * straight to CodeMirror's `doc.line(n)` API. `from` is the 0-based
@@ -44,7 +45,7 @@ export function activeOutlineLineForCursor(
 }
 
 const ATX_RE = /^(#{1,6})\s+(.+?)\s*#*\s*$/
-const SETEXT_UNDERLINE_RE = /^(=+|-+)\s*$/
+const SETEXT_UNDERLINE_RE = /^(=+|-{2,})\s*$/
 
 export function parseOutline(body: string): OutlineItem[] {
   const items: OutlineItem[] = []

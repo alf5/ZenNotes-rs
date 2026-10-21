@@ -443,11 +443,29 @@ function suggestInBody(ctx: SuggestContext, line: Span, offset: number): Suggest
 
   const def = spans.length > 0 ? nodeDef(spans[0].text) : null
   if (!def) return { from, to, items: [] }
-  const spec = def.params[position - 1]
+  // A tag list keeps going after a comma (`tagged #a, #b`), so a later position
+  // belongs to the same list. After a bare space it does not: `#a #b` is an
+  // error, and offering a tag there would walk the user into it.
+  const typed = active ? active.text.slice(0, offset - active.start) : ''
+  const lastSpec = def.params[def.params.length - 1]
+  let spec = def.params[position - 1]
+  if (!spec && lastSpec?.type === 'tags') {
+    if (spans[position - 1]?.text.endsWith(',') || typed.includes(',')) spec = lastSpec
+  }
   // Past the last declared param, or on a `rest` param that already swallowed
   // the tokens before it. Either way the registry says nothing about this
   // position, and inventing something would be worse than staying quiet.
   if (!spec) return { from, to, items: [] }
+  if (spec.type === 'tags' && active) {
+    // `#a,#b` is one token holding two tags. Only the entry under the caret is
+    // being completed, so the prefix is `#b` and picking a tag keeps `#a,`.
+    const ahead = active.text.indexOf(',', typed.length)
+    return {
+      from: active.start + typed.lastIndexOf(',') + 1,
+      to: ahead === -1 ? to : active.start + ahead,
+      items: paramItems(spec.type, ctx)
+    }
+  }
   return { from, to, items: paramItems(spec.type, ctx) }
 }
 
@@ -506,6 +524,7 @@ function verbItems(defs: readonly NodeDef[]): Suggestion[] {
 function paramItems(type: ParamType, ctx: SuggestContext): Suggestion[] {
   switch (type) {
     case 'tag':
+    case 'tags':
       return tagItems(ctx.tags)
     case 'field':
       return fieldItems(ctx.fields)

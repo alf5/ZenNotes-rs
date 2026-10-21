@@ -3,7 +3,10 @@
 //! `importFiles`, `importPastedImage`, rename/move/duplicate/delete/restore).
 //!
 //! An asset is any non-`.md` file in the vault (outside `.zennotes`). New
-//! imports land at the vault root, matching the Electron behaviour.
+//! imports, dropped or pasted, land in the unified `assets/` folder, and the
+//! link each one gets follows upstream's single rule (`markdownForImportedAsset`).
+//! Opening a vault migrates loose root attachments and the legacy
+//! `attachements/` / `_assets/` dirs into `assets/` (`migrateLooseAssets`).
 
 use std::collections::HashSet;
 use std::fs;
@@ -11,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use crate::ipc::types::{AssetMeta, DeletedAsset, ImportedAsset};
 use crate::vault::config::resolve_path;
-use crate::vault::layout::{INTERNAL_VAULT_DIR, LEGACY_ATTACHMENTS_DIRS, PRIMARY_ATTACHMENTS_DIR};
+use crate::vault::layout::{ASSETS_DIR, ATTACHMENTS_DIRS, INTERNAL_VAULT_DIR, LEGACY_ATTACHMENTS_DIRS};
 use crate::vault::metadata::{classify_imported_asset, pasted_image_extension};
 use crate::vault::notes::{normalize_vault_relative_path, resolve_safe, to_posix};
 
@@ -110,9 +113,81 @@ fn clean_asset_filename(name: &str) -> Result<String, String> {
 }
 
 pub fn has_assets_dir(root: &Path) -> bool {
-    std::iter::once(PRIMARY_ATTACHMENTS_DIR)
-        .chain(LEGACY_ATTACHMENTS_DIRS)
-        .any(|d| root.join(d).is_dir())
+    ATTACHMENTS_DIRS.iter().any(|d| root.join(d).is_dir())
+}
+
+/// A root-level file that belongs to a database (a legacy loose `.csv`, its
+/// sidecar, or a backup), never an attachment. `databaseCsvPathFor` +
+/// `isDatabaseInternalPath` for a bare file name.
+fn is_root_database_file(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.ends_with(".csv")
+        || lower.ends_with(".csv.base.json")
+        || lower.ends_with(".csv.bak")
+        || lower.ends_with(".csv.base.json.bak")
+}
+
+/// Port of `migrateLooseAssets`: one-time, idempotent. Moves loose root-level
+/// attachments and the files in the legacy `attachements/` / `_assets/` dirs
+/// into `assets/`, skipping a file whose name is already taken there (so the
+/// basename fallback that resolves `![[…]]` embeds stays unambiguous). Never
+/// touches notes or database files. A vault managed by Obsidian (`.obsidian/`)
+/// keeps its loose root files, which are the user's own (#202).
+///
+/// One deliberate difference: a root-level `.excalidraw` file stays where it
+/// is. In a root-mode vault it is a note, and inside `assets/` it would vanish
+/// from the note list; upstream checks only for `.md` there.
+pub fn migrate_loose_assets(root: &Path) -> (Vec<String>, Vec<String>) {
+    let mut moved = Vec::new();
+    let mut skipped = Vec::new();
+    let assets_abs = root.join(ASSETS_DIR);
+    let mut move_into_assets = |src_rel: &str| {
+        let name = Path::new(src_rel).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let dest_rel = format!("{ASSETS_DIR}/{name}");
+        if to_posix(src_rel) == dest_rel {
+            return;
+        }
+        let dest_abs = root.join(&dest_rel);
+        if dest_abs.exists() {
+            skipped.push(to_posix(src_rel));
+            return;
+        }
+        if fs::create_dir_all(&assets_abs).is_ok() && fs::rename(root.join(src_rel), &dest_abs).is_ok() {
+            moved.push(dest_rel);
+        }
+    };
+    if !root.join(".obsidian").exists() {
+        if let Ok(entries) = fs::read_dir(root) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let is_file = entry.file_type().map(|t| t.is_file()).unwrap_or(false);
+                let lower = name.to_lowercase();
+                if name.starts_with('.') || !is_file || lower.ends_with(".md") || lower.ends_with(".excalidraw") {
+                    continue;
+                }
+                if is_root_database_file(&name) {
+                    continue;
+                }
+                move_into_assets(&name);
+            }
+        }
+    }
+    for dir in LEGACY_ATTACHMENTS_DIRS {
+        let Ok(entries) = fs::read_dir(root.join(dir)) else { continue };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') || !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                continue;
+            }
+            move_into_assets(&format!("{dir}/{name}"));
+        }
+        // Not empty: leave it.
+        let _ = fs::remove_dir(root.join(dir));
+    }
+    if !moved.is_empty() {
+        eprintln!("[zen] migrated {} asset(s) into {ASSETS_DIR}/", moved.len());
+    }
+    (moved, skipped)
 }
 
 /// `vault:list-assets` — every non-md file in the vault (excluding `.zennotes`
@@ -204,8 +279,9 @@ pub fn move_asset(root: &Path, rel: &str, target_dir: &str) -> Result<AssetMeta,
     if normalized.split('/').any(|c| c == INTERNAL_VAULT_DIR) {
         return Err("Cannot move assets into internal ZenNotes-rs files.".into());
     }
+    // No explicit target: the unified `assets/` folder, not loose at the root.
     let dest_dir = if normalized.is_empty() {
-        root.to_path_buf()
+        root.join(ASSETS_DIR)
     } else {
         resolve_safe(root, normalized)?
     };
@@ -351,45 +427,62 @@ fn markdown_destination(rel_from_note: &str) -> String {
     format!("<{}>", rel_from_note.replace('>', "%3E"))
 }
 
-fn markdown_for_imported_asset(rel_from_note: &str, filename: &str, kind: &str) -> String {
-    let dest = markdown_destination(rel_from_note);
-    if kind == "image" {
-        let (base, _) = split_ext(filename);
-        format!("![{base}]({dest})")
+/// Port of `markdownForImportedAsset`, the one rule every route follows: an
+/// image, PDF, audio or video file as an embed by VAULT-relative path, which
+/// the note shows in place (a picture, a document, a player); anything else as
+/// a markdown link.
+fn markdown_for_imported_asset(vault_rel_path: &str, filename: &str, kind: &str) -> String {
+    if matches!(kind, "image" | "pdf" | "audio" | "video") {
+        format!("![[{vault_rel_path}]]")
     } else {
-        format!("[{filename}]({dest})")
+        format!("[{filename}]({})", markdown_destination(vault_rel_path))
     }
 }
 
-fn posix_relative_from(note_dir: &str, target: &str) -> String {
-    // POSIX relative path from note_dir to target (both vault-relative).
-    let from: Vec<&str> = if note_dir.is_empty() { vec![] } else { note_dir.split('/').collect() };
-    let to: Vec<&str> = target.split('/').collect();
-    let mut i = 0;
-    while i < from.len() && i < to.len() && from[i] == to[i] {
-        i += 1;
+/// Port of `importedAssetFilename`: a raw OS filename can contain characters
+/// that terminate or retarget a wikilink, so they are scrubbed before the file
+/// is copied, and the saved path and the emitted embed always agree.
+fn imported_asset_filename(filename: &str) -> String {
+    let leaf = Path::new(filename).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let scrubbed: String = leaf
+        .chars()
+        .map(|c| match c {
+            '\\' | '/' | ':' | '%' | '*' | '?' | '"' | '<' | '>' | '|' | '[' | ']' | '#' | '^' => '-',
+            c if (c as u32) <= 0x1f => '-',
+            c => c,
+        })
+        .collect();
+    let mut collapsed = String::new();
+    let mut prev_space = false;
+    for c in scrubbed.chars() {
+        if c.is_whitespace() {
+            if !prev_space {
+                collapsed.push(' ');
+            }
+            prev_space = true;
+        } else {
+            collapsed.push(c);
+            prev_space = false;
+        }
     }
-    let ups = from.len() - i;
-    let mut parts: Vec<String> = std::iter::repeat("..".to_string()).take(ups).collect();
-    parts.extend(to[i..].iter().map(|s| s.to_string()));
-    parts.join("/")
+    let safe = collapsed.trim().to_string();
+    if safe.is_empty() || safe == "." || safe == ".." {
+        "file".to_string()
+    } else {
+        safe
+    }
 }
 
-/// `vault:import-files` — copy dropped files into the vault root, returning a
-/// markdown snippet for each.
+/// `vault:import-files` — copy dropped files into the unified `assets/`
+/// folder, matching pasted images (#377), returning a markdown snippet for
+/// each. The link is by vault path, so it does not depend on the note.
 pub fn import_files(
     root: &Path,
-    note_rel_path: &str,
+    _note_rel_path: &str,
     source_paths: &[String],
 ) -> Result<Vec<ImportedAsset>, String> {
     fs::create_dir_all(root).map_err(|e| format!("mkdir failed: {e}"))?;
-    let note_dir = {
-        let posix = to_posix(note_rel_path);
-        match posix.rfind('/') {
-            Some(idx) => posix[..idx].to_string(),
-            None => String::new(),
-        }
-    };
+    let assets_dir = root.join(ASSETS_DIR);
     let mut imported = Vec::new();
     for source in source_paths {
         let source_abs = PathBuf::from(resolve_path(source));
@@ -397,17 +490,17 @@ pub fn import_files(
         if !md.is_file() {
             continue;
         }
-        let base = source_abs.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-        let final_name = unique_filename(root, &base);
-        let dest = root.join(&final_name);
+        fs::create_dir_all(&assets_dir).map_err(|e| format!("mkdir failed: {e}"))?;
+        let base = imported_asset_filename(&source_abs.to_string_lossy());
+        let final_name = unique_filename(&assets_dir, &base);
+        let dest = assets_dir.join(&final_name);
         fs::copy(&source_abs, &dest).map_err(|e| format!("copy failed: {e}"))?;
         let vault_rel = rel_of(root, &dest);
-        let rel_from_note = posix_relative_from(&note_dir, &vault_rel);
         let kind = classify_imported_asset(&final_name);
         imported.push(ImportedAsset {
             name: final_name.clone(),
+            markdown: markdown_for_imported_asset(&vault_rel, &final_name, kind),
             path: vault_rel,
-            markdown: markdown_for_imported_asset(&rel_from_note, &final_name, kind),
             kind: kind.to_string(),
         });
     }
@@ -438,7 +531,8 @@ fn sanitize_pasted_base(raw: &str) -> String {
     collapsed.trim().to_string()
 }
 
-/// `vault:import-pasted-image` — write clipboard image bytes to the vault root.
+/// `vault:import-pasted-image` — write clipboard image bytes into `assets/`,
+/// named the way `pastedImageFilename` names them.
 pub fn import_pasted_image(
     root: &Path,
     data: &[u8],
@@ -457,13 +551,19 @@ pub fn import_pasted_image(
     let (raw_base, _) = split_ext(&raw_name);
     let base = sanitize_pasted_base(&raw_base);
     let timestamp = chrono::Local::now().format("%Y-%m-%d %H%M%S").to_string();
-    let final_base = if !base.is_empty() && base != "." && base != ".." {
+    // WebKit and Chromium name every bitmap pasted from the clipboard
+    // `image.png`; kept, every paste would be `image.png`, `image 2.png`, …
+    // (#775), so that stem counts as no name. A file copied from a file
+    // manager arrives under its own name and keeps it.
+    let final_base = if !base.is_empty() && base != "." && base != ".." && base.to_lowercase() != "image" {
         base
     } else {
         format!("Pasted Image {timestamp}")
     };
-    let final_name = unique_filename(root, &format!("{final_base}{ext}"));
-    let dest = root.join(&final_name);
+    let assets_dir = root.join(ASSETS_DIR);
+    fs::create_dir_all(&assets_dir).map_err(|e| format!("mkdir failed: {e}"))?;
+    let final_name = unique_filename(&assets_dir, &format!("{final_base}{ext}"));
+    let dest = assets_dir.join(&final_name);
     fs::write(&dest, data).map_err(|e| format!("write failed: {e}"))?;
     let vault_rel = rel_of(root, &dest);
     Ok(ImportedAsset {
@@ -529,30 +629,84 @@ mod tests {
     }
 
     #[test]
-    fn pasted_image_writes_and_returns_embed() {
+    fn pasted_image_lands_in_assets_and_returns_embed() {
         let v = vault();
         let asset = import_pasted_image(v.path(), b"\x89PNG", "image/png", None).unwrap();
+        assert!(asset.path.starts_with("assets/Pasted Image "), "{}", asset.path);
         assert!(asset.name.ends_with(".png"));
         assert_eq!(asset.markdown, format!("![[{}]]", asset.path));
-        assert!(v.path().join(&asset.name).exists());
+        assert!(v.path().join(&asset.path).exists());
     }
 
     #[test]
-    fn import_files_makes_relative_markdown() {
+    fn a_pasted_bitmap_named_image_gets_a_timestamped_name() {
         let v = vault();
-        // Source lives OUTSIDE the vault so the copied name is preserved.
+        // The clipboard's placeholder name is no name (#775)…
+        let first = import_pasted_image(v.path(), b"x", "image/png", Some("image.png")).unwrap();
+        assert!(first.name.starts_with("Pasted Image "), "{}", first.name);
+        // …while a file copied from a file manager keeps its own.
+        let named = import_pasted_image(v.path(), b"x", "image/png", Some("Diagram [v2].png")).unwrap();
+        assert_eq!(named.path, "assets/Diagram -v2-.png");
+    }
+
+    #[test]
+    fn import_files_lands_in_assets_and_links_by_vault_path() {
+        let v = vault();
+        // Sources live OUTSIDE the vault so the copied names are preserved.
         let ext_dir = tempfile::tempdir().unwrap();
-        let src = ext_dir.path().join("external.png");
-        fs::write(&src, b"x").unwrap();
+        let png = ext_dir.path().join("external.png");
+        let pdf = ext_dir.path().join("paper.pdf");
+        let zip = ext_dir.path().join("bundle#1.zip");
+        for file in [&png, &pdf, &zip] {
+            fs::write(file, b"x").unwrap();
+        }
         let imported = import_files(
             v.path(),
-            "inbox/Note.md",
-            &[src.to_string_lossy().to_string()],
+            "inbox/Deep/Note.md",
+            &[png, pdf, zip].iter().map(|p| p.to_string_lossy().to_string()).collect::<Vec<_>>(),
         )
         .unwrap();
-        assert_eq!(imported.len(), 1);
-        assert_eq!(imported[0].path, "external.png");
-        // Note is in inbox/, asset at root → "../external.png".
-        assert!(imported[0].markdown.contains("../external.png"), "{}", imported[0].markdown);
+        assert_eq!(imported[0].path, "assets/external.png");
+        assert_eq!(imported[0].markdown, "![[assets/external.png]]");
+        // A PDF (like audio and video) is an embed now, shown in place.
+        assert_eq!(imported[1].markdown, "![[assets/paper.pdf]]");
+        // Anything else is a link, its wikilink-breaking characters scrubbed.
+        assert_eq!(imported[2].path, "assets/bundle-1.zip");
+        assert_eq!(imported[2].markdown, "[bundle-1.zip](<assets/bundle-1.zip>)");
+    }
+
+    #[test]
+    fn loose_assets_migrate_into_assets_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("Note.md"), "# n").unwrap();
+        fs::write(root.join("pic.png"), b"p").unwrap();
+        fs::write(root.join("Sketch.excalidraw"), "{}").unwrap();
+        fs::write(root.join("Books.csv"), "a").unwrap();
+        fs::create_dir_all(root.join("attachements")).unwrap();
+        fs::write(root.join("attachements/old.pdf"), b"o").unwrap();
+        fs::create_dir_all(root.join("assets")).unwrap();
+        fs::write(root.join("assets/taken.png"), b"t").unwrap();
+        fs::create_dir_all(root.join("_assets")).unwrap();
+        fs::write(root.join("_assets/taken.png"), b"dup").unwrap();
+
+        let (moved, skipped) = migrate_loose_assets(root);
+        assert!(moved.contains(&"assets/pic.png".to_string()));
+        assert!(moved.contains(&"assets/old.pdf".to_string()));
+        assert_eq!(skipped, vec!["_assets/taken.png".to_string()]);
+        assert!(root.join("Note.md").exists());
+        assert!(root.join("Sketch.excalidraw").exists());
+        assert!(root.join("Books.csv").exists());
+        assert!(!root.join("attachements").exists());
+        assert!(root.join("_assets").exists());
+        // Idempotent.
+        assert_eq!(migrate_loose_assets(root).0, Vec::<String>::new());
+
+        // An Obsidian vault keeps its loose root files.
+        let obsidian = tempfile::tempdir().unwrap();
+        fs::create_dir_all(obsidian.path().join(".obsidian")).unwrap();
+        fs::write(obsidian.path().join("canvas.png"), b"c").unwrap();
+        migrate_loose_assets(obsidian.path());
+        assert!(obsidian.path().join("canvas.png").exists());
     }
 }

@@ -164,8 +164,20 @@ function serializeArg(spec: ParamSpec, value: ArgValue): string {
   if (typeof value !== 'string') return String(value)
   // `bindParams` stores tags without the `#`; the file always writes it.
   if (spec.type === 'tag') return `#${value}`
+  if (spec.type === 'tags') return tagListText(value)
   if (ALWAYS_QUOTED.has(spec.type)) return quote(value)
   return isBareSafe(value, spec.type === 'rest') ? value : quote(value)
+}
+
+/** A stored tag list (`a,b`) as the file writes it: `#a, #b`. One tag writes
+ *  exactly as a single-tag step always has. */
+export function tagListText(value: string): string {
+  return value
+    .split(',')
+    .map((tag) => tag.trim())
+    .filter(Boolean)
+    .map((tag) => `#${tag}`)
+    .join(', ')
 }
 
 /* -------------------------------------------------------------------------- */

@@ -16,9 +16,11 @@ import {
   setColumnAlign,
   sortByColumn,
   columnCount,
+  serializeTable,
   type ColumnAlign,
   type MarkdownTable
 } from './markdown-table'
+import { writeClipboardText } from './clipboard-text'
 
 export interface TableMenuRequest {
   x: number
@@ -28,6 +30,12 @@ export interface TableMenuRequest {
   col: number
   model: MarkdownTable
   apply: (next: MarkdownTable, focus?: { row: number; col: number }) => void
+  /** Turn the whole table into a `.base` database and leave a link in its
+   *  place (#832). Unlike `apply`, this leaves the table model alone: the
+   *  converter reads the committed document itself. Omitted = no such item. */
+  convertToDatabase?: () => void
+  /** Insert a copy of the whole table below it. Omitted = no such item. */
+  duplicateTable?: () => void
 }
 
 type MenuItem =
@@ -43,7 +51,7 @@ export function closeTableContextMenu(): void {
 
 export function openTableContextMenu(req: TableMenuRequest): void {
   closeTableContextMenu()
-  const { row, col, model, apply } = req
+  const { row, col, model, apply, convertToDatabase, duplicateTable } = req
   // Restore focus to whatever opened the menu (e.g. a table cell) on close,
   // unless an action ran — that focuses its own target cell.
   const previouslyFocused = document.activeElement as HTMLElement | null
@@ -142,7 +150,26 @@ export function openTableContextMenu(req: TableMenuRequest): void {
       kind: 'item',
       label: 'Sort column (Z → A)',
       run: () => apply(sortByColumn(model, col, 'desc'))
-    }
+    },
+    { kind: 'sep' },
+    {
+      kind: 'item',
+      label: 'Copy table as Markdown',
+      run: () => {
+        writeClipboardText(serializeTable(model))
+        // Nothing changed, so the cell that opened the menu keeps the caret.
+        previouslyFocused?.focus?.()
+      }
+    },
+    ...(duplicateTable
+      ? [{ kind: 'item', label: 'Duplicate table', run: duplicateTable } as const]
+      : []),
+    ...(convertToDatabase
+      ? [
+          { kind: 'sep' } as const,
+          { kind: 'item', label: 'Convert to database…', run: convertToDatabase } as const
+        ]
+      : [])
   ]
 
   const menu = document.createElement('div')

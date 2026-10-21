@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  backlinksForNote,
   blockAnchorsTargeting,
   extractWikilinkTargets,
   extractMarkdownLinkHrefs,
@@ -242,5 +243,86 @@ describe('extractMarkdownLinkHrefs (#70dark)', () => {
   it('dedupes; external hrefs are left for the resolver to filter', () => {
     const body = '[a](Note.md) [b](Note.md) [ext](https://example.com)'
     expect(extractMarkdownLinkHrefs(body)).toEqual(['Note.md', 'https://example.com'])
+  })
+})
+
+describe('resolveWikilinkTarget trims slash runs without regex backtracking', () => {
+  it('resolves an explicit path wrapped in slashes', () => {
+    expect(resolveWikilinkTarget(notes, '/projects/Spec/')?.path).toBe('inbox/projects/Spec.md')
+    expect(resolveWikilinkTarget(notes, '///projects/Spec///')?.path).toBe('inbox/projects/Spec.md')
+  })
+
+  it('resolves a path suffix with trailing slashes', () => {
+    expect(resolveWikilinkTarget(notes, 'projects/Spec/')?.path).toBe('inbox/projects/Spec.md')
+    expect(resolveWikilinkTarget(notes, 'projects/Spec///')?.path).toBe('inbox/projects/Spec.md')
+  })
+
+  it('treats a target made only of slashes as unresolved', () => {
+    expect(resolveWikilinkTarget(notes, '///')).toBeNull()
+    expect(resolveWikilinkTarget(notes, '/'.repeat(20000))).toBeNull()
+  })
+})
+
+describe('backlinksForNote (#880)', () => {
+  const vault = [
+    { path: 'inbox/Hub.md', title: 'Hub', folder: 'inbox' as const, wikilinks: ['Hub', 'Leaf'] },
+    { path: 'inbox/Leaf.md', title: 'Leaf', folder: 'inbox' as const, wikilinks: ['Hub#Intro', 'hub', 'Hub^b1'] },
+    { path: 'trash/Old.md', title: 'Old', folder: 'trash' as const, wikilinks: ['Hub'] },
+    { path: 'inbox/a/Twin.md', title: 'Twin', folder: 'inbox' as const, wikilinks: [] },
+    { path: 'archive/a/Twin.md', title: 'Twin', folder: 'archive' as const, wikilinks: ['inbox/Hub'] },
+    { path: 'inbox/Ref.md', title: 'Ref', folder: 'inbox' as const, wikilinks: ['a/Twin', 'Twin', 'Missing'] }
+  ]
+
+  it('lists linking notes once each, in notes order, skipping trash and self-links', () => {
+    expect(backlinksForNote(vault, { path: 'inbox/Hub.md' }).map((n) => n.path)).toEqual([
+      'inbox/Leaf.md',
+      'archive/a/Twin.md'
+    ])
+  })
+
+  it('keeps ambiguity rules: a shared path tail resolves nowhere, a shared title to the first note', () => {
+    expect(backlinksForNote(vault, { path: 'inbox/a/Twin.md' }).map((n) => n.path)).toEqual([
+      'inbox/Ref.md'
+    ])
+    expect(backlinksForNote(vault, { path: 'archive/a/Twin.md' })).toEqual([])
+  })
+
+  it('returns a copy, so a caller cannot change the next answer', () => {
+    backlinksForNote(vault, { path: 'inbox/Hub.md' }).length = 0
+    expect(backlinksForNote(vault, { path: 'inbox/Hub.md' })).toHaveLength(2)
+  })
+
+  it('sees notes added to the same array after an earlier call', () => {
+    const live = [{ path: 'inbox/A.md', title: 'A', folder: 'inbox' as const, wikilinks: ['B'] }]
+    expect(resolveWikilinkTarget(live, 'B')).toBeNull()
+    expect(backlinksForNote(live, { path: 'inbox/B.md' })).toEqual([])
+    live.push({ path: 'inbox/B.md', title: 'B', folder: 'inbox' as const, wikilinks: [] })
+    expect(resolveWikilinkTarget(live, 'B')?.path).toBe('inbox/B.md')
+    expect(backlinksForNote(live, { path: 'inbox/B.md' }).map((n) => n.path)).toEqual(['inbox/A.md'])
+  })
+
+  // Counting backlinks used to resolve every link against every note, so each
+  // note switch cost (links x notes) in a large vault. Count the reads instead
+  // of timing them: switching between many notes must not rescan the vault.
+  it('resolves the vault once, not once per note switch', () => {
+    let reads = 0
+    const size = 2000
+    const big = Array.from({ length: size }, (_, i) => {
+      const note = {
+        path: `inbox/n${i}.md`,
+        folder: 'inbox' as const,
+        wikilinks: [`n${(i + 1) % size}`, `missing ${i}`, `x/n${i}`]
+      }
+      return Object.defineProperty(note, 'title', {
+        get: () => {
+          reads++
+          return `n${i}`
+        }
+      }) as typeof note & { title: string }
+    })
+    for (let i = 0; i < 200; i++) {
+      expect(backlinksForNote(big, big[i])).toEqual([big[(i + size - 1) % size]])
+    }
+    expect(reads).toBeLessThanOrEqual(size)
   })
 })
