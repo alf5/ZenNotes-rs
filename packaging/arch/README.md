@@ -14,6 +14,8 @@ The binary is installed as **`/usr/bin/zennotes-rs`**.
 ## Dependencies (Arch packages)
 
 - **Runtime:** `webkit2gtk-4.1`, `gtk3`, `hicolor-icon-theme`
+- **Optional:** `libayatana-appindicator`, for the tray icon behind "Keep running in the tray"
+  (without it the app keeps that setting off)
 - **Build:** `rust` (provides cargo), `bun`, `nodejs`, `pkgconf`, `git`
 
 ## Build & install locally
@@ -31,7 +33,7 @@ source files (here, `zennotes-rs.desktop`) at its root:
 ```bash
 git clone ssh://aur@aur.archlinux.org/zennotes-rs.git
 cp PKGBUILD .SRCINFO zennotes-rs.desktop zennotes-rs/
-cd zennotes-rs && git add -A && git commit -m "zennotes-rs 2.15.0-1" && git push
+cd zennotes-rs && git add -A && git commit -m "zennotes-rs <pkgver>-<pkgrel>" && git push
 ```
 
 Users then install with an AUR helper:
@@ -42,8 +44,9 @@ paru -S zennotes-rs      # or: yay -S zennotes-rs
 
 ## Notes
 
-- The source is pinned to the **`v2.15.0` git tag** (`git+…#tag=v2.15.0`), so the hash is `SKIP`
-  (git sources are verified by the tag/commit, not a tarball checksum).
+- The source is pinned to the **`v$pkgver` git tag** (`git+…#tag=v$pkgver`), so the hash is
+  `SKIP` (git sources are verified by the tag/commit, not a tarball checksum). Bump `pkgver` only
+  once that tag is on GitHub, or the build has nothing to clone.
 - This is a **from-source** package — building compiles Rust + the frontend (a few minutes).
   WebKitGTK cannot be statically linked, so there is no fully self-contained single binary;
   the app uses Arch's system `webkit2gtk-4.1` at runtime (the standard Tauri-on-Linux model).
