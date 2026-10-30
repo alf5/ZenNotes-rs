@@ -127,7 +127,7 @@ import { relocateAssetWithReferences, renameNoteWithLinks } from './link-rewrite
 const APP_INFO: ZenAppInfo = {
   name: 'zennotes-rs',
   productName: 'ZenNotes-rs',
-  version: '2.73.0',
+  version: '2.73.1',
   description: 'ZenNotes-rs desktop',
   homepage: 'https://github.com/alf5/ZenNotes-rs',
   runtime: 'desktop',
