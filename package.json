@@ -19,7 +19,9 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "NO_STRIP=true tauri build",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:mcp": "bun tooling/mcp-golden/check.ts",
+    "mcp:golden": "bun tooling/mcp-golden/generate.ts"
   },
   "dependencies": {
     "@codemirror/lint": "^6.9.7",

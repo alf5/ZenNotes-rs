@@ -1,0 +1,2374 @@
+{
+  "steps": [
+    {
+      "tool": "vault_info",
+      "args": {},
+      "isError": false,
+      "result": {
+        "kind": "local",
+        "vaultRoot": "<ROOT>",
+        "primaryNotesLocation": "inbox",
+        "inboxAbsolutePath": "<ROOT>/inbox",
+        "topFolders": [
+          "inbox",
+          "quick",
+          "archive",
+          "trash"
+        ],
+        "subfolders": [
+          {
+            "folder": "inbox",
+            "subpath": "Work"
+          }
+        ],
+        "notes": "IMPORTANT: Always use the `path` returned by other tools verbatim. Never prepend `inbox/` to a path you got back from list_notes / create_note / read_note. This vault uses INBOX mode: notes for the conceptual `inbox` folder live under `inbox/` (e.g. `inbox/MyNote.md`)."
+      }
+    },
+    {
+      "tool": "list_notes",
+      "args": {},
+      "isError": false,
+      "result": [
+        {
+          "path": "quick/Scratch.md",
+          "link": "zennotes://open?path=quick/Scratch.md",
+          "title": "Scratch",
+          "folder": "quick",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "size": 20,
+          "tags": [
+            "idea"
+          ],
+          "wikilinks": [],
+          "excerpt": "quick thought #idea"
+        },
+        {
+          "path": "inbox/Work/Notes (old).md",
+          "link": "zennotes://open?path=inbox/Work/Notes%20%28old%29.md",
+          "title": "Notes (old)",
+          "folder": "inbox",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "size": 42,
+          "tags": [],
+          "wikilinks": [],
+          "excerpt": "Some old notes about café menus & plans."
+        },
+        {
+          "path": "inbox/Work/Meeting 2026-01-05.md",
+          "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+          "title": "Meeting 2026-01-05",
+          "folder": "inbox",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "size": 148,
+          "tags": [
+            "work",
+            "meeting"
+          ],
+          "wikilinks": [
+            "Project Plan"
+          ],
+          "excerpt": "Meeting 2026-01-05 Attendees: Ana, Bo - [ ] Send notes @status:doing #work - [ ] Follow up with Project Plan due:2026-01-10 #work #meeting"
+        },
+        {
+          "path": "inbox/Welcome.md",
+          "link": "zennotes://open?path=inbox/Welcome.md",
+          "title": "Welcome",
+          "folder": "inbox",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "size": 337,
+          "tags": [
+            "onboarding",
+            "welcome"
+          ],
+          "wikilinks": [
+            "Project Plan",
+            "Meeting 2026-01-05"
+          ],
+          "excerpt": "Welcome Start with the Project Plan and the first meeting. - [ ] Read the plan due:2026-02-01 !high #onboarding - [x] Install ZenNotes - [ ] Ask about access @waiting Plan the plan: plan carefully. #welcome #onboarding"
+        },
+        {
+          "path": "inbox/Project Plan.md",
+          "link": "zennotes://open?path=inbox/Project%20Plan.md",
+          "title": "Project Plan",
+          "folder": "inbox",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "size": 191,
+          "tags": [
+            "work"
+          ],
+          "wikilinks": [
+            "Welcome"
+          ],
+          "excerpt": "Project Plan Back to Welcome. Milestones 1. [ ] Draft scope due: 2026-03-01 !med 2. [/] Build prototype !low #work 3. [-] Old approach 4. [] Moved elsewhere - [ ] Quoted task"
+        },
+        {
+          "path": "inbox/Comments Target.md",
+          "link": "zennotes://open?path=inbox/Comments%20Target.md",
+          "title": "Comments Target",
+          "folder": "inbox",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "size": 97,
+          "tags": [],
+          "wikilinks": [],
+          "excerpt": "Comments Target The first paragraph has a Key Sentence worth discussing. A second paragraph."
+        },
+        {
+          "path": "archive/Old Idea.md",
+          "link": "zennotes://open?path=archive/Old%20Idea.md",
+          "title": "Old Idea",
+          "folder": "archive",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "size": 52,
+          "tags": [],
+          "wikilinks": [
+            "Welcome"
+          ],
+          "excerpt": "Old Idea An archived plan. Links to Welcome."
+        }
+      ]
+    },
+    {
+      "tool": "list_notes",
+      "args": {
+        "folder": "inbox",
+        "subpath": "Work"
+      },
+      "isError": false,
+      "result": [
+        {
+          "path": "inbox/Work/Notes (old).md",
+          "link": "zennotes://open?path=inbox/Work/Notes%20%28old%29.md",
+          "title": "Notes (old)",
+          "folder": "inbox",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "size": 42,
+          "tags": [],
+          "wikilinks": [],
+          "excerpt": "Some old notes about café menus & plans."
+        },
+        {
+          "path": "inbox/Work/Meeting 2026-01-05.md",
+          "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+          "title": "Meeting 2026-01-05",
+          "folder": "inbox",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "size": 148,
+          "tags": [
+            "work",
+            "meeting"
+          ],
+          "wikilinks": [
+            "Project Plan"
+          ],
+          "excerpt": "Meeting 2026-01-05 Attendees: Ana, Bo - [ ] Send notes @status:doing #work - [ ] Follow up with Project Plan due:2026-01-10 #work #meeting"
+        }
+      ]
+    },
+    {
+      "tool": "list_notes",
+      "args": {
+        "tag": "WORK"
+      },
+      "isError": false,
+      "result": [
+        {
+          "path": "inbox/Work/Meeting 2026-01-05.md",
+          "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+          "title": "Meeting 2026-01-05",
+          "folder": "inbox",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "size": 148,
+          "tags": [
+            "work",
+            "meeting"
+          ],
+          "wikilinks": [
+            "Project Plan"
+          ],
+          "excerpt": "Meeting 2026-01-05 Attendees: Ana, Bo - [ ] Send notes @status:doing #work - [ ] Follow up with Project Plan due:2026-01-10 #work #meeting"
+        },
+        {
+          "path": "inbox/Project Plan.md",
+          "link": "zennotes://open?path=inbox/Project%20Plan.md",
+          "title": "Project Plan",
+          "folder": "inbox",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "size": 191,
+          "tags": [
+            "work"
+          ],
+          "wikilinks": [
+            "Welcome"
+          ],
+          "excerpt": "Project Plan Back to Welcome. Milestones 1. [ ] Draft scope due: 2026-03-01 !med 2. [/] Build prototype !low #work 3. [-] Old approach 4. [] Moved elsewhere - [ ] Quoted task"
+        }
+      ]
+    },
+    {
+      "tool": "list_notes",
+      "args": {
+        "wikilinkTo": "project plan"
+      },
+      "isError": false,
+      "result": [
+        {
+          "path": "inbox/Work/Meeting 2026-01-05.md",
+          "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+          "title": "Meeting 2026-01-05",
+          "folder": "inbox",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "size": 148,
+          "tags": [
+            "work",
+            "meeting"
+          ],
+          "wikilinks": [
+            "Project Plan"
+          ],
+          "excerpt": "Meeting 2026-01-05 Attendees: Ana, Bo - [ ] Send notes @status:doing #work - [ ] Follow up with Project Plan due:2026-01-10 #work #meeting"
+        },
+        {
+          "path": "inbox/Welcome.md",
+          "link": "zennotes://open?path=inbox/Welcome.md",
+          "title": "Welcome",
+          "folder": "inbox",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "size": 337,
+          "tags": [
+            "onboarding",
+            "welcome"
+          ],
+          "wikilinks": [
+            "Project Plan",
+            "Meeting 2026-01-05"
+          ],
+          "excerpt": "Welcome Start with the Project Plan and the first meeting. - [ ] Read the plan due:2026-02-01 !high #onboarding - [x] Install ZenNotes - [ ] Ask about access @waiting Plan the plan: plan carefully. #welcome #onboarding"
+        }
+      ]
+    },
+    {
+      "tool": "list_notes",
+      "args": {
+        "folder": "trash"
+      },
+      "isError": false,
+      "result": [
+        {
+          "path": "trash/Deleted.md",
+          "link": "zennotes://open?path=trash/Deleted.md",
+          "title": "Deleted",
+          "folder": "trash",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "size": 11,
+          "tags": [
+            "work"
+          ],
+          "wikilinks": [],
+          "excerpt": "gone #work"
+        }
+      ]
+    },
+    {
+      "tool": "list_notes",
+      "args": {
+        "updatedSinceMs": "<time>",
+        "limit": 2
+      },
+      "isError": false,
+      "result": [
+        {
+          "path": "quick/Scratch.md",
+          "link": "zennotes://open?path=quick/Scratch.md",
+          "title": "Scratch",
+          "folder": "quick",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "size": 20,
+          "tags": [
+            "idea"
+          ],
+          "wikilinks": [],
+          "excerpt": "quick thought #idea"
+        },
+        {
+          "path": "inbox/Work/Notes (old).md",
+          "link": "zennotes://open?path=inbox/Work/Notes%20%28old%29.md",
+          "title": "Notes (old)",
+          "folder": "inbox",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "size": 42,
+          "tags": [],
+          "wikilinks": [],
+          "excerpt": "Some old notes about café menus & plans."
+        }
+      ]
+    },
+    {
+      "tool": "list_notes",
+      "args": {
+        "folder": "nowhere"
+      },
+      "isError": true,
+      "result": "Error: folder must be one of inbox, quick, archive, trash"
+    },
+    {
+      "tool": "list_folders",
+      "args": {},
+      "isError": false,
+      "result": [
+        {
+          "folder": "inbox",
+          "subpath": "Work"
+        }
+      ]
+    },
+    {
+      "tool": "list_assets",
+      "args": {},
+      "isError": false,
+      "result": [
+        {
+          "path": "assets/diagram.png",
+          "name": "diagram.png",
+          "size": 8,
+          "updatedAt": "<time>"
+        }
+      ]
+    },
+    {
+      "tool": "read_note",
+      "args": {
+        "path": "inbox/Welcome.md"
+      },
+      "isError": false,
+      "result": {
+        "path": "inbox/Welcome.md",
+        "link": "zennotes://open?path=inbox/Welcome.md",
+        "title": "Welcome",
+        "folder": "inbox",
+        "createdAt": "<time>",
+        "updatedAt": "<time>",
+        "size": 337,
+        "tags": [
+          "onboarding",
+          "welcome"
+        ],
+        "wikilinks": [
+          "Project Plan",
+          "Meeting 2026-01-05"
+        ],
+        "excerpt": "Welcome Start with the Project Plan and the first meeting. - [ ] Read the plan due:2026-02-01 !high #onboarding - [x] Install ZenNotes - [ ] Ask about access @waiting Plan the plan: plan carefully. #welcome #onboarding",
+        "body": "---\ntitle: Welcome\nstatus: active\n---\n# Welcome\n\nStart with the [[Project Plan]] and the [[Meeting 2026-01-05|first meeting]].\n\n- [ ] Read the plan due:2026-02-01 !high #onboarding\n- [x] Install ZenNotes\n- [ ] Ask about access @waiting\n\nPlan the plan: plan carefully.\n\n```js\n// - [ ] not a task, and #not-a-tag\n```\n\n#welcome #onboarding\n"
+      }
+    },
+    {
+      "tool": "read_note",
+      "args": {
+        "path": "inbox/Missing.md"
+      },
+      "isError": true,
+      "result": "Error: ENOENT: no such file or directory, open '<ROOT>/inbox/Missing.md'"
+    },
+    {
+      "tool": "read_note",
+      "args": {
+        "path": "../outside.md"
+      },
+      "isError": true,
+      "result": "Error: Path escapes vault: ../outside.md"
+    },
+    {
+      "tool": "read_note",
+      "args": {},
+      "isError": true,
+      "result": "Error: Missing required string argument: path"
+    },
+    {
+      "tool": "search_text",
+      "args": {
+        "query": "plan"
+      },
+      "isError": false,
+      "result": [
+        {
+          "path": "archive/Old Idea.md",
+          "link": "zennotes://open?path=archive/Old%20Idea.md",
+          "title": "Old Idea",
+          "folder": "archive",
+          "lineNumber": 3,
+          "lineText": "An archived plan. Links to [[Welcome]]."
+        },
+        {
+          "path": "inbox/Project Plan.md",
+          "link": "zennotes://open?path=inbox/Project%20Plan.md",
+          "title": "Project Plan",
+          "folder": "inbox",
+          "lineNumber": 1,
+          "lineText": "# Project Plan"
+        },
+        {
+          "path": "inbox/Welcome.md",
+          "link": "zennotes://open?path=inbox/Welcome.md",
+          "title": "Welcome",
+          "folder": "inbox",
+          "lineNumber": 7,
+          "lineText": "Start with the [[Project Plan]] and the [[Meeting 2026-01-05|first meeting]]."
+        },
+        {
+          "path": "inbox/Welcome.md",
+          "link": "zennotes://open?path=inbox/Welcome.md",
+          "title": "Welcome",
+          "folder": "inbox",
+          "lineNumber": 9,
+          "lineText": "- [ ] Read the plan due:2026-02-01 !high #onboarding"
+        },
+        {
+          "path": "inbox/Welcome.md",
+          "link": "zennotes://open?path=inbox/Welcome.md",
+          "title": "Welcome",
+          "folder": "inbox",
+          "lineNumber": 13,
+          "lineText": "Plan the plan: plan carefully."
+        },
+        {
+          "path": "inbox/Work/Meeting 2026-01-05.md",
+          "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+          "title": "Meeting 2026-01-05",
+          "folder": "inbox",
+          "lineNumber": 6,
+          "lineText": "- [ ] Follow up with [[Project Plan]] due:2026-01-10"
+        },
+        {
+          "path": "inbox/Work/Notes (old).md",
+          "link": "zennotes://open?path=inbox/Work/Notes%20%28old%29.md",
+          "title": "Notes (old)",
+          "folder": "inbox",
+          "lineNumber": 1,
+          "lineText": "Some old notes about café menus & plans."
+        }
+      ]
+    },
+    {
+      "tool": "search_text",
+      "args": {
+        "query": "café",
+        "limit": 1
+      },
+      "isError": false,
+      "result": [
+        {
+          "path": "inbox/Work/Notes (old).md",
+          "link": "zennotes://open?path=inbox/Work/Notes%20%28old%29.md",
+          "title": "Notes (old)",
+          "folder": "inbox",
+          "lineNumber": 1,
+          "lineText": "Some old notes about café menus & plans."
+        }
+      ]
+    },
+    {
+      "tool": "search_by_title",
+      "args": {
+        "query": "MEET"
+      },
+      "isError": false,
+      "result": [
+        {
+          "path": "inbox/Work/Meeting 2026-01-05.md",
+          "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+          "title": "Meeting 2026-01-05",
+          "folder": "inbox",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "size": 148,
+          "tags": [
+            "work",
+            "meeting"
+          ],
+          "wikilinks": [
+            "Project Plan"
+          ],
+          "excerpt": "Meeting 2026-01-05 Attendees: Ana, Bo - [ ] Send notes @status:doing #work - [ ] Follow up with Project Plan due:2026-01-10 #work #meeting"
+        }
+      ]
+    },
+    {
+      "tool": "search_by_tag",
+      "args": {
+        "tag": "#work"
+      },
+      "isError": false,
+      "result": [
+        {
+          "path": "inbox/Work/Meeting 2026-01-05.md",
+          "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+          "title": "Meeting 2026-01-05",
+          "folder": "inbox",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "size": 148,
+          "tags": [
+            "work",
+            "meeting"
+          ],
+          "wikilinks": [
+            "Project Plan"
+          ],
+          "excerpt": "Meeting 2026-01-05 Attendees: Ana, Bo - [ ] Send notes @status:doing #work - [ ] Follow up with Project Plan due:2026-01-10 #work #meeting"
+        },
+        {
+          "path": "inbox/Project Plan.md",
+          "link": "zennotes://open?path=inbox/Project%20Plan.md",
+          "title": "Project Plan",
+          "folder": "inbox",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "size": 191,
+          "tags": [
+            "work"
+          ],
+          "wikilinks": [
+            "Welcome"
+          ],
+          "excerpt": "Project Plan Back to Welcome. Milestones 1. [ ] Draft scope due: 2026-03-01 !med 2. [/] Build prototype !low #work 3. [-] Old approach 4. [] Moved elsewhere - [ ] Quoted task"
+        }
+      ]
+    },
+    {
+      "tool": "list_tags",
+      "args": {},
+      "isError": false,
+      "result": [
+        {
+          "tag": "work",
+          "count": 2
+        },
+        {
+          "tag": "idea",
+          "count": 1
+        },
+        {
+          "tag": "meeting",
+          "count": 1
+        },
+        {
+          "tag": "onboarding",
+          "count": 1
+        },
+        {
+          "tag": "welcome",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "tool": "backlinks",
+      "args": {
+        "path": "inbox/Project Plan.md"
+      },
+      "isError": false,
+      "result": [
+        {
+          "path": "inbox/Welcome.md",
+          "link": "zennotes://open?path=inbox/Welcome.md",
+          "title": "Welcome",
+          "folder": "inbox",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "size": 337,
+          "tags": [
+            "onboarding",
+            "welcome"
+          ],
+          "wikilinks": [
+            "Project Plan",
+            "Meeting 2026-01-05"
+          ],
+          "excerpt": "Welcome Start with the Project Plan and the first meeting. - [ ] Read the plan due:2026-02-01 !high #onboarding - [x] Install ZenNotes - [ ] Ask about access @waiting Plan the plan: plan carefully. #welcome #onboarding"
+        },
+        {
+          "path": "inbox/Work/Meeting 2026-01-05.md",
+          "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+          "title": "Meeting 2026-01-05",
+          "folder": "inbox",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "size": 148,
+          "tags": [
+            "work",
+            "meeting"
+          ],
+          "wikilinks": [
+            "Project Plan"
+          ],
+          "excerpt": "Meeting 2026-01-05 Attendees: Ana, Bo - [ ] Send notes @status:doing #work - [ ] Follow up with Project Plan due:2026-01-10 #work #meeting"
+        }
+      ]
+    },
+    {
+      "tool": "list_tasks",
+      "args": {},
+      "isError": false,
+      "result": [
+        {
+          "id": "inbox/Project Plan.md#0",
+          "sourcePath": "inbox/Project Plan.md",
+          "link": "zennotes://open?path=inbox/Project%20Plan.md",
+          "noteTitle": "Project Plan",
+          "noteFolder": "inbox",
+          "lineNumber": 6,
+          "taskIndex": 0,
+          "rawText": "1. [ ] Draft scope due: 2026-03-01 !med",
+          "content": "Draft scope",
+          "checked": false,
+          "cancelled": false,
+          "inProgress": false,
+          "forwarded": false,
+          "due": "2026-03-01",
+          "priority": "med",
+          "waiting": false,
+          "tags": []
+        },
+        {
+          "id": "inbox/Project Plan.md#1",
+          "sourcePath": "inbox/Project Plan.md",
+          "link": "zennotes://open?path=inbox/Project%20Plan.md",
+          "noteTitle": "Project Plan",
+          "noteFolder": "inbox",
+          "lineNumber": 7,
+          "taskIndex": 1,
+          "rawText": "2. [/] Build prototype !low #work",
+          "content": "Build prototype #work",
+          "checked": false,
+          "cancelled": false,
+          "inProgress": true,
+          "forwarded": false,
+          "priority": "low",
+          "waiting": false,
+          "tags": [
+            "work"
+          ]
+        },
+        {
+          "id": "inbox/Project Plan.md#4",
+          "sourcePath": "inbox/Project Plan.md",
+          "link": "zennotes://open?path=inbox/Project%20Plan.md",
+          "noteTitle": "Project Plan",
+          "noteFolder": "inbox",
+          "lineNumber": 11,
+          "taskIndex": 4,
+          "rawText": "> - [ ] Quoted task",
+          "content": "Quoted task",
+          "checked": false,
+          "cancelled": false,
+          "inProgress": false,
+          "forwarded": false,
+          "waiting": false,
+          "tags": []
+        },
+        {
+          "id": "inbox/Welcome.md#0",
+          "sourcePath": "inbox/Welcome.md",
+          "link": "zennotes://open?path=inbox/Welcome.md",
+          "noteTitle": "Welcome",
+          "noteFolder": "inbox",
+          "lineNumber": 8,
+          "taskIndex": 0,
+          "rawText": "- [ ] Read the plan due:2026-02-01 !high #onboarding",
+          "content": "Read the plan #onboarding",
+          "checked": false,
+          "cancelled": false,
+          "inProgress": false,
+          "forwarded": false,
+          "due": "2026-02-01",
+          "priority": "high",
+          "waiting": false,
+          "status": "active",
+          "tags": [
+            "onboarding"
+          ]
+        },
+        {
+          "id": "inbox/Work/Meeting 2026-01-05.md#0",
+          "sourcePath": "inbox/Work/Meeting 2026-01-05.md",
+          "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+          "noteTitle": "Meeting 2026-01-05",
+          "noteFolder": "inbox",
+          "lineNumber": 4,
+          "taskIndex": 0,
+          "rawText": "- [ ] Send notes @status:doing #work",
+          "content": "Send notes @status:doing #work",
+          "checked": false,
+          "cancelled": false,
+          "inProgress": false,
+          "forwarded": false,
+          "waiting": false,
+          "status": "doing",
+          "tags": [
+            "work"
+          ]
+        },
+        {
+          "id": "inbox/Work/Meeting 2026-01-05.md#1",
+          "sourcePath": "inbox/Work/Meeting 2026-01-05.md",
+          "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+          "noteTitle": "Meeting 2026-01-05",
+          "noteFolder": "inbox",
+          "lineNumber": 5,
+          "taskIndex": 1,
+          "rawText": "- [ ] Follow up with [[Project Plan]] due:2026-01-10",
+          "content": "Follow up with [[Project Plan]]",
+          "checked": false,
+          "cancelled": false,
+          "inProgress": false,
+          "forwarded": false,
+          "due": "2026-01-10",
+          "waiting": false,
+          "tags": []
+        }
+      ]
+    },
+    {
+      "tool": "list_tasks",
+      "args": {
+        "status": "all"
+      },
+      "isError": false,
+      "result": [
+        {
+          "id": "inbox/Project Plan.md#0",
+          "sourcePath": "inbox/Project Plan.md",
+          "link": "zennotes://open?path=inbox/Project%20Plan.md",
+          "noteTitle": "Project Plan",
+          "noteFolder": "inbox",
+          "lineNumber": 6,
+          "taskIndex": 0,
+          "rawText": "1. [ ] Draft scope due: 2026-03-01 !med",
+          "content": "Draft scope",
+          "checked": false,
+          "cancelled": false,
+          "inProgress": false,
+          "forwarded": false,
+          "due": "2026-03-01",
+          "priority": "med",
+          "waiting": false,
+          "tags": []
+        },
+        {
+          "id": "inbox/Project Plan.md#1",
+          "sourcePath": "inbox/Project Plan.md",
+          "link": "zennotes://open?path=inbox/Project%20Plan.md",
+          "noteTitle": "Project Plan",
+          "noteFolder": "inbox",
+          "lineNumber": 7,
+          "taskIndex": 1,
+          "rawText": "2. [/] Build prototype !low #work",
+          "content": "Build prototype #work",
+          "checked": false,
+          "cancelled": false,
+          "inProgress": true,
+          "forwarded": false,
+          "priority": "low",
+          "waiting": false,
+          "tags": [
+            "work"
+          ]
+        },
+        {
+          "id": "inbox/Project Plan.md#2",
+          "sourcePath": "inbox/Project Plan.md",
+          "link": "zennotes://open?path=inbox/Project%20Plan.md",
+          "noteTitle": "Project Plan",
+          "noteFolder": "inbox",
+          "lineNumber": 8,
+          "taskIndex": 2,
+          "rawText": "3. [-] Old approach",
+          "content": "Old approach",
+          "checked": false,
+          "cancelled": true,
+          "inProgress": false,
+          "forwarded": false,
+          "waiting": false,
+          "tags": []
+        },
+        {
+          "id": "inbox/Project Plan.md#3",
+          "sourcePath": "inbox/Project Plan.md",
+          "link": "zennotes://open?path=inbox/Project%20Plan.md",
+          "noteTitle": "Project Plan",
+          "noteFolder": "inbox",
+          "lineNumber": 9,
+          "taskIndex": 3,
+          "rawText": "4. [>] Moved elsewhere",
+          "content": "Moved elsewhere",
+          "checked": false,
+          "cancelled": false,
+          "inProgress": false,
+          "forwarded": true,
+          "waiting": false,
+          "tags": []
+        },
+        {
+          "id": "inbox/Project Plan.md#4",
+          "sourcePath": "inbox/Project Plan.md",
+          "link": "zennotes://open?path=inbox/Project%20Plan.md",
+          "noteTitle": "Project Plan",
+          "noteFolder": "inbox",
+          "lineNumber": 11,
+          "taskIndex": 4,
+          "rawText": "> - [ ] Quoted task",
+          "content": "Quoted task",
+          "checked": false,
+          "cancelled": false,
+          "inProgress": false,
+          "forwarded": false,
+          "waiting": false,
+          "tags": []
+        },
+        {
+          "id": "inbox/Welcome.md#0",
+          "sourcePath": "inbox/Welcome.md",
+          "link": "zennotes://open?path=inbox/Welcome.md",
+          "noteTitle": "Welcome",
+          "noteFolder": "inbox",
+          "lineNumber": 8,
+          "taskIndex": 0,
+          "rawText": "- [ ] Read the plan due:2026-02-01 !high #onboarding",
+          "content": "Read the plan #onboarding",
+          "checked": false,
+          "cancelled": false,
+          "inProgress": false,
+          "forwarded": false,
+          "due": "2026-02-01",
+          "priority": "high",
+          "waiting": false,
+          "status": "active",
+          "tags": [
+            "onboarding"
+          ]
+        },
+        {
+          "id": "inbox/Welcome.md#1",
+          "sourcePath": "inbox/Welcome.md",
+          "link": "zennotes://open?path=inbox/Welcome.md",
+          "noteTitle": "Welcome",
+          "noteFolder": "inbox",
+          "lineNumber": 9,
+          "taskIndex": 1,
+          "rawText": "- [x] Install ZenNotes",
+          "content": "Install ZenNotes",
+          "checked": true,
+          "cancelled": false,
+          "inProgress": false,
+          "forwarded": false,
+          "waiting": false,
+          "status": "active",
+          "tags": []
+        },
+        {
+          "id": "inbox/Welcome.md#2",
+          "sourcePath": "inbox/Welcome.md",
+          "link": "zennotes://open?path=inbox/Welcome.md",
+          "noteTitle": "Welcome",
+          "noteFolder": "inbox",
+          "lineNumber": 10,
+          "taskIndex": 2,
+          "rawText": "- [ ] Ask about access @waiting",
+          "content": "Ask about access",
+          "checked": false,
+          "cancelled": false,
+          "inProgress": false,
+          "forwarded": false,
+          "waiting": true,
+          "status": "active",
+          "tags": []
+        },
+        {
+          "id": "inbox/Work/Meeting 2026-01-05.md#0",
+          "sourcePath": "inbox/Work/Meeting 2026-01-05.md",
+          "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+          "noteTitle": "Meeting 2026-01-05",
+          "noteFolder": "inbox",
+          "lineNumber": 4,
+          "taskIndex": 0,
+          "rawText": "- [ ] Send notes @status:doing #work",
+          "content": "Send notes @status:doing #work",
+          "checked": false,
+          "cancelled": false,
+          "inProgress": false,
+          "forwarded": false,
+          "waiting": false,
+          "status": "doing",
+          "tags": [
+            "work"
+          ]
+        },
+        {
+          "id": "inbox/Work/Meeting 2026-01-05.md#1",
+          "sourcePath": "inbox/Work/Meeting 2026-01-05.md",
+          "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+          "noteTitle": "Meeting 2026-01-05",
+          "noteFolder": "inbox",
+          "lineNumber": 5,
+          "taskIndex": 1,
+          "rawText": "- [ ] Follow up with [[Project Plan]] due:2026-01-10",
+          "content": "Follow up with [[Project Plan]]",
+          "checked": false,
+          "cancelled": false,
+          "inProgress": false,
+          "forwarded": false,
+          "due": "2026-01-10",
+          "waiting": false,
+          "tags": []
+        }
+      ]
+    },
+    {
+      "tool": "list_tasks",
+      "args": {
+        "status": "done"
+      },
+      "isError": false,
+      "result": [
+        {
+          "id": "inbox/Welcome.md#1",
+          "sourcePath": "inbox/Welcome.md",
+          "link": "zennotes://open?path=inbox/Welcome.md",
+          "noteTitle": "Welcome",
+          "noteFolder": "inbox",
+          "lineNumber": 9,
+          "taskIndex": 1,
+          "rawText": "- [x] Install ZenNotes",
+          "content": "Install ZenNotes",
+          "checked": true,
+          "cancelled": false,
+          "inProgress": false,
+          "forwarded": false,
+          "waiting": false,
+          "status": "active",
+          "tags": []
+        }
+      ]
+    },
+    {
+      "tool": "list_tasks",
+      "args": {
+        "status": "waiting"
+      },
+      "isError": false,
+      "result": [
+        {
+          "id": "inbox/Welcome.md#2",
+          "sourcePath": "inbox/Welcome.md",
+          "link": "zennotes://open?path=inbox/Welcome.md",
+          "noteTitle": "Welcome",
+          "noteFolder": "inbox",
+          "lineNumber": 10,
+          "taskIndex": 2,
+          "rawText": "- [ ] Ask about access @waiting",
+          "content": "Ask about access",
+          "checked": false,
+          "cancelled": false,
+          "inProgress": false,
+          "forwarded": false,
+          "waiting": true,
+          "status": "active",
+          "tags": []
+        }
+      ]
+    },
+    {
+      "tool": "list_tasks",
+      "args": {
+        "priority": "high"
+      },
+      "isError": false,
+      "result": [
+        {
+          "id": "inbox/Welcome.md#0",
+          "sourcePath": "inbox/Welcome.md",
+          "link": "zennotes://open?path=inbox/Welcome.md",
+          "noteTitle": "Welcome",
+          "noteFolder": "inbox",
+          "lineNumber": 8,
+          "taskIndex": 0,
+          "rawText": "- [ ] Read the plan due:2026-02-01 !high #onboarding",
+          "content": "Read the plan #onboarding",
+          "checked": false,
+          "cancelled": false,
+          "inProgress": false,
+          "forwarded": false,
+          "due": "2026-02-01",
+          "priority": "high",
+          "waiting": false,
+          "status": "active",
+          "tags": [
+            "onboarding"
+          ]
+        }
+      ]
+    },
+    {
+      "tool": "list_tasks",
+      "args": {
+        "dueBefore": "2026-02-15",
+        "dueAfter": "2026-01-01"
+      },
+      "isError": false,
+      "result": [
+        {
+          "id": "inbox/Welcome.md#0",
+          "sourcePath": "inbox/Welcome.md",
+          "link": "zennotes://open?path=inbox/Welcome.md",
+          "noteTitle": "Welcome",
+          "noteFolder": "inbox",
+          "lineNumber": 8,
+          "taskIndex": 0,
+          "rawText": "- [ ] Read the plan due:2026-02-01 !high #onboarding",
+          "content": "Read the plan #onboarding",
+          "checked": false,
+          "cancelled": false,
+          "inProgress": false,
+          "forwarded": false,
+          "due": "2026-02-01",
+          "priority": "high",
+          "waiting": false,
+          "status": "active",
+          "tags": [
+            "onboarding"
+          ]
+        },
+        {
+          "id": "inbox/Work/Meeting 2026-01-05.md#1",
+          "sourcePath": "inbox/Work/Meeting 2026-01-05.md",
+          "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+          "noteTitle": "Meeting 2026-01-05",
+          "noteFolder": "inbox",
+          "lineNumber": 5,
+          "taskIndex": 1,
+          "rawText": "- [ ] Follow up with [[Project Plan]] due:2026-01-10",
+          "content": "Follow up with [[Project Plan]]",
+          "checked": false,
+          "cancelled": false,
+          "inProgress": false,
+          "forwarded": false,
+          "due": "2026-01-10",
+          "waiting": false,
+          "tags": []
+        }
+      ]
+    },
+    {
+      "tool": "list_tasks",
+      "args": {
+        "tags": [
+          "work"
+        ],
+        "folder": "inbox"
+      },
+      "isError": false,
+      "result": [
+        {
+          "id": "inbox/Project Plan.md#1",
+          "sourcePath": "inbox/Project Plan.md",
+          "link": "zennotes://open?path=inbox/Project%20Plan.md",
+          "noteTitle": "Project Plan",
+          "noteFolder": "inbox",
+          "lineNumber": 7,
+          "taskIndex": 1,
+          "rawText": "2. [/] Build prototype !low #work",
+          "content": "Build prototype #work",
+          "checked": false,
+          "cancelled": false,
+          "inProgress": true,
+          "forwarded": false,
+          "priority": "low",
+          "waiting": false,
+          "tags": [
+            "work"
+          ]
+        },
+        {
+          "id": "inbox/Work/Meeting 2026-01-05.md#0",
+          "sourcePath": "inbox/Work/Meeting 2026-01-05.md",
+          "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+          "noteTitle": "Meeting 2026-01-05",
+          "noteFolder": "inbox",
+          "lineNumber": 4,
+          "taskIndex": 0,
+          "rawText": "- [ ] Send notes @status:doing #work",
+          "content": "Send notes @status:doing #work",
+          "checked": false,
+          "cancelled": false,
+          "inProgress": false,
+          "forwarded": false,
+          "waiting": false,
+          "status": "doing",
+          "tags": [
+            "work"
+          ]
+        }
+      ]
+    },
+    {
+      "tool": "list_comments",
+      "args": {
+        "path": "inbox/Comments Target.md"
+      },
+      "isError": false,
+      "result": [
+        {
+          "id": "c-user-1",
+          "author": null,
+          "body": "Is this right?",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "anchorText": "Key Sentence",
+          "line": 3,
+          "resolved": false,
+          "resolvedAt": null,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "tool": "add_comment",
+      "args": {
+        "path": "inbox/Comments Target.md",
+        "body": "  Looks right to me.  ",
+        "anchor_text": "second PARAGRAPH"
+      },
+      "isError": false,
+      "result": {
+        "id": "<id1>",
+        "author": "Claude Code",
+        "body": "Looks right to me.",
+        "createdAt": "<time>",
+        "updatedAt": "<time>",
+        "anchorText": "second paragraph",
+        "line": 5,
+        "resolved": false,
+        "resolvedAt": null,
+        "replies": []
+      }
+    },
+    {
+      "tool": "add_comment",
+      "args": {
+        "path": "inbox/Comments Target.md",
+        "body": "Note-level remark",
+        "author": "Reviewer Bot"
+      },
+      "isError": false,
+      "result": {
+        "id": "<id2>",
+        "author": "Reviewer Bot",
+        "body": "Note-level remark",
+        "createdAt": "<time>",
+        "updatedAt": "<time>",
+        "anchorText": "",
+        "line": 1,
+        "resolved": false,
+        "resolvedAt": null,
+        "replies": []
+      }
+    },
+    {
+      "tool": "add_comment",
+      "args": {
+        "path": "inbox/Comments Target.md",
+        "body": "x",
+        "anchor_text": "not in the note"
+      },
+      "isError": true,
+      "result": "Error: anchor_text was not found in the note. Pass the text exactly as it appears (read_note shows it), or omit it for a note-level comment."
+    },
+    {
+      "tool": "add_comment",
+      "args": {
+        "path": "inbox/Comments Target.md",
+        "body": "   "
+      },
+      "isError": true,
+      "result": "Error: Missing required string argument: body"
+    },
+    {
+      "tool": "reply_to_comment",
+      "args": {
+        "path": "inbox/Comments Target.md",
+        "id": "c-user-1",
+        "body": "Yes, it is."
+      },
+      "isError": false,
+      "result": {
+        "id": "c-user-1",
+        "author": null,
+        "body": "Is this right?",
+        "createdAt": "<time>",
+        "updatedAt": "<time>",
+        "anchorText": "Key Sentence",
+        "line": 3,
+        "resolved": false,
+        "resolvedAt": null,
+        "replies": [
+          {
+            "id": "<id3>",
+            "author": "Claude Code",
+            "body": "Yes, it is.",
+            "createdAt": "<time>",
+            "updatedAt": "<time>"
+          }
+        ]
+      }
+    },
+    {
+      "tool": "reply_to_comment",
+      "args": {
+        "path": "inbox/Comments Target.md",
+        "id": "nope",
+        "body": "?"
+      },
+      "isError": true,
+      "result": "Error: No comment with id nope on inbox/Comments Target.md. Use list_comments to find ids."
+    },
+    {
+      "tool": "resolve_comment",
+      "args": {
+        "path": "inbox/Comments Target.md",
+        "id": "c-user-1"
+      },
+      "isError": false,
+      "result": {
+        "id": "c-user-1",
+        "author": null,
+        "body": "Is this right?",
+        "createdAt": "<time>",
+        "updatedAt": "<time>",
+        "anchorText": "Key Sentence",
+        "line": 3,
+        "resolved": true,
+        "resolvedAt": "<time>",
+        "replies": [
+          {
+            "id": "<id3>",
+            "author": "Claude Code",
+            "body": "Yes, it is.",
+            "createdAt": "<time>",
+            "updatedAt": "<time>"
+          }
+        ]
+      }
+    },
+    {
+      "tool": "list_comments",
+      "args": {
+        "path": "inbox/Comments Target.md"
+      },
+      "isError": false,
+      "result": [
+        {
+          "id": "<id1>",
+          "author": "Claude Code",
+          "body": "Looks right to me.",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "anchorText": "second paragraph",
+          "line": 5,
+          "resolved": false,
+          "resolvedAt": null,
+          "replies": []
+        },
+        {
+          "id": "<id2>",
+          "author": "Reviewer Bot",
+          "body": "Note-level remark",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "anchorText": "",
+          "line": 1,
+          "resolved": false,
+          "resolvedAt": null,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "tool": "list_comments",
+      "args": {
+        "path": "inbox/Comments Target.md",
+        "include_resolved": true
+      },
+      "isError": false,
+      "result": [
+        {
+          "id": "c-user-1",
+          "author": null,
+          "body": "Is this right?",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "anchorText": "Key Sentence",
+          "line": 3,
+          "resolved": true,
+          "resolvedAt": "<time>",
+          "replies": [
+            {
+              "id": "<id3>",
+              "author": "Claude Code",
+              "body": "Yes, it is.",
+              "createdAt": "<time>",
+              "updatedAt": "<time>"
+            }
+          ]
+        },
+        {
+          "id": "<id1>",
+          "author": "Claude Code",
+          "body": "Looks right to me.",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "anchorText": "second paragraph",
+          "line": 5,
+          "resolved": false,
+          "resolvedAt": null,
+          "replies": []
+        },
+        {
+          "id": "<id2>",
+          "author": "Reviewer Bot",
+          "body": "Note-level remark",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "anchorText": "",
+          "line": 1,
+          "resolved": false,
+          "resolvedAt": null,
+          "replies": []
+        }
+      ]
+    },
+    {
+      "tool": "resolve_comment",
+      "args": {
+        "path": "inbox/Comments Target.md",
+        "id": "c-user-1",
+        "resolved": false
+      },
+      "isError": false,
+      "result": {
+        "id": "c-user-1",
+        "author": null,
+        "body": "Is this right?",
+        "createdAt": "<time>",
+        "updatedAt": "<time>",
+        "anchorText": "Key Sentence",
+        "line": 3,
+        "resolved": false,
+        "resolvedAt": null,
+        "replies": [
+          {
+            "id": "<id3>",
+            "author": "Claude Code",
+            "body": "Yes, it is.",
+            "createdAt": "<time>",
+            "updatedAt": "<time>"
+          }
+        ]
+      }
+    },
+    {
+      "tool": "append_to_note",
+      "args": {
+        "path": "inbox/Welcome.md",
+        "text": "Appended line."
+      },
+      "isError": false,
+      "result": {
+        "path": "inbox/Welcome.md",
+        "link": "zennotes://open?path=inbox/Welcome.md",
+        "title": "Welcome",
+        "folder": "inbox",
+        "createdAt": "<time>",
+        "updatedAt": "<time>",
+        "size": 353,
+        "tags": [
+          "onboarding",
+          "welcome"
+        ],
+        "wikilinks": [
+          "Project Plan",
+          "Meeting 2026-01-05"
+        ],
+        "excerpt": "Welcome Start with the Project Plan and the first meeting. - [ ] Read the plan due:2026-02-01 !high #onboarding - [x] Install ZenNotes - [ ] Ask about access @waiting Plan the plan: plan carefully. #welcome #onboarding A"
+      }
+    },
+    {
+      "tool": "prepend_to_note",
+      "args": {
+        "path": "inbox/Welcome.md",
+        "text": "> [!note] Pinned"
+      },
+      "isError": false,
+      "result": {
+        "path": "inbox/Welcome.md",
+        "link": "zennotes://open?path=inbox/Welcome.md",
+        "title": "Welcome",
+        "folder": "inbox",
+        "createdAt": "<time>",
+        "updatedAt": "<time>",
+        "size": 371,
+        "tags": [
+          "onboarding",
+          "welcome"
+        ],
+        "wikilinks": [
+          "Project Plan",
+          "Meeting 2026-01-05"
+        ],
+        "excerpt": "[!note] Pinned Welcome Start with the Project Plan and the first meeting. - [ ] Read the plan due:2026-02-01 !high #onboarding - [x] Install ZenNotes - [ ] Ask about access @waiting Plan the plan: plan carefully. #welcom"
+      }
+    },
+    {
+      "tool": "insert_at_line",
+      "args": {
+        "path": "inbox/Welcome.md",
+        "lineNumber": 7,
+        "text": "Inserted line."
+      },
+      "isError": false,
+      "result": {
+        "path": "inbox/Welcome.md",
+        "link": "zennotes://open?path=inbox/Welcome.md",
+        "title": "Welcome",
+        "folder": "inbox",
+        "createdAt": "<time>",
+        "updatedAt": "<time>",
+        "size": 386,
+        "tags": [
+          "onboarding",
+          "welcome"
+        ],
+        "wikilinks": [
+          "Project Plan",
+          "Meeting 2026-01-05"
+        ],
+        "excerpt": "[!note] Pinned Welcome Inserted line. Start with the Project Plan and the first meeting. - [ ] Read the plan due:2026-02-01 !high #onboarding - [x] Install ZenNotes - [ ] Ask about access @waiting Plan the plan: plan car"
+      }
+    },
+    {
+      "tool": "insert_at_line",
+      "args": {
+        "path": "inbox/Welcome.md",
+        "text": "no line"
+      },
+      "isError": true,
+      "result": "Error: lineNumber is required"
+    },
+    {
+      "tool": "replace_in_note",
+      "args": {
+        "path": "inbox/Welcome.md",
+        "find": "plan",
+        "replace": "PLAN"
+      },
+      "isError": false,
+      "result": {
+        "meta": {
+          "path": "inbox/Welcome.md",
+          "link": "zennotes://open?path=inbox/Welcome.md",
+          "title": "Welcome",
+          "folder": "inbox",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "size": 386,
+          "tags": [
+            "onboarding",
+            "welcome"
+          ],
+          "wikilinks": [
+            "Project Plan",
+            "Meeting 2026-01-05"
+          ],
+          "excerpt": "[!note] Pinned Welcome Inserted line. Start with the Project Plan and the first meeting. - [ ] Read the PLAN due:2026-02-01 !high #onboarding - [x] Install ZenNotes - [ ] Ask about access @waiting Plan the plan: plan car"
+        },
+        "replacements": 1
+      }
+    },
+    {
+      "tool": "replace_in_note",
+      "args": {
+        "path": "inbox/Welcome.md",
+        "find": "plan",
+        "replace": "PLAN",
+        "occurrence": "all"
+      },
+      "isError": false,
+      "result": {
+        "meta": {
+          "path": "inbox/Welcome.md",
+          "link": "zennotes://open?path=inbox/Welcome.md",
+          "title": "Welcome",
+          "folder": "inbox",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "size": 386,
+          "tags": [
+            "onboarding",
+            "welcome"
+          ],
+          "wikilinks": [
+            "Project Plan",
+            "Meeting 2026-01-05"
+          ],
+          "excerpt": "[!note] Pinned Welcome Inserted line. Start with the Project Plan and the first meeting. - [ ] Read the PLAN due:2026-02-01 !high #onboarding - [x] Install ZenNotes - [ ] Ask about access @waiting Plan the PLAN: PLAN car"
+        },
+        "replacements": 2
+      }
+    },
+    {
+      "tool": "replace_in_note",
+      "args": {
+        "path": "inbox/Welcome.md",
+        "find": "absent text",
+        "replace": "x"
+      },
+      "isError": false,
+      "result": {
+        "meta": {
+          "path": "inbox/Welcome.md",
+          "link": "zennotes://open?path=inbox/Welcome.md",
+          "title": "Welcome",
+          "folder": "inbox",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "size": 386,
+          "tags": [
+            "onboarding",
+            "welcome"
+          ],
+          "wikilinks": [
+            "Project Plan",
+            "Meeting 2026-01-05"
+          ],
+          "excerpt": "[!note] Pinned Welcome Inserted line. Start with the Project Plan and the first meeting. - [ ] Read the PLAN due:2026-02-01 !high #onboarding - [x] Install ZenNotes - [ ] Ask about access @waiting Plan the PLAN: PLAN car"
+        },
+        "replacements": 0
+      }
+    },
+    {
+      "tool": "write_note",
+      "args": {
+        "path": "quick/Scratch.md",
+        "body": "rewritten #idea\n"
+      },
+      "isError": false,
+      "result": {
+        "path": "quick/Scratch.md",
+        "link": "zennotes://open?path=quick/Scratch.md",
+        "title": "Scratch",
+        "folder": "quick",
+        "createdAt": "<time>",
+        "updatedAt": "<time>",
+        "size": 16,
+        "tags": [
+          "idea"
+        ],
+        "wikilinks": [],
+        "excerpt": "rewritten #idea"
+      }
+    },
+    {
+      "tool": "write_note",
+      "args": {
+        "path": "quick/Scratch.md"
+      },
+      "isError": true,
+      "result": "Error: body must be a string"
+    },
+    {
+      "tool": "list_tasks",
+      "args": {
+        "folder": "inbox"
+      },
+      "isError": false,
+      "result": [
+        {
+          "id": "inbox/Project Plan.md#0",
+          "sourcePath": "inbox/Project Plan.md",
+          "link": "zennotes://open?path=inbox/Project%20Plan.md",
+          "noteTitle": "Project Plan",
+          "noteFolder": "inbox",
+          "lineNumber": 6,
+          "taskIndex": 0,
+          "rawText": "1. [ ] Draft scope due: 2026-03-01 !med",
+          "content": "Draft scope",
+          "checked": false,
+          "cancelled": false,
+          "inProgress": false,
+          "forwarded": false,
+          "due": "2026-03-01",
+          "priority": "med",
+          "waiting": false,
+          "tags": []
+        },
+        {
+          "id": "inbox/Project Plan.md#1",
+          "sourcePath": "inbox/Project Plan.md",
+          "link": "zennotes://open?path=inbox/Project%20Plan.md",
+          "noteTitle": "Project Plan",
+          "noteFolder": "inbox",
+          "lineNumber": 7,
+          "taskIndex": 1,
+          "rawText": "2. [/] Build prototype !low #work",
+          "content": "Build prototype #work",
+          "checked": false,
+          "cancelled": false,
+          "inProgress": true,
+          "forwarded": false,
+          "priority": "low",
+          "waiting": false,
+          "tags": [
+            "work"
+          ]
+        },
+        {
+          "id": "inbox/Project Plan.md#4",
+          "sourcePath": "inbox/Project Plan.md",
+          "link": "zennotes://open?path=inbox/Project%20Plan.md",
+          "noteTitle": "Project Plan",
+          "noteFolder": "inbox",
+          "lineNumber": 11,
+          "taskIndex": 4,
+          "rawText": "> - [ ] Quoted task",
+          "content": "Quoted task",
+          "checked": false,
+          "cancelled": false,
+          "inProgress": false,
+          "forwarded": false,
+          "waiting": false,
+          "tags": []
+        },
+        {
+          "id": "inbox/Welcome.md#0",
+          "sourcePath": "inbox/Welcome.md",
+          "link": "zennotes://open?path=inbox/Welcome.md",
+          "noteTitle": "Welcome",
+          "noteFolder": "inbox",
+          "lineNumber": 11,
+          "taskIndex": 0,
+          "rawText": "- [ ] Read the PLAN due:2026-02-01 !high #onboarding",
+          "content": "Read the PLAN #onboarding",
+          "checked": false,
+          "cancelled": false,
+          "inProgress": false,
+          "forwarded": false,
+          "due": "2026-02-01",
+          "priority": "high",
+          "waiting": false,
+          "status": "active",
+          "tags": [
+            "onboarding"
+          ]
+        },
+        {
+          "id": "inbox/Work/Meeting 2026-01-05.md#0",
+          "sourcePath": "inbox/Work/Meeting 2026-01-05.md",
+          "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+          "noteTitle": "Meeting 2026-01-05",
+          "noteFolder": "inbox",
+          "lineNumber": 4,
+          "taskIndex": 0,
+          "rawText": "- [ ] Send notes @status:doing #work",
+          "content": "Send notes @status:doing #work",
+          "checked": false,
+          "cancelled": false,
+          "inProgress": false,
+          "forwarded": false,
+          "waiting": false,
+          "status": "doing",
+          "tags": [
+            "work"
+          ]
+        },
+        {
+          "id": "inbox/Work/Meeting 2026-01-05.md#1",
+          "sourcePath": "inbox/Work/Meeting 2026-01-05.md",
+          "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+          "noteTitle": "Meeting 2026-01-05",
+          "noteFolder": "inbox",
+          "lineNumber": 5,
+          "taskIndex": 1,
+          "rawText": "- [ ] Follow up with [[Project Plan]] due:2026-01-10",
+          "content": "Follow up with [[Project Plan]]",
+          "checked": false,
+          "cancelled": false,
+          "inProgress": false,
+          "forwarded": false,
+          "due": "2026-01-10",
+          "waiting": false,
+          "tags": []
+        }
+      ]
+    },
+    {
+      "tool": "toggle_task",
+      "args": {
+        "id": "inbox/Project Plan.md#0"
+      },
+      "isError": false,
+      "result": {
+        "id": "inbox/Project Plan.md#0",
+        "sourcePath": "inbox/Project Plan.md",
+        "link": "zennotes://open?path=inbox/Project%20Plan.md",
+        "noteTitle": "Project Plan",
+        "noteFolder": "inbox",
+        "lineNumber": 6,
+        "taskIndex": 0,
+        "rawText": "1. [x] Draft scope due: 2026-03-01 !med",
+        "content": "Draft scope",
+        "checked": true,
+        "cancelled": false,
+        "inProgress": false,
+        "forwarded": false,
+        "due": "2026-03-01",
+        "priority": "med",
+        "waiting": false,
+        "tags": []
+      }
+    },
+    {
+      "tool": "toggle_task",
+      "args": {
+        "id": "inbox/Welcome.md#99"
+      },
+      "isError": false,
+      "result": null
+    },
+    {
+      "tool": "toggle_task",
+      "args": {
+        "id": "no-hash"
+      },
+      "isError": true,
+      "result": "Error: Malformed task id: no-hash"
+    },
+    {
+      "tool": "read_note",
+      "args": {
+        "path": "inbox/Welcome.md"
+      },
+      "isError": false,
+      "result": {
+        "path": "inbox/Welcome.md",
+        "link": "zennotes://open?path=inbox/Welcome.md",
+        "title": "Welcome",
+        "folder": "inbox",
+        "createdAt": "<time>",
+        "updatedAt": "<time>",
+        "size": 386,
+        "tags": [
+          "onboarding",
+          "welcome"
+        ],
+        "wikilinks": [
+          "Project Plan",
+          "Meeting 2026-01-05"
+        ],
+        "excerpt": "[!note] Pinned Welcome Inserted line. Start with the Project Plan and the first meeting. - [ ] Read the PLAN due:2026-02-01 !high #onboarding - [x] Install ZenNotes - [ ] Ask about access @waiting Plan the PLAN: PLAN car",
+        "body": "---\ntitle: Welcome\nstatus: active\n---\n> [!note] Pinned\n\n# Welcome\nInserted line.\n\nStart with the [[Project Plan]] and the [[Meeting 2026-01-05|first meeting]].\n\n- [ ] Read the PLAN due:2026-02-01 !high #onboarding\n- [x] Install ZenNotes\n- [ ] Ask about access @waiting\n\nPlan the PLAN: PLAN carefully.\n\n```js\n// - [ ] not a task, and #not-a-tag\n```\n\n#welcome #onboarding\n\nAppended line.\n"
+      }
+    },
+    {
+      "tool": "create_note",
+      "args": {
+        "title": "New Idea",
+        "subpath": "Ideas",
+        "body": "# New Idea\n\nSee [[Welcome]].\n"
+      },
+      "isError": false,
+      "result": {
+        "path": "inbox/Ideas/New Idea.md",
+        "link": "zennotes://open?path=inbox/Ideas/New%20Idea.md",
+        "title": "New Idea",
+        "folder": "inbox",
+        "createdAt": "<time>",
+        "updatedAt": "<time>",
+        "size": 29,
+        "tags": [],
+        "wikilinks": [
+          "Welcome"
+        ],
+        "excerpt": "New Idea See Welcome."
+      }
+    },
+    {
+      "tool": "create_note",
+      "args": {
+        "title": "New Idea",
+        "subpath": "Ideas"
+      },
+      "isError": false,
+      "result": {
+        "path": "inbox/Ideas/New Idea 2.md",
+        "link": "zennotes://open?path=inbox/Ideas/New%20Idea%202.md",
+        "title": "New Idea 2",
+        "folder": "inbox",
+        "createdAt": "<time>",
+        "updatedAt": "<time>",
+        "size": 14,
+        "tags": [],
+        "wikilinks": [],
+        "excerpt": "New Idea 2"
+      }
+    },
+    {
+      "tool": "create_note",
+      "args": {
+        "folder": "quick"
+      },
+      "isError": false,
+      "result": {
+        "path": "quick/Untitled.md",
+        "link": "zennotes://open?path=quick/Untitled.md",
+        "title": "Untitled",
+        "folder": "quick",
+        "createdAt": "<time>",
+        "updatedAt": "<time>",
+        "size": 12,
+        "tags": [],
+        "wikilinks": [],
+        "excerpt": "Untitled"
+      }
+    },
+    {
+      "tool": "create_note",
+      "args": {
+        "title": "a/b: c?",
+        "folder": "archive"
+      },
+      "isError": false,
+      "result": {
+        "path": "archive/a-b- c-.md",
+        "link": "zennotes://open?path=archive/a-b-%20c-.md",
+        "title": "a-b- c-",
+        "folder": "archive",
+        "createdAt": "<time>",
+        "updatedAt": "<time>",
+        "size": 11,
+        "tags": [],
+        "wikilinks": [],
+        "excerpt": "a-b- c-"
+      }
+    },
+    {
+      "tool": "create_note",
+      "args": {
+        "folder": "trash",
+        "title": "Nope"
+      },
+      "isError": true,
+      "result": "Error: Refusing to create a note directly in trash/"
+    },
+    {
+      "tool": "rename_note",
+      "args": {
+        "path": "inbox/Project Plan.md",
+        "newTitle": "Project Roadmap"
+      },
+      "isError": false,
+      "result": {
+        "path": "inbox/Project Roadmap.md",
+        "link": "zennotes://open?path=inbox/Project%20Roadmap.md",
+        "title": "Project Roadmap",
+        "folder": "inbox",
+        "createdAt": "<time>",
+        "updatedAt": "<time>",
+        "size": 194,
+        "tags": [
+          "work"
+        ],
+        "wikilinks": [
+          "Welcome"
+        ],
+        "excerpt": "Project Roadmap Back to Welcome. Milestones 1. [x] Draft scope due: 2026-03-01 !med 2. [/] Build prototype !low #work 3. [-] Old approach 4. [] Moved elsewhere - [ ] Quoted task"
+      }
+    },
+    {
+      "tool": "rename_note",
+      "args": {
+        "path": "inbox/Project Roadmap.md",
+        "newTitle": "Welcome"
+      },
+      "isError": true,
+      "result": "Error: A note named \"Welcome\" already exists in inbox"
+    },
+    {
+      "tool": "backlinks",
+      "args": {
+        "path": "inbox/Project Roadmap.md"
+      },
+      "isError": false,
+      "result": []
+    },
+    {
+      "tool": "move_note",
+      "args": {
+        "path": "inbox/Ideas/New Idea.md",
+        "targetFolder": "quick",
+        "targetSubpath": "Later"
+      },
+      "isError": false,
+      "result": {
+        "path": "quick/Later/New Idea.md",
+        "link": "zennotes://open?path=quick/Later/New%20Idea.md",
+        "title": "New Idea",
+        "folder": "quick",
+        "createdAt": "<time>",
+        "updatedAt": "<time>",
+        "size": 29,
+        "tags": [],
+        "wikilinks": [
+          "Welcome"
+        ],
+        "excerpt": "New Idea See Welcome."
+      }
+    },
+    {
+      "tool": "move_note",
+      "args": {
+        "path": "inbox/Ideas/New Idea 1.md",
+        "targetFolder": "elsewhere"
+      },
+      "isError": true,
+      "result": "Error: targetFolder must be one of inbox, quick, archive, trash"
+    },
+    {
+      "tool": "duplicate_note",
+      "args": {
+        "path": "inbox/Welcome.md"
+      },
+      "isError": false,
+      "result": {
+        "path": "inbox/Welcome copy.md",
+        "link": "zennotes://open?path=inbox/Welcome%20copy.md",
+        "title": "Welcome copy",
+        "folder": "inbox",
+        "createdAt": "<time>",
+        "updatedAt": "<time>",
+        "size": 386,
+        "tags": [
+          "onboarding",
+          "welcome"
+        ],
+        "wikilinks": [
+          "Project Plan",
+          "Meeting 2026-01-05"
+        ],
+        "excerpt": "[!note] Pinned Welcome Inserted line. Start with the Project Plan and the first meeting. - [ ] Read the PLAN due:2026-02-01 !high #onboarding - [x] Install ZenNotes - [ ] Ask about access @waiting Plan the PLAN: PLAN car"
+      }
+    },
+    {
+      "tool": "archive_note",
+      "args": {
+        "path": "inbox/Work/Meeting 2026-01-05.md"
+      },
+      "isError": false,
+      "result": {
+        "path": "archive/Work/Meeting 2026-01-05.md",
+        "link": "zennotes://open?path=archive/Work/Meeting%202026-01-05.md",
+        "title": "Meeting 2026-01-05",
+        "folder": "archive",
+        "createdAt": "<time>",
+        "updatedAt": "<time>",
+        "size": 148,
+        "tags": [
+          "work",
+          "meeting"
+        ],
+        "wikilinks": [
+          "Project Plan"
+        ],
+        "excerpt": "Meeting 2026-01-05 Attendees: Ana, Bo - [ ] Send notes @status:doing #work - [ ] Follow up with Project Plan due:2026-01-10 #work #meeting"
+      }
+    },
+    {
+      "tool": "unarchive_note",
+      "args": {
+        "path": "archive/Work/Meeting 2026-01-05.md"
+      },
+      "isError": false,
+      "result": {
+        "path": "inbox/Work/Meeting 2026-01-05.md",
+        "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+        "title": "Meeting 2026-01-05",
+        "folder": "inbox",
+        "createdAt": "<time>",
+        "updatedAt": "<time>",
+        "size": 148,
+        "tags": [
+          "work",
+          "meeting"
+        ],
+        "wikilinks": [
+          "Project Plan"
+        ],
+        "excerpt": "Meeting 2026-01-05 Attendees: Ana, Bo - [ ] Send notes @status:doing #work - [ ] Follow up with Project Plan due:2026-01-10 #work #meeting"
+      }
+    },
+    {
+      "tool": "move_to_trash",
+      "args": {
+        "path": "inbox/Welcome copy.md"
+      },
+      "isError": false,
+      "result": {
+        "path": "trash/Welcome copy.md",
+        "link": "zennotes://open?path=trash/Welcome%20copy.md",
+        "title": "Welcome copy",
+        "folder": "trash",
+        "createdAt": "<time>",
+        "updatedAt": "<time>",
+        "size": 386,
+        "tags": [
+          "onboarding",
+          "welcome"
+        ],
+        "wikilinks": [
+          "Project Plan",
+          "Meeting 2026-01-05"
+        ],
+        "excerpt": "[!note] Pinned Welcome Inserted line. Start with the Project Plan and the first meeting. - [ ] Read the PLAN due:2026-02-01 !high #onboarding - [x] Install ZenNotes - [ ] Ask about access @waiting Plan the PLAN: PLAN car"
+      }
+    },
+    {
+      "tool": "restore_from_trash",
+      "args": {
+        "path": "trash/Deleted.md"
+      },
+      "isError": false,
+      "result": {
+        "path": "inbox/Deleted.md",
+        "link": "zennotes://open?path=inbox/Deleted.md",
+        "title": "Deleted",
+        "folder": "inbox",
+        "createdAt": "<time>",
+        "updatedAt": "<time>",
+        "size": 11,
+        "tags": [
+          "work"
+        ],
+        "wikilinks": [],
+        "excerpt": "gone #work"
+      }
+    },
+    {
+      "tool": "create_folder",
+      "args": {
+        "folder": "inbox",
+        "subpath": "Projects/2026"
+      },
+      "isError": false,
+      "result": {
+        "ok": true
+      }
+    },
+    {
+      "tool": "create_folder",
+      "args": {
+        "folder": "trash",
+        "subpath": "x"
+      },
+      "isError": true,
+      "result": "Error: Refusing to create subfolders inside trash/"
+    },
+    {
+      "tool": "rename_folder",
+      "args": {
+        "folder": "inbox",
+        "oldSubpath": "Work",
+        "newSubpath": "Office"
+      },
+      "isError": false,
+      "result": "Office"
+    },
+    {
+      "tool": "list_folders",
+      "args": {},
+      "isError": false,
+      "result": [
+        {
+          "folder": "archive",
+          "subpath": "Work"
+        },
+        {
+          "folder": "inbox",
+          "subpath": "Ideas"
+        },
+        {
+          "folder": "inbox",
+          "subpath": "Office"
+        },
+        {
+          "folder": "inbox",
+          "subpath": "Projects"
+        },
+        {
+          "folder": "inbox",
+          "subpath": "Projects/2026"
+        },
+        {
+          "folder": "quick",
+          "subpath": "Later"
+        }
+      ]
+    },
+    {
+      "tool": "delete_folder",
+      "args": {
+        "folder": "inbox",
+        "subpath": "Projects",
+        "confirm": false
+      },
+      "isError": true,
+      "result": "Error: delete_folder requires confirm=true."
+    },
+    {
+      "tool": "delete_folder",
+      "args": {
+        "folder": "inbox",
+        "subpath": "Projects",
+        "confirm": true
+      },
+      "isError": false,
+      "result": {
+        "ok": true
+      }
+    },
+    {
+      "tool": "delete_note",
+      "args": {
+        "path": "quick/Scratch.md"
+      },
+      "isError": true,
+      "result": "Error: delete_note requires confirm=true."
+    },
+    {
+      "tool": "delete_note",
+      "args": {
+        "path": "quick/Scratch.md",
+        "confirm": true
+      },
+      "isError": false,
+      "result": {
+        "ok": true
+      }
+    },
+    {
+      "tool": "empty_trash",
+      "args": {},
+      "isError": true,
+      "result": "Error: empty_trash requires confirm=true. Ask the user first."
+    },
+    {
+      "tool": "empty_trash",
+      "args": {
+        "confirm": true
+      },
+      "isError": false,
+      "result": {
+        "ok": true
+      }
+    },
+    {
+      "tool": "list_notes",
+      "args": {
+        "folder": "trash"
+      },
+      "isError": false,
+      "result": []
+    },
+    {
+      "tool": "no_such_tool",
+      "args": {},
+      "isError": true,
+      "result": "Unknown tool: no_such_tool"
+    },
+    {
+      "tool": "vault_info",
+      "args": {},
+      "isError": false,
+      "result": {
+        "kind": "local",
+        "vaultRoot": "<ROOT>",
+        "primaryNotesLocation": "inbox",
+        "inboxAbsolutePath": "<ROOT>/inbox",
+        "topFolders": [
+          "inbox",
+          "quick",
+          "archive",
+          "trash"
+        ],
+        "subfolders": [
+          {
+            "folder": "archive",
+            "subpath": "Work"
+          },
+          {
+            "folder": "inbox",
+            "subpath": "Ideas"
+          },
+          {
+            "folder": "inbox",
+            "subpath": "Office"
+          },
+          {
+            "folder": "quick",
+            "subpath": "Later"
+          }
+        ],
+        "notes": "IMPORTANT: Always use the `path` returned by other tools verbatim. Never prepend `inbox/` to a path you got back from list_notes / create_note / read_note. This vault uses INBOX mode: notes for the conceptual `inbox` folder live under `inbox/` (e.g. `inbox/MyNote.md`)."
+      }
+    }
+  ],
+  "files": {
+    ".zennotes/agent-edits/inbox/Project Roadmap.md.json": {
+      "version": 1,
+      "before": "# Project Plan\n\nBack to [[Welcome]].\n\n## Milestones\n\n1. [ ] Draft scope due: 2026-03-01 !med\n2. [/] Build prototype !low #work\n3. [-] Old approach\n4. [>] Moved elsewhere\n\n> - [ ] Quoted task\n",
+      "after": "# Project Plan\n\nBack to [[Welcome]].\n\n## Milestones\n\n1. [x] Draft scope due: 2026-03-01 !med\n2. [/] Build prototype !low #work\n3. [-] Old approach\n4. [>] Moved elsewhere\n\n> - [ ] Quoted task\n",
+      "edits": [
+        {
+          "at": "<time>",
+          "agent": "Claude Code",
+          "tool": "toggle_task"
+        }
+      ],
+      "outside": []
+    },
+    ".zennotes/agent-edits/inbox/Welcome.md.json": {
+      "version": 1,
+      "before": "---\ntitle: Welcome\nstatus: active\n---\n# Welcome\n\nStart with the [[Project Plan]] and the [[Meeting 2026-01-05|first meeting]].\n\n- [ ] Read the plan due:2026-02-01 !high #onboarding\n- [x] Install ZenNotes\n- [ ] Ask about access @waiting\n\nPlan the plan: plan carefully.\n\n```js\n// - [ ] not a task, and #not-a-tag\n```\n\n#welcome #onboarding\n",
+      "after": "---\ntitle: Welcome\nstatus: active\n---\n> [!note] Pinned\n\n# Welcome\nInserted line.\n\nStart with the [[Project Plan]] and the [[Meeting 2026-01-05|first meeting]].\n\n- [ ] Read the PLAN due:2026-02-01 !high #onboarding\n- [x] Install ZenNotes\n- [ ] Ask about access @waiting\n\nPlan the PLAN: PLAN carefully.\n\n```js\n// - [ ] not a task, and #not-a-tag\n```\n\n#welcome #onboarding\n\nAppended line.\n",
+      "edits": [
+        {
+          "at": "<time>",
+          "agent": "Claude Code",
+          "tool": "append_to_note"
+        },
+        {
+          "at": "<time>",
+          "agent": "Claude Code",
+          "tool": "prepend_to_note"
+        },
+        {
+          "at": "<time>",
+          "agent": "Claude Code",
+          "tool": "insert_at_line"
+        },
+        {
+          "at": "<time>",
+          "agent": "Claude Code",
+          "tool": "replace_in_note"
+        },
+        {
+          "at": "<time>",
+          "agent": "Claude Code",
+          "tool": "replace_in_note"
+        }
+      ],
+      "outside": []
+    },
+    ".zennotes/comments/inbox/Comments Target.md.comments.json": {
+      "version": 1,
+      "comments": [
+        {
+          "id": "c-user-1",
+          "notePath": "inbox/Comments Target.md",
+          "anchorStart": 45,
+          "anchorEnd": 57,
+          "anchorText": "Key Sentence",
+          "body": "Is this right?",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "resolvedAt": null
+        },
+        {
+          "id": "<id1>",
+          "notePath": "inbox/Comments Target.md",
+          "anchorStart": 79,
+          "anchorEnd": 95,
+          "anchorText": "second paragraph",
+          "body": "Looks right to me.",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "resolvedAt": null,
+          "author": "Claude Code"
+        },
+        {
+          "id": "<id2>",
+          "notePath": "inbox/Comments Target.md",
+          "anchorStart": 0,
+          "anchorEnd": 0,
+          "anchorText": "",
+          "body": "Note-level remark",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "resolvedAt": null,
+          "author": "Reviewer Bot"
+        },
+        {
+          "id": "<id3>",
+          "notePath": "inbox/Comments Target.md",
+          "anchorStart": 45,
+          "anchorEnd": 57,
+          "anchorText": "Key Sentence",
+          "body": "Yes, it is.",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "resolvedAt": null,
+          "author": "Claude Code",
+          "parentId": "c-user-1"
+        }
+      ]
+    },
+    ".zennotes/note-metadata/inbox/Project Roadmap.md.metadata.json": {
+      "version": 1,
+      "createdAt": "<time>"
+    },
+    ".zennotes/note-metadata/inbox/Welcome.md.metadata.json": {
+      "version": 1,
+      "createdAt": "<time>"
+    },
+    ".zennotes/vault.json": {
+      "primaryNotesLocation": "inbox"
+    },
+    "archive/Old Idea.md": "# Old Idea\n\nAn archived plan. Links to [[Welcome]].\n",
+    "archive/a-b- c-.md": "# a-b- c-\n\n",
+    "assets/diagram.png": {
+      "base64": "iVBORw0KGgo=",
+      "size": 8
+    },
+    "inbox/Comments Target.md": "# Comments Target\n\nThe first paragraph has a Key Sentence worth discussing.\n\nA second paragraph.\n",
+    "inbox/Deleted.md": "gone #work\n",
+    "inbox/Ideas/New Idea 2.md": "# New Idea 2\n\n",
+    "inbox/Office/Meeting 2026-01-05.md": "# Meeting 2026-01-05\n\nAttendees: Ana, Bo\n\n- [ ] Send notes @status:doing #work\n- [ ] Follow up with [[Project Plan]] due:2026-01-10\n\n#work #meeting\n",
+    "inbox/Office/Notes (old).md": "Some old notes about café menus & plans.\n",
+    "inbox/Project Roadmap.md": "# Project Roadmap\n\nBack to [[Welcome]].\n\n## Milestones\n\n1. [x] Draft scope due: 2026-03-01 !med\n2. [/] Build prototype !low #work\n3. [-] Old approach\n4. [>] Moved elsewhere\n\n> - [ ] Quoted task\n",
+    "inbox/Welcome.md": "---\ntitle: Welcome\nstatus: active\n---\n> [!note] Pinned\n\n# Welcome\nInserted line.\n\nStart with the [[Project Plan]] and the [[Meeting 2026-01-05|first meeting]].\n\n- [ ] Read the PLAN due:2026-02-01 !high #onboarding\n- [x] Install ZenNotes\n- [ ] Ask about access @waiting\n\nPlan the PLAN: PLAN carefully.\n\n```js\n// - [ ] not a task, and #not-a-tag\n```\n\n#welcome #onboarding\n\nAppended line.\n",
+    "quick/Later/New Idea.md": "# New Idea\n\nSee [[Welcome]].\n",
+    "quick/Untitled.md": "# Untitled\n\n"
+  }
+}

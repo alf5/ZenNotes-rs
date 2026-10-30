@@ -7,6 +7,49 @@ crossed here was 451 upstream commits: ~72k changed lines across the three
 vendored packages, ~18k in `apps/desktop/src`, and a bridge contract with one
 new required member (`openExternalUrl`) and ~35 new optional ones.
 
+## MCP server (ZenNotes-rs 2.73.1, after the v2.73 mirror)
+
+`zennotes-rs mcp` is the port of upstream's MCP server
+(`apps/desktop/src/mcp`), built on the `rmcp` crate and dispatched from
+`main.rs` before Tauri starts, so it runs headless over stdio. It serves the
+same 34 tools on the vault folder directly (the app need not be running):
+`--vault <path or name>`, else `$ZENNOTES_VAULT`, else the vault the app last
+had open, re-resolved before every call with upstream's "the vault changed,
+call vault_info" guard. Edits through `write_note`, `append_to_note`,
+`prepend_to_note`, `insert_at_line`, `replace_in_note` and `toggle_task` leave
+agent edit records the app's review reads (`[mcp] review_agent_edits`).
+Settings → MCP now installs it into Claude Code, Claude Desktop, Codex and
+OpenCode, under the key `zennotes-rs` (not upstream's `zennotes`, so both apps
+can be installed side by side without overwriting each other's entry), and
+edits the instructions, kept in the app config dir as
+`zennotes.mcp-instructions.md`.
+
+**Parity is tested against upstream itself**: `tooling/mcp-golden/generate.ts
+<upstream clone>` runs upstream's server from its TypeScript under bun,
+replays `scenario.json` (80 calls over every tool and its error paths, on the
+fixture vault beside it), and records `golden.json` plus the tool list
+(`src-tauri/src/mcp/tools.json`, served verbatim) and the default instructions
+(`src-tauri/src/mcp/instructions.md`). `bun run test:mcp` replays the scenario
+against `target/debug/zennotes-rs` and fails on any difference in a reply or in
+the files left on disk. **Re-run both on every re-vendor.**
+
+Port-owned copies (Rust) of upstream logic, all covered by the golden test:
+
+| File | Upstream |
+|---|---|
+| `src-tauri/src/mcp/server.rs` | `apps/desktop/src/mcp/server.ts` (handlers, argument checks, error wording, `VaultSession`) |
+| `src-tauri/src/mcp/ops.rs` | `apps/desktop/src/mcp/vault-ops.ts` (its own vault logic, which differs from the main process: `.md`-only listings, frontmatter tags, ` 2` name counters, no inbound link rewrite on rename) |
+| `src-tauri/src/mcp/tasks.rs` | the task parser in `vault-ops.ts` + `@shared/tasks` / `tasks-excluded-folders` helpers |
+| `src-tauri/src/mcp/comments.rs` | `apps/desktop/src/mcp/comment-ops.ts` + `@shared/note-comments` threading |
+| `src-tauri/src/mcp/agent_edits.rs` | `apps/desktop/src/mcp/agent-edit-recorder.ts` + the writing half of `@shared/agent-edits` |
+| `src-tauri/src/mcp/integrations.rs` | `apps/desktop/src/main/mcp-integrations.ts` |
+
+Not carried over: remote vaults (`--server`, `--token`, the Settings server
+token, `ZENNOTES_SERVER`; this build has no remote workspaces), remapped
+system folders (as everywhere in this port), and the legacy `out/main/mcp.js`
+entry. The vendored Settings page still describes the server as "the packaged
+Electron binary in plain-Node mode" and the Codex row as `[mcp_servers.zennotes]`.
+
 ## Frontend
 
 - `packages/{app-core,bridge-contract,shared-domain}` re-vendored **verbatim**
@@ -102,7 +145,7 @@ build has no Cloud page to open. Vendored code, so it is left as upstream has it
 | Gap | Why |
 |---|---|
 | `sendUsageCount` | Upstream's anonymous install count goes to zennotes.org; sent from here it would count this port as upstream. Absent, so the Settings switch has no effect. |
-| MCP server token, managed `zn` CLI updates | No MCP server or CLI ships in this build. |
+| MCP server token, managed `zn` CLI updates | The MCP server serves local vaults only (no remote workspaces), and no `zn` CLI ships in this build. |
 | Cloud end-to-end encryption, backup paging | Cloud sync remains out of scope (see below). |
 | `--new-window` (#815) | Single-vault backend; a second workspace window is "Open Vault in New Window". |
 | macOS title-bar toggle | Upstream hides the traffic lights; this build is verified on Linux only, where windows are frameless and the app draws its own controls. |
@@ -485,6 +528,7 @@ below.
 
 ## Out of scope (upstream features the port intentionally drops)
 
-Web/server/CLI (`zn`), MCP install flows, auto-updater, Raycast, TikZ. Upstream
+Web/server/CLI (`zn`), auto-updater, Raycast, TikZ. (The MCP server and its
+install flows were added after v2.73; see the top of this file.) Upstream
 UI touching these already degrades via the existing capability flags and
 "unavailable" stubs in `tauri-bridge.ts`.

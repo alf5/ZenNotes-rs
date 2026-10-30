@@ -27,7 +27,8 @@ Claude Opus 5.5.
 - **Downloads:** prebuilt bundles are on [GitHub Releases](https://github.com/alf5/ZenNotes-rs/releases/latest): macOS `.dmg` (Apple Silicon + Intel), Windows `-setup.exe` / `.msi`, and Linux `.AppImage` / `.deb`. The macOS and Windows builds come from CI; only Linux is tested by hand.
 - **Arch Linux:** a `makepkg`/AUR setup lives in [`packaging/arch/`](packaging/arch/) and builds from source against Arch's own `webkit2gtk-4.1` / `gtk3` packages.
 - **Building from source:** see [BUILD.md](BUILD.md) for the build, the test suites, and the AppImage workarounds on rolling-release distros.
-- **Scope:** desktop app only. Not part of this port: the original's web/server/self-hosted modes, ZenNotes Cloud (sync, backups, publishing), the `zn` CLI and MCP server with their install flows, Raycast, the auto-updater, TikZ, and PDF/Word export. In Settings, their pages either do not appear or say they are not available in this build.
+- **Scope:** desktop app only. Not part of this port: the original's web/server/self-hosted modes, ZenNotes Cloud (sync, backups, publishing), the `zn` CLI, Raycast, the auto-updater, TikZ, and PDF/Word export.
+- **MCP:** the binary is its own MCP server: `zennotes-rs mcp [--vault <path or name>]` serves the original's 34 vault tools over stdio, on local vaults, and Settings → MCP installs it into Claude Code, Claude Desktop, Codex or OpenCode (as `zennotes-rs`, so it can sit beside the original's `zennotes` entry). Its replies are checked against the original's server; see [GAP-ANALYSIS.md](GAP-ANALYSIS.md). In Settings, their pages either do not appear or say they are not available in this build.
 - **Identity:** application id `com.zennotes-rs.app`, deep-link scheme `zennotes-rs://`.
 - **Upstream parity:** mirrored to ZenNotes **v2.73.0**. See [GAP-ANALYSIS.md](GAP-ANALYSIS.md) for what is and is not carried over.
 

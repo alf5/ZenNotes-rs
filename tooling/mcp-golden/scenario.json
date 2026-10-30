@@ -1,0 +1,552 @@
+{
+  "comment": "Tool calls replayed against upstream's MCP server (generate.ts) and against `zennotes-rs mcp` (check.ts), in order, on a fresh copy of ./vault. An argument {\"$ref\": label, \"at\": \"a.b.0\"} is replaced by that field of the labelled step's parsed result.",
+  "steps": [
+    {
+      "tool": "vault_info",
+      "args": {},
+      "sortBy": "folder,subpath",
+      "sortAt": "subfolders"
+    },
+    {
+      "tool": "list_notes",
+      "args": {}
+    },
+    {
+      "tool": "list_notes",
+      "args": {
+        "folder": "inbox",
+        "subpath": "Work"
+      }
+    },
+    {
+      "tool": "list_notes",
+      "args": {
+        "tag": "WORK"
+      }
+    },
+    {
+      "tool": "list_notes",
+      "args": {
+        "wikilinkTo": "project plan"
+      }
+    },
+    {
+      "tool": "list_notes",
+      "args": {
+        "folder": "trash"
+      }
+    },
+    {
+      "tool": "list_notes",
+      "args": {
+        "updatedSinceMs": 1767225900000,
+        "limit": 2
+      }
+    },
+    {
+      "tool": "list_notes",
+      "args": {
+        "folder": "nowhere"
+      }
+    },
+    {
+      "tool": "list_folders",
+      "args": {},
+      "sortBy": "folder,subpath"
+    },
+    {
+      "tool": "list_assets",
+      "args": {}
+    },
+    {
+      "tool": "read_note",
+      "args": {
+        "path": "inbox/Welcome.md"
+      }
+    },
+    {
+      "tool": "read_note",
+      "args": {
+        "path": "inbox/Missing.md"
+      }
+    },
+    {
+      "tool": "read_note",
+      "args": {
+        "path": "../outside.md"
+      }
+    },
+    {
+      "tool": "read_note",
+      "args": {}
+    },
+    {
+      "tool": "search_text",
+      "args": {
+        "query": "plan"
+      },
+      "sortBy": "path,lineNumber"
+    },
+    {
+      "tool": "search_text",
+      "args": {
+        "query": "café",
+        "limit": 1
+      },
+      "sortBy": "path,lineNumber"
+    },
+    {
+      "tool": "search_by_title",
+      "args": {
+        "query": "MEET"
+      }
+    },
+    {
+      "tool": "search_by_tag",
+      "args": {
+        "tag": "#work"
+      }
+    },
+    {
+      "tool": "list_tags",
+      "args": {}
+    },
+    {
+      "tool": "backlinks",
+      "args": {
+        "path": "inbox/Project Plan.md"
+      },
+      "sortBy": "path"
+    },
+    {
+      "tool": "list_tasks",
+      "args": {},
+      "sortBy": "id"
+    },
+    {
+      "tool": "list_tasks",
+      "args": {
+        "status": "all"
+      },
+      "sortBy": "id"
+    },
+    {
+      "tool": "list_tasks",
+      "args": {
+        "status": "done"
+      },
+      "sortBy": "id"
+    },
+    {
+      "tool": "list_tasks",
+      "args": {
+        "status": "waiting"
+      },
+      "sortBy": "id"
+    },
+    {
+      "tool": "list_tasks",
+      "args": {
+        "priority": "high"
+      },
+      "sortBy": "id"
+    },
+    {
+      "tool": "list_tasks",
+      "args": {
+        "dueBefore": "2026-02-15",
+        "dueAfter": "2026-01-01"
+      },
+      "sortBy": "id"
+    },
+    {
+      "tool": "list_tasks",
+      "args": {
+        "tags": [
+          "work"
+        ],
+        "folder": "inbox"
+      },
+      "sortBy": "id"
+    },
+    {
+      "tool": "list_comments",
+      "args": {
+        "path": "inbox/Comments Target.md"
+      },
+      "label": "threads",
+      "sortBy": "body"
+    },
+    {
+      "tool": "add_comment",
+      "args": {
+        "path": "inbox/Comments Target.md",
+        "body": "  Looks right to me.  ",
+        "anchor_text": "second PARAGRAPH"
+      }
+    },
+    {
+      "tool": "add_comment",
+      "args": {
+        "path": "inbox/Comments Target.md",
+        "body": "Note-level remark",
+        "author": "Reviewer Bot"
+      }
+    },
+    {
+      "tool": "add_comment",
+      "args": {
+        "path": "inbox/Comments Target.md",
+        "body": "x",
+        "anchor_text": "not in the note"
+      }
+    },
+    {
+      "tool": "add_comment",
+      "args": {
+        "path": "inbox/Comments Target.md",
+        "body": "   "
+      }
+    },
+    {
+      "tool": "reply_to_comment",
+      "args": {
+        "path": "inbox/Comments Target.md",
+        "id": {
+          "$ref": "threads",
+          "at": "0.id"
+        },
+        "body": "Yes, it is."
+      }
+    },
+    {
+      "tool": "reply_to_comment",
+      "args": {
+        "path": "inbox/Comments Target.md",
+        "id": "nope",
+        "body": "?"
+      }
+    },
+    {
+      "tool": "resolve_comment",
+      "args": {
+        "path": "inbox/Comments Target.md",
+        "id": {
+          "$ref": "threads",
+          "at": "0.id"
+        }
+      }
+    },
+    {
+      "tool": "list_comments",
+      "args": {
+        "path": "inbox/Comments Target.md"
+      },
+      "sortBy": "body"
+    },
+    {
+      "tool": "list_comments",
+      "args": {
+        "path": "inbox/Comments Target.md",
+        "include_resolved": true
+      },
+      "sortBy": "body"
+    },
+    {
+      "tool": "resolve_comment",
+      "args": {
+        "path": "inbox/Comments Target.md",
+        "id": {
+          "$ref": "threads",
+          "at": "0.id"
+        },
+        "resolved": false
+      }
+    },
+    {
+      "tool": "append_to_note",
+      "args": {
+        "path": "inbox/Welcome.md",
+        "text": "Appended line."
+      }
+    },
+    {
+      "tool": "prepend_to_note",
+      "args": {
+        "path": "inbox/Welcome.md",
+        "text": "> [!note] Pinned"
+      }
+    },
+    {
+      "tool": "insert_at_line",
+      "args": {
+        "path": "inbox/Welcome.md",
+        "lineNumber": 7,
+        "text": "Inserted line."
+      }
+    },
+    {
+      "tool": "insert_at_line",
+      "args": {
+        "path": "inbox/Welcome.md",
+        "text": "no line"
+      }
+    },
+    {
+      "tool": "replace_in_note",
+      "args": {
+        "path": "inbox/Welcome.md",
+        "find": "plan",
+        "replace": "PLAN"
+      }
+    },
+    {
+      "tool": "replace_in_note",
+      "args": {
+        "path": "inbox/Welcome.md",
+        "find": "plan",
+        "replace": "PLAN",
+        "occurrence": "all"
+      }
+    },
+    {
+      "tool": "replace_in_note",
+      "args": {
+        "path": "inbox/Welcome.md",
+        "find": "absent text",
+        "replace": "x"
+      }
+    },
+    {
+      "tool": "write_note",
+      "args": {
+        "path": "quick/Scratch.md",
+        "body": "rewritten #idea\n"
+      }
+    },
+    {
+      "tool": "write_note",
+      "args": {
+        "path": "quick/Scratch.md"
+      }
+    },
+    {
+      "tool": "list_tasks",
+      "args": {
+        "folder": "inbox"
+      },
+      "sortBy": "id",
+      "label": "openTasks"
+    },
+    {
+      "tool": "toggle_task",
+      "args": {
+        "id": {
+          "$ref": "openTasks",
+          "at": "0.id"
+        }
+      }
+    },
+    {
+      "tool": "toggle_task",
+      "args": {
+        "id": "inbox/Welcome.md#99"
+      }
+    },
+    {
+      "tool": "toggle_task",
+      "args": {
+        "id": "no-hash"
+      }
+    },
+    {
+      "tool": "read_note",
+      "args": {
+        "path": "inbox/Welcome.md"
+      }
+    },
+    {
+      "tool": "create_note",
+      "args": {
+        "title": "New Idea",
+        "subpath": "Ideas",
+        "body": "# New Idea\n\nSee [[Welcome]].\n"
+      }
+    },
+    {
+      "tool": "create_note",
+      "args": {
+        "title": "New Idea",
+        "subpath": "Ideas"
+      }
+    },
+    {
+      "tool": "create_note",
+      "args": {
+        "folder": "quick"
+      }
+    },
+    {
+      "tool": "create_note",
+      "args": {
+        "title": "a/b: c?",
+        "folder": "archive"
+      }
+    },
+    {
+      "tool": "create_note",
+      "args": {
+        "folder": "trash",
+        "title": "Nope"
+      }
+    },
+    {
+      "tool": "rename_note",
+      "args": {
+        "path": "inbox/Project Plan.md",
+        "newTitle": "Project Roadmap"
+      }
+    },
+    {
+      "tool": "rename_note",
+      "args": {
+        "path": "inbox/Project Roadmap.md",
+        "newTitle": "Welcome"
+      }
+    },
+    {
+      "tool": "backlinks",
+      "args": {
+        "path": "inbox/Project Roadmap.md"
+      },
+      "sortBy": "path"
+    },
+    {
+      "tool": "move_note",
+      "args": {
+        "path": "inbox/Ideas/New Idea.md",
+        "targetFolder": "quick",
+        "targetSubpath": "Later"
+      }
+    },
+    {
+      "tool": "move_note",
+      "args": {
+        "path": "inbox/Ideas/New Idea 1.md",
+        "targetFolder": "elsewhere"
+      }
+    },
+    {
+      "tool": "duplicate_note",
+      "args": {
+        "path": "inbox/Welcome.md"
+      }
+    },
+    {
+      "tool": "archive_note",
+      "args": {
+        "path": "inbox/Work/Meeting 2026-01-05.md"
+      }
+    },
+    {
+      "tool": "unarchive_note",
+      "args": {
+        "path": "archive/Work/Meeting 2026-01-05.md"
+      }
+    },
+    {
+      "tool": "move_to_trash",
+      "args": {
+        "path": "inbox/Welcome copy.md"
+      }
+    },
+    {
+      "tool": "restore_from_trash",
+      "args": {
+        "path": "trash/Deleted.md"
+      }
+    },
+    {
+      "tool": "create_folder",
+      "args": {
+        "folder": "inbox",
+        "subpath": "Projects/2026"
+      }
+    },
+    {
+      "tool": "create_folder",
+      "args": {
+        "folder": "trash",
+        "subpath": "x"
+      }
+    },
+    {
+      "tool": "rename_folder",
+      "args": {
+        "folder": "inbox",
+        "oldSubpath": "Work",
+        "newSubpath": "Office"
+      }
+    },
+    {
+      "tool": "list_folders",
+      "args": {},
+      "sortBy": "folder,subpath"
+    },
+    {
+      "tool": "delete_folder",
+      "args": {
+        "folder": "inbox",
+        "subpath": "Projects",
+        "confirm": false
+      }
+    },
+    {
+      "tool": "delete_folder",
+      "args": {
+        "folder": "inbox",
+        "subpath": "Projects",
+        "confirm": true
+      }
+    },
+    {
+      "tool": "delete_note",
+      "args": {
+        "path": "quick/Scratch.md"
+      }
+    },
+    {
+      "tool": "delete_note",
+      "args": {
+        "path": "quick/Scratch.md",
+        "confirm": true
+      }
+    },
+    {
+      "tool": "empty_trash",
+      "args": {}
+    },
+    {
+      "tool": "empty_trash",
+      "args": {
+        "confirm": true
+      }
+    },
+    {
+      "tool": "list_notes",
+      "args": {
+        "folder": "trash"
+      }
+    },
+    {
+      "tool": "no_such_tool",
+      "args": {}
+    },
+    {
+      "tool": "vault_info",
+      "args": {},
+      "sortBy": "folder,subpath",
+      "sortAt": "subfolders"
+    }
+  ]
+}
