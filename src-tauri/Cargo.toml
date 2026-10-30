@@ -1,6 +1,6 @@
 [package]
 name = "zennotes-rs"
-version = "2.73.0"
+version = "2.73.1"
 description = "ZenNotes-rs desktop — a Tauri port of ZenNotes"
 authors = ["ZenNotes-rs"]
 edition = "2021"
