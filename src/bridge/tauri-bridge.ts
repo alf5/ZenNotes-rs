@@ -441,51 +441,21 @@ const bridge: ZenBridge = {
   setQuickCapturePinned: (pinned: boolean): Promise<boolean> =>
     invoke('app_set_quick_capture_pinned', { pinned }),
 
-  // ---- MCP / CLI / Raycast (M16, deferred) ------------------------------
-  // The MCP server / `zen` CLI / Raycast extension need a bundled Node sidecar
-  // (the MCP TS SDK + node-tikzjax) or a separate binary, which this build does
-  // not ship yet. These return safe "unavailable" states so Settings renders
-  // without crashing; no capability is flipped on.
-  mcpGetRuntime: async (): Promise<McpServerRuntime> => ({
-    command: '',
-    args: [],
-    env: {},
-    entryPath: null
-  }),
-  mcpGetStatuses: async (): Promise<McpClientStatus[]> =>
-    (['claude-code', 'claude-desktop', 'codex'] as McpClientId[]).map((id) => ({
-      id,
-      configPath: '',
-      installed: false,
-      upToDate: false,
-      note: 'MCP integration is not available in this build yet.'
-    })),
-  mcpInstall: async (id: McpClientId): Promise<McpClientStatus> => ({
-    id,
-    configPath: '',
-    installed: false,
-    upToDate: false,
-    note: 'MCP integration is not available in this build yet.'
-  }),
-  mcpUninstall: async (id: McpClientId): Promise<McpClientStatus> => ({
-    id,
-    configPath: '',
-    installed: false,
-    upToDate: false,
-    note: 'MCP integration is not available in this build yet.'
-  }),
-  mcpGetInstructions: async (): Promise<McpInstructionsPayload> => ({
-    defaultValue: '',
-    current: '',
-    isCustom: false,
-    filePath: ''
-  }),
-  mcpSetInstructions: async (): Promise<McpInstructionsPayload> => ({
-    defaultValue: '',
-    current: '',
-    isCustom: false,
-    filePath: ''
-  }),
+  // ---- MCP -----------------------------------------------------------------
+  // The server is this binary run as `zennotes-rs mcp` (src-tauri/src/mcp);
+  // these install it into a client's config and edit the instructions it
+  // sends. The server-token members stay absent: there are no remote vaults.
+  mcpGetRuntime: (): Promise<McpServerRuntime> => invoke('mcp_get_runtime'),
+  mcpGetStatuses: (): Promise<McpClientStatus[]> => invoke('mcp_get_statuses'),
+  mcpInstall: (id: McpClientId): Promise<McpClientStatus> => invoke('mcp_install', { id }),
+  mcpUninstall: (id: McpClientId): Promise<McpClientStatus> => invoke('mcp_uninstall', { id }),
+  mcpGetInstructions: (): Promise<McpInstructionsPayload> => invoke('mcp_get_instructions'),
+  mcpSetInstructions: (next: string | null): Promise<McpInstructionsPayload> =>
+    invoke('mcp_set_instructions', { next }),
+
+  // ---- CLI / Raycast (deferred) -------------------------------------------
+  // The `zen` CLI and the Raycast extension are not part of this build; these
+  // return safe "unavailable" states so Settings renders.
   cliGetStatus: async (): Promise<CliInstallStatus> => unavailableCliStatus(),
   cliInstall: async (): Promise<CliInstallStatus> => unavailableCliStatus(),
   cliUninstall: async (): Promise<CliInstallStatus> => unavailableCliStatus(),
@@ -740,7 +710,8 @@ const bridge: ZenBridge = {
   // Deliberately absent (all optional in the contract, so app-core hides
   // what they drive): sendUsageCount (upstream's anonymous install count goes
   // to zennotes.org and would count this port as upstream), the MCP server
-  // token and managed-CLI update members (no MCP server or CLI ships here),
+  // token members (no remote vaults to authenticate to) and the managed-CLI
+  // update members (no CLI ships here),
   // and the cloud encryption members (cloud sync is out of scope).
 }
 

@@ -1,5 +1,6 @@
 //! IPC command handlers + the serde types they exchange with the frontend.
 
+pub mod mcp_cmds;
 pub mod os_cmds;
 pub mod types;
 pub mod vault_cmds;

@@ -32,6 +32,11 @@ a very recent `binutils` + `gdk-pixbuf`). Both are worked around below.
 # bundle-boot-order test reads dist/, so build first.
 bun run build && NODE_OPTIONS='--no-experimental-webstorage' bun run test
 
+# The MCP server (`zennotes-rs mcp`) replayed against upstream's recorded
+# replies; needs the debug binary from `cargo build`. After a re-vendor,
+# re-record first: bun run mcp:golden <upstream ZenNotes clone>
+bun run test:mcp
+
 # Vendored frontend packages. app-core must run from its OWN directory: its
 # vendored vitest.config.ts registers the Harper and oniguruma wasm plugins,
 # and passing `--root` from elsewhere overrides the config, after which ~19

@@ -14,6 +14,7 @@ mod deep_links;
 mod external_urls;
 mod ipc;
 mod link_metadata;
+mod mcp;
 mod os;
 mod remote;
 mod search;
@@ -26,7 +27,7 @@ mod vault;
 mod watcher;
 mod windows;
 
-use ipc::{os_cmds, vault_cmds, window_cmds, workspace_cmds};
+use ipc::{mcp_cmds, os_cmds, vault_cmds, window_cmds, workspace_cmds};
 use state::AppState;
 use tauri::Manager;
 
@@ -55,6 +56,11 @@ fn app_renderer_ready(app: tauri::AppHandle, state: tauri::State<AppState>) {
             let _ = main.emit("app://open-note", rel);
         }
     }
+}
+
+/// `zennotes-rs mcp`: see `mcp::run`.
+pub fn run_mcp(args: &[String]) -> i32 {
+    mcp::run(args)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -199,6 +205,12 @@ pub fn run() {
             window_cmds::app_read_external_file,
             window_cmds::app_write_external_file,
             window_cmds::app_move_external_file_to_vault,
+            mcp_cmds::mcp_get_runtime,
+            mcp_cmds::mcp_get_statuses,
+            mcp_cmds::mcp_install,
+            mcp_cmds::mcp_uninstall,
+            mcp_cmds::mcp_get_instructions,
+            mcp_cmds::mcp_set_instructions,
             os_cmds::app_zoom_in,
             os_cmds::app_zoom_out,
             os_cmds::app_zoom_reset,

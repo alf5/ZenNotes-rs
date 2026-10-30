@@ -1,0 +1,720 @@
+[
+  {
+    "name": "vault_info",
+    "description": "Return where the currently configured ZenNotes vault lives (a folder on this machine, or a self-hosted server the desktop app is connected to) and its top-level layout. Call this once at the start of a session to confirm you are pointing at the right vault, and to learn whether the user runs in `inbox` or `root` primary mode (the answer changes how every other tool behaves).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "list_notes",
+    "description": "List notes in the vault with metadata (title, folder, tags, wikilinks, excerpt, timestamps). Optional filters narrow by folder, tag, or wikilink target. Use this before editing to pick the right note. Trashed notes are included only when folder='trash' is explicit. The returned `path` field is the canonical reference: pass it back verbatim to read_note / write_note / move_note. In `primaryNotesLocation: root` vaults, inbox notes have a path WITHOUT an `inbox/` prefix (e.g. `MyNote.md`); never add one. Each note also carries `link`, a clickable zennotes:// URL that opens it in the app; use it verbatim when rendering note titles as markdown links for the user.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "folder": {
+          "type": "string",
+          "enum": [
+            "inbox",
+            "quick",
+            "archive",
+            "trash"
+          ],
+          "description": "Only return notes in this top-level folder."
+        },
+        "subpath": {
+          "type": "string",
+          "description": "POSIX subpath under the folder (e.g. \"Work/Meetings\"). Requires folder to be set."
+        },
+        "tag": {
+          "type": "string",
+          "description": "Only return notes that contain this #tag."
+        },
+        "wikilinkTo": {
+          "type": "string",
+          "description": "Only return notes that link to a note with this title."
+        },
+        "updatedSinceMs": {
+          "type": "number",
+          "description": "Only return notes updated at or after this epoch millisecond timestamp."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Cap the number of notes returned. Default: 200."
+        }
+      }
+    }
+  },
+  {
+    "name": "list_folders",
+    "description": "List every subfolder in the vault grouped by top-level folder.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "list_assets",
+    "description": "List files under the vault’s attachments directory (images, PDFs, audio, video, other binaries). Useful when a note references an asset you need to inspect.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "read_note",
+    "description": "Read the full body and metadata of a single note. Always read before you write. Use the path verbatim from list_notes / search_* / create_note. Never invent or prefix it.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Vault-relative POSIX path exactly as another tool returned it. In `primaryNotesLocation: root` vaults this looks like \"MyNote.md\"; in `inbox` mode it looks like \"inbox/MyNote.md\". Pass it through unchanged."
+        }
+      },
+      "required": [
+        "path"
+      ]
+    }
+  },
+  {
+    "name": "write_note",
+    "description": "Overwrite the full body of an existing note. Destructive, so prefer append_to_note / replace_in_note for incremental edits. Keep frontmatter intact unless the user asked you to change it.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Vault-relative POSIX path."
+        },
+        "body": {
+          "type": "string",
+          "description": "New full markdown body."
+        }
+      },
+      "required": [
+        "path",
+        "body"
+      ]
+    }
+  },
+  {
+    "name": "create_note",
+    "description": "Create a new note. Always picks a non-conflicting filename by appending a counter if needed. Use the `path` from the response to refer to the note in any follow-up tool calls. DO NOT reconstruct it from `folder + title`. In root-mode vaults, `folder: \"inbox\"` means the note lands directly at the vault root with a path like \"MyNote.md\" (no inbox/ prefix).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "folder": {
+          "type": "string",
+          "enum": [
+            "inbox",
+            "quick",
+            "archive"
+          ],
+          "description": "Conceptual folder. Refuses \"trash\". In `primaryNotesLocation: inbox` vaults, \"inbox\" maps to <root>/inbox/; in `primaryNotesLocation: root` vaults, \"inbox\" maps to the vault root itself. quick/ and archive/ are always real subdirectories. Default if omitted: \"inbox\"."
+        },
+        "title": {
+          "type": "string",
+          "description": "Human-readable title. Becomes the filename (sanitized). Optional; defaults to \"Untitled\"."
+        },
+        "subpath": {
+          "type": "string",
+          "description": "POSIX subpath under the folder. Example: \"Work/Research\". Missing parents are created."
+        },
+        "body": {
+          "type": "string",
+          "description": "Initial markdown body. Defaults to \"# <title>\\n\\n\"."
+        }
+      }
+    }
+  },
+  {
+    "name": "rename_note",
+    "description": "Rename a note in place (filename only, same folder). Check backlinks() first so you can warn the user about dangling wikilinks.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "newTitle": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "newTitle"
+      ]
+    }
+  },
+  {
+    "name": "move_note",
+    "description": "Move a note to a new folder or subfolder. Use archive_note/unarchive_note/move_to_trash for the special destinations rather than this tool.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "targetFolder": {
+          "type": "string",
+          "enum": [
+            "inbox",
+            "quick",
+            "archive",
+            "trash"
+          ]
+        },
+        "targetSubpath": {
+          "type": "string",
+          "description": "Optional POSIX subpath under the folder."
+        }
+      },
+      "required": [
+        "path",
+        "targetFolder"
+      ]
+    }
+  },
+  {
+    "name": "duplicate_note",
+    "description": "Duplicate a note next to itself with a \" copy\" suffix.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ]
+    }
+  },
+  {
+    "name": "move_to_trash",
+    "description": "Soft-delete: move the note into trash/. Reversible via restore_from_trash.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ]
+    }
+  },
+  {
+    "name": "restore_from_trash",
+    "description": "Restore a trashed note back to inbox/.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ]
+    }
+  },
+  {
+    "name": "empty_trash",
+    "description": "Permanently delete every note in trash/. Confirm with the user before calling: this is irreversible.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "confirm": {
+          "type": "boolean",
+          "description": "Must be true. Prevents accidental triggers."
+        }
+      },
+      "required": [
+        "confirm"
+      ]
+    }
+  },
+  {
+    "name": "delete_note",
+    "description": "Permanently delete a single note file. Prefer move_to_trash unless the user explicitly asked for a hard delete.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "confirm": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "confirm"
+      ]
+    }
+  },
+  {
+    "name": "archive_note",
+    "description": "Move a note into archive/.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ]
+    }
+  },
+  {
+    "name": "unarchive_note",
+    "description": "Move an archived note back to inbox/.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ]
+    }
+  },
+  {
+    "name": "create_folder",
+    "description": "Create a subfolder under inbox/, quick/, or archive/.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "folder": {
+          "type": "string",
+          "enum": [
+            "inbox",
+            "quick",
+            "archive"
+          ]
+        },
+        "subpath": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "folder",
+        "subpath"
+      ]
+    }
+  },
+  {
+    "name": "rename_folder",
+    "description": "Rename or move a subfolder in place.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "folder": {
+          "type": "string",
+          "enum": [
+            "inbox",
+            "quick",
+            "archive"
+          ]
+        },
+        "oldSubpath": {
+          "type": "string"
+        },
+        "newSubpath": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "folder",
+        "oldSubpath",
+        "newSubpath"
+      ]
+    }
+  },
+  {
+    "name": "delete_folder",
+    "description": "Delete a subfolder and everything inside it. Destructive. Confirm with the user first.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "folder": {
+          "type": "string",
+          "enum": [
+            "inbox",
+            "quick",
+            "archive"
+          ]
+        },
+        "subpath": {
+          "type": "string"
+        },
+        "confirm": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "folder",
+        "subpath",
+        "confirm"
+      ]
+    }
+  },
+  {
+    "name": "search_text",
+    "description": "Full-text search across live notes (inbox/quick/archive). Returns line-level matches with path, line number, and preview. Cheap first step when the user says \"find\" or \"where did I write\".",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "query"
+      ]
+    }
+  },
+  {
+    "name": "search_by_title",
+    "description": "Fuzzy-match notes by title (case-insensitive substring). Good for \"open my note about …\".",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "query"
+      ]
+    }
+  },
+  {
+    "name": "search_by_tag",
+    "description": "Find notes carrying a specific inline #tag. Tags are case-insensitive; pass the name with or without the leading #.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "tag": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "tag"
+      ]
+    }
+  },
+  {
+    "name": "list_tags",
+    "description": "Enumerate every #tag used in the vault (excluding trash) with the count of notes carrying it.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "backlinks",
+    "description": "Return every note that links to the given note via [[wikilink]]. Run this before renaming a note: the rename will orphan these links.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Vault-relative path to the target note."
+        }
+      },
+      "required": [
+        "path"
+      ]
+    }
+  },
+  {
+    "name": "list_tasks",
+    "description": "Return every task (markdown checkbox) in live notes with parsed metadata: due date, priority, @waiting, tags, and status, the column a Kanban board grouped by status shows it in (a task note’s `status:`, a line’s `@status:`, or the frontmatter `status:` of its note). Filter by state, priority, date range, tag, or folder.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "open",
+            "done",
+            "waiting",
+            "all"
+          ],
+          "description": "The task’s state, not its status column. open = not done, cancelled or waiting (default). done = checked. waiting = has @waiting. all = everything."
+        },
+        "priority": {
+          "type": "string",
+          "enum": [
+            "high",
+            "med",
+            "low"
+          ],
+          "description": "Only tasks at this priority."
+        },
+        "dueBefore": {
+          "type": "string",
+          "description": "YYYY-MM-DD exclusive upper bound."
+        },
+        "dueAfter": {
+          "type": "string",
+          "description": "YYYY-MM-DD inclusive lower bound."
+        },
+        "tag": {
+          "type": "string"
+        },
+        "folder": {
+          "type": "string",
+          "enum": [
+            "inbox",
+            "quick",
+            "archive"
+          ]
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Alternative to tag: require ALL of these tags."
+        },
+        "includeExcluded": {
+          "type": "boolean",
+          "description": "Also scan notes opted out of Tasks (frontmatter `tasks: false` / `tasks: note`), folders on the vault's excluded list, and notes outside its Task folders. Default false: excluded tasks are invisible."
+        }
+      }
+    }
+  },
+  {
+    "name": "toggle_task",
+    "description": "Flip a task’s checkbox state using its stable id from list_tasks (\"<path>#<index>\"). Returns the updated task, or null if the id no longer matches a task (content drifted).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Stable task id: sourcePath#taskIndex."
+        }
+      },
+      "required": [
+        "id"
+      ]
+    }
+  },
+  {
+    "name": "append_to_note",
+    "description": "Append markdown to the end of a note (inserts a blank line separator if needed). Preferred for adding entries to daily logs, running lists, meeting notes.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string",
+          "description": "Markdown to append (no leading newline needed)."
+        }
+      },
+      "required": [
+        "path",
+        "text"
+      ]
+    }
+  },
+  {
+    "name": "prepend_to_note",
+    "description": "Insert markdown at the top of a note, after any frontmatter block. Good for \"pin this to the top\" or adding a banner.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "text"
+      ]
+    }
+  },
+  {
+    "name": "insert_at_line",
+    "description": "Insert text before a given zero-based line number. Line numbers come from read_note or list_tasks (which reports lineNumber).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "lineNumber": {
+          "type": "number",
+          "description": "Zero-based line number."
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "lineNumber",
+        "text"
+      ]
+    }
+  },
+  {
+    "name": "replace_in_note",
+    "description": "Literal (non-regex) find-and-replace inside a single note. Returns the number of replacements made. Default scope: first occurrence.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "find": {
+          "type": "string"
+        },
+        "replace": {
+          "type": "string"
+        },
+        "occurrence": {
+          "type": "string",
+          "enum": [
+            "first",
+            "all"
+          ],
+          "description": "Default: \"first\"."
+        }
+      },
+      "required": [
+        "path",
+        "find",
+        "replace"
+      ]
+    }
+  },
+  {
+    "name": "list_comments",
+    "description": "The comment threads on a note: each top-level comment with the text it is anchored to, the line that text sits on now, who wrote it (author is null for the vault owner), and its replies in order. Read this before reviewing or answering a discussion; unresolved threads only unless include_resolved is true.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Vault-relative note path."
+        },
+        "include_resolved": {
+          "type": "boolean",
+          "description": "Also list resolved threads. Default false."
+        }
+      },
+      "required": [
+        "path"
+      ]
+    }
+  },
+  {
+    "name": "add_comment",
+    "description": "Start a new comment thread on a note, attributed to you. Pass anchor_text, a passage copied exactly from the note, to attach the comment to it (the app highlights it and jumps there); omit it for a note-level comment. Markdown is fine in the body. Returns the new thread.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Vault-relative note path."
+        },
+        "body": {
+          "type": "string",
+          "description": "The comment, in Markdown."
+        },
+        "anchor_text": {
+          "type": "string",
+          "description": "Text from the note the comment is about, verbatim. Omit for a note-level comment."
+        },
+        "author": {
+          "type": "string",
+          "description": "Display name to sign with. Defaults to the connected client (e.g. \"Claude Code\")."
+        }
+      },
+      "required": [
+        "path",
+        "body"
+      ]
+    }
+  },
+  {
+    "name": "reply_to_comment",
+    "description": "Answer a comment in its thread, attributed to you. id is a thread id (or any reply id in it) from list_comments; the reply keeps the thread’s anchor. Use this to respond to the user’s comments the way you would on a pull request, instead of editing the note body. Returns the updated thread.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Vault-relative note path."
+        },
+        "id": {
+          "type": "string",
+          "description": "A comment id from list_comments."
+        },
+        "body": {
+          "type": "string",
+          "description": "The reply, in Markdown."
+        },
+        "author": {
+          "type": "string",
+          "description": "Display name to sign with. Defaults to the connected client."
+        }
+      },
+      "required": [
+        "path",
+        "id",
+        "body"
+      ]
+    }
+  },
+  {
+    "name": "resolve_comment",
+    "description": "Mark a comment thread resolved (or reopen it with resolved: false). Resolve only when the discussion is settled or the user asks; the thread stays in the note’s history and moves to the Resolved section of the app’s Comments panel.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Vault-relative note path."
+        },
+        "id": {
+          "type": "string",
+          "description": "A comment id from list_comments."
+        },
+        "resolved": {
+          "type": "boolean",
+          "description": "false reopens the thread. Default true."
+        }
+      },
+      "required": [
+        "path",
+        "id"
+      ]
+    }
+  }
+]
