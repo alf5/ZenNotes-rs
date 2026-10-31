@@ -7,16 +7,27 @@
  * sensitive commands like "Unarchive" only show up when applicable).
  */
 import { requestAgentEditReview } from './agent-review-runtime'
-import { isTagsViewActive, isTasksViewActive, isTrashViewActive, useStore } from '../store'
+import {
+  isTagsViewActive,
+  isTasksViewActive,
+  isTrashViewActive,
+  isUnresolvedLinksViewActive,
+  useStore
+} from '../store'
+import { openLinkPopoverAtCursor } from './link-popover-open'
 import { confirmApp } from './confirm-requests'
 import { requestSettingsTarget } from './settings-navigation'
 import { hideWindowToTray, useTrayStore } from './tray-runtime'
+import { hostOpensNotesToRead } from './editor-host'
 import { promptApp } from './prompt-requests'
 import { captureNavigationContext } from './navigation-context'
 import { buildMoveNotePrompt, moveNoteVocabulary, parseMoveNoteTarget } from './move-note'
 import { focusPaneInDirection } from './pane-nav'
 import { focusSidebarPanel } from './sidebar-focus'
+import { runSidebarNotePlan, sidebarCommandPlan } from './sidebar-note-actions'
+import { openContextGallery } from './folder-gallery-open'
 import { findLeaf } from './pane-layout'
+import { getTabStepTarget, stepActiveTab } from './buffer-navigation'
 import { requestPaneMode } from './pane-mode'
 import { resolveQuickNoteTitle } from './quick-note-title'
 import { forwardTaskWithPicker, taskAtEditorCursor } from './forward-task'
@@ -33,15 +44,42 @@ import {
 import { harperEditorConfig, harperSupported } from './harper-runtime'
 import { reflowParagraph } from './cm-reflow'
 import { convertTableToDatabase } from './table-to-database'
+import { removeCalloutAtCursor, requestCalloutTypeMenu } from './callout-menu'
+import { requestCodeLanguagePicker } from './code-language-request'
+import {
+  activeNoteCover,
+  coverNotePath,
+  openCoverPicker,
+  openUnsplashCoverPicker,
+  removeCover,
+  setCoverFromClipboard,
+  startCoverReposition
+} from './note-cover-actions'
+import { unsplashSearchAvailable } from './unsplash-search'
+import { openUnsplashKeySettings, unsplashKeySupported } from './unsplash-key'
+import { csvPathFromDatabaseTab, type DbView } from '@shared/databases'
+import {
+  databaseCsvPathForTab,
+  requestDatabaseViewCommand,
+  type DatabaseViewCommand
+} from './database-view-commands'
+import { viewHasPicks } from './database-cells'
 import { canRenameVault, renameVaultWithPrompt } from './rename-vault'
 import { promptImageWidth } from './image-resize'
 import { copyLinkAtCursor } from './link-copy'
 import { getKeymapDisplay, getLeaderChordDisplay, type KeymapId } from './keymaps'
+import { commandBindingHint } from './command-keymaps'
 import { dispatchKeyboardContextMenu, findTabContextMenuTarget } from './keyboard-context-menu'
 import { resolveSystemFolderLabels } from './system-folder-labels'
-import { isCalendarToggleAvailable, noteFolderSubpath } from './vault-layout'
+import {
+  findDailyNoteForDate,
+  findMonthlyNoteForDate,
+  findWeeklyNoteForDate,
+  isCalendarToggleAvailable
+} from './vault-layout'
 import { runWorkflowById } from './workflow-trigger'
 import { requestPublishNote } from './publish-note-requests'
+import { activeReferencePath } from './pinned-reference'
 import {
   hasCloudVaultRemovalNotice,
   hasPendingCloudReview,
@@ -69,7 +107,8 @@ async function runFoldCommand(command: FoldCommand): Promise<void> {
     const folding = await import('./cm-heading-fold')
     folding[command](view)
   }
-  view.focus()
+  // A fold is a view of the note, not typing: a phone keeps its keyboard down.
+  if (!hostOpensNotesToRead()) view.focus()
 }
 
 export interface Command {
@@ -87,10 +126,43 @@ export interface Command {
   when?: () => boolean
   /** Runs when the user picks this entry. Async is fine. */
   run: () => void | Promise<void>
+  /**
+   * Asked just before the command runs: true when all it does is take the
+   * user to a note that already exists, to read it (Go Back, Reopen Closed
+   * Tab, today's daily note when it is there already). The palette then hands
+   * over the way a search pick does: the editor takes the keyboard on desktop,
+   * and a host that opens notes to read (a phone) keeps it down. Commands that
+   * create a note to be written in, or act on the note in place, leave it out
+   * and keep focusing the editor.
+   */
+  opensToRead?: () => boolean
+  /**
+   * The name a key binding goes by, for a command whose title flips with
+   * state (Enable Vim Mode / Disable Vim Mode). Settings → Keymap and the
+   * config.toml reference list it, so a key is never filed under what the
+   * command happened to say the moment the list was made.
+   */
+  bindTitle?: string
+  /**
+   * Why `when` says no, in words. A command run from its own key cannot
+   * vanish the way a palette row does, so the key says what is missing
+   * instead of doing nothing (#971). Commands without one get the generic
+   * "isn't available here".
+   */
+  unavailableReason?: () => string
+  /** `shortcut` as it was before the user's own key for the command was put
+   *  in front of it: the key the command has anyway (a leader chord, `:w`).
+   *  Settings shows it beside the binding as an "also". */
+  builtinShortcut?: string
 }
 
 export function buildCommands(options?: { includeUnavailable?: boolean }): Command[] {
   const getState = (): ReturnType<typeof useStore.getState> => useStore.getState()
+  // The three guards most commands share. Named, so the reason a bound key
+  // gives when one says no can be filled in once, below, instead of per row.
+  const hasNote = (): boolean => !!getState().activeNote
+  const hasEditorNote = (): boolean => !!getState().editorViewRef && !!getState().activeNote
+  const hasSelection = (): boolean => !!getState().selectedPath
   const labels = () => resolveSystemFolderLabels(getState().systemFolderLabels)
   const pathLabel = (): string =>
     getState().workspaceMode === 'remote' ? 'Server Path' : 'Absolute Path'
@@ -101,9 +173,17 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     const parts = ids.map(shortcut)
     return parts.every(Boolean) ? parts.join(' ') : ''
   }
+  // Whether this period's daily, weekly or monthly note is already there:
+  // such a note opens to read, one the command creates is written in.
+  const periodicNoteExists = (find: typeof findDailyNoteForDate): boolean =>
+    !!find(getState().notes, getState().vaultSettings, new Date())
+  // Leader chords, the Ctrl+W pane prefix and ex commands exist only in Vim
+  // mode, so with it off the palette names none of them: a row must not
+  // advertise a key that does nothing (the Vim-off hint rule).
+  const vimOnly = (display: string): string => (getState().vimMode ? display : '')
   const leaderShortcut = (id: KeymapId): string =>
-    getLeaderChordDisplay(getState().keymapOverrides, id)
-  const paneShortcut = (id: KeymapId): string => chord('vim.panePrefix', id)
+    vimOnly(getLeaderChordDisplay(getState().keymapOverrides, id))
+  const paneShortcut = (id: KeymapId): string => vimOnly(chord('vim.panePrefix', id))
   const searchShortcut = (): string => {
     const state = getState()
     const primary = shortcut('global.searchNotes')
@@ -132,7 +212,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
         const title = resolveQuickNoteTitle(
           s.notes,
           s.quickNoteDateTitle,
-          s.quickNoteTitlePrefix ?? undefined
+          s.quickNoteTitlePrefix
         )
         return s.createAndOpen('quick', '', { title, focusTitle: true })
       }
@@ -170,40 +250,51 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'note.daily.today',
+      unavailableReason: () => 'Daily notes are off: turn them on under Settings, Vault, Periodic notes',
       title: "Open Today's Daily Note",
       category: 'Note',
       keywords: 'daily journal date today log',
       shortcut: leaderShortcut('vim.leaderDailyNote'),
       when: () => getState().vaultSettings.dailyNotes.enabled,
-      run: () => getState().openTodayDailyNote()
+      // Read when today's note is there already; one created here is written in.
+      opensToRead: () => periodicNoteExists(findDailyNoteForDate),
+      run: () => getState().openTodayDailyNote({ readIfExisting: true })
     },
     {
       id: 'note.daily.rollover',
+      unavailableReason: () => 'Daily notes are off: turn them on under Settings, Vault, Periodic notes',
       title: 'Roll Over Unfinished Tasks to Today',
       category: 'Note',
       keywords: 'daily tasks rollover roll over migrate unfinished carry forward today',
       when: () => getState().vaultSettings.dailyNotes.enabled,
+      // Like today's daily note: read when it is there already, focused when
+      // the rollover creates it.
+      opensToRead: () => periodicNoteExists(findDailyNoteForDate),
       run: () => {
         void getState().rolloverUnfinishedTasksIntoToday({ force: true, open: true })
       }
     },
     {
       id: 'note.weekly.thisWeek',
+      unavailableReason: () => 'Weekly notes are off: turn them on under Settings, Vault, Periodic notes',
       title: "Open This Week's Note",
       category: 'Note',
       keywords: 'weekly week review date log',
       shortcut: leaderShortcut('vim.leaderWeeklyNote'),
       when: () => getState().vaultSettings.weeklyNotes.enabled,
-      run: () => getState().openThisWeekWeeklyNote()
+      opensToRead: () => periodicNoteExists(findWeeklyNoteForDate),
+      run: () => getState().openThisWeekWeeklyNote({ readIfExisting: true })
     },
     {
       id: 'note.monthly.thisMonth',
+      unavailableReason: () => 'Monthly notes are off: turn them on under Settings, Vault, Periodic notes',
       title: "Open This Month's Note",
       category: 'Note',
       keywords: 'monthly month review reflection date log',
       shortcut: leaderShortcut('vim.leaderMonthlyNote'),
       when: () => getState().vaultSettings.monthlyNotes.enabled,
-      run: () => getState().openThisMonthMonthlyNote()
+      opensToRead: () => periodicNoteExists(findMonthlyNoteForDate),
+      run: () => getState().openThisMonthMonthlyNote({ readIfExisting: true })
     },
     {
       id: 'template.create',
@@ -223,7 +314,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       shortcut:
         shortcut('global.insertTemplate') ||
         (getState().vimMode ? leaderShortcut('vim.leaderInsertTemplate') : undefined),
-      when: () => !!getState().activeNote,
+      when: hasNote,
       run: () => getState().openTemplatePaletteForInsert()
     },
     {
@@ -238,7 +329,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       title: 'Embed Existing Drawing…',
       category: 'Note',
       keywords: 'excalidraw drawing diagram sketch insert embed image picture canvas',
-      when: () => !!getState().activeNote,
+      when: hasNote,
       run: () => getState().setEmbedDrawingPaletteOpen(true)
     },
     {
@@ -246,11 +337,12 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       title: 'Embed New Drawing',
       category: 'Note',
       keywords: 'excalidraw drawing diagram sketch create new insert embed canvas',
-      when: () => !!getState().activeNote,
+      when: hasNote,
       run: () => void getState().embedNewDrawing()
     },
     {
       id: 'note.publish',
+      unavailableReason: () => window.zen.getCapabilities().supportsCloudSync === true ? `Publish Note needs an open note outside the ${labels().trash}` : "Publishing isn't available here",
       title: 'Publish Note',
       category: 'Note',
       keywords: 'share public link web cloud update',
@@ -267,6 +359,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'template.removeBuiltins',
+      unavailableReason: () => 'The built-in templates are already removed',
       title: 'Remove Built-in Templates',
       category: 'Note',
       keywords: 'template built-in builtin remove hide delete clear shipped default',
@@ -285,6 +378,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'template.restoreBuiltins',
+      unavailableReason: () => 'The built-in templates are already there',
       title: 'Restore Built-in Templates',
       category: 'Note',
       keywords: 'template built-in builtin restore bring back show shipped default',
@@ -296,11 +390,12 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       title: 'Save Current Note as Template…',
       category: 'Note',
       keywords: 'template save custom create from note',
-      when: () => !!getState().activeNote,
+      when: hasNote,
       run: () => getState().saveActiveNoteAsTemplate()
     },
     {
       id: 'note.new.here',
+      unavailableReason: () => `New Note in Current Folder needs a note or folder outside the ${labels().trash}`,
       title: 'New Note in Current Folder',
       category: 'Note',
       shortcut: shortcut('global.newNoteHere'),
@@ -317,25 +412,25 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       id: 'note.save',
       title: 'Save Note',
       category: 'Note',
-      shortcut: ':w',
+      shortcut: vimOnly(':w'),
       keywords: 'persist write',
-      when: () => !!getState().selectedPath,
+      when: hasSelection,
       run: () => getState().persistActive()
     },
     {
       id: 'note.format',
       title: 'Format Markdown',
       category: 'Note',
-      shortcut: ':format',
+      shortcut: vimOnly(':format'),
       keywords: 'prettier',
-      when: () => !!getState().selectedPath,
+      when: hasSelection,
       run: () => getState().formatActiveNote()
     },
     {
       id: 'note.rename',
       title: 'Rename Note…',
       category: 'Note',
-      when: () => !!getState().activeNote,
+      when: hasNote,
       run: async () => {
         const isCurrent = captureNavigationContext()
         const active = getState().activeNote
@@ -351,13 +446,15 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'note.favorite',
+      bindTitle: 'Toggle Note Favorite',
+      unavailableReason: () => getState().activeNote ? `A note in the ${labels().trash} can't be a favorite` : 'Favorites need an open note',
       // The sidebar row's context menu was the only mouse route and the
       // leader chord the only keyboard one; the palette gives every host,
       // phones included, a way to fill the Favorites section on Home. (#810)
       title: isActiveNoteFavorite() ? 'Remove Note from Favorites' : 'Add Note to Favorites',
       category: 'Note',
       keywords: 'favourite star bookmark home sidebar',
-      shortcut: chord('vim.leaderPrefix', 'vim.leaderNoteActions', 'vim.leaderToggleFavorite'),
+      shortcut: vimOnly(chord('vim.leaderPrefix', 'vim.leaderNoteActions', 'vim.leaderToggleFavorite')),
       when: () => {
         const active = getState().activeNote
         return !!active && active.folder !== 'trash'
@@ -365,17 +462,110 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       run: () => getState().toggleFavoriteActiveNote()
     },
     {
+      id: 'note.cover',
+      bindTitle: 'Add or Change Cover…',
+      unavailableReason: () => 'A cover needs an open note',
+      title: activeNoteCover() ? 'Change Cover…' : 'Add Cover…',
+      category: 'Note',
+      keywords: 'banner header image picture gallery gradient',
+      shortcut: vimOnly(chord('vim.leaderPrefix', 'vim.leaderNoteActions', 'vim.leaderNoteCover')),
+      when: () => !!coverNotePath(),
+      run: () => {
+        openCoverPicker()
+      }
+    },
+    {
+      id: 'note.cover.unsplash',
+      unavailableReason: () => coverNotePath() ? "Unsplash search isn't available here" : 'A cover needs an open note',
+      title: 'Add Cover from Unsplash…',
+      category: 'Note',
+      keywords: 'banner header image picture photo stock unsplash',
+      shortcut: vimOnly(chord('vim.leaderPrefix', 'vim.leaderNoteActions', 'vim.leaderNoteCoverUnsplash')),
+      when: () => !!coverNotePath() && unsplashSearchAvailable(),
+      run: () => {
+        openUnsplashCoverPicker()
+      }
+    },
+    {
+      // Settings, in the field: the cover picker's Unsplash tab searches with
+      // the person's own key.
+      id: 'note.cover.unsplashKey',
+      title: 'Set Unsplash Access Key…',
+      category: 'Note',
+      keywords: 'unsplash api key access cover banner photo settings',
+      when: () => unsplashKeySupported(),
+      run: () => {
+        openUnsplashKeySettings()
+      }
+    },
+    {
+      id: 'note.cover.paste',
+      unavailableReason: () => 'A cover needs an open note',
+      title: 'Paste Cover from Clipboard',
+      category: 'Note',
+      keywords: 'banner header image screenshot',
+      shortcut: vimOnly(':cover paste'),
+      when: () => !!coverNotePath(),
+      run: async () => {
+        const path = coverNotePath()
+        if (path) await setCoverFromClipboard(path)
+      }
+    },
+    {
+      id: 'note.cover.reposition',
+      unavailableReason: () => coverNotePath() ? 'This note has no cover' : 'A cover needs an open note',
+      title: 'Reposition Cover',
+      category: 'Note',
+      keywords: 'banner header image move focal',
+      shortcut: vimOnly(':cover reposition'),
+      when: () => !!activeNoteCover(),
+      run: () => {
+        startCoverReposition()
+      }
+    },
+    {
+      id: 'note.cover.remove',
+      unavailableReason: () => coverNotePath() ? 'This note has no cover' : 'A cover needs an open note',
+      title: 'Remove Cover',
+      category: 'Note',
+      keywords: 'banner header image delete',
+      shortcut: vimOnly(':cover!'),
+      when: () => !!activeNoteCover(),
+      run: async () => {
+        const path = coverNotePath()
+        if (path) await removeCover(path)
+      }
+    },
+    {
       id: 'note.archive',
+      // With the sidebar focused and its cursor on a note, that note (or the
+      // selection it is part of) is the one this acts on, not the open note
+      // (#972); everywhere else it is the open note, as before.
+      unavailableReason: () => {
+        const plan = sidebarCommandPlan('archive')
+        if (plan?.kind === 'refuse') return plan.reason
+        return getState().activeNote ? `Move Note to ${labels().archive} works on a note in ${labels().inbox} or ${labels().quick}` : `Move Note to ${labels().archive} needs an open note`
+      },
       title: `Move Note to ${labels().archive}`,
       category: 'Note',
       when: () => {
+        const plan = sidebarCommandPlan('archive')
+        if (plan) return plan.kind === 'run'
         const f = getState().activeNote?.folder
         return f === 'inbox' || f === 'quick'
       },
-      run: () => getState().archiveActive()
+      run: async () => {
+        const plan = sidebarCommandPlan('archive')
+        if (plan) {
+          await runSidebarNotePlan(plan)
+          return
+        }
+        await getState().archiveActive()
+      }
     },
     {
       id: 'note.unarchive',
+      unavailableReason: () => `Unarchive Note only works on a note in the ${labels().archive}`,
       title: 'Unarchive Note',
       category: 'Note',
       when: () => getState().activeNote?.folder === 'archive',
@@ -383,14 +573,32 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'note.trash',
+      // Follows the sidebar the same way as Move Note to Archive above (#972).
+      unavailableReason: () => {
+        const plan = sidebarCommandPlan('trash')
+        if (plan?.kind === 'refuse') return plan.reason
+        return getState().activeNote ? `This note is already in the ${labels().trash}` : `Move Note to ${labels().trash} needs an open note`
+      },
       title: `Move Note to ${labels().trash}`,
       category: 'Note',
       keywords: 'delete',
-      when: () => !!getState().activeNote && getState().activeNote?.folder !== 'trash',
-      run: () => getState().trashActive()
+      when: () => {
+        const plan = sidebarCommandPlan('trash')
+        if (plan) return plan.kind === 'run'
+        return !!getState().activeNote && getState().activeNote?.folder !== 'trash'
+      },
+      run: async () => {
+        const plan = sidebarCommandPlan('trash')
+        if (plan) {
+          await runSidebarNotePlan(plan)
+          return
+        }
+        await getState().trashActive()
+      }
     },
     {
       id: 'note.restore',
+      unavailableReason: () => `Restore from ${labels().trash} only works on a note in the ${labels().trash}`,
       title: `Restore Note from ${labels().trash}`,
       category: 'Note',
       when: () => getState().activeNote?.folder === 'trash',
@@ -398,6 +606,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'note.delete-permanently',
+      unavailableReason: () => `Delete Note Permanently only works on a note in the ${labels().trash}`,
       title: 'Delete Note Permanently',
       category: 'Note',
       keywords: 'trash purge forever remove',
@@ -409,7 +618,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       title: 'Copy Note as Wikilink',
       category: 'Note',
       keywords: 'link clipboard',
-      when: () => !!getState().activeNote,
+      when: hasNote,
       run: async () => {
         const active = getState().activeNote
         if (!active) return
@@ -422,7 +631,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       title: 'Copy Note as Markdown',
       category: 'Note',
       keywords: 'copy clipboard markdown source document whole content text yank',
-      when: () => !!getState().activeNote,
+      when: hasNote,
       run: async () => {
         await getState().copyActiveNoteAsMarkdown()
       }
@@ -432,7 +641,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       title: 'Copy Note as HTML (for email)',
       category: 'Note',
       keywords: 'copy clipboard html email rich mail paste share formatted',
-      when: () => !!getState().activeNote,
+      when: hasNote,
       run: async () => {
         await getState().copyActiveNoteAsHtml()
       }
@@ -472,7 +681,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       title: 'Copy Note Path',
       category: 'Note',
       keywords: 'clipboard relative vault',
-      when: () => !!getState().activeNote,
+      when: hasNote,
       run: async () => {
         const active = getState().activeNote
         if (!active) return
@@ -551,7 +760,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       title: 'Open in Floating Window',
       category: 'Note',
       keywords: 'popout window detach',
-      when: () => !!getState().activeNote,
+      when: hasNote,
       run: async () => {
         const p = getState().activeNote?.path
         if (p) await window.zen.openNoteWindow(p)
@@ -562,7 +771,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       title: 'Move Note to Folder…',
       category: 'Note',
       keywords: 'move mv relocate folder archive inbox',
-      when: () => !!getState().activeNote,
+      when: hasNote,
       run: async () => {
         const isCurrent = captureNavigationContext()
         const state = getState()
@@ -582,6 +791,19 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
   const getActiveLeaf = () => {
     const s = getState()
     return findLeaf(s.paneLayout, s.activePaneId)
+  }
+  // The database the active pane shows (as a database tab or a .csv asset
+  // tab), with its active view, once it has loaded.
+  const activeDatabaseView = (): { csvPath: string; view: DbView } | null => {
+    const csvPath = databaseCsvPathForTab(getActiveLeaf()?.activeTab)
+    const doc = csvPath ? getState().databases[csvPath] : undefined
+    if (!csvPath || !doc) return null
+    const view = doc.views.find((v) => v.id === doc.activeViewId) ?? doc.views[0]
+    return view ? { csvPath, view } : null
+  }
+  const runDatabaseViewCommand = (command: DatabaseViewCommand): void => {
+    const active = activeDatabaseView()
+    if (active) requestDatabaseViewCommand(active.csvPath, command)
   }
   const getActiveTabContext = () => {
     const leaf = getActiveLeaf()
@@ -616,24 +838,56 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       // (#242). Vim closes the tab with `:q` (→ closeActiveNote), matching how
       // save shows `:w`. Outside Vim, the real Mod+W binding is correct.
       shortcut: getState().vimMode ? ':q' : shortcut('global.closeActiveTab'),
-      when: () => !!getState().selectedPath,
+      when: hasSelection,
+      opensToRead: () => true,
       run: () => getState().closeActiveNote()
     },
     {
       id: 'tab.reopen',
+      unavailableReason: () => 'No closed tab to reopen',
       title: 'Reopen Closed Tab',
       category: 'Tabs',
       keywords: 'restore last undo closed reopen',
       shortcut: shortcut('global.reopenClosedTab'),
       when: () => getState().closedTabStack.length > 0,
+      opensToRead: () => true,
       run: () => getState().reopenLastClosedTab()
     },
     {
+      id: 'tab.next',
+      unavailableReason: () => 'No other tab to go to',
+      title: 'Next Tab',
+      category: 'Tabs',
+      shortcut: shortcut('tabs.next'),
+      keywords: 'cycle switch right gt ctrl+tab',
+      when: () => {
+        const s = getState()
+        return getTabStepTarget(s.paneLayout, s.activePaneId, 1).kind !== 'none'
+      },
+      opensToRead: () => true,
+      run: () => stepActiveTab(getState(), 1)
+    },
+    {
+      id: 'tab.previous',
+      unavailableReason: () => 'No other tab to go to',
+      title: 'Previous Tab',
+      category: 'Tabs',
+      shortcut: shortcut('tabs.previous'),
+      keywords: 'cycle switch left gT back ctrl+shift+tab',
+      when: () => {
+        const s = getState()
+        return getTabStepTarget(s.paneLayout, s.activePaneId, -1).kind !== 'none'
+      },
+      opensToRead: () => true,
+      run: () => stepActiveTab(getState(), -1)
+    },
+    {
       id: 'tab.pin',
+      bindTitle: 'Pin or Unpin Tab',
       title: isActiveTabPinned() ? 'Unpin Tab' : 'Pin Tab',
       category: 'Tabs',
       keywords: 'stick sticky',
-      when: () => !!getState().activeNote,
+      when: hasNote,
       run: () => {
         const s = getState()
         if (s.activeNote) s.toggleTabPin(s.activePaneId, s.activeNote.path)
@@ -641,6 +895,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'tab.close-others',
+      unavailableReason: () => 'No other tab to close',
       title: 'Close Other Tabs in Pane',
       category: 'Tabs',
       keywords: 'only siblings keep current close others',
@@ -655,6 +910,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'tab.close-right',
+      unavailableReason: () => 'No tab to the right to close',
       title: 'Close Tabs to the Right',
       category: 'Tabs',
       keywords: 'siblings later right side close',
@@ -698,7 +954,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       category: 'Navigation',
       shortcut: getState().vimMode ? leaderShortcut('vim.leaderNoteOutline') : undefined,
       keywords: 'outline headings toc jump toc table of contents leader',
-      when: () => !!getState().activeNote,
+      when: hasNote,
       run: () => getState().setOutlinePaletteOpen(true)
     },
     {
@@ -707,7 +963,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       category: 'View',
       shortcut: shortcut('global.toggleOutlinePanel'),
       keywords: 'outline panel sidebar right headings',
-      when: () => !!getState().activeNote,
+      when: hasNote,
       run: () => {
         window.dispatchEvent(new Event('zen:toggle-outline'))
       }
@@ -718,7 +974,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       category: 'View',
       shortcut: shortcut('global.toggleCommentsPanel'),
       keywords: 'comments annotations discussion margin review',
-      when: () => !!getState().activeNote,
+      when: hasNote,
       run: () => {
         window.dispatchEvent(new Event('zen:toggle-comments'))
       }
@@ -729,13 +985,14 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       category: 'Editor',
       shortcut: shortcut('global.addComment'),
       keywords: 'comment annotate selection note review',
-      when: () => !!getState().activeNote,
+      when: hasNote,
       run: () => {
         window.dispatchEvent(new Event('zen:add-comment'))
       }
     },
     {
       id: 'view.calendar-panel',
+      unavailableReason: () => 'The calendar opens beside a daily or weekly note',
       title: 'Toggle Calendar Panel',
       category: 'View',
       shortcut: getState().vimMode ? leaderShortcut('vim.leaderCalendar') : undefined,
@@ -748,11 +1005,24 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       }
     },
     {
+      id: 'view.timeline-panel',
+      title: 'Toggle Timeline',
+      category: 'View',
+      shortcut: shortcut('global.toggleTimelinePanel'),
+      keywords: 'timeline tasks due dates overdue milestones upcoming agenda schedule panel right',
+      // Like the other right-hand panels it sits beside a note, so it needs
+      // one in the pane; the tasks it lists are the whole vault's. (#1007)
+      when: hasNote,
+      run: () => {
+        window.dispatchEvent(new Event('zen:toggle-timeline'))
+      }
+    },
+    {
       id: 'view.close-right-panel',
       title: 'Close Right Panel',
       category: 'View',
-      keywords: 'close hide dismiss right panel pane connections comments outline calendar',
-      when: () => !!getState().activeNote,
+      keywords: 'close hide dismiss right panel pane connections comments outline calendar timeline',
+      when: hasNote,
       run: () => {
         window.dispatchEvent(new Event('zen:close-right-panel'))
       }
@@ -763,7 +1033,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       category: 'View',
       shortcut: shortcut('global.modeEdit'),
       keywords: 'editor writing raw markdown pane mode toolbar editmode',
-      when: () => !!getState().activeNote,
+      when: hasNote,
       run: () => requestPaneMode('edit')
     },
     {
@@ -772,7 +1042,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       category: 'View',
       shortcut: shortcut('global.modeSplit'),
       keywords: 'editor preview side by side pane mode toolbar splitmode',
-      when: () => !!getState().activeNote,
+      when: hasNote,
       run: () => requestPaneMode('split')
     },
     {
@@ -781,7 +1051,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       category: 'View',
       shortcut: shortcut('global.modePreview'),
       keywords: 'reading rendered markdown pane mode toolbar previewmode',
-      when: () => !!getState().activeNote,
+      when: hasNote,
       run: () => requestPaneMode('preview')
     },
     {
@@ -888,36 +1158,36 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       id: 'fold.heading',
       title: 'Fold Heading or List Item at Cursor',
       category: 'Editor',
-      shortcut: shortcut('vim.foldCurrent'),
+      shortcut: vimOnly(shortcut('vim.foldCurrent')),
       keywords: 'collapse fold heading section list item task bullet children callout',
-      when: () => !!getState().editorViewRef && !!getState().activeNote,
+      when: hasEditorNote,
       run: () => runFoldCommand('foldAtCursor')
     },
     {
       id: 'fold.unfold-heading',
       title: 'Unfold Heading or List Item at Cursor',
       category: 'Editor',
-      shortcut: shortcut('vim.unfoldCurrent'),
+      shortcut: vimOnly(shortcut('vim.unfoldCurrent')),
       keywords: 'expand unfold heading section list item task bullet children callout',
-      when: () => !!getState().editorViewRef && !!getState().activeNote,
+      when: hasEditorNote,
       run: () => runFoldCommand('unfoldAtCursor')
     },
     {
       id: 'fold.all',
       title: 'Fold All Headings and Lists',
       category: 'Editor',
-      shortcut: shortcut('vim.foldAll'),
+      shortcut: vimOnly(shortcut('vim.foldAll')),
       keywords: 'collapse fold all every heading list item task outline callout',
-      when: () => !!getState().editorViewRef && !!getState().activeNote,
+      when: hasEditorNote,
       run: () => runFoldCommand('foldAllOutline')
     },
     {
       id: 'fold.unfold-all',
       title: 'Unfold All Headings and Lists',
       category: 'Editor',
-      shortcut: shortcut('vim.unfoldAll'),
+      shortcut: vimOnly(shortcut('vim.unfoldAll')),
       keywords: 'expand unfold all every reset heading list item task outline callout',
-      when: () => !!getState().editorViewRef && !!getState().activeNote,
+      when: hasEditorNote,
       run: () => runFoldCommand('unfoldAll')
     },
     {
@@ -981,12 +1251,31 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       }
     },
     {
+      id: 'editor.link-popover',
+      title: 'Open Link Popover',
+      category: 'Editor',
+      shortcut: getState().vimMode
+        ? [shortcut('vim.linkPopover'), shortcut('editor.linkPopover')].filter(Boolean).join(' / ')
+        : shortcut('editor.linkPopover'),
+      keywords: 'link popover hover preview edit create note wikilink peek floating in place',
+      when: hasEditorNote,
+      run: () => {
+        const view = getState().editorViewRef
+        if (!view) return
+        // The palette took focus; the cursor the popover reads is the
+        // editor's, which it kept.
+        if (!openLinkPopoverAtCursor(view)) {
+          window.alert('Put the cursor on a [[wikilink]] to open its note in the link popover.')
+        }
+      }
+    },
+    {
       id: 'task.toggle-checkbox',
       title: 'Toggle Checkbox',
       category: 'Editor',
       shortcut: shortcut('editor.toggleCheckbox'),
       keywords: 'toggle checkbox task check uncheck line todo checklist convert done',
-      when: () => !!getState().editorViewRef && !!getState().activeNote,
+      when: hasEditorNote,
       run: () => {
         const view = getState().editorViewRef
         if (view) toggleCheckbox(view)
@@ -998,13 +1287,76 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       category: 'Editor',
       shortcut: shortcut('editor.reflowParagraph'),
       keywords: 'reflow join lines unwrap hard wrap word wrap format paragraph gq fill',
-      when: () => !!getState().editorViewRef && !!getState().activeNote,
+      when: hasEditorNote,
       run: () => {
         const view = getState().editorViewRef
         if (!view) return
         reflowParagraph(view)
         view.focus()
       }
+    },
+    {
+      id: 'database.create-record-pages',
+      title: 'Create Pages for All Records',
+      category: 'Database',
+      shortcut: getState().vimMode ? 'O' : undefined,
+      keywords: 'database base records rows pages notes link wikilink bulk all csv',
+      when: () => {
+        const tab = getActiveLeaf()?.activeTab
+        return !!tab && !!csvPathFromDatabaseTab(tab)
+      },
+      run: async () => {
+        const tab = getActiveLeaf()?.activeTab
+        const csvPath = tab ? csvPathFromDatabaseTab(tab) : null
+        if (csvPath) await getState().createAllRecordPages(csvPath)
+      }
+    },
+    // The open database's views (charles b.'s saved views). Each acts on the
+    // active pane's database and its active view, and lists only where it
+    // can do something there.
+    {
+      id: 'database.columns',
+      title: 'Choose Database Columns',
+      category: 'Database',
+      shortcut: getState().vimMode ? 'c' : undefined,
+      keywords: 'database base table columns fields show hide visible choose pick view',
+      when: () => activeDatabaseView()?.view.type === 'table',
+      run: () => runDatabaseViewCommand('columns')
+    },
+    {
+      id: 'database.new-table-view',
+      title: 'New Table View',
+      category: 'Database',
+      keywords: 'database base view table add create new saved columns',
+      when: () => !!activeDatabaseView(),
+      run: () => runDatabaseViewCommand('new-table-view')
+    },
+    {
+      id: 'database.duplicate-view',
+      title: 'Duplicate View',
+      category: 'Database',
+      keywords: 'database base view copy duplicate clone saved table board',
+      when: () => !!activeDatabaseView(),
+      run: () => runDatabaseViewCommand('duplicate-view')
+    },
+    {
+      id: 'database.pick-selected',
+      title: 'Show Only Selected Rows',
+      category: 'Database',
+      keywords: 'database base rows records pick picked picks selected selection only view subset',
+      when: () => activeDatabaseView()?.view.type === 'table',
+      run: () => runDatabaseViewCommand('pick-selected')
+    },
+    {
+      id: 'database.show-all-rows',
+      title: 'Show All Rows',
+      category: 'Database',
+      keywords: 'database base rows records picks picked clear reset all every view',
+      when: () => {
+        const active = activeDatabaseView()
+        return !!active && viewHasPicks(active.view)
+      },
+      run: () => runDatabaseViewCommand('show-all-rows')
     },
     {
       id: 'table.to-database',
@@ -1017,11 +1369,58 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       // Stays listed whenever a note is open: with no table under the cursor
       // the run says so, which beats an entry that vanishes from the palette
       // and an ex command that returns nothing.
-      when: () => !!getState().editorViewRef && !!getState().activeNote,
+      when: hasEditorNote,
       run: async () => {
         const view = getState().editorViewRef
         if (!view) return
         await convertTableToDatabase(view)
+      }
+    },
+    // Callouts from the keyboard (#1016): the type menu the right-click
+    // offers, at the caret. Listed whenever a note is open, like the table
+    // conversion above: a caret in code says why instead of hiding the row.
+    {
+      id: 'editor.callout-type',
+      title: 'Set Callout Type…',
+      category: 'Editor',
+      shortcut: vimOnly(
+        chord('vim.leaderPrefix', 'vim.leaderNoteActions', 'vim.leaderCalloutType')
+      ),
+      keywords:
+        'callout admonition alert box turn into convert change type note info tip warning danger error success quote blockquote',
+      when: hasEditorNote,
+      run: () => {
+        requestCalloutTypeMenu()
+      }
+    },
+    {
+      id: 'editor.remove-callout',
+      title: 'Remove Callout',
+      category: 'Editor',
+      keywords: 'callout admonition alert unwrap plain text blockquote delete remove',
+      when: hasEditorNote,
+      run: () => {
+        const view = getState().editorViewRef
+        if (!view) return
+        removeCalloutAtCursor(view)
+        if (!hostOpensNotesToRead()) view.focus()
+      }
+    },
+    // The code block language picker (#1014), for the block at the caret: the
+    // same picker the block's label opens. Listed whenever a note is open;
+    // outside a code block it says so.
+    {
+      id: 'editor.code-language',
+      title: 'Set Code Block Language…',
+      category: 'Editor',
+      shortcut: vimOnly(
+        chord('vim.leaderPrefix', 'vim.leaderNoteActions', 'vim.leaderCodeLanguage')
+      ),
+      keywords:
+        'code block fence fenced language syntax highlight highlighting detect detected guess picker typescript python change set',
+      when: hasEditorNote,
+      run: () => {
+        requestCodeLanguagePicker()
       }
     },
     {
@@ -1029,12 +1428,13 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       title: 'Copy Link Under Cursor',
       category: 'Editor',
       keywords: 'copy link url email address clipboard gy',
-      when: () => !!getState().editorViewRef && !!getState().activeNote,
+      when: hasEditorNote,
       run: () => {
         const view = getState().editorViewRef
         if (!view) return
         copyLinkAtCursor(view)
-        view.focus()
+        // Copying is not typing: a phone keeps its keyboard down.
+        if (!hostOpensNotesToRead()) view.focus()
       }
     },
     {
@@ -1042,7 +1442,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       title: 'Resize Image…',
       category: 'Editor',
       keywords: 'image picture width size resize embed px hint shrink grow',
-      when: () => !!getState().editorViewRef && !!getState().activeNote,
+      when: hasEditorNote,
       run: async () => {
         const view = getState().editorViewRef
         if (!view) return
@@ -1053,16 +1453,18 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       id: 'nav.back',
       title: 'Go Back',
       category: 'Tabs',
-      shortcut: shortcut('vim.historyBack'),
+      shortcut: getState().vimMode ? shortcut('vim.historyBack') : shortcut('global.historyBack'),
       keywords: 'history previous',
+      opensToRead: () => true,
       run: () => getState().jumpToPreviousNote()
     },
     {
       id: 'nav.forward',
       title: 'Go Forward',
       category: 'Tabs',
-      shortcut: shortcut('vim.historyForward'),
+      shortcut: getState().vimMode ? shortcut('vim.historyForward') : shortcut('global.historyForward'),
       keywords: 'history next',
+      opensToRead: () => true,
       run: () => getState().jumpToNextNote()
     },
     {
@@ -1071,6 +1473,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       category: 'Tabs',
       shortcut: shortcut('global.toggleRecentNote'),
       keywords: 'recent last previous alternate toggle switch note',
+      opensToRead: () => true,
       run: () => getState().toggleRecentNote()
     }
   )
@@ -1081,9 +1484,9 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       id: 'split.right',
       title: 'Split Right',
       category: 'Panes',
-      shortcut: ':vsplit',
+      shortcut: vimOnly(':vsplit'),
       keywords: 'vsplit vertical',
-      when: () => !!getState().selectedPath,
+      when: hasSelection,
       run: () => {
         const st = getState()
         const path = st.selectedPath
@@ -1099,9 +1502,9 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       id: 'split.down',
       title: 'Split Down',
       category: 'Panes',
-      shortcut: ':split',
+      shortcut: vimOnly(':split'),
       keywords: 'split horizontal',
-      when: () => !!getState().selectedPath,
+      when: hasSelection,
       run: () => {
         const st = getState()
         const path = st.selectedPath
@@ -1237,18 +1640,20 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
   cmds.push(
     {
       id: 'view.tasks',
+      unavailableReason: () => `The ${labels().tasks} view is already open`,
       title: `Open ${labels().tasks}`,
       category: 'View',
-      shortcut: ':tasks',
+      shortcut: vimOnly(':tasks'),
       keywords: 'tasks todo checklist due waiting done vault',
       when: () => !isTasksViewActive(getState()),
       run: () => getState().openTasksView()
     },
     {
       id: 'view.workflows',
+      unavailableReason: () => 'Workflows are off: turn them on under Settings, Workflows',
       title: 'Open Workflows',
       category: 'View',
-      shortcut: ':workflows',
+      shortcut: vimOnly(':workflows'),
       keywords: 'workflow automation pipeline graph canvas nodes run dry',
       // Hidden entirely when the feature is switched off in Settings, so the
       // palette never offers a command that would open nothing.
@@ -1257,6 +1662,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'view.atlas',
+      unavailableReason: () => 'The Atlas is turned off in Settings',
       title: 'Open Atlas',
       category: 'View',
       shortcut: leaderShortcut('vim.leaderAtlas'),
@@ -1266,10 +1672,33 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       run: () => getState().openAtlasView()
     },
     {
+      id: 'view.unresolved-links',
+      unavailableReason: () => 'The Unresolved Links view is already open',
+      title: 'Open Unresolved Links',
+      category: 'View',
+      shortcut: leaderShortcut('vim.leaderUnresolvedLinks'),
+      keywords:
+        'unresolved links missing broken dangling wikilinks notes to write later create orphan dead',
+      when: () => !isUnresolvedLinksViewActive(getState()),
+      run: () => getState().openUnresolvedLinksView()
+    },
+    {
+      id: 'view.folder-gallery',
+      title: 'Open Folder Gallery',
+      category: 'View',
+      shortcut: leaderShortcut('vim.leaderFolderGallery'),
+      keywords:
+        'gallery folder covers cards grid thumbnails banner images pictures board notes browse',
+      // The folder under the sidebar cursor while the sidebar has focus,
+      // otherwise the open note's folder (lib/folder-gallery-open.ts).
+      run: () => openContextGallery()
+    },
+    {
       id: 'view.tags',
+      unavailableReason: () => 'The Tags view is already open',
       title: 'Open Tags',
       category: 'View',
-      shortcut: ':tag',
+      shortcut: vimOnly(':tag'),
       keywords: 'tags browse filter vault',
       when: () => !isTagsViewActive(getState()),
       run: () => getState().openTagView()
@@ -1300,6 +1729,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'view.toggle.tags',
+      bindTitle: 'Show or Hide Tags in Sidebar',
       title: getState().tagsCollapsed
         ? 'Show Tags in Sidebar'
         : 'Hide Tags in Sidebar',
@@ -1309,6 +1739,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'view.content-align',
+      bindTitle: 'Toggle Content Alignment',
       title: getState().contentAlign === 'center'
         ? 'Align Content Left'
         : 'Center Content',
@@ -1321,6 +1752,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'view.sort.name-asc',
+      unavailableReason: () => 'Notes are already sorted this way',
       title: 'Sort Notes: Name (A → Z)',
       category: 'View',
       keywords: 'alphabetical order',
@@ -1329,6 +1761,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'view.sort.name-desc',
+      unavailableReason: () => 'Notes are already sorted this way',
       title: 'Sort Notes: Name (Z → A)',
       category: 'View',
       keywords: 'alphabetical order reverse',
@@ -1337,6 +1770,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'view.sort.updated-desc',
+      unavailableReason: () => 'Notes are already sorted this way',
       title: 'Sort Notes: Updated (Newest First)',
       category: 'View',
       keywords: 'date recent time modified',
@@ -1345,6 +1779,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'view.sort.updated-asc',
+      unavailableReason: () => 'Notes are already sorted this way',
       title: 'Sort Notes: Updated (Oldest First)',
       category: 'View',
       keywords: 'date time modified',
@@ -1353,6 +1788,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'view.sort.created-desc',
+      unavailableReason: () => 'Notes are already sorted this way',
       title: 'Sort Notes: Created (Newest First)',
       category: 'View',
       keywords: 'date added',
@@ -1361,6 +1797,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'view.sort.created-asc',
+      unavailableReason: () => 'Notes are already sorted this way',
       title: 'Sort Notes: Created (Oldest First)',
       category: 'View',
       keywords: 'date added reverse',
@@ -1369,6 +1806,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'view.sort.manual',
+      unavailableReason: () => 'Notes are already sorted this way',
       title: 'Sort Notes: Manual',
       category: 'View',
       keywords: 'none drag order',
@@ -1377,6 +1815,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'view.group-by-kind',
+      bindTitle: 'Toggle Grouping Notes by Kind',
       title: getState().groupByKind
         ? 'Ungroup Notes by Kind'
         : 'Group Notes by Kind',
@@ -1386,6 +1825,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'view.focus-mode',
+      bindTitle: 'Toggle Zen Mode',
       title: (() => {
         const st = getState()
         return st.zenMode ? 'Exit Zen Mode' : 'Enter Zen Mode'
@@ -1400,12 +1840,23 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'view.dark-sidebar',
+      bindTitle: 'Toggle Dark Sidebar',
       title: getState().darkSidebar ? 'Light Sidebar' : 'Dark Sidebar',
       category: 'View',
       run: () => getState().setDarkSidebar(!getState().darkSidebar)
     },
     {
+      // Settings, Appearance, Chrome, Status bar. Hidden, the bar still shows
+      // while Cloud needs the user (lib/status-bar-visibility.ts).
+      id: 'view.status-bar',
+      title: 'Toggle Status Bar',
+      category: 'View',
+      keywords: 'status bar footer bottom bar hide show cloud sync word count backlinks chrome',
+      run: () => getState().setShowStatusBar(!getState().showStatusBar)
+    },
+    {
       id: 'view.line-numbers.off',
+      unavailableReason: () => 'Line numbers already show this way',
       title: 'Line Numbers: Off',
       category: 'View',
       when: () => getState().lineNumberMode !== 'off',
@@ -1413,6 +1864,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'view.line-numbers.absolute',
+      unavailableReason: () => 'Line numbers already show this way',
       title: 'Line Numbers: Absolute',
       category: 'View',
       when: () => getState().lineNumberMode !== 'absolute',
@@ -1420,6 +1872,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'view.line-numbers.relative',
+      unavailableReason: () => 'Line numbers already show this way',
       title: 'Line Numbers: Relative',
       category: 'View',
       when: () => getState().lineNumberMode !== 'relative',
@@ -1430,6 +1883,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
   // The Kanban card order (#889), from any note: the next board opened uses it.
   cmds.push({
     id: 'view.kanban-card-sort',
+    bindTitle: 'Kanban: Toggle Card Order',
     title:
       getState().kanbanCardSort === 'due'
         ? 'Kanban: Order Cards Manually'
@@ -1437,6 +1891,20 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     category: 'View',
     keywords: 'tasks board sort due date deadline order cards columns manual',
     run: () => getState().setKanbanCardSort(getState().kanbanCardSort === 'due' ? 'manual' : 'due')
+  })
+
+  // The Tasks list's order (#989), from any note: the next list opened uses it.
+  cmds.push({
+    id: 'view.tasks-list-order',
+    bindTitle: 'Tasks: Toggle List Order',
+    title:
+      getState().tasksListOrder === 'priority'
+        ? 'Tasks: Order List by Note Order'
+        : 'Tasks: Order List by Priority',
+    category: 'View',
+    keywords: 'tasks list sort priority high order note line',
+    run: () =>
+      getState().setTasksListOrder(getState().tasksListOrder === 'priority' ? 'note' : 'priority')
   })
 
   // Saved Tasks filters (#731): one palette entry per name, so a filter is a
@@ -1459,12 +1927,14 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
   cmds.push(
     {
       id: 'editor.vim.toggle',
+      bindTitle: 'Toggle Vim Mode',
       title: getState().vimMode ? 'Disable Vim Mode' : 'Enable Vim Mode',
       category: 'Editor',
       run: () => getState().setVimMode(!getState().vimMode)
     },
     {
       id: 'editor.completed-task.none',
+      unavailableReason: () => 'Completed tasks already look this way',
       title: 'Completed Tasks: No Style',
       category: 'Editor',
       when: () => getState().completedTaskStyle !== 'none',
@@ -1472,6 +1942,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'editor.completed-task.strikethrough',
+      unavailableReason: () => 'Completed tasks already look this way',
       title: 'Completed Tasks: Strikethrough',
       category: 'Editor',
       when: () => getState().completedTaskStyle !== 'strikethrough',
@@ -1479,6 +1950,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'editor.completed-task.gray',
+      unavailableReason: () => 'Completed tasks already look this way',
       title: 'Completed Tasks: Gray',
       category: 'Editor',
       when: () => getState().completedTaskStyle !== 'gray',
@@ -1486,6 +1958,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'editor.completed-task.gray-strikethrough',
+      unavailableReason: () => 'Completed tasks already look this way',
       title: 'Completed Tasks: Strikethrough + Gray',
       category: 'Editor',
       when: () => getState().completedTaskStyle !== 'gray-strikethrough',
@@ -1493,6 +1966,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'editor.which-key.toggle',
+      bindTitle: 'Toggle Leader Key Hints',
       title: getState().whichKeyHints
         ? 'Disable Leader Key Hints'
         : 'Enable Leader Key Hints',
@@ -1503,6 +1977,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'editor.live-preview.toggle',
+      bindTitle: 'Toggle Live Preview',
       title: getState().livePreview ? 'Disable Live Preview' : 'Enable Live Preview',
       category: 'Editor',
       keywords: 'decoration inline',
@@ -1510,6 +1985,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'editor.harper.toggle',
+      bindTitle: 'Toggle Grammar and Spelling with Harper',
       title: getState().harperEnabled
         ? 'Disable Grammar and Spelling with Harper'
         : 'Enable Grammar and Spelling with Harper',
@@ -1520,6 +1996,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'editor.harper.next',
+      unavailableReason: () => !harperSupported() ? "Harper isn't available here" : !getState().harperEnabled ? 'Harper is off: turn it on under Settings, Editor' : 'Harper needs a note open in the editor',
       title: 'Harper: Next Suggestion',
       category: 'Editor',
       keywords: 'harper grammar spelling',
@@ -1531,6 +2008,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'editor.harper.previous',
+      unavailableReason: () => !harperSupported() ? "Harper isn't available here" : !getState().harperEnabled ? 'Harper is off: turn it on under Settings, Editor' : 'Harper needs a note open in the editor',
       title: 'Harper: Previous Suggestion',
       category: 'Editor',
       keywords: 'harper grammar spelling',
@@ -1542,6 +2020,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'editor.harper.suggest',
+      unavailableReason: () => !harperSupported() ? "Harper isn't available here" : !getState().harperEnabled ? 'Harper is off: turn it on under Settings, Editor' : 'Harper needs a note open in the editor',
       title: 'Harper: Show Suggestions at Cursor',
       category: 'Editor',
       keywords: 'harper grammar spelling fix',
@@ -1553,6 +2032,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'editor.harper.apply',
+      unavailableReason: () => !harperSupported() ? "Harper isn't available here" : !getState().harperEnabled ? 'Harper is off: turn it on under Settings, Editor' : 'Harper needs a note open in the editor',
       title: 'Harper: Apply First Suggestion',
       category: 'Editor',
       keywords: 'harper grammar spelling fix',
@@ -1564,6 +2044,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'editor.harper.addWord',
+      unavailableReason: () => !harperSupported() ? "Harper isn't available here" : !getState().harperEnabled ? 'Harper is off: turn it on under Settings, Editor' : 'Harper needs a note open in the editor',
       title: 'Harper: Add Word to Dictionary',
       category: 'Editor',
       keywords: 'harper spelling dictionary',
@@ -1575,6 +2056,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'editor.harper.ignore',
+      unavailableReason: () => !harperSupported() ? "Harper isn't available here" : !getState().harperEnabled ? 'Harper is off: turn it on under Settings, Editor' : 'Harper needs a note open in the editor',
       title: 'Harper: Ignore Suggestion',
       category: 'Editor',
       keywords: 'harper grammar spelling',
@@ -1586,12 +2068,14 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'editor.tabs.toggle',
+      bindTitle: 'Toggle Tabs',
       title: getState().tabsEnabled ? 'Disable Tabs' : 'Enable Tabs',
       category: 'Editor',
       run: () => getState().setTabsEnabled(!getState().tabsEnabled)
     },
     {
       id: 'editor.keep-panels.toggle',
+      bindTitle: 'Toggle Remembering Panels per Note',
       title: getState().keepPanelsAcrossNotes
         ? 'Remember Panels per Note'
         : 'Keep Panels When Switching Notes',
@@ -1601,6 +2085,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'editor.persist-undo-history.toggle',
+      bindTitle: 'Toggle Keeping Undo History After Quitting',
       title: getState().persistUndoHistory
         ? 'Stop Keeping Undo History After Quitting'
         : 'Keep Undo History After Quitting',
@@ -1611,6 +2096,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'editor.word-wrap.toggle',
+      bindTitle: 'Toggle Word Wrap',
       title: getState().wordWrap ? 'Disable Word Wrap' : 'Enable Word Wrap',
       category: 'Editor',
       shortcut: shortcut('global.toggleWordWrap'),
@@ -1619,6 +2105,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'editor.auto-reveal.toggle',
+      bindTitle: 'Toggle Auto-Reveal Active Note',
       title: getState().autoReveal
         ? 'Disable Auto-Reveal Active Note'
         : 'Enable Auto-Reveal Active Note',
@@ -1627,6 +2114,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'editor.quick-note-date.toggle',
+      bindTitle: 'Toggle Quick Note Date Titles',
       title: getState().quickNoteDateTitle
         ? 'Disable Quick Note Date Titles'
         : 'Enable Quick Note Date Titles'
@@ -1637,6 +2125,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'editor.pdf-embed.compact',
+      unavailableReason: () => 'PDF embeds already show this way',
       title: 'PDF Embeds: Compact Card',
       category: 'Editor',
       keywords: 'pdf embed compact card preview reference',
@@ -1645,6 +2134,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'editor.pdf-embed.full',
+      unavailableReason: () => 'PDF embeds already show this way',
       title: 'PDF Embeds: Inline Viewer',
       category: 'Editor',
       keywords: 'pdf embed full iframe inline',
@@ -1660,7 +2150,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       title: 'Pin Active Note as Reference',
       category: 'Reference',
       keywords: 'sticky side companion research',
-      when: () => !!getState().activeNote,
+      when: hasNote,
       run: async () => {
         const path = getState().activeNote?.path
         if (path) await getState().pinReference(path)
@@ -1668,6 +2158,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'ref.unpin',
+      unavailableReason: () => 'No note is pinned as the reference',
       title: 'Unpin Reference',
       category: 'Reference',
       when: () => !!getState().pinnedRefPath,
@@ -1677,11 +2168,12 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'ref.toggle',
+      bindTitle: 'Show or Hide Reference Pane',
       title: getState().pinnedRefVisible
         ? 'Hide Reference Pane'
         : 'Show Reference Pane',
       category: 'Reference',
-      when: () => !!getState().pinnedRefPath,
+      when: () => !!activeReferencePath(getState()),
       run: () => {
         getState().togglePinnedRefVisible()
       }
@@ -1691,7 +2183,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
       title: 'Focus Reference Pane',
       category: 'Reference',
       when: () =>
-        !!getState().pinnedRefPath && getState().pinnedRefVisible,
+        !!activeReferencePath(getState()) && getState().pinnedRefVisible,
       run: () => {
         const cm = document.querySelector<HTMLElement>(
           '[data-pane-id="pinned-ref"] .cm-content'
@@ -1710,9 +2202,9 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     title: 'Themes…',
     category: 'UI',
     keywords: 'color appearance palette dark light',
-    run: () => {
-      /* handled by CommandPalette */
-    }
+    // The palette drills into its theme list when this row is picked there;
+    // run on its own (a key, the ex line) it opens the palette on that list.
+    run: () => getState().setCommandPaletteOpen(true, 'theme')
   })
   cmds.push({
     id: 'ui.newTheme',
@@ -1787,6 +2279,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
   cmds.push(
     {
       id: 'demo.generate',
+      bindTitle: 'Generate Demo Tour Notes',
       title: getState().notes.some((note) => isDemoTourStartPath(note.path))
         ? 'Regenerate Demo Tour Notes'
         : 'Generate Demo Tour Notes',
@@ -1909,6 +2402,7 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
     },
     {
       id: 'app.cloud.reviewConflicts',
+      unavailableReason: () => 'No Cloud conflicts are waiting',
       title: 'Review Cloud Sync Conflicts',
       category: 'Vault',
       keywords: 'cloud sync conflict merge review resolve queue two devices differ settings',
@@ -1960,9 +2454,8 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
         window.zen.getAppInfo().runtime === 'desktop' &&
         (window.zen.getCapabilities().supportsLocalFilesystemPickers ||
           window.zen.getCapabilities().supportsRemoteWorkspace),
-      run: () => {
-        /* handled by CommandPalette */
-      }
+      // Drilled into by the palette; on its own key it opens the palette there.
+      run: () => getState().setCommandPaletteOpen(true, 'vault')
     },
     {
       id: 'vault.rename',
@@ -2274,9 +2767,8 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
         category: 'Workflow',
         keywords: 'workflow run list pick choose automation trigger pipeline',
         when: stillOn,
-        run: () => {
-          /* handled by CommandPalette */
-        }
+        // Drilled into by the palette; on its own key it opens the palette there.
+        run: () => getState().setCommandPaletteOpen(true, 'workflow')
       })
       for (const entry of state.workflowIndex) {
         if (entry.status !== 'active') continue
@@ -2289,6 +2781,34 @@ export function buildCommands(options?: { includeUnavailable?: boolean }): Comma
           run: () => runWorkflowById(entry.id)
         })
       }
+    }
+  }
+
+  // The shared guards get their reason here, once (see hasNote above).
+  for (const cmd of cmds) {
+    if (cmd.unavailableReason || !cmd.when) continue
+    const title = cmd.title
+    if (cmd.when === hasNote) cmd.unavailableReason = () => `${title} needs an open note`
+    else if (cmd.when === hasEditorNote) {
+      cmd.unavailableReason = () => `${title} needs a note open in the editor`
+    } else if (cmd.when === hasSelection) {
+      cmd.unavailableReason = () => `${title} needs an open note`
+    }
+  }
+
+  // A key the user gave a command shows on its row, ahead of any key it
+  // already had (Toggle favorite keeps Space l s after it). A leader
+  // sequence names a Vim key, so it shows only with Vim mode on.
+  {
+    const state = getState()
+    const bindings = state.commandKeymaps
+    for (const cmd of cmds) {
+      cmd.builtinShortcut = cmd.shortcut
+      const own = commandBindingHint(bindings[cmd.id], {
+        overrides: state.keymapOverrides,
+        vimMode: state.vimMode
+      })
+      if (own) cmd.shortcut = cmd.shortcut ? `${own} / ${cmd.shortcut}` : own
     }
   }
 

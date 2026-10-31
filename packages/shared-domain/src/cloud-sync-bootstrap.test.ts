@@ -873,7 +873,7 @@ describe('metadata-first Cloud bootstrap', () => {
     expect(f.revision).toHaveBeenCalledExactlyOnceWith('vault', 'item-1', 2)
     expect(written).toHaveBeenCalledWith(
       expect.objectContaining({
-        files: [{ path: 'large.bin', content: cloud[1].content }]
+        files: [{ path: 'large.bin', content: cloud[1].content, displace_existing: true }]
       })
     )
     expect(Object.keys(f.state()?.pending_conflicts ?? {})).toEqual(['item-0'])

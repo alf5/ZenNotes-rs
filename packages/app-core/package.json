@@ -1,11 +1,12 @@
 {
   "name": "@zennotes/app-core",
   "private": true,
-  "version": "2.73.0",
+  "version": "2.79.0",
   "type": "module",
   "exports": {
     "./main": "./src/main.tsx",
     "./navigation": "./src/navigation.ts",
+    "./calendar": "./src/calendar.tsx",
     "./notes": "./src/notes.ts",
     "./shell": "./src/shell.ts",
     "./browse": "./src/browse.ts",
@@ -66,7 +67,7 @@
     "jsxgraph": "^1.12.2",
     "katex": "^0.16.15",
     "mdast": "^3.0.0",
-    "pele": "1.6.0",
+    "pele": "1.12.0",
     "prettier": "^3.8.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

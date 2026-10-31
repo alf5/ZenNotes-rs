@@ -38,7 +38,7 @@ describe('task cancelling primitives (#450)', () => {
     const tasks = parseTasksFromBody('- [ ] open\n- [x] done\n- [>] gone [[X]]\n- [-] scrapped', ctx)
     const g = groupTasks(tasks, new Date(2026, 0, 1))
     expect(g.cancelled.map((t) => t.content)).toEqual(['scrapped'])
-    expect(g.today.map((t) => t.content)).toEqual(['open'])
+    expect(g.undated.map((t) => t.content)).toEqual(['open'])
     expect(g.done.map((t) => t.content)).toEqual(['done'])
     expect(g.forwarded.map((t) => t.content)).toEqual(['gone [[X]]'])
   })

@@ -9,6 +9,7 @@ import {
 } from './store'
 import { resolveAuto, findTheme } from './lib/themes'
 import { applyTypographyVariables } from './lib/typography-variables'
+import { activeReferencePath } from './lib/pinned-reference'
 import {
   injectActiveTheme,
   injectOverrides,
@@ -38,22 +39,20 @@ import {
   matchesShortcut,
   TAB_SELECT_KEYMAP_IDS
 } from './lib/keymaps'
-import { selectActiveBuffer } from './lib/buffer-navigation'
+import { selectActiveBuffer, stepActiveTab } from './lib/buffer-navigation'
 import { resolveCloseShortcut } from './lib/close-shortcut'
 import { focusPaneOrEdgePanel } from './lib/pane-nav'
-import {
-  activatePanelRow,
-  isRowPanel,
-  moveCommentCursor,
-  movePanelCursor,
-  type CursorMove
-} from './lib/panel-rows'
 import { requestPaneMode } from './lib/pane-mode'
 import { recordRendererPerf } from './lib/perf'
-import { focusEditorNormalMode } from './lib/editor-focus'
+import {
+  focusEditorAfterPaletteClose,
+  focusEditorAfterReadOpen,
+  focusEditorNormalMode
+} from './lib/editor-focus'
 import { isAppOverlayOpen, isOverlayOrDialogOpen } from './lib/overlay-open'
 import { installMarkdownFileDropHandler } from './lib/markdown-file-drop'
 import {
+  setMarkdownDetectCodeLanguages,
   setMarkdownLooseMathDelimiters,
   setMarkdownMathRenderer
 } from './lib/markdown-settings'
@@ -66,12 +65,26 @@ import { ensureCloudAutoSyncStarted, stopCloudAutoSync } from './lib/cloud-auto-
 import { loadKeepRunningInTray, startTraySyncStatusReporter } from './lib/tray-runtime'
 import { installHarperRuntime } from './lib/harper-runtime'
 import { installIgnoredKeysGuard } from './lib/ignored-keys'
+import { installCommandKeymapDispatcher, isMainAppWindow } from './lib/command-keymap-dispatch'
+import { installSidebarTrashKeys } from './lib/sidebar-note-actions'
 
 // The ignored-keys guard (#732) has to be on `window` before any component
 // registers a capture listener there, so it is installed at import time,
 // not from an effect: children's effects run before App's, and VimNav's
 // would otherwise see the stray key first. Reads the live list on each key.
 installIgnoredKeysGuard(() => useStore.getState().ignoredKeys)
+// Keys the user gave command palette commands (#971) go next, for the same
+// reason: a binding the user chose wins over every default, VimNav's and the
+// editor's included, so its listener has to be ahead of theirs. Leader
+// sequences are not handled here but in VimNav, after the built-in leader
+// keys. See lib/command-keymap-dispatch.ts.
+installCommandKeymapDispatcher(() => useStore.getState())
+// The sidebar's Mod+Backspace (#972) after those, ahead of every component:
+// a list view left active behind a focused sidebar listens on the window too,
+// and must not see the chord first. Only the main window has a sidebar.
+if (typeof window !== 'undefined' && isMainAppWindow(window.location.search)) {
+  installSidebarTrashKeys(() => useStore.getState())
+}
 
 let editorModulePromise: Promise<typeof import('./components/Editor')> | null = null
 const EDITOR_MODULE_WARMUP_GRACE_MS = 40
@@ -174,6 +187,10 @@ const Editor = lazy(async () => {
   return { default: module.Editor }
 })
 
+const LinkPopover = lazy(async () => {
+  const module = await import('./components/LinkPopover')
+  return { default: module.LinkPopover }
+})
 const PinnedReferencePane = lazy(async () => {
   const module = await import('./components/PinnedReferencePane')
   return { default: module.PinnedReferencePane }
@@ -217,6 +234,10 @@ const TemplatePalette = lazy(async () => {
 const EmbedDrawingPalette = lazy(async () => {
   const module = await import('./components/EmbedDrawingPalette')
   return { default: module.EmbedDrawingPalette }
+})
+const NoteCoverPicker = lazy(async () => {
+  const module = await import('./components/NoteCoverPicker')
+  return { default: module.NoteCoverPicker }
 })
 
 const SettingsModal = lazy(async () => {
@@ -307,60 +328,6 @@ function AppUpdateNotice({
   )
 }
 
-/**
- * Keyboard handling inside a focused panel when Vim mode is off.
- *
- * VimNav owns panel keys, but its listener only exists in Vim mode — so without
- * it, pane navigation could hand focus to a panel with no way to move inside it.
- * This covers the keys that are universal everywhere else in the app: ↑/↓ move
- * the row cursor, Home/End jump to the ends, Enter activates the row, Escape (or
- * ←) hands focus back to the editor. Single-letter motions stay Vim-only.
- *
- * Returns nothing; the event is consumed only when a panel actually handled it,
- * so unrelated keys still reach the app.
- */
-function handlePanelKeyWithoutVim(e: KeyboardEvent, focusedPanel: string | null): void {
-  if (e.metaKey || e.ctrlKey || e.altKey) return
-  // A dialog over the panel owns its keys: the focused panel stays set while
-  // one is open, so arrows would move the row behind it and Enter would open
-  // that row instead of pressing the dialog's focused button (#960).
-  if (isOverlayOrDialogOpen()) return
-  // Text entry inside a panel (the outline filter, a comment draft) keeps its keys.
-  const target = e.target instanceof HTMLElement ? e.target : null
-  if (target) {
-    const tag = target.tagName
-    if (tag === 'INPUT' || tag === 'TEXTAREA' || target.isContentEditable) return
-  }
-  const isComments = focusedPanel === 'comments'
-  if (!isComments && !isRowPanel(focusedPanel)) return
-
-  const move: CursorMove | null =
-    e.key === 'ArrowDown' ? 'down' : e.key === 'ArrowUp' ? 'up' : e.key === 'Home' ? 'first' : e.key === 'End' ? 'last' : null
-
-  const consume = (): void => {
-    e.preventDefault()
-    e.stopImmediatePropagation()
-  }
-
-  if (move) {
-    const moved = isComments ? moveCommentCursor(move) : movePanelCursor(focusedPanel, move)
-    if (moved) consume()
-    return
-  }
-  if (e.key === 'Enter') {
-    // The comments panel has no single "open" action per card, so Enter is left
-    // to the card's own focused control there.
-    if (isComments) return
-    if (activatePanelRow(focusedPanel)) consume()
-    return
-  }
-  if (e.key === 'Escape' || e.key === 'ArrowLeft') {
-    consume()
-    useStore.getState().setFocusedPanel('editor')
-    focusEditorNormalMode()
-  }
-}
-
 function App(): JSX.Element {
   const mountedAtRef = useRef(performance.now())
   const workspaceReadyLoggedRef = useRef(false)
@@ -370,6 +337,7 @@ function App(): JSX.Element {
   const init = useStore((s) => s.init)
   const workspaceRestored = useStore((s) => s.workspaceRestored && !s.workspaceTransitioning)
   const searchOpen = useStore((s) => s.searchOpen)
+  const linkPopoverOpen = useStore((s) => s.linkPopover !== null)
   const setSearchOpen = useStore((s) => s.setSearchOpen)
   const vaultTextSearchOpen = useStore((s) => s.vaultTextSearchOpen)
   const setVaultTextSearchOpen = useStore((s) => s.setVaultTextSearchOpen)
@@ -382,6 +350,7 @@ function App(): JSX.Element {
   const templatePaletteOpen = useStore((s) => s.templatePaletteOpen)
   const setTemplatePaletteOpen = useStore((s) => s.setTemplatePaletteOpen)
   const embedDrawingPaletteOpen = useStore((s) => s.embedDrawingPaletteOpen)
+  const noteCoverPickerPath = useStore((s) => s.noteCoverPickerPath)
   const setEmbedDrawingPaletteOpen = useStore((s) => s.setEmbedDrawingPaletteOpen)
   const sidebarOpen = useStore((s) => s.sidebarOpen)
   const noteListOpen = useStore((s) => s.noteListOpen)
@@ -415,6 +384,7 @@ function App(): JSX.Element {
   const completedTaskStyle = useStore((s) => s.completedTaskStyle)
   const mathRenderer = useStore((s) => s.mathRenderer)
   const looseMathDelimiters = useStore((s) => s.looseMathDelimiters)
+  const detectCodeLanguages = useStore((s) => s.detectCodeLanguages)
   const lineNumberPosition = useStore((s) => s.lineNumberPosition)
   const interfaceFont = useStore((s) => s.interfaceFont)
   const textFont = useStore((s) => s.textFont)
@@ -424,7 +394,7 @@ function App(): JSX.Element {
   const persistWorkspace = useStore((s) => s.persistWorkspace)
   const flushDirtyNotes = useStore((s) => s.flushDirtyNotes)
   const activePinnedRefPath = useMemo(
-    () => (selectedPath ? noteRefs[selectedPath]?.path ?? pinnedRefPath : pinnedRefPath),
+    () => activeReferencePath({ selectedPath, noteRefs, pinnedRefPath }),
     [noteRefs, pinnedRefPath, selectedPath]
   )
   const showPinnedReferencePane = !zenMode && pinnedRefVisible && !!activePinnedRefPath
@@ -471,7 +441,15 @@ function App(): JSX.Element {
   // pane jump or mouse click. Routed through a DOM event to keep the store free
   // of an editor-focus import cycle. (#353)
   useEffect(() => {
-    const handler = (): void => focusEditorNormalMode({ attempts: 10, delayMs: 24 })
+    // A request marked `read` (a periodic note that already existed, opened
+    // from the command palette) lands the way a search pick does: focused on
+    // desktop, left to read on a phone.
+    const handler = (event: Event): void => {
+      const options = { attempts: 10, delayMs: 24 }
+      const detail = (event as CustomEvent<{ read?: boolean } | null>).detail
+      if (detail?.read) focusEditorAfterReadOpen(options)
+      else focusEditorNormalMode(options)
+    }
     window.addEventListener('zen:focus-editor', handler)
     return () => window.removeEventListener('zen:focus-editor', handler)
   }, [])
@@ -724,6 +702,10 @@ function App(): JSX.Element {
     setMarkdownLooseMathDelimiters(looseMathDelimiters)
   }, [looseMathDelimiters])
 
+  useEffect(() => {
+    setMarkdownDetectCodeLanguages(detectCodeLanguages)
+  }, [detectCodeLanguages])
+
   // The app now always runs fully opaque.
   useEffect(() => {
     document.documentElement.setAttribute('data-opaque', '')
@@ -814,7 +796,7 @@ function App(): JSX.Element {
         const title = resolveQuickNoteTitle(
           state.notes,
           state.quickNoteDateTitle,
-          state.quickNoteTitlePrefix ?? undefined
+          state.quickNoteTitlePrefix
         )
         void state.createAndOpen('quick', '', { title, focusTitle: true })
         return
@@ -838,6 +820,21 @@ function App(): JSX.Element {
           if (!overrides[id] && eventMatchesUserOverride(e, overrides, id)) continue
           e.preventDefault()
           selectActiveBuffer(state, i + 1)
+          return
+        }
+      }
+      // Next / previous tab with Vim on or off (#973), in the same order gt/gT
+      // walk. Inserted mid-chain like the digits above, so an explicit rebind
+      // of the same combination to a later action still wins.
+      if (!overlayOpen) {
+        for (const [id, delta] of [
+          ['tabs.next', 1],
+          ['tabs.previous', -1]
+        ] as const) {
+          if (!matchesShortcut(e, overrides, id)) continue
+          if (!overrides[id] && eventMatchesUserOverride(e, overrides, id)) continue
+          e.preventDefault()
+          stepActiveTab(state, delta)
           return
         }
       }
@@ -929,39 +926,41 @@ function App(): JSX.Element {
         void state.reopenLastClosedTab()
         return
       }
+      // A palette closed here hands back the focus the way its own Escape and
+      // Cancel do: on a phone, that leaves the keyboard where it was.
       if (e.key === 'Escape' && state.searchOpen) {
         setSearchOpen(false)
-        focusEditorNormalMode()
+        focusEditorAfterPaletteClose()
         return
       }
       if (e.key === 'Escape' && state.vaultTextSearchOpen) {
         setVaultTextSearchOpen(false)
-        focusEditorNormalMode()
+        focusEditorAfterPaletteClose()
         return
       }
       if (e.key === 'Escape' && state.commandPaletteOpen) {
         setCommandPaletteOpen(false)
-        focusEditorNormalMode()
+        focusEditorAfterPaletteClose()
         return
       }
       if (e.key === 'Escape' && state.bufferPaletteOpen) {
         setBufferPaletteOpen(false)
-        focusEditorNormalMode()
+        focusEditorAfterPaletteClose()
         return
       }
       if (e.key === 'Escape' && state.templatePaletteOpen) {
         setTemplatePaletteOpen(false)
-        focusEditorNormalMode()
+        focusEditorAfterPaletteClose()
         return
       }
       if (e.key === 'Escape' && state.embedDrawingPaletteOpen) {
         setEmbedDrawingPaletteOpen(false)
-        focusEditorNormalMode()
+        focusEditorAfterPaletteClose()
         return
       }
       if (e.key === 'Escape' && state.outlinePaletteOpen) {
         setOutlinePaletteOpen(false)
-        focusEditorNormalMode()
+        focusEditorAfterPaletteClose()
         return
       }
       // ⌘1 — toggle sidebar
@@ -986,6 +985,12 @@ function App(): JSX.Element {
       if (matchesShortcut(e, overrides, 'global.toggleCommentsPanel')) {
         e.preventDefault()
         window.dispatchEvent(new Event('zen:toggle-comments'))
+        return
+      }
+      // ⌘7: toggle the Timeline panel in the active pane (#1007)
+      if (matchesShortcut(e, overrides, 'global.toggleTimelinePanel')) {
+        e.preventDefault()
+        window.dispatchEvent(new Event('zen:toggle-timeline'))
         return
       }
       // ⌥⌘M — comment the current selection (or line) without the mouse
@@ -1133,14 +1138,9 @@ function App(): JSX.Element {
         return
       }
 
-      // With Vim mode ON, VimNav owns every key inside a focused panel. With it
-      // OFF that listener isn't installed at all, so `Alt+hjkl` could put focus
-      // in a panel there was then no way to drive — you could reach Connections
-      // or the Outline and not move a row. The universal keys (arrows, Enter,
-      // Escape) work here regardless of mode; the single-letter motions (j/k,
-      // gg/G) stay Vim-only, as everywhere else in the app.
-      if (state.vimMode) return
-      handlePanelKeyWithoutVim(e, state.focusedPanel)
+      // Keys inside a focused panel (the sidebar, the note list, connections,
+      // the outline, comments) are VimNav's in both modes: with Vim off it
+      // routes them to the same handlers, with the typed Vim keys turned off.
     }
     window.addEventListener('keydown', handler)
     window.addEventListener('keydown', focusPaneHandler, true)
@@ -1315,6 +1315,11 @@ function App(): JSX.Element {
           <EmbedDrawingPalette />
         </Suspense>
       )}
+      {noteCoverPickerPath && (
+        <Suspense fallback={null}>
+          <NoteCoverPicker key={noteCoverPickerPath} notePath={noteCoverPickerPath} />
+        </Suspense>
+      )}
       {settingsOpen && (
         <Suspense fallback={null}>
           <SettingsModal />
@@ -1323,6 +1328,11 @@ function App(): JSX.Element {
       {whatsNewOpen && (
         <Suspense fallback={null}>
           <WhatsNewModal />
+        </Suspense>
+      )}
+      {linkPopoverOpen && (
+        <Suspense fallback={null}>
+          <LinkPopover />
         </Suspense>
       )}
       <PromptHost />

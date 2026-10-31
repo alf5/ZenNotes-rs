@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import type { FolderEntry, NoteFolder, NoteMeta } from '@shared/ipc'
 import { DEFAULT_VAULT_SETTINGS } from '@shared/ipc'
-import { linkCandidates, noteLinkTarget, notesMatchingSource } from './link-candidates'
+import { linkCandidates, noteLinkTarget, noteSubtitle, notesMatchingSource } from './link-candidates'
 
 const makeNote = (path: string, title: string, folder: NoteFolder = 'inbox'): NoteMeta =>
   ({
@@ -127,5 +127,25 @@ describe('notesMatchingSource (#500)', () => {
 
   it('scopes to a tag case-insensitively', () => {
     expect(notesMatchingSource(notes, { kind: 'tag', tag: 'person' }).map((n) => n.title)).toEqual(['Jane'])
+  })
+})
+
+describe('noteSubtitle: the [[ picker shows the folder note search shows', () => {
+  it('drops the main area directory and keeps every other area', () => {
+    expect(noteSubtitle(makeNote('inbox/Projects/Atlas/Overview.md', 'Overview'), settings)).toBe(
+      'Projects/Atlas/'
+    )
+    expect(
+      noteSubtitle(makeNote('archive/2025/Atlas/Overview.md', 'Overview', 'archive'), settings)
+    ).toBe('archive/2025/Atlas/')
+  })
+
+  it('labels a note at the top of an area with the area', () => {
+    expect(noteSubtitle(makeNote('inbox/Overview.md', 'Overview'), settings)).toBe('inbox/')
+    expect(noteSubtitle(makeNote('archive/Overview.md', 'Overview', 'archive'), settings)).toBe(
+      'archive/'
+    )
+    const rootMode = { ...settings, primaryNotesLocation: 'root' as const }
+    expect(noteSubtitle(makeNote('Overview.md', 'Overview'), rootMode)).toBe('')
   })
 })

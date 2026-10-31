@@ -65,25 +65,38 @@ import { openWikilinkAttachment } from "../lib/open-wikilink-attachment";
 import { buildVersionReport } from "../lib/version-report";
 import { writeClipboardText } from "../lib/clipboard-text";
 import {
+  coverNotePath,
+  openCoverPicker,
+  openUnsplashCoverPicker,
+  removeCover,
+  resolveCoverArgument,
+  setCoverFromBuiltin,
+  setCoverFromClipboard,
+  setCoverPosition,
+  setCoverTarget,
+  startCoverReposition,
+} from "../lib/note-cover-actions";
+import { GRADIENT_COVERS, PHOTO_COVERS } from "../lib/note-cover-gallery";
+import {
   externalFileLink,
   openExternalFileLink,
 } from "../lib/external-file-link";
 import { StatusBar } from "./StatusBar";
-import { useCloudSyncStatusStore } from "../lib/cloud-auto-sync";
+import { cloudSyncNeedsUser, useCloudSyncStatusStore } from "../lib/cloud-auto-sync";
+import { statusBarVisible } from "../lib/status-bar-visibility";
+import { defineStatusBarOption } from "../lib/vim-status-bar-option";
 import { EditorPane } from "./EditorPane";
 import { focusPaneInDirection, focusPaneOrEdgePanel } from "../lib/pane-nav";
 import { requestPaneMode } from "../lib/pane-mode";
 import {
   getKeymapBinding,
-  getKeymapDefinitions,
-  getKeymapDisplay,
   getSequenceTokens,
-  UNBOUND_BINDING,
   type KeymapId,
   type KeymapOverrides,
 } from "../lib/keymaps";
 import { requestSettingsTarget } from "../lib/settings-navigation";
 import { useToastStore } from "../lib/toast";
+import { runBindEx, runUnbindEx } from "../lib/command-keymap-ex";
 import {
   navigateActiveBuffer,
   selectActiveBuffer,
@@ -95,6 +108,8 @@ import { registerNoteMoveExCommands } from "../lib/vim-ex-commands";
 import { promptImageWidth, setImageWidthFromInput } from "../lib/image-resize";
 import { copyLinkAtCursor } from "../lib/link-copy";
 import { followLinkTarget } from "../lib/follow-link";
+import { openLinkPopoverAtCursor } from "../lib/link-popover-open";
+import { openGalleryFromArgument } from "../lib/folder-gallery-open";
 
 let vimCommandsRegistered = false;
 let syncedVimBindings: Partial<Record<KeymapId, string[]>> = {};
@@ -212,6 +227,13 @@ function syncVimKeymaps(overrides: KeymapOverrides): void {
         action: "zenCreateNoteFromLink",
         bindings: [
           toVimSequence(getKeymapBinding(overrides, "vim.createNoteFromLink")),
+        ].filter((binding): binding is string => !!binding),
+      },
+      {
+        id: "vim.linkPopover",
+        action: "zenLinkPopover",
+        bindings: [
+          toVimSequence(getKeymapBinding(overrides, "vim.linkPopover")),
         ].filter((binding): binding is string => !!binding),
       },
       {
@@ -532,6 +554,70 @@ function registerVimCommands(): void {
   Vim.defineEx("format", "format", () => {
     void useStore.getState().formatActiveNote();
   });
+  // `:cover` (`:cov`) is the ex twin of Space l c. Bare, it opens the picker;
+  // `:cover!` or `:cover remove` takes the cover off; `paste` uses the
+  // clipboard image; `reposition` enters reposition mode and `40%` sets the
+  // focal point outright. `unsplash fog` opens the picker's Unsplash tab on
+  // that search (Enter then picks the first photo; nothing is picked unseen).
+  // Anything else names the image: an https URL, a vault image by path or
+  // unique file name, or a built-in cover by name.
+  Vim.defineEx(
+    "cover",
+    "cov",
+    (_cm: unknown, params: { argString?: string } | undefined) => {
+      const arg = (params?.argString ?? "").trim();
+      const path = coverNotePath();
+      if (!arg) {
+        openCoverPicker();
+        return;
+      }
+      if (!path) {
+        useToastStore.getState().addToast("Open a note to give it a cover", "info");
+        return;
+      }
+      const lower = arg.toLowerCase();
+      if (arg === "!" || lower === "remove") {
+        void removeCover(path);
+        return;
+      }
+      if (lower === "paste") {
+        void setCoverFromClipboard(path);
+        return;
+      }
+      if (lower === "reposition") {
+        startCoverReposition();
+        return;
+      }
+      const unsplash = arg.match(/^unsplash(?:\s+([\s\S]*))?$/i);
+      if (unsplash) {
+        openUnsplashCoverPicker((unsplash[1] ?? "").trim());
+        return;
+      }
+      const percent = arg.match(/^(\d{1,3}(?:\.\d+)?)%$/);
+      if (percent) {
+        void setCoverPosition(path, Number(percent[1]) / 100);
+        return;
+      }
+      const target = resolveCoverArgument(arg);
+      if (target) {
+        void setCoverTarget(path, target);
+        return;
+      }
+      const builtin = [...GRADIENT_COVERS, ...PHOTO_COVERS].find(
+        (cover) =>
+          cover.title.toLowerCase() === lower ||
+          cover.id.toLowerCase() === lower ||
+          cover.id.toLowerCase() === `gradient-${lower}`,
+      );
+      if (builtin) {
+        void setCoverFromBuiltin(path, builtin);
+        return;
+      }
+      useToastStore
+        .getState()
+        .addToast(`No image called "${arg}" in this vault`, "info");
+    },
+  );
   // `:imgwidth 480` (`:imgw`) writes the `|480` size hint into the image on
   // the cursor line, the same edit as dragging the widget's handle; `auto`
   // (or 0) strips it, and no argument opens the Resize Image prompt (#684).
@@ -565,6 +651,7 @@ function registerVimCommands(): void {
       return undefined;
     },
   );
+  defineStatusBarOption();
   // `:harper on|off` (or bare `:harper` to toggle) is the ex twin of the
   // Settings toggle "Grammar and spelling with Harper".
   Vim.defineEx(
@@ -599,36 +686,25 @@ function registerVimCommands(): void {
     },
   );
   // `:unbind <action.id>` removes an action's key entirely, the ex twin of
-  // the Unbind button under Settings, Keymaps. Without an argument, or with
-  // an id the catalog does not know, it opens that page, where every id is
-  // listed, instead of guessing.
+  // the Unbind button under Settings, Keymaps; `:unbind command <id>` does
+  // the same for a command palette command (#971). Without an argument, or
+  // with an id nothing knows, it opens that page, where every id is listed,
+  // instead of guessing.
   Vim.defineEx(
     "unbind",
     "unbind",
     (_cm: unknown, params: { argString?: string } | undefined) => {
-      const arg = (params?.argString ?? "").trim();
-      const state = useStore.getState();
-      const definition = getKeymapDefinitions().find((d) => d.id === arg);
-      if (!definition) {
-        if (arg) {
-          useToastStore
-            .getState()
-            .addToast(`No keymap action is called "${arg}"`, "info");
-        }
-        requestSettingsTarget("keymaps");
-        state.setSettingsOpen(true);
-        return;
-      }
-      const before = getKeymapDisplay(state.keymapOverrides, definition.id);
-      state.setKeymapBinding(definition.id, UNBOUND_BINDING);
-      useToastStore
-        .getState()
-        .addToast(
-          before
-            ? `Unbound ${definition.title} (was ${before})`
-            : `${definition.title} is already unbound`,
-          "success",
-        );
+      runUnbindEx(params?.argString ?? "");
+    },
+  );
+  // `:bind <keys> <command.id>` gives a command palette command a key (#971):
+  // `:bind <C-BS> note.trash`, `:bind <leader>xa note.archive`, or the
+  // Settings spelling, `:bind Mod+Backspace note.trash`.
+  Vim.defineEx(
+    "bind",
+    "bind",
+    (_cm: unknown, params: { argString?: string } | undefined) => {
+      runBindEx(params?.argString ?? "");
     },
   );
   Vim.defineEx("quit", "q", () => {
@@ -662,6 +738,19 @@ function registerVimCommands(): void {
   Vim.defineEx("tasks", "tasks", () => {
     void useStore.getState().openTasksView();
   });
+  Vim.defineEx("unresolved", "unres", () => {
+    void useStore.getState().openUnresolvedLinksView();
+  });
+  // `:gallery` (`:gal`) opens this note's folder as a Gallery; `:gallery
+  // Projects/Website` names the folder (a vault path, a folder in the notes
+  // area, or a system folder such as `archive`).
+  Vim.defineEx(
+    "gallery",
+    "gal",
+    (_cm: unknown, params: { argString?: string } | undefined) => {
+      void openGalleryFromArgument(params?.argString ?? "");
+    },
+  );
 
   // Quick-add a whole-note task file. `:newtask` (or `:task`) prompts for a
   // title and creates it at the configured tasks location; `:newtask <folder>`
@@ -821,6 +910,13 @@ function registerVimCommands(): void {
       createWithoutAsking: true,
       kind: link.kind,
     });
+  });
+
+  // `K` on a [[wikilink]]: its note in the link popover, keyboard inside.
+  // Inside the popover's own editor it chains to the next link's note.
+  Vim.defineAction("zenLinkPopover", (cm: ReturnType<typeof getCM>) => {
+    const view = (cm as unknown as { cm6?: EditorView }).cm6;
+    if (view) openLinkPopoverAtCursor(view);
   });
 
   Vim.defineAction("goToDefinition", (cm: ReturnType<typeof getCM>) => {
@@ -1144,9 +1240,13 @@ function registerVimNoteCommands(): void {
   };
   Vim.defineEx("outline", "outline", openOutline);
   // `:closepanel` / `:closep` closes whichever right-hand panel (connections,
-  // outline, comments, or calendar) is open in the active pane.
+  // outline, comments, calendar, or timeline) is open in the active pane.
   Vim.defineEx("closepanel", "closep", () => {
     window.dispatchEvent(new Event("zen:close-right-panel"));
+  });
+  // `:timeline` toggles the Timeline panel in the active pane (#1007).
+  Vim.defineEx("timeline", "timeline", () => {
+    window.dispatchEvent(new Event("zen:toggle-timeline"));
   });
   const setZenMode = (next: "toggle" | "on" | "off"): void => {
     requestAnimationFrame(() => {
@@ -1284,6 +1384,7 @@ const MANUAL_EX_NAMES = new Set([
   "wq",
   "format",
   "unbind",
+  "bind",
   "tasks",
   "tag",
   "template",
@@ -1315,6 +1416,7 @@ const MANUAL_EX_NAMES = new Set([
   "buffers",
   "ls",
   "outline",
+  "timeline",
   "view",
   "zen",
   "zenmode",
@@ -1730,6 +1832,15 @@ export function Editor(): JSX.Element {
   const cloudSyncVisible = useCloudSyncStatusStore(
     (state) => state.phase !== "hidden",
   );
+  const showStatusBar = useStore((s) => s.showStatusBar);
+  const cloudNeedsUser = useCloudSyncStatusStore(cloudSyncNeedsUser);
+  const statusBarShown = statusBarVisible({
+    zenMode,
+    hasNote: activeNote !== null,
+    cloudShown: cloudSyncVisible,
+    showStatusBar,
+    cloudNeedsUser,
+  });
 
   useEffect(() => {
     registerVimCommands();
@@ -1749,9 +1860,7 @@ export function Editor(): JSX.Element {
       <div className="flex min-h-0 min-w-0 flex-1">
         <PaneTreeView node={paneLayout} />
       </div>
-      {!zenMode && (activeNote || cloudSyncVisible) && (
-        <StatusBar note={activeNote} />
-      )}
+      {statusBarShown && <StatusBar note={activeNote} />}
     </section>
   );
 }

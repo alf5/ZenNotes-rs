@@ -40,6 +40,136 @@ export const CLOUD_ANNOUNCEMENT = {
 
 export const WHATS_NEW: readonly WhatsNewEntry[] = [
   {
+    version: '2.79.0',
+    highlights: [
+      {
+        title: 'A timeline of what’s due',
+        body: 'The Timeline panel lays every open task with a date down one line: overdue work in red, today, then each day that has work. Tag a task #milestone to mark it with a diamond. Mod+7, or Space n in Vim mode.'
+      },
+      {
+        title: 'Any command can take a key',
+        body: 'Every command in the palette can be given a key of its own, a leader sequence in Vim mode included. Highlight one and press Alt+Enter, or use the Commands group in Settings, Keymap.'
+      },
+      {
+        title: 'Share to ZenNotes on macOS',
+        body: 'Choose Share, ZenNotes in Safari or any app to save a page or the text you selected as a note. Each vault picks where shares land.'
+      },
+      {
+        title: 'Unsplash covers with your own key',
+        body: 'Add your Unsplash Access Key in Settings to search millions of photos for a note’s cover. Searches go straight from your computer to Unsplash, and the photo is credited to its photographer.'
+      },
+      {
+        title: 'A folder as a Gallery',
+        body: 'Open as Gallery on a folder shows its notes as cards by their covers, a letter for a note without one. Sort them, include subfolders, filter by title. Open Folder Gallery in the palette, :gallery, or Space G in Vim mode.'
+      },
+      {
+        title: 'Callouts and code languages from a menu',
+        body: 'Right-click lines to turn them into a callout, or a callout to change its type. A code block’s label now picks its language, and a block without one shows a detected language until you choose it.'
+      },
+      {
+        title: 'Database views that show just what you need',
+        body: 'Each table view keeps its own columns: the Columns button hides the rest of a wide CSV. The + makes new table views and copies, and Show only these in this view keeps the rows you selected.'
+      }
+    ]
+  },
+  {
+    version: '2.78.0',
+    highlights: [
+      {
+        title: 'Give a note a cover',
+        body: 'A wide image across the top of a note, the way Notion draws one. Add Cover in the command palette, or Space l c in Vim mode, opens the picker: gradients, public-domain photos, your own images or a link. Hover it to reposition or remove it.'
+      },
+      {
+        title: 'Covers stay plain Markdown',
+        body: 'A cover is saved as banner frontmatter, the key Obsidian’s banner plugins read, and its image is an ordinary file in your assets folder. Published notes and Quick Look show it too.'
+      },
+      {
+        title: 'Math in diagram labels',
+        body: 'Mermaid labels typeset $$ math, as on mermaid.live and GitHub, and text on a node’s own fill picks dark or light to stay readable in every theme.'
+      },
+      {
+        title: 'LaTeX in the terminal',
+        body: 'The bundled zn is 0.12.2: with math set to latex, its preview draws display math and TikZ through the TeX on your computer.'
+      }
+    ]
+  },
+  {
+    version: '2.77.0',
+    highlights: [
+      {
+        title: 'Links to notes you haven’t written yet',
+        body: 'Unresolved Links lists every [[link]] in your vault that points at no note, most linked first, with the lines that link to it. Open it from the command palette, or with Space u in Vim mode.'
+      },
+      {
+        title: 'Edit a linked note in place',
+        body: 'Rest the pointer on a link and its note opens in a popover over yours: type, then Escape. A link to a missing note offers to create it right there. K in Vim mode, Shift+Cmd+K without.'
+      },
+      {
+        title: 'Tags find the idea, not just the note',
+        body: 'The Tags view lists the tagged blocks inside each note: a list item, a paragraph, or a whole section under a tagged heading. In Search notes, #idea does the same, and Enter jumps to the line.'
+      },
+      {
+        title: 'Steadier on slow networks',
+        body: 'ZenNotes Cloud retries a stalled request after 30 seconds instead of waiting five minutes, and a conflict review opens at once, even while a sync is running.'
+      }
+    ]
+  },
+  {
+    version: '2.76.0',
+    highlights: [
+      {
+        title: 'Any due date, two clicks away',
+        body: 'Right-click a task in the Tasks list, on the board or in the calendar and pick Choose a date… for a month calendar: a click on a day sets it. In Vim mode, @ opens it on the selected task.'
+      },
+      {
+        title: 'No due date has its own place',
+        body: 'A task without a due date now waits under No due date, after Upcoming, instead of in Today. The Status board has the same column, and dropping a card there clears its date.'
+      },
+      {
+        title: 'Tasks by priority',
+        body: 'The Tasks list’s new Order menu puts high priority first inside each group, still grouped by date (s in Vim mode, or :order priority). Note order brings back your notes’ line order.'
+      },
+      {
+        title: 'Cloud conflicts settle cleanly',
+        body: 'Choosing the other device’s version no longer removes a note this device kept, and when a file already holds its place, that file moves beside it under the next free name.'
+      }
+    ]
+  },
+  {
+    version: '2.75.0',
+    highlights: [
+      {
+        title: 'Same name, different folder',
+        body: 'Search notes (Cmd+P on macOS, Ctrl+P elsewhere) now shows the folder each result lives in, so notes that share a name are easy to tell apart. A long folder keeps its end in view.'
+      },
+      {
+        title: 'Links in table cells',
+        body: 'Type [[ in a table cell in Edit mode and the same note picker as in a paragraph opens: arrows or Ctrl+N and Ctrl+P to move, Enter to insert, | to add display text.'
+      },
+      {
+        title: 'Deep notes keep their title',
+        body: 'In a narrow pane, a note several folders deep now gives up its outer folders before its title, and renaming it shows the whole name from the start.'
+      }
+    ]
+  },
+  {
+    version: '2.74.0',
+    highlights: [
+      {
+        title: 'Every record, ready to link',
+        body: 'Choose Create pages for all records in a database’s ⋯ menu, or press O in the grid with Vim on, to give every record its page at once, so each one can be linked. A page file already in the folder is linked, not copied.'
+      },
+      {
+        title: 'Next and previous tab',
+        body: 'Ctrl+PageDown and Ctrl+PageUp (Cmd+Option+Right and Left on macOS) step through your open tabs, with Vim on or off. Next Tab and Previous Tab are in the command palette too.'
+      },
+      {
+        title: 'Plan days ahead',
+        body: 'Follow a link like [[2026-11-03]] to a day with no note and it becomes that day’s daily note, from your template. Hover a day in the calendar to read its note without opening it.'
+      }
+    ]
+  },
+  {
     version: '2.73.0',
     highlights: [
       {

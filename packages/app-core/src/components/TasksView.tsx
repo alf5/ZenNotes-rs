@@ -1,27 +1,49 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { isTasksViewActive, useStore, type KanbanCardSort, type TasksViewMode } from '../store'
+import { isTasksViewActive, useStore, type KanbanCardSort, type TasksListOrder, type TasksViewMode } from '../store'
 import { filterTasksForDisplay, inferDailyTaskDueDates, type VaultTask } from '@shared/tasks'
 import { buildDailyNoteDateByPath } from '../lib/vault-layout'
-import { computeTasksRender, filterTasks, isOverdue } from '../lib/tasks-filter'
+import { computeTasksRender, filterTasks, isOverdue, noteTagsByPath } from '../lib/tasks-filter'
 import { forwardTaskWithPicker } from '../lib/forward-task'
 import { TasksRow } from './TasksRow'
 import { TasksCalendar } from './TasksCalendar'
 import { TasksKanban } from './TasksKanban'
 import { CalendarIcon, CheckSquareIcon, KanbanIcon, ListIcon } from './icons'
-import { advanceSequence, getKeymapBinding, matchesSequenceToken } from '../lib/keymaps'
+import { advanceSequence, getKeymapBinding, matchesSequenceToken, type KeymapId } from '../lib/keymaps'
+import {
+  listViewBindingMatches,
+  listViewKey,
+  listViewSequencesLive,
+  listViewYieldsKey
+} from '../lib/list-view-keys'
 import { ContextMenu, type ContextMenuItem } from './ContextMenu'
-import { buildTaskMenuItems } from '../lib/task-context-menu'
+import { buildTaskMenuItems, chooseTaskDueDate } from '../lib/task-context-menu'
 import { isImeComposing } from '../lib/ime'
 import { isOverlayOrDialogOpen } from '../lib/overlay-open'
 import { promptApp } from '../lib/prompt-requests'
 import { useToastStore } from '../lib/toast'
 import { findSavedTaskFilterName, savedTaskFilterNameForQuery } from '../lib/saved-task-filters'
 
-type GroupKey = 'today' | 'upcoming' | 'waiting' | 'forwarded' | 'done' | 'cancelled'
+// Every action this view answers, so a chord bound to one reaches it.
+const TASKS_VIEW_ACTIONS: readonly KeymapId[] = [
+  'nav.filter',
+  'tasks.savedFilters',
+  'nav.localEx',
+  'nav.moveDown',
+  'nav.moveUp',
+  'tasks.moveTaskUp',
+  'tasks.moveTaskDown',
+  'nav.jumpBottom',
+  'nav.jumpTop',
+  'nav.openResult',
+  'nav.toggleTask'
+]
+
+type GroupKey = 'today' | 'upcoming' | 'undated' | 'waiting' | 'forwarded' | 'done' | 'cancelled'
 
 const GROUP_LABELS: Record<GroupKey, string> = {
   today: 'Today',
   upcoming: 'Upcoming',
+  undated: 'No due date',
   waiting: 'Waiting',
   forwarded: 'Forwarded',
   done: 'Done',
@@ -87,9 +109,16 @@ export function TasksView(): JSX.Element {
   // the calendar takes this pre-filtered list, and the Kanban receives the raw
   // query so it can narrow cards without losing the full board (its group-by
   // options and card-order persistence must keep seeing every task).
-  const filteredTasks = useMemo(() => filterTasks(tasks, filter), [tasks, filter])
+  // A file task also matches the tags written in its note's body (#1008).
+  const noteTags = useMemo(() => noteTagsByPath(notes), [notes])
+  const filteredTasks = useMemo(
+    () => filterTasks(tasks, filter, noteTags),
+    [tasks, filter, noteTags]
+  )
   const keymapOverrides = useStore((s) => s.keymapOverrides)
   const vimMode = useStore((s) => s.vimMode)
+  const listOrder = useStore((s) => s.tasksListOrder)
+  const setTasksListOrder = useStore((s) => s.setTasksListOrder)
   const viewMode = useStore((s) => s.tasksViewMode)
   const setViewMode = useStore((s) => s.setTasksViewMode)
   // Only the Tasks panel in the *active* pane should listen for j/k/etc.
@@ -102,6 +131,7 @@ export function TasksView(): JSX.Element {
   const [collapsed, setCollapsed] = useState<Record<GroupKey, boolean>>({
     today: false,
     upcoming: false,
+    undated: false,
     waiting: false,
     forwarded: true,
     done: true,
@@ -137,14 +167,16 @@ export function TasksView(): JSX.Element {
 
   const render = useMemo(() => {
     const linger = lingerRef.current
-    if (linger.size === 0) return computeTasksRender(tasks, filter, today, collapsed)
+    if (linger.size === 0) {
+      return computeTasksRender(tasks, filter, today, collapsed, listOrder, noteTags)
+    }
     // Group lingering tasks by their PRE-toggle checked state so a just-checked
     // task stays in its current group instead of jumping straight to Done.
     const source = tasks.map((t) => {
       const l = linger.get(t.id)
       return l ? { ...t, checked: l.groupChecked } : t
     })
-    const r = computeTasksRender(source, filter, today, collapsed)
+    const r = computeTasksRender(source, filter, today, collapsed, listOrder, noteTags)
     // Render the real task so the checkbox reflects the actual (new) state while
     // the row lingers in place.
     const byId = new Map(tasks.map((t) => [t.id, t]))
@@ -153,7 +185,7 @@ export function TasksView(): JSX.Element {
     )
     return { ...r, rows }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tasks, filter, today, collapsed, lingerVersion])
+  }, [tasks, filter, today, collapsed, lingerVersion, listOrder, noteTags])
 
   // Index-into-rows map for just the 'task' rows (what the cursor navigates).
   const taskRowIndices = useMemo(() => {
@@ -373,9 +405,22 @@ export function TasksView(): JSX.Element {
   // the same note — this rewrites the note's markdown line order, the single
   // source of truth. No-op at a group edge or a note boundary (can't move a
   // task line into a different file).
+  // Reordering moves lines in the note, which only means something while the
+  // list shows the notes' line order; by priority it would seem to do nothing.
+  const reorderBlockedByPriority = useCallback((): boolean => {
+    if (listOrder !== 'priority') return false
+    toast(
+      vimMode
+        ? 'Reordering works in Note order. Press s to switch.'
+        : 'Reordering works in Note order. Switch Order to Note order.'
+    )
+    return true
+  }, [listOrder, vimMode, toast])
+
   const moveSelectedTask = useCallback(
     (delta: -1 | 1) => {
       if (viewMode !== 'list' || !currentTask) return
+      if (reorderBlockedByPriority()) return
       const row = render.rows[currentRowIdx]
       if (!row || row.kind !== 'task') return
       const list = render.groups[row.group]
@@ -385,7 +430,7 @@ export function TasksView(): JSX.Element {
       followTaskRef.current = taskFollowKey(currentTask)
       void reorderTaskInNote(currentTask, neighbor, delta < 0 ? 'before' : 'after')
     },
-    [viewMode, currentTask, currentRowIdx, render.rows, render.groups, reorderTaskInNote]
+    [viewMode, currentTask, currentRowIdx, render.rows, render.groups, reorderTaskInNote, reorderBlockedByPriority]
   )
 
   // Drag-to-reorder: only within the same note (a task line can't move between
@@ -393,7 +438,7 @@ export function TasksView(): JSX.Element {
   const reorderTaskByDrag = useCallback(
     (draggedId: string, targetId: string, position: 'before' | 'after') => {
       if (draggedId === targetId) return
-      const keys: GroupKey[] = ['today', 'upcoming', 'waiting', 'done']
+      const keys: GroupKey[] = ['today', 'upcoming', 'undated', 'waiting', 'done']
       for (const group of keys) {
         const list = render.groups[group]
         const dragged = list.find((t) => t.id === draggedId)
@@ -453,11 +498,25 @@ export function TasksView(): JSX.Element {
       }
       // `:order due` sorts every Kanban column by due date, `:order manual`
       // brings back the dragged arrangement, and bare `:order` switches
-      // between the two, like `s` on the board. (#889)
+      // between the two, like `s` on the board. (#889) `:order priority` and
+      // `:order note` set the list's order instead, and bare `:order` in the
+      // list switches that one, like `s` there. (#989)
       if (head === 'order') {
         const wanted = arg.toLowerCase()
-        if (wanted && wanted !== 'due' && wanted !== 'manual') {
-          toast('Usage: :order due | manual')
+        if (wanted && !['due', 'manual', 'priority', 'note'].includes(wanted)) {
+          toast('Usage: :order due | manual | priority | note')
+          return
+        }
+        if (wanted === 'priority' || wanted === 'note' || (!wanted && viewMode === 'list')) {
+          const store = useStore.getState()
+          const next: TasksListOrder = wanted
+            ? (wanted as TasksListOrder)
+            : store.tasksListOrder === 'priority'
+              ? 'note'
+              : 'priority'
+          store.setTasksListOrder(next)
+          setViewMode('list')
+          toast(next === 'priority' ? 'Tasks ordered by priority' : 'Tasks in their notes’ order')
           return
         }
         const store = useStore.getState()
@@ -562,7 +621,8 @@ export function TasksView(): JSX.Element {
       saveCurrentFilter,
       deleteSavedTaskFilter,
       savedFilters,
-      toast
+      toast,
+      viewMode
     ]
   )
 
@@ -602,14 +662,16 @@ export function TasksView(): JSX.Element {
         const tag = active.tagName
         if (tag === 'INPUT' || tag === 'TEXTAREA' || active.isContentEditable) return
       }
-      if (e.metaKey || e.ctrlKey || e.altKey) return
-
-      const key = e.key
       const overrides = keymapOverrides
+      // A chord gets through only as the key of one of this view's actions,
+      // and never past a global shortcut (#972, lib/list-view-keys.ts).
+      if (listViewYieldsKey(e, overrides, TASKS_VIEW_ACTIONS, vimMode)) return
+
+      const key = listViewKey(e)
       // When Vim mode is off, the single-key Vim shortcuts (j/k/gg/G/o/Space/1-3/…)
-      // are disabled — only arrows/Enter/Escape navigate. (songgenqing report)
-      const seq = (id: Parameters<typeof matchesSequenceToken>[2]): boolean =>
-        vimMode && matchesSequenceToken(e, overrides, id)
+      // are disabled: only arrows/Enter/Escape navigate, plus any action the
+      // user bound to a chord. (songgenqing report)
+      const seq = (id: KeymapId): boolean => listViewBindingMatches(e, overrides, id, vimMode)
       const consume = (): void => {
         e.preventDefault()
         e.stopImmediatePropagation()
@@ -676,6 +738,15 @@ export function TasksView(): JSX.Element {
       // List-mode-only navigation. Calendar and Kanban have their own.
       if (viewMode !== 'list') return
 
+      // The list's Order (#989), like `s` for the board's card order.
+      if (vimMode && key === 's') {
+        consume()
+        const next: TasksListOrder = listOrder === 'priority' ? 'note' : 'priority'
+        setTasksListOrder(next)
+        toast(next === 'priority' ? 'Tasks ordered by priority' : 'Tasks in their notes’ order')
+        return
+      }
+
       if (seq('nav.moveDown') || key === 'ArrowDown') {
         consume()
         moveCursor(1)
@@ -705,7 +776,7 @@ export function TasksView(): JSX.Element {
         return
       }
       if (
-        vimMode &&
+        listViewSequencesLive(e, vimMode) &&
         advanceSequence(
           e,
           getKeymapBinding(overrides, 'nav.jumpTop'),
@@ -748,6 +819,12 @@ export function TasksView(): JSX.Element {
         void startTaskFromList(currentTask)
         return
       }
+      // Any due date from the calendar `@date` opens (#991). Vim-gated single key.
+      if (vimMode && key === '@' && currentTask) {
+        consume()
+        void chooseTaskDueDate(currentTask)
+        return
+      }
     }
     window.addEventListener('keydown', handler, true)
     return () => window.removeEventListener('keydown', handler, true)
@@ -770,7 +847,10 @@ export function TasksView(): JSX.Element {
     viewMode,
     setViewMode,
     newTaskFile,
-    pickSavedFilter
+    pickSavedFilter,
+    listOrder,
+    setTasksListOrder,
+    toast
   ])
 
   return (
@@ -922,6 +1002,26 @@ export function TasksView(): JSX.Element {
       )}
 
       {viewMode === 'list' && (
+        <div className="flex items-center justify-end gap-2 border-b border-paper-300/45 px-4 py-1 text-xs text-current/60">
+          <span>Order</span>
+          <select
+            data-tasks-list-order
+            value={listOrder}
+            onChange={(e) => setTasksListOrder(e.target.value as TasksListOrder)}
+            title={
+              listOrder === 'priority'
+                ? `Each group puts high priority first, then medium, low, and none; ties follow the due date. Note order brings back the notes' line order${vimMode ? ' (s)' : ''}.`
+                : `Each group follows its notes' line order, which J/K rearrange. Priority puts high priority first${vimMode ? ' (s)' : ''}.`
+            }
+            className="rounded-md border border-paper-300/60 bg-paper-200/60 px-2 py-0.5 text-xs text-current/85 outline-none focus:border-paper-400/70"
+          >
+            <option value="note">Note order</option>
+            <option value="priority">Priority</option>
+          </select>
+        </div>
+      )}
+
+      {viewMode === 'list' && (
         <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
           {render.rows.length === 0 && !loading && (
             <div className="px-6 py-10 text-center text-sm text-current/50">
@@ -965,7 +1065,7 @@ export function TasksView(): JSX.Element {
                   const ti = taskRowIndices.indexOf(idx)
                   if (ti >= 0) setCursorIndex(ti)
                 }}
-                onReorder={reorderTaskByDrag}
+                onReorder={listOrder === 'note' ? reorderTaskByDrag : undefined}
                 onContextMenu={openTaskMenu}
                 toggleKeyLabel={toggleKeyLabel}
                 vimMode={vimMode}
@@ -994,6 +1094,7 @@ export function TasksView(): JSX.Element {
         <TasksKanban
           tasks={tasks}
           filter={filter}
+          noteTags={noteTags}
           today={today}
           onOpenTask={(task) => void openTaskAt(task)}
           onToggleTask={(task) => void toggleTaskFromList(task)}
@@ -1040,14 +1141,14 @@ export function TasksView(): JSX.Element {
         <div className="border-t border-paper-300/45 px-4 py-1.5 text-xs text-current/40">
           {viewMode === 'list'
             ? vimMode
-              ? 'j/k move · J/K reorder · Enter/o open · x toggle · i start · c cancel · F saved filters · right-click actions · :q close'
-              : '↑/↓ move · Shift+J/K reorder · Enter open · right-click actions'
+              ? `j/k move · ${listOrder === 'note' ? 'J/K reorder · ' : ''}Enter/o open · x toggle · i start · c cancel · @ due date · s order · F saved filters · right-click actions · :q close`
+              : `↑/↓ move · ${listOrder === 'note' ? 'Shift+J/K reorder · ' : ''}Enter open · right-click actions`
             : viewMode === 'calendar'
               ? vimMode
-                ? 'h/j/k/l day · [ ] month · Tab pick · x toggle · i start · c cancel · F saved filters · drag to move · right-click actions · :q'
+                ? 'h/j/k/l day · [ ] month · Tab pick · x toggle · i start · c cancel · @ due date · F saved filters · drag to move · right-click actions · :q'
                 : '←/→/↑/↓ day · Tab pick · Space toggle · drag to move · right-click actions'
               : vimMode
-                ? 'h/l column · j/k card · x toggle · i start · c cancel · Enter open · s order · F saved filters · right-click actions · :q close'
+                ? 'h/l column · j/k card · x toggle · i start · c cancel · @ due date · Enter open · s order · F saved filters · right-click actions · :q close'
                 : '←/→ column · ↑/↓ card · Space toggle · Enter open · right-click actions'}
         </div>
       )}

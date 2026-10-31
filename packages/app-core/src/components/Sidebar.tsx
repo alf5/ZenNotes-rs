@@ -25,6 +25,7 @@ import {
 } from "../store";
 import { Button } from "./ui/Button";
 import { buildMoveNotePrompt, moveNoteVocabulary, parseMoveNoteTarget } from "../lib/move-note";
+import { assetMoveTargetDir, buildMoveAssetPrompt } from "../lib/move-asset";
 import { buildTagTree, extractTags, flattenTagTree } from "../lib/tags";
 import { isTypstPreamblePath, resolveTypstPreambleFolder } from "../lib/typst-preamble";
 import { focusEditorNormalMode } from "../lib/editor-focus";
@@ -42,6 +43,7 @@ import {
   CheckSquareIcon,
   CloseIcon,
   DatabaseIcon,
+  GalleryIcon,
   DocumentIcon,
   ExcalidrawIcon,
   ExpandAllIcon,
@@ -132,8 +134,19 @@ import {
 import {
   getScrollTopForPreservedSidebarAnchor,
   isRecentSidebarPointerInteraction,
+  sidebarSelectionChanged,
 } from "../lib/sidebar-scroll";
+import {
+  anchorSidebarCursor,
+  findSidebarCursorRow,
+  sidebarCursorFallbackInDom,
+  type SidebarCursorAnchor,
+} from "../lib/sidebar-cursor";
 import { buildVaultSwitcherEntries } from "../lib/vault-switcher";
+import {
+  registerSidebarActionHost,
+  type SidebarSelectionSnapshot,
+} from "../lib/sidebar-note-actions";
 import { appUpdateBadgeLabel, useAppUpdateState } from "../lib/app-update-state";
 import { getISOWeekYear } from "../lib/template-render";
 import { requestPublishNote } from "../lib/publish-note-requests";
@@ -330,6 +343,18 @@ function noteSelectionKey(path: string): string {
   return `note:${encodeURIComponent(path)}`;
 }
 
+/**
+ * A row in the multi-selection keeps the selection's tint, and when the
+ * cursor is on it too, the cursor's ring is drawn over that tint. The tint
+ * used to replace the cursor's style outright, so a cursor walking through a
+ * selection vanished on every selected row, and the trash keys acted on a
+ * row you could not see. The note list draws its cursor on a selected row
+ * the same way; a background of the cursor's own would only fight the tint.
+ */
+export function sidebarSelectedRowClass(cursorHere: boolean | undefined): string {
+  return `${cursorHere ? "vim-cursor-on-selected " : ""}bg-accent/[0.09] text-ink-900`;
+}
+
 function folderSelectionKey(folder: NoteFolder, subpath: string): string {
   return `folder:${folder}:${encodeURIComponent(subpath)}`;
 }
@@ -479,6 +504,7 @@ export function Sidebar(): JSX.Element {
   const openHelpView = useStore((s) => s.openHelpView);
   const helpViewActive = useStore(isHelpViewActive);
   const openArchiveView = useStore((s) => s.openArchiveView);
+  const openFolderGallery = useStore((s) => s.openFolderGallery);
   const archiveViewActive = useStore(isArchiveViewActive);
   const openTrashView = useStore((s) => s.openTrashView);
   const trashViewActive = useStore(isTrashViewActive);
@@ -701,6 +727,13 @@ export function Sidebar(): JSX.Element {
   const selectedSidebarCountRef = useRef(selectedSidebarCount);
   const sidebarScrollRef = useRef<HTMLDivElement | null>(null);
   const lastSidebarPointerAtRef = useRef(0);
+  // What the reveal effect below last put the Vim cursor on, and the last
+  // note that was selected; see that effect.
+  const revealedSelectionRef = useRef<readonly unknown[] | null>(null);
+  const lastSelectedNoteRef = useRef<string | null>(null);
+  // Which row the Vim cursor's number named; see the layout effect that
+  // keeps the number on it.
+  const sidebarCursorAnchorRef = useRef<SidebarCursorAnchor | null>(null);
   const pendingSidebarScrollAnchorRef = useRef<{
     selector: string;
     top: number;
@@ -716,6 +749,54 @@ export function Sidebar(): JSX.Element {
     selectedSidebarItemsRef.current = selectedSidebarItems;
     selectedSidebarCountRef.current = selectedSidebarCount;
   }, [selectedSidebarCount, selectedSidebarItems, selectedSidebarKeys]);
+
+  // The keyboard's trash and archive (#972) act on this selection from
+  // outside the component (VimNav, the palette): hand them a snapshot of it,
+  // a way to clear it after a batch, and a hold on the cursor while they run.
+  const sidebarSelectionForActionsRef = useRef({
+    count: selectedSidebarCount,
+    notes: selectedNoteMetas,
+    actionNotes: selectedNoteMetasForAction,
+    folderCount: selectedFolderItems.length,
+  });
+  sidebarSelectionForActionsRef.current = {
+    count: selectedSidebarCount,
+    notes: selectedNoteMetas,
+    actionNotes: selectedNoteMetasForAction,
+    folderCount: selectedFolderItems.length,
+  };
+  const sidebarCursorHoldsRef = useRef(0);
+  useEffect(
+    () =>
+      registerSidebarActionHost({
+        selection: (): SidebarSelectionSnapshot => {
+          const current = sidebarSelectionForActionsRef.current;
+          return {
+            count: current.count,
+            notePaths: new Set(current.notes.map((note) => note.path)),
+            actionNotePaths: current.actionNotes.map((note) => note.path),
+            folderCount: current.folderCount,
+          };
+        },
+        clearSelection: () => {
+          setSelectedSidebarKeys(new Set());
+          setSelectionAnchorKey(null);
+        },
+        holdCursor: async (run) => {
+          sidebarCursorHoldsRef.current += 1;
+          try {
+            return await run();
+          } finally {
+            // The last store write of the action can commit after the
+            // promise settles; release once that render has run.
+            window.setTimeout(() => {
+              sidebarCursorHoldsRef.current -= 1;
+            }, 0);
+          }
+        },
+      }),
+    [],
+  );
 
   const captureSidebarScrollAnchor = useCallback((target: EventTarget | null): void => {
     const scroller = sidebarScrollRef.current;
@@ -1890,6 +1971,17 @@ export function Sidebar(): JSX.Element {
         },
       });
     }
+    // The folder's notes as cards, led by their covers. A database's record
+    // pages have its own grid, so a `.base` folder has no Gallery.
+    if (!isFormDirName(subpath.split("/").slice(-1)[0])) {
+      items.push({
+        label: "Open as Gallery",
+        icon: <GalleryIcon />,
+        onSelect: async () => {
+          await openFolderGallery(folder, subpath);
+        },
+      });
+    }
     // Quick Notes is a flat folder — no nested subfolders allowed.
     if (folder !== "quick") {
       items.push({
@@ -2098,6 +2190,7 @@ export function Sidebar(): JSX.Element {
     openTemplatePaletteForFolder,
     openArchiveView,
     openQuickNotesView,
+    openFolderGallery,
     createFolderAction,
     renameFolderAction,
     deleteFolderAction,
@@ -2476,23 +2569,10 @@ export function Sidebar(): JSX.Element {
       items.push({
         label: "Move…",
         onSelect: async () => {
-          const target = await promptApp({
-            title: "Move asset",
-            description: "Enter a vault-relative folder path. Leave empty to move to the vault root.",
-            initialValue: currentDir,
-            placeholder: "media/screenshots",
-            okLabel: "Move",
-            allowEmptySubmit: true,
-            validate: (value) => {
-              const clean = value.trim();
-              if (clean.includes("..")) return "Path cannot contain ..";
-              if (clean.split("/").includes(".zennotes")) {
-                return "Cannot move assets into internal ZenNotes files";
-              }
-              return null;
-            },
-          });
-          if (target === null || target === currentDir) return;
+          const value = await promptApp(buildMoveAssetPrompt(currentDir));
+          if (value === null) return;
+          const target = assetMoveTargetDir(value);
+          if (target === currentDir) return;
           await moveAsset(asset.path, target);
         },
       });
@@ -2808,9 +2888,92 @@ export function Sidebar(): JSX.Element {
     }
   };
 
-  useEffect(() => {
+  // The Vim cursor is a row number, and every render hands the numbers out
+  // again in render order, which puts a folder's notes before the subfolders
+  // it shows above them. A listing change above the cursor (a note written
+  // from outside the app, a sync) renumbers its row, and the cursor used to
+  // stay on the number and so land on another row. Note which row the number
+  // named whenever it changes, while the rows it was read from are still in
+  // the DOM, and put the number back on that row after each render.
+  useEffect(
+    () =>
+      useStore.subscribe((state, previous) => {
+        if (state.sidebarCursorIndex === previous.sidebarCursorIndex) return;
+        sidebarCursorAnchorRef.current = anchorSidebarCursor(
+          document,
+          state.sidebarCursorIndex,
+        );
+      }),
+    [],
+  );
+  useLayoutEffect(() => {
+    // Unfocused, the cursor is not drawn, and focusing the sidebar lands on
+    // the current item anyway (the reveal effect below).
     if (!isSidebarFocused) return;
+    const { sidebarCursorIndex: index, setSidebarCursorIndex } =
+      useStore.getState();
+    const anchor = sidebarCursorAnchorRef.current;
+    if (anchor?.index !== index) {
+      sidebarCursorAnchorRef.current = anchorSidebarCursor(document, index);
+      return;
+    }
+    // Moving the number re-anchors through the subscription above.
+    const found = findSidebarCursorRow(document, anchor);
+    if (found !== null) {
+      if (found !== index) setSidebarCursorIndex(found);
+      return;
+    }
+    // The row is gone (deleted, moved, renamed elsewhere): the cursor goes to
+    // the row that took its place, or the one before it at a folder's end.
+    const neighbor = sidebarCursorFallbackInDom(document, anchor);
+    if (neighbor === null) return;
+    if (neighbor !== index) setSidebarCursorIndex(neighbor);
+    // Already on it: anchor it, or every render would look for the gone row.
+    else sidebarCursorAnchorRef.current = anchorSidebarCursor(document, index);
+  });
 
+  useEffect(() => {
+    // Follow a new selection, never a re-run for the same one. Selecting a
+    // folder clears selectedPath, and almost any store update after it (the
+    // first expand's note prefetch landing, a listing refresh) sets it back
+    // to the open tab. That is the same note coming back, not a new pick, so
+    // the last note counts through the gap; and a refresh that leaves the
+    // selection alone is no reason to move. Both used to drag the cursor off
+    // the row Vim keys had moved it to and onto the open note. (#993)
+    // The note is remembered while the sidebar is unfocused too: a folder
+    // clicked before the keys moved in opens the gap before this effect
+    // would otherwise see the note, and the first refresh then read as a pick.
+    if (selectedPath) lastSelectedNoteRef.current = selectedPath;
+    if (!isSidebarFocused) {
+      // Coming back into the sidebar always lands on the current item.
+      revealedSelectionRef.current = null;
+      return;
+    }
+
+    const selection = [
+      lastSelectedNoteRef.current,
+      view,
+      tagsViewActive,
+      selectedTags,
+      trashViewActive,
+      archiveViewActive,
+      quickNotesViewActive,
+    ];
+    if (!sidebarSelectionChanged(revealedSelectionRef.current, selection)) {
+      return;
+    }
+    // A note trashed or archived from the sidebar closes its tab, and the
+    // open note becomes the next tab's: a side effect, not a pick. The cursor
+    // stays where the anchoring put it, on the row that took the gone row's
+    // place, instead of jumping to that other note. (#972)
+    if (sidebarCursorHoldsRef.current > 0) {
+      revealedSelectionRef.current = selection;
+      return;
+    }
+
+    // Read live: the layout effect above may have moved the cursor in this
+    // very commit, after this render captured sidebarCursorIndex.
+    const cursorIndex = useStore.getState().sidebarCursorIndex;
     const findTarget = (): HTMLElement | null => {
       if (
         isRecentSidebarPointerInteraction(
@@ -2819,7 +2982,7 @@ export function Sidebar(): JSX.Element {
         )
       ) {
         const cursorEl = document.querySelector<HTMLElement>(
-          `[data-sidebar-idx="${sidebarCursorIndex}"]`,
+          `[data-sidebar-idx="${cursorIndex}"]`,
         );
         if (cursorEl) return cursorEl;
       }
@@ -2912,11 +3075,13 @@ export function Sidebar(): JSX.Element {
       return null;
     };
 
+    // No row yet (the listing is still loading): the next run tries again.
     const target = findTarget();
     if (!target) return;
+    revealedSelectionRef.current = selection;
 
     const idx = Number(target.dataset.sidebarIdx);
-    if (Number.isFinite(idx) && idx !== sidebarCursorIndex) {
+    if (Number.isFinite(idx) && idx !== cursorIndex) {
       useStore.getState().setSidebarCursorIndex(idx);
     }
 
@@ -3362,7 +3527,7 @@ export function Sidebar(): JSX.Element {
                   const title = resolveQuickNoteTitle(
                     notes,
                     quickNoteDateTitle,
-                    quickNoteTitlePrefix ?? undefined,
+                    quickNoteTitlePrefix,
                   );
                   void createAndOpen("quick", "", { title, focusTitle: true });
                 }}
@@ -5179,7 +5344,7 @@ const NoteLeaf = memo(function NoteLeaf({
                 ? "text-accent"
                 : "bg-paper-300/70 text-ink-900 font-medium"
           : selected
-            ? "bg-accent/[0.09] text-ink-900"
+            ? sidebarSelectedRowClass(vimHighlight)
             : vimHighlight
               ? "vim-cursor"
               : "text-ink-700 hover:bg-paper-200/70",
@@ -5504,7 +5669,7 @@ function TreeRow({
           : dropTarget
             ? "bg-accent/20 text-ink-900 ring-1 ring-accent/60"
             : selected
-              ? "bg-accent/[0.09] text-ink-900"
+              ? sidebarSelectedRowClass(vimHighlight)
             : vimHighlight
               ? "vim-cursor"
               : "text-ink-800 hover:bg-paper-200/70",

@@ -2,7 +2,7 @@
 
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
 import { forceParsing } from '@codemirror/language'
-import { EditorState } from '@codemirror/state'
+import { Compartment, EditorState } from '@codemirror/state'
 import { EditorView } from '@codemirror/view'
 import { describe, expect, it } from 'vitest'
 import { taskMetadataExtension } from './cm-task-metadata'
@@ -17,10 +17,11 @@ function mount(doc: string): EditorView {
       extensions: [markdown({ base: markdownLanguage }), taskMetadataExtension]
     })
   })
+  // The plugin redraws whenever the syntax tree changes, so finishing the parse
+  // is all a mount needs. Nothing edits the note after it: a note this short
+  // parses from scratch on every edit, under the same 20 ms budget, and a cut
+  // parse can stop before the code fence.
   forceParsing(view, doc.length, 5000)
-  // nudge the doc so the plugin rebuilds against a fully-parsed tree
-  view.dispatch({ changes: { from: doc.length, insert: ' ' } })
-  view.dispatch({ changes: { from: doc.length, to: doc.length + 1 } })
   return view
 }
 const classesOn = (view: EditorView, sel: string) =>
@@ -72,5 +73,27 @@ describe('cm-task-metadata (#454)', () => {
     expect(classesOn(view, '.cm-task-prio-high')).toEqual([])
     expect(classesOn(view, '.cm-task-prio-low')).toEqual(['!low'])
     view.destroy()
+  })
+
+  it('redraws when only the syntax tree changes, as when a cut parse finishes', () => {
+    // Swapping the language in changes the tree and nothing else: no edit, no
+    // selection, no viewport. A parse that finishes after its time budget ran
+    // out reaches the plugin the same way.
+    const language = new Compartment()
+    const doc = '```md\n- [ ] Example !high\n```\n\n- [ ] Real !low'
+    const parent = document.createElement('div')
+    document.body.append(parent)
+    const view = new EditorView({
+      parent,
+      state: EditorState.create({ doc, extensions: [language.of([]), taskMetadataExtension] })
+    })
+    // No tree yet, so nothing says the fence is code.
+    expect(classesOn(view, '.cm-task-prio-high')).toEqual(['!high'])
+    view.dispatch({ effects: language.reconfigure(markdown({ base: markdownLanguage })) })
+    forceParsing(view, doc.length, 5000)
+    expect(classesOn(view, '.cm-task-prio-high')).toEqual([])
+    expect(classesOn(view, '.cm-task-prio-low')).toEqual(['!low'])
+    view.destroy()
+    parent.remove()
   })
 })

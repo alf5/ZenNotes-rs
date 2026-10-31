@@ -1,14 +1,42 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { isTagsViewActive, useStore } from '../store'
 import type { NoteMeta } from '@shared/ipc'
+import type { TagBlock } from '@shared/tag-blocks'
 import { buildTagTree, flattenTagTree, matchesSelectedTags, noteTagsForCount } from '../lib/tags'
+import { openTaggedBlock, useTagBlockIndex } from '../lib/tag-block-index'
+import {
+  buildTagViewRows,
+  nextNoteRowIndex,
+  previousNoteRowIndex,
+  type TagViewRow
+} from '../lib/tag-view-rows'
 import { resolveTypstPreambleFolder } from '../lib/typst-preamble'
 import { TagIcon, CloseIcon, DocumentIcon } from './icons'
 import { ContextMenu, type ContextMenuItem } from './ContextMenu'
-import { advanceSequence, getKeymapBinding, matchesSequenceToken } from '../lib/keymaps'
+import { TaggedBlockText } from './TaggedBlockText'
+import { advanceSequence, getKeymapBinding, type KeymapId } from '../lib/keymaps'
+import {
+  listViewBindingMatches,
+  listViewKey,
+  listViewSequencesLive,
+  listViewYieldsKey
+} from '../lib/list-view-keys'
 import { isPrimaryNotesAtRoot, noteFolderSubpath } from '../lib/vault-layout'
 import { isImeComposing } from '../lib/ime'
 import { isAppOverlayOpen } from '../lib/overlay-open'
+
+// Every action this view answers, so a chord bound to one reaches it.
+const TAG_VIEW_ACTIONS: readonly KeymapId[] = [
+  'nav.filter',
+  'nav.localEx',
+  'nav.moveDown',
+  'nav.moveUp',
+  'nav.jumpBottom',
+  'tags.nextNote',
+  'tags.previousNote',
+  'nav.jumpTop',
+  'nav.openResult'
+]
 
 function formatDate(ms: number): string {
   const d = new Date(ms)
@@ -51,13 +79,28 @@ export function TagView(): JSX.Element {
   const amActive = useStore(isTagsViewActive)
 
   const [filter, setFilter] = useState('')
-  const [cursorIndex, setCursorIndex] = useState(0)
+  // The cursor follows a row's key, not its position: block rows fill in
+  // under notes as their bodies are read, and the selected row must not
+  // drift while they do. `index` is the fallback when the key leaves the list.
+  const [cursor, setCursor] = useState<{ key: string | null; index: number }>({
+    key: null,
+    index: 0
+  })
   const [exOpen, setExOpen] = useState(false)
   const [exValue, setExValue] = useState('')
   // Right-click menu for a selected tag chip (deselect / keep only / clear). (#356)
   const [tagMenu, setTagMenu] = useState<{ x: number; y: number; tag: string } | null>(null)
 
   const filterRef = useRef<HTMLInputElement>(null)
+
+  // A "+N more" row in Search notes opens this view with its free text as the
+  // filter, so the list shows the blocks that row stood for.
+  const filterSeed = useStore((s) => s.tagViewFilterSeed)
+  useEffect(() => {
+    if (filterSeed === null) return
+    setFilter(filterSeed)
+    useStore.setState({ tagViewFilterSeed: null })
+  }, [filterSeed])
   const exRef = useRef<HTMLInputElement>(null)
   const rootRef = useRef<HTMLDivElement>(null)
   const gPending = useRef(0)
@@ -100,47 +143,76 @@ export function TagView(): JSX.Element {
       .sort((a, b) => b.updatedAt - a.updatedAt)
   }, [notes, activeNote, selectedTags, tagMatchMode, preambleFolder])
 
-  const filtered = useMemo(() => {
-    const q = filter.trim().toLowerCase()
-    if (!q) return matching
-    return matching.filter(
-      (n) =>
-        n.title.toLowerCase().includes(q) ||
-        n.excerpt.toLowerCase().includes(q) ||
-        n.path.toLowerCase().includes(q)
-    )
-  }, [matching, filter])
+  // Block-level results (#837): the blocks inside each matching note that
+  // carry a selected tag, read on demand for the listed notes only.
+  const tagBlocks = useTagBlockIndex(matching)
+  const { rows, blockCount } = useMemo(
+    () => buildTagViewRows(matching, tagBlocks.blocksByPath, selectedTags, filter),
+    [matching, tagBlocks.blocksByPath, selectedTags, filter]
+  )
+  const matchingBlockCount = useMemo(
+    () =>
+      filter.trim()
+        ? buildTagViewRows(matching, tagBlocks.blocksByPath, selectedTags, '').blockCount
+        : blockCount,
+    [filter, matching, tagBlocks.blocksByPath, selectedTags, blockCount]
+  )
 
-  const safeCursor = Math.min(cursorIndex, Math.max(0, filtered.length - 1))
-  const current = filtered[safeCursor]
+  const cursorIndex = useMemo(() => {
+    if (rows.length === 0) return 0
+    if (cursor.key !== null) {
+      const at = rows.findIndex((row) => row.key === cursor.key)
+      if (at >= 0) return at
+    }
+    return Math.min(cursor.index, rows.length - 1)
+  }, [rows, cursor])
+  const current: TagViewRow | undefined = rows[cursorIndex]
 
-  useEffect(() => {
-    if (safeCursor !== cursorIndex) setCursorIndex(safeCursor)
-  }, [safeCursor, cursorIndex])
+  const moveTo = useCallback(
+    (index: number) => {
+      const row = rows[index]
+      if (row) setCursor({ key: row.key, index })
+    },
+    [rows]
+  )
 
   useEffect(() => {
     if (!current) return
     const el = rootRef.current?.querySelector<HTMLElement>(
-      `[data-tag-row="${cssEscape(current.path)}"]`
+      `[data-tag-view-index="${cursorIndex}"]`
     )
     if (el) el.scrollIntoView({ block: 'nearest' })
-  }, [current])
+  }, [current, cursorIndex])
 
-  const openCurrent = useCallback(async () => {
-    if (!current) return
-    await selectNote(current.path)
-    useStore.getState().setFocusedPanel('editor')
-    requestAnimationFrame(() => useStore.getState().editorViewRef?.focus())
-  }, [current, selectNote])
+  const openNote = useCallback(
+    async (note: NoteMeta) => {
+      await selectNote(note.path)
+      useStore.getState().setFocusedPanel('editor')
+      requestAnimationFrame(() => useStore.getState().editorViewRef?.focus())
+    },
+    [selectNote]
+  )
+
+  const openBlock = useCallback(async (note: NoteMeta, block: TagBlock) => {
+    if (await openTaggedBlock(note.path, block.startLine)) {
+      requestAnimationFrame(() => useStore.getState().editorViewRef?.focus())
+    }
+  }, [])
+
+  const openRow = useCallback(
+    async (row: TagViewRow) => {
+      if (row.kind === 'block') await openBlock(row.note, row.block)
+      else await openNote(row.note)
+    },
+    [openBlock, openNote]
+  )
 
   const moveCursor = useCallback(
     (delta: number) => {
-      if (filtered.length === 0) return
-      setCursorIndex((i) =>
-        Math.max(0, Math.min(filtered.length - 1, i + delta))
-      )
+      if (rows.length === 0) return
+      moveTo(Math.max(0, Math.min(rows.length - 1, cursorIndex + delta)))
     },
-    [filtered.length]
+    [rows.length, cursorIndex, moveTo]
   )
 
   const runExCommand = useCallback(
@@ -254,14 +326,16 @@ export function TagView(): JSX.Element {
         const t = focused.tagName
         if (t === 'INPUT' || t === 'TEXTAREA' || focused.isContentEditable) return
       }
-      if (e.metaKey || e.ctrlKey || e.altKey) return
-
-      const k = e.key
       const overrides = keymapOverrides
+      // A chord gets through only as the key of one of this view's actions,
+      // and never past a global shortcut (#972, lib/list-view-keys.ts).
+      if (listViewYieldsKey(e, overrides, TAG_VIEW_ACTIONS, vimMode)) return
+
+      const k = listViewKey(e)
       // When Vim mode is off, the single-key Vim shortcuts (j/k/gg/G/o//…) are
-      // disabled — only arrows/Enter/Escape navigate. (songgenqing report)
-      const seq = (id: Parameters<typeof matchesSequenceToken>[2]): boolean =>
-        vimMode && matchesSequenceToken(e, overrides, id)
+      // disabled: only arrows/Enter/Escape navigate, plus any action the user
+      // bound to a chord. (songgenqing report)
+      const seq = (id: KeymapId): boolean => listViewBindingMatches(e, overrides, id, vimMode)
       const consume = (): void => {
         e.preventDefault()
         e.stopImmediatePropagation()
@@ -300,17 +374,30 @@ export function TagView(): JSX.Element {
       }
       if (seq('nav.jumpBottom')) {
         consume()
-        setCursorIndex(filtered.length - 1)
+        moveTo(rows.length - 1)
+        return
+      }
+      // `}` / `{` hop between notes, past a note's block rows (vim-gated).
+      if (seq('tags.nextNote')) {
+        consume()
+        const next = nextNoteRowIndex(rows, cursorIndex)
+        if (next >= 0) moveTo(next)
+        return
+      }
+      if (seq('tags.previousNote')) {
+        consume()
+        const previous = previousNoteRowIndex(rows, cursorIndex)
+        if (previous >= 0) moveTo(previous)
         return
       }
       if (
-        vimMode &&
+        listViewSequencesLive(e, vimMode) &&
         advanceSequence(
           e,
           getKeymapBinding(overrides, 'nav.jumpTop'),
           gPending,
           gTimer,
-          () => setCursorIndex(0),
+          () => moveTo(0),
           consume,
           500
         )
@@ -332,7 +419,7 @@ export function TagView(): JSX.Element {
       }
       if ((k === 'Enter' || seq('nav.openResult')) && current) {
         consume()
-        void openCurrent()
+        void openRow(current)
       }
     }
     window.addEventListener('keydown', handler, true)
@@ -341,11 +428,13 @@ export function TagView(): JSX.Element {
     amActive,
     filter,
     moveCursor,
-    filtered.length,
+    moveTo,
+    rows,
+    cursorIndex,
     current,
     keymapOverrides,
     vimMode,
-    openCurrent,
+    openRow,
     closeTagView,
     setSelectedTags
   ])
@@ -366,7 +455,12 @@ export function TagView(): JSX.Element {
         <h1 className="text-sm font-semibold">Tags</h1>
         <span className="ml-2 rounded bg-current/10 px-1.5 py-0.5 text-xs text-current/60">
           {matching.length} {matching.length === 1 ? 'note' : 'notes'}
+          {matchingBlockCount > 0 &&
+            ` · ${matchingBlockCount} ${matchingBlockCount === 1 ? 'block' : 'blocks'}`}
         </span>
+        {tagBlocks.pending > 0 && (
+          <span className="text-xs text-current/40">Finding tagged blocks…</span>
+        )}
         <div className="ml-auto flex items-center gap-2">
           {selectedTags.length >= 2 && (
             <div className="flex items-center gap-1" title="How multiple tags combine">
@@ -575,7 +669,7 @@ export function TagView(): JSX.Element {
           <div className="px-6 py-10 text-center text-sm text-current/50">
             Pick one or more tags above to see matching notes.
           </div>
-        ) : filtered.length === 0 ? (
+        ) : rows.length === 0 ? (
           <div className="px-6 py-10 text-center text-sm text-current/50">
             {matching.length === 0
               ? tagMatchMode === 'all' && selectedTags.length >= 2
@@ -584,22 +678,47 @@ export function TagView(): JSX.Element {
               : `No notes match "${filter}".`}
           </div>
         ) : (
-          filtered.map((note, i) => {
-            const isCursor = i === safeCursor
+          rows.map((row, i) => {
+            const isCursor = i === cursorIndex
+            if (row.kind === 'block') {
+              const { note, block } = row
+              return (
+                <button
+                  key={row.key}
+                  type="button"
+                  data-tag-view-index={i}
+                  data-tag-block-row={`${note.path}:${block.startLine + 1}`}
+                  onMouseMove={() => moveTo(i)}
+                  onClick={() => {
+                    moveTo(i)
+                    void openBlock(note, block)
+                  }}
+                  title={`Open ${note.title || 'note'} at line ${block.startLine + 1}`}
+                  className={[
+                    'flex w-full items-start gap-2 rounded-md py-1.5 pl-9 pr-3 text-left transition-colors',
+                    isCursor ? 'vim-cursor' : 'hover:bg-current/5'
+                  ].join(' ')}
+                >
+                  <span className="min-w-0 flex-1 border-l-2 border-paper-300/70 pl-2.5">
+                    <TaggedBlockText block={block} tags={selectedTags} highlight={filter} />
+                  </span>
+                  <span className="shrink-0 pt-0.5 font-mono text-2xs text-current/40">
+                    L{block.startLine + 1}
+                  </span>
+                </button>
+              )
+            }
+            const { note } = row
             return (
               <button
-                key={note.path}
+                key={row.key}
                 type="button"
+                data-tag-view-index={i}
                 data-tag-row={note.path}
-                onMouseMove={() => setCursorIndex(i)}
+                onMouseMove={() => moveTo(i)}
                 onClick={() => {
-                  setCursorIndex(i)
-                  void selectNote(note.path).then(() => {
-                    useStore.getState().setFocusedPanel('editor')
-                    requestAnimationFrame(() =>
-                      useStore.getState().editorViewRef?.focus()
-                    )
-                  })
+                  moveTo(i)
+                  void openNote(note)
                 }}
                 className={[
                   'group flex w-full items-start gap-3 rounded-md px-3 py-2 text-left transition-colors',
@@ -616,7 +735,9 @@ export function TagView(): JSX.Element {
                   <div className="mt-0.5 truncate text-xs text-current/50">
                     {folderLabel(note) || note.folder}
                   </div>
-                  {note.excerpt && (
+                  {/* The tagged blocks listed below say more than the opening
+                      of the note, so the excerpt only shows without them. */}
+                  {note.excerpt && row.blockCount === 0 && (
                     <div className="mt-0.5 truncate text-xs text-current/40">
                       {note.excerpt}
                     </div>
@@ -667,8 +788,8 @@ export function TagView(): JSX.Element {
       ) : (
         <div className="border-t border-paper-300/50 px-4 py-1.5 text-xs text-current/40">
           {vimMode
-            ? 'j/k move · Enter/o open · click chips to toggle · c clear tags · / filter · : command · :q close'
-            : '↑/↓ move · Enter open · click chips to toggle'}
+            ? 'j/k move · {/} prev/next note · Enter/o open note or block · click chips to toggle · c clear tags · / filter · : command · :q close'
+            : '↑/↓ move · Enter open note or block · click chips to toggle'}
         </div>
       )}
       {tagMenu && (
@@ -681,9 +802,4 @@ export function TagView(): JSX.Element {
       )}
     </div>
   )
-}
-
-function cssEscape(value: string): string {
-  if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') return CSS.escape(value)
-  return value.replace(/["\\]/g, '\\$&')
 }

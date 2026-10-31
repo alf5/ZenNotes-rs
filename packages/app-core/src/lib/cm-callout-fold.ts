@@ -5,13 +5,17 @@
  * The fold range is the callout's whole blockquote below its title line, so
  * the chevron, the fold keys and Fold All close the same span and any of them
  * reopens what another closed. Collapsed callouts fold once each time a note
- * opens in the editor. That rides a state field which a note swap resets (a
+ * opens in the editor, each once the parser has read past its end: on a long
+ * note it reaches the rest only as the reader scrolls or jumps there. How far
+ * it has reached rides a state field which a note swap resets (a
  * whole-document replace under `noteEditingSync`) and which outlives the
  * live-preview compartment's reconfigures: a theme switch must not close
- * again what the reader opened.
+ * again what the reader opened. A callout the reader edited, or that holds
+ * the caret, is not folded.
  */
 import { ensureSyntaxTree, foldEffect, syntaxTree, unfoldEffect } from '@codemirror/language'
 import {
+  type ChangeDesc,
   type EditorState,
   type Extension,
   StateEffect,
@@ -82,19 +86,15 @@ export function enclosingFoldableCallout(state: EditorState, pos: number): Callo
   return null
 }
 
-/** Fold ranges of every callout with a marker, or only the collapsed ones.
- *  Pass a fully parsed tree (ensureSyntaxTree) to reach past the viewport. */
-export function foldableCalloutRanges(
-  state: EditorState,
-  tree: Tree = syntaxTree(state),
-  only?: CalloutFoldMarker
-): FoldRange[] {
+/** Fold ranges of every callout with a marker. Pass a fully parsed tree
+ *  (ensureSyntaxTree) to reach past the viewport. */
+export function foldableCalloutRanges(state: EditorState, tree: Tree = syntaxTree(state)): FoldRange[] {
   const ranges: FoldRange[] = []
   tree.iterate({
     enter: (ref) => {
       if (ref.name !== 'Blockquote') return undefined
       const callout = calloutOf(state, ref.node)
-      if (callout?.marker && callout.range && (!only || callout.marker === only)) {
+      if (callout?.marker && callout.range) {
         ranges.push(callout.range)
       }
       return undefined
@@ -152,7 +152,27 @@ export class CalloutFoldChevron extends WidgetType {
   }
 }
 
-const markCalloutDefaultsApplied = StateEffect.define<null>()
+interface Span {
+  from: number
+  to: number
+}
+
+/** The part of an opened note whose collapsed callouts have not been folded
+ *  yet, from `from` to the end. */
+interface PendingCallouts {
+  from: number
+  /** What changed in it since the note opened: a callout touching any of it
+   *  stays open, as typing a marker does not fold. */
+  edited: readonly Span[]
+  /** Whether the first pass, which parses ahead, has run. */
+  started: boolean
+}
+
+const calloutDefaultsReached = StateEffect.define<number>({
+  map: (pos, mapping) => mapping.mapPos(pos)
+})
+
+const unopened = (): PendingCallouts => ({ from: 0, edited: [], started: false })
 
 function replacesWholeDocument(tr: Transaction): boolean {
   let whole = false
@@ -162,18 +182,108 @@ function replacesWholeDocument(tr: Transaction): boolean {
   return whole
 }
 
-/** Whether this document's collapsed callouts have been folded yet. */
-const calloutDefaultsApplied = StateField.define<boolean>({
-  create: () => false,
-  update(applied, tr) {
-    if (tr.effects.some((effect) => effect.is(markCalloutDefaultsApplied))) return true
-    // Another note swapped in: its collapsed callouts start folded too.
-    if (applied && tr.docChanged && tr.annotation(noteEditingSync) && replacesWholeDocument(tr)) {
-      return false
+function mapPending(pending: PendingCallouts, changes: ChangeDesc): PendingCallouts {
+  const from = changes.mapPos(pending.from)
+  const edited = pending.edited.map((span) => ({
+    from: changes.mapPos(span.from, -1),
+    to: changes.mapPos(span.to, 1)
+  }))
+  changes.iterChangedRanges((_fromA, _toA, fromB, toB) => {
+    if (toB >= from) edited.push({ from: fromB, to: toB })
+  })
+  edited.sort((a, b) => a.from - b.from)
+  const merged: Span[] = []
+  for (const span of edited) {
+    const last = merged[merged.length - 1]
+    if (last && span.from <= last.to) last.to = Math.max(last.to, span.to)
+    else merged.push(span)
+  }
+  return { ...pending, from, edited: merged }
+}
+
+/** Null once the parser has reached the end of the note. */
+const pendingCallouts = StateField.define<PendingCallouts | null>({
+  create: unopened,
+  update(pending, tr) {
+    if (tr.docChanged) {
+      // Another note swapped in: its collapsed callouts start folded too.
+      if (tr.annotation(noteEditingSync) && replacesWholeDocument(tr)) pending = unopened()
+      else if (pending) pending = mapPending(pending, tr.changes)
     }
-    return applied
+    for (const effect of tr.effects) {
+      if (!pending || !effect.is(calloutDefaultsReached)) continue
+      const from = Math.max(pending.from, effect.value)
+      pending =
+        from >= tr.state.doc.length
+          ? null
+          : { from, edited: pending.edited.filter((span) => span.to >= from), started: true }
+    }
+    return pending
   }
 })
+
+/** Where the last node the parser has produced starts, -1 before it has
+ *  produced any. The tree's length does not say how far the parse got: the
+ *  note grammar's tree always spans the whole note (cm-markdown-language.ts). */
+function lastNodeStart(tree: Tree): number {
+  let node = tree.topNode.lastChild
+  if (!node) return -1
+  for (let child = node.lastChild; child; child = child.lastChild) node = child
+  return node.type.isTop ? -1 : node.from
+}
+
+/** Whether the parser has read past the block ending at `to`: it has produced
+ *  a node after it, or only blank lines follow it. Until then the block may go
+ *  on, and a parse that stopped early ends whatever is still open there. */
+function readPast(state: EditorState, to: number, lastStart: number): boolean {
+  if (lastStart > to) return true
+  const rest = state.doc.iterRange(to)
+  while (!rest.next().done) if (/\S/.test(rest.value)) return false
+  return true
+}
+
+/** Fold the collapsed callouts the parser has reached since the last pass. */
+function foldReachedCallouts(view: EditorView): void {
+  const { state } = view
+  const pending = state.field(pendingCallouts, false)
+  if (!pending) return
+  const tree = (!pending.started && ensureSyntaxTree(state, state.doc.length, 200)) || syntaxTree(state)
+  const lastStart = lastNodeStart(tree)
+  // A callout the parser has yet to produce starts on a later line.
+  const read = lastStart < 0 ? 0 : state.doc.lineAt(lastStart).to + 1
+  if (pending.started && read <= pending.from) return
+  const caret = state.selection.main.head
+  const folds: StateEffect<FoldRange>[] = []
+  let reached = read
+  let waiting = false
+  tree.iterate({
+    from: pending.from,
+    enter: (ref) => {
+      if (waiting) return false
+      if (ref.name !== 'Blockquote' || ref.from < pending.from) return undefined
+      const callout = calloutOf(state, ref.node)
+      if (callout?.marker !== '-') return undefined
+      // It and everything after it wait for the parser to read past its end.
+      if (!readPast(state, ref.to, lastStart)) {
+        reached = ref.from
+        waiting = true
+        return false
+      }
+      const { range } = callout
+      if (
+        range &&
+        !(caret > range.from && caret <= range.to) &&
+        !pending.edited.some((span) => span.from <= ref.to && span.to >= ref.from) &&
+        !foldedExactly(state, range)
+      ) {
+        folds.push(foldEffect.of(range))
+      }
+      return undefined
+    }
+  })
+  if (pending.started && folds.length === 0 && reached === pending.from) return
+  view.dispatch({ effects: [...folds, calloutDefaultsReached.of(reached)] })
+}
 
 const applyCalloutDefaults = ViewPlugin.fromClass(
   class {
@@ -185,7 +295,12 @@ const applyCalloutDefaults = ViewPlugin.fromClass(
     }
 
     update(update: ViewUpdate): void {
-      this.check(update.view)
+      if (
+        syntaxTree(update.startState) !== syntaxTree(update.state) ||
+        update.startState.field(pendingCallouts, false) !== update.state.field(pendingCallouts, false)
+      ) {
+        this.check(update.view)
+      }
     }
 
     destroy(): void {
@@ -193,18 +308,12 @@ const applyCalloutDefaults = ViewPlugin.fromClass(
     }
 
     private check(view: EditorView): void {
-      if (this.scheduled || view.state.field(calloutDefaultsApplied, false) !== false) return
+      if (this.scheduled || !view.state.field(pendingCallouts, false)) return
       this.scheduled = true
       // Not from inside a view update: CodeMirror refuses a dispatch there.
       queueMicrotask(() => {
         this.scheduled = false
-        const { state } = view
-        if (this.destroyed || state.field(calloutDefaultsApplied, false) !== false) return
-        const tree = ensureSyntaxTree(state, state.doc.length, 200) ?? syntaxTree(state)
-        const folds = foldableCalloutRanges(state, tree, '-')
-          .filter((range) => !foldedExactly(state, range))
-          .map((range) => foldEffect.of(range))
-        view.dispatch({ effects: [...folds, markCalloutDefaultsApplied.of(null)] })
+        if (!this.destroyed) foldReachedCallouts(view)
       })
     }
   }
@@ -213,5 +322,5 @@ const applyCalloutDefaults = ViewPlugin.fromClass(
 /** Collapsed callouts start folded when a note opens. Live preview only, with
  *  the chevrons in `cm-wysiwyg-blocks.ts`; folding itself is `codeFolding()`. */
 export function calloutFolding(): Extension {
-  return [calloutDefaultsApplied, applyCalloutDefaults]
+  return [pendingCallouts, applyCalloutDefaults]
 }

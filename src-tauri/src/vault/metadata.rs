@@ -17,8 +17,8 @@ const PDF_EXTENSIONS: &[&str] = &[".pdf"];
 const AUDIO_EXTENSIONS: &[&str] = &[".aac", ".flac", ".m4a", ".mp3", ".ogg", ".wav"];
 const VIDEO_EXTENSIONS: &[&str] = &[".m4v", ".mov", ".mp4", ".ogv", ".webm"];
 
-static FENCED_CODE_BLOCK_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(^|\n)```[^\n]*\n[\s\S]*?\n```[ \t]*(?=\n|$)").unwrap());
+static FENCE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[ \t]*(`{3,}|~{3,})(.*)\r?$").unwrap());
 static INLINE_CODE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`[^`\n]*`").unwrap());
 static TAG_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?:^|\s)#([a-zA-Z][A-Za-z0-9_\-/]*)").unwrap());
@@ -115,13 +115,44 @@ pub fn local_asset_target_kind(target: &str) -> Option<&'static str> {
     }
 }
 
-/// Blank out fenced + inline code so metadata scans ignore code spans.
+/// Blank out fenced and inline code so the tag, link and excerpt scanners
+/// never read code as content. Line-based and indentation-tolerant: a fence
+/// nested under a list item is still a code block (#293), and a note saved
+/// with Windows line endings closes its fences. Mirrors `stripCodeContent` in
+/// main/vault.ts and mcp/vault-ops.ts.
 pub fn strip_code_content(body: &str) -> String {
-    if !body.contains('`') {
+    if !body.contains('`') && !body.contains('~') {
         return body.to_string();
     }
-    let no_fences = FENCED_CODE_BLOCK_RE.replace_all(body, "$1 ");
-    INLINE_CODE_RE.replace_all(&no_fences, " ").into_owned()
+    let mut lines: Vec<String> = body.split('\n').map(str::to_string).collect();
+    let mut in_fence = false;
+    let mut fence_char = ' ';
+    let mut fence_len = 0;
+    for line in lines.iter_mut() {
+        if let Ok(Some(m)) = FENCE_RE.captures(line) {
+            let marker = m.get(1).map(|x| x.as_str()).unwrap_or("");
+            let rest = m.get(2).map(|x| x.as_str()).unwrap_or("");
+            let ch = marker.chars().next().unwrap_or(' ');
+            if !in_fence {
+                // A backtick fence's info string may not contain a backtick (CommonMark).
+                if ch == '~' || !rest.contains('`') {
+                    in_fence = true;
+                    fence_char = ch;
+                    fence_len = marker.len();
+                    *line = " ".into();
+                    continue;
+                }
+            } else if ch == fence_char && marker.len() >= fence_len && rest.trim().is_empty() {
+                in_fence = false;
+                *line = " ".into();
+                continue;
+            }
+        }
+        if in_fence {
+            *line = " ".into();
+        }
+    }
+    INLINE_CODE_RE.replace_all(&lines.join("\n"), " ").into_owned()
 }
 
 /// Unique `#tags`, insertion-order preserved, ignoring code.
@@ -300,6 +331,18 @@ pub fn build_excerpt(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fenced_code_in_a_crlf_note_is_not_scanned() {
+        let body = "# Notes\r\n\r\n```c\r\n#include <stdio.h>\r\n```\r\n\r\n#realtag\r\n";
+        assert_eq!(extract_tags(body), vec!["realtag".to_string()]);
+    }
+
+    #[test]
+    fn indented_and_tilde_fences_are_not_scanned() {
+        let body = "- item\n  ```\n  #nope\n  ```\n~~~\n#nor\n~~~\n#yes\n";
+        assert_eq!(extract_tags(body), vec!["yes".to_string()]);
+    }
 
     #[test]
     fn asset_embeds_wiki_and_md_image_targets() {

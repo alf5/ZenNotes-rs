@@ -2032,6 +2032,138 @@ describe('CloudSyncCoordinator: catching up on a file this device never touched'
     expect(server.mutations).toEqual([])
   })
 
+  it('saves only what landed when a change fails while a coalesced revision is still owed', async () => {
+    // Fresh.md lands on its own. Plan.md v2 is then skipped in favour of v3,
+    // and New.md lands while v3 is still owed, so the newest state that can
+    // stand on its own is the one right after Fresh.md. The failing move must
+    // not save Plan.md as v2, nor New.md as tracked.
+    const fs = memoryFileSystem({ [path]: 'v1', 'Other.md': 'other' })
+    const rename = fs.rename
+    let refuse = true
+    fs.rename = async (from, to) => {
+      if (refuse) throw new Error('rename failed: Already exists')
+      return rename(from, to)
+    }
+    const states = memoryState({
+      version: 1,
+      vault_id: 'vault-1',
+      cursor: 1,
+      items: {
+        plan: tracked('plan', path, 1, 'v1'),
+        other: tracked('other', 'Other.md', 1, 'other')
+      }
+    })
+    const server = remote({
+      changes: [
+        upsert(2, 'fresh', 'Fresh.md', 'fresh'),
+        upsert(3, 'plan', path, 'v2'),
+        upsert(4, 'new', 'New.md', 'new'),
+        {
+          sequence: 5,
+          item_id: 'other',
+          type: 'move',
+          path: 'archive/Other.md',
+          previous_path: 'Other.md',
+          revision: 5
+        },
+        upsert(6, 'plan', path, 'v3')
+      ]
+    })
+    const coordinator = new CloudSyncCoordinator(
+      'vault-1',
+      server,
+      new PortableCloudSyncRepository(fs),
+      states,
+      ids()
+    )
+
+    await expect(coordinator.sync()).rejects.toThrow('Already exists')
+    expect(states.current).toEqual({
+      version: 1,
+      vault_id: 'vault-1',
+      cursor: 2,
+      items: {
+        plan: tracked('plan', path, 1, 'v1'),
+        other: tracked('other', 'Other.md', 1, 'other'),
+        fresh: tracked('fresh', 'Fresh.md', 2, 'fresh')
+      }
+    })
+
+    refuse = false
+    const retry = await coordinator.sync()
+
+    expect(retry.localConflicts).toEqual([])
+    expect([...fs.files.keys()].sort()).toEqual(['Fresh.md', 'New.md', 'archive/Other.md', path])
+    expect(fs.files.get(path)).toBe('v3')
+    expect(states.current?.cursor).toBe(6)
+    expect(states.current?.items.new).toEqual(tracked('new', 'New.md', 4, 'new'))
+    expect(states.current?.pending_conflicts ?? {}).toEqual({})
+    expect(server.mutations).toEqual([])
+  })
+
+  it('pulls each change in a large vault in microseconds, not milliseconds', async () => {
+    // Every pulled change used to copy the whole tracked state, so a phone
+    // catching up on a big vault paid for its size on every file: 1.7 ms a
+    // change at 10,000 notes against 0.18 ms at 600 (18 µs at both now).
+    async function perChange(vaultSize: number, arriving: number): Promise<number> {
+      const items: CloudSyncState['items'] = {}
+      const files = new Map<string, CloudSyncLocalItem>()
+      for (let index = 0; index < vaultSize; index++) {
+        const notePath = `inbox/Note ${index}.md`
+        const body = content(`note ${index}`)
+        items[`note-${index}`] = {
+          item_id: `note-${index}`, path: notePath, kind: 'text', revision: 1,
+          sha256: body.sha256, byte_length: body.byte_length, media_type: body.media_type
+        }
+        files.set(notePath, { path: notePath, kind: 'text', content: body })
+      }
+      const changes = Array.from({ length: arriving }, (_, index): CloudSyncChange => ({
+        sequence: vaultSize + index + 1,
+        item_id: `new-${index}`,
+        type: 'upsert',
+        path: `inbox/New ${index}.md`,
+        previous_path: null,
+        revision: 1,
+        content: content(`new ${index}`)
+      }))
+      // Timed from the first file written to the last, so the run's one scan
+      // and one save, which do grow with the vault, are left out.
+      let first = 0
+      let last = 0
+      const repository: CloudSyncRepository = {
+        async scan() {
+          return [...files.values()]
+        },
+        async apply(change) {
+          last = performance.now()
+          first ||= last
+          if (change.content) files.set(change.path, { path: change.path, kind: 'text', content: change.content })
+        }
+      }
+      const result = await new CloudSyncCoordinator(
+        'vault-1',
+        remote({ changes }),
+        repository,
+        memoryState({ version: 1, vault_id: 'vault-1', cursor: vaultSize, items }),
+        ids()
+      ).sync()
+      expect(result.pulled).toBe(arriving)
+      return (last - first) / (arriving - 1)
+    }
+
+    // A bound in absolute time, not a ratio to a small vault: a change there
+    // takes a microsecond or two, so that ratio swung from 1.5 to 4.6 on a
+    // quiet machine and failed a 5x bound on macOS CI (25 µs against 2.7 µs).
+    // At 20,000 notes a change takes 2 to 5 µs now and took 3.6 ms (7 ms on a
+    // busy machine) with the copy, so 250 µs sits a decade clear of both. The
+    // fastest of three runs drops the pauses that only ever add time, and a
+    // small run first warms the code up.
+    await perChange(200, 2000)
+    const runs: number[] = []
+    for (let run = 0; run < 3; run++) runs.push(await perChange(20_000, 2000))
+    expect(Math.min(...runs)).toBeLessThan(0.25)
+  })
+
   it('queues a real local edit without creating a note beside it', async () => {
     const fs = memoryFileSystem({ [path]: 'edited here while offline' })
     const states = memoryState({
@@ -2632,7 +2764,7 @@ describe('CloudSyncCoordinator: decisions on queued conflicts', () => {
       expected_cloud_revision: 2
     })
 
-    expect(written).toEqual([{ path, content: expect.objectContaining({ data: cloudText }) }])
+    expect(written).toEqual([{ path, content: expect.objectContaining({ data: cloudText }), displace_existing: true }])
   })
 
   it('uploads a large local file from disk without rewriting it as empty', async () => {
@@ -3051,5 +3183,149 @@ describe('CloudSyncCoordinator: a cursor older than the change log (CURSOR_EXPIR
       expect.objectContaining({ type: 'delete', item_id: 'a', base_revision: 4 })
     ])
     expect(states.current?.cursor).toBe(40)
+  })
+})
+
+describe('CloudSyncCoordinator: a file that only passed through this device (Dave, 2026-10-23)', () => {
+  const note = 'inbox/Daily Notes/Untitled.md'
+  const trashed = 'trash/Daily Notes/Untitled.md'
+  const second = 'trash/Daily Notes/Untitled 2.md'
+
+  function manifestItem(itemId: string, itemPath: string, revision: number, data: string) {
+    const content = realContent(data)
+    return {
+      item_id: itemId, path: itemPath, kind: 'text' as const, revision,
+      sha256: content.sha256, byte_length: content.byte_length, media_type: content.media_type, content
+    }
+  }
+
+  // While this device's sync was stuck it edited Untitled.md; the computer
+  // trashed it, made a new Untitled.md at the same path and trashed that too.
+  function computerChurn() {
+    return {
+      changes: [
+        { sequence: 2, item_id: 'plan', type: 'move' as const, path: trashed, previous_path: note, revision: 2 },
+        upsert(3, 'second', note, 'second note'),
+        { sequence: 4, item_id: 'second', type: 'move' as const, path: second, previous_path: note, revision: 4 }
+      ],
+      manifest: {
+        data: [manifestItem('plan', trashed, 2, 'agreed'), manifestItem('second', second, 4, 'second note')],
+        cursor: 4,
+        next_page: null
+      }
+    }
+  }
+
+  function storedPhantom(): CloudSyncStoredConflict {
+    return {
+      id: 'second', item_id: 'second', kind: 'move', sequence: 4,
+      base: { path: null, revision: null, kind: 'text', content: null },
+      local: { path: note, revision: null, kind: 'text', content: realContent('edited here') },
+      cloud: { path: second, revision: 4, kind: 'text', content: realContent('second note') }
+    }
+  }
+
+  it('lands the computer\'s second note in the trash instead of queuing it against this device\'s note', async () => {
+    const fs = memoryFileSystem({ [note]: 'edited here' })
+    const states = memoryState({ version: 1, vault_id: 'vault-1', cursor: 1, items: { plan: tracked('plan', note, 1, 'agreed') } })
+    const server = remote(computerChurn())
+
+    const result = await new CloudSyncCoordinator('vault-1', server, new PortableCloudSyncRepository(fs), states, ids()).sync()
+
+    expect(result.pendingConflicts).toEqual([
+      expect.objectContaining({ id: 'plan', kind: 'move', path: note, cloud_path: trashed })
+    ])
+    expect(fs.files.get(note)).toBe('edited here')
+    expect(fs.files.get(second)).toBe('second note')
+    expect(states.current?.items.second).toMatchObject({ path: second, revision: 4 })
+    expect(server.mutations).toEqual([])
+  })
+
+  it('settles a queued conflict an earlier version left on this device\'s note', async () => {
+    const fs = memoryFileSystem({ [note]: 'edited here' })
+    const states = memoryState({
+      version: 1, vault_id: 'vault-1', cursor: 4,
+      items: { plan: tracked('plan', trashed, 2, 'agreed'), second: tracked('second', second, 4, 'second note') },
+      pending_conflicts: { second: storedPhantom() }
+    })
+    const server = remote({ manifest: computerChurn().manifest })
+
+    const result = await new CloudSyncCoordinator('vault-1', server, new PortableCloudSyncRepository(fs), states, ids()).sync()
+
+    expect(result.pendingConflicts).toEqual([])
+    expect(fs.files.get(note)).toBe('edited here')
+    expect(fs.files.get(second)).toBe('second note')
+  })
+
+  for (const choice of ['local', 'cloud'] as const) {
+    it(`never deletes this device's note when "${choice}" is chosen on such a conflict`, async () => {
+      const fs = memoryFileSystem({ [note]: 'edited here' })
+      const states = memoryState({
+        version: 1, vault_id: 'vault-1', cursor: 4,
+        items: { second: tracked('second', second, 4, 'second note') },
+        pending_conflicts: { second: storedPhantom() }
+      })
+      const server = remote({ manifest: computerChurn().manifest })
+      const coordinator = new CloudSyncCoordinator('vault-1', server, new PortableCloudSyncRepository(fs), states, ids())
+
+      await coordinator.resolveConflict({
+        conflict_id: 'second', choice,
+        expected_local_sha256: realContent('edited here').sha256, expected_cloud_revision: 4
+      })
+
+      expect(fs.files.get(note)).toBe('edited here')
+      expect(fs.files.get(second)).toBe('second note')
+      expect(states.current?.pending_conflicts?.second).toBeUndefined()
+      expect(server.mutations).toEqual([])
+    })
+  }
+
+  it('moves this device\'s own trashed note aside when the computer\'s version is chosen', async () => {
+    const fs = memoryFileSystem({ [note]: 'edited here', [trashed]: 'the phone\'s own scratch' })
+    const states = memoryState({ version: 1, vault_id: 'vault-1', cursor: 1, items: { plan: tracked('plan', note, 1, 'agreed') } })
+    const churn = computerChurn()
+    const server = remote({
+      changes: [churn.changes[0]],
+      manifest: { data: [manifestItem('plan', trashed, 2, 'agreed')], cursor: 2, next_page: null }
+    })
+    const coordinator = new CloudSyncCoordinator('vault-1', server, new PortableCloudSyncRepository(fs), states, ids())
+    await coordinator.sync()
+    const details = await coordinator.getConflict('plan')
+
+    await coordinator.resolveConflict({
+      conflict_id: 'plan', choice: 'cloud',
+      expected_local_sha256: details.local.sha256, expected_cloud_revision: 2
+    })
+
+    expect(fs.files.get(trashed)).toBe('agreed')
+    expect(fs.files.get(second)).toBe('the phone\'s own scratch')
+    expect(fs.files.has(note)).toBe(false)
+  })
+
+  it('says another Cloud file holds the name instead of "changed again"', async () => {
+    const fs = memoryFileSystem({ [note]: 'edited here' })
+    const states = memoryState({ version: 1, vault_id: 'vault-1', cursor: 1, items: { plan: tracked('plan', note, 1, 'agreed') } })
+    const churn = computerChurn()
+    const server = remote({
+      changes: [churn.changes[0]],
+      manifest: { data: [manifestItem('plan', trashed, 2, 'agreed')], cursor: 2, next_page: null },
+      mutate: (body) => ({
+        acknowledged: [],
+        conflicts: body.mutations.map((mutation) => ({
+          operation_id: mutation.operation_id, item_id: mutation.item_id,
+          code: 'PATH_CONFLICT' as const, current_revision: null, current_path: note
+        })),
+        cursor: 2
+      })
+    })
+    const coordinator = new CloudSyncCoordinator('vault-1', server, new PortableCloudSyncRepository(fs), states, ids())
+    await coordinator.sync()
+    const details = await coordinator.getConflict('plan')
+
+    await expect(coordinator.resolveConflict({
+      conflict_id: 'plan', choice: 'local',
+      expected_local_sha256: details.local.sha256, expected_cloud_revision: 2
+    })).rejects.toThrow(`Another file in Cloud already uses “${note}”`)
+    expect(fs.files.get(note)).toBe('edited here')
   })
 })

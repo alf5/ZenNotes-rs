@@ -26,7 +26,7 @@ import { InlineMarkdown } from '../lib/inline-markdown'
 import { CloudTaskConflictIndicator } from './CloudTaskConflictIndicator'
 import { resolveWeekStartDay } from '../lib/week-start'
 import { ContextMenu, type ContextMenuItem } from './ContextMenu'
-import { buildTaskMenuItems } from '../lib/task-context-menu'
+import { buildTaskMenuItems, chooseTaskDueDate } from '../lib/task-context-menu'
 import { isOverlayOrDialogOpen } from '../lib/overlay-open'
 
 interface Props {
@@ -518,6 +518,12 @@ export function TasksCalendar({
           if (vimMode && e.key === 'c') {
             consume()
             void cancelTaskFromList(active)
+            return
+          }
+          // Any due date from the calendar `@date` opens (#991).
+          if (vimMode && e.key === '@') {
+            consume()
+            void chooseTaskDueDate(active)
             return
           }
           if (e.key === 'e') {

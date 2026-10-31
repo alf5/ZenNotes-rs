@@ -58,6 +58,26 @@ describe('newTaskFile', () => {
     expect(s.toasts().some((t) => t.message === 'Task added')).toBe(false)
   })
 
+  it('adds the new task to a loaded list by rescanning only its file (zennotesandroid#128)', async () => {
+    const s = await setup(false)
+    const { useStore } = await import('./store')
+    const rescanTasksForPath = vi.fn(async () => {})
+    useStore.setState({ vaultTasks: [{ id: 'inbox/Old.md#0' } as never], rescanTasksForPath })
+    expect(await s.create('Buy milk')).toBe('inbox/Buy milk.md')
+    expect(rescanTasksForPath).toHaveBeenCalledWith('inbox/Buy milk.md')
+    expect(useStore.getState().refreshTasks).not.toHaveBeenCalled()
+  })
+
+  it('loads an unloaded task list whole, without holding up the toast', async () => {
+    const s = await setup(false)
+    const { useStore } = await import('./store')
+    const refreshTasks = vi.fn(() => new Promise<void>(() => {}))
+    useStore.setState({ vaultTasks: [], refreshTasks })
+    expect(await s.create('Buy milk')).toBe('inbox/Buy milk.md')
+    expect(refreshTasks).toHaveBeenCalledTimes(1)
+    expect(s.toasts().some((t) => t.message === 'Task added')).toBe(true)
+  })
+
   it('says nothing when the prompt is cancelled', async () => {
     const s = await setup(false)
     expect(await s.create(null)).toBeNull()

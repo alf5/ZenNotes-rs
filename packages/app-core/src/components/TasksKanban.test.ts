@@ -281,10 +281,13 @@ describe('statusColumns (#677)', () => {
       ],
       TODAY
     )
-    expect(columns.map((c) => c.id)).toEqual(['today', 'upcoming', IN_PROGRESS_COLUMN_ID, 'waiting', 'done'])
-    expect(columnIds(columns, 'today')).toEqual(['todo'])
+    expect(columns.map((c) => c.id)).toEqual(['today', 'upcoming', 'undated', IN_PROGRESS_COLUMN_ID, 'waiting', 'done'])
+    // An undated task has its own column (#990); started, it still goes to In progress.
+    expect(columnIds(columns, 'today')).toEqual([])
+    expect(columnIds(columns, 'undated')).toEqual(['todo'])
     expect(columnIds(columns, 'upcoming')).toEqual(['later'])
-    expect(columnIds(columns, IN_PROGRESS_COLUMN_ID)).toEqual(['started', 'started later'])
+    // Started work follows the list's order: dated first, undated last.
+    expect(columnIds(columns, IN_PROGRESS_COLUMN_ID)).toEqual(['started later', 'started'])
     // @waiting wins over [/]: the card reads as blocked until the wait clears.
     expect(columnIds(columns, 'waiting')).toEqual(['blocked'])
     expect(columnIds(columns, 'done')).toEqual(['shipped'])
@@ -321,10 +324,32 @@ describe('dropMutationsFor on the Status board (#677)', () => {
   it('dropping into Waiting keeps the [/] underneath', () => {
     expect(kinds('waiting', { inProgress: true })).toEqual(['set-checked', 'set-waiting'])
   })
+
+  it('dropping into No due date clears the due date and reopens the task (#990)', () => {
+    const mutations = dropMutationsFor('status', 'undated', card({ content: 'x', due: '2026-09-01', inProgress: true }), TODAY)
+    expect(mutations).toContainEqual({ kind: 'set-due', due: null })
+    expect(mutations).toContainEqual({ kind: 'set-in-progress', inProgress: false })
+  })
+
+  it('refuses No due date for a daily-note task, whose date is its note\'s, not a due: to clear', () => {
+    expect(dropMutationsFor('status', 'undated', card({ content: 'x', due: '2026-08-15', dueInferred: true }), TODAY)).toBeNull()
+  })
 })
 
 describe('completeStatusOrder (#677)', () => {
   const built = ['today', 'upcoming', IN_PROGRESS_COLUMN_ID, 'waiting', 'done']
+
+  it('slots No due date after Upcoming in an order saved before it existed (#990)', () => {
+    const withUndated = ['today', 'upcoming', 'undated', IN_PROGRESS_COLUMN_ID, 'waiting', 'done']
+    expect(completeStatusOrder(['done', 'upcoming', 'today', IN_PROGRESS_COLUMN_ID, 'waiting'], withUndated)).toEqual([
+      'done',
+      'upcoming',
+      'undated',
+      'today',
+      IN_PROGRESS_COLUMN_ID,
+      'waiting'
+    ])
+  })
 
   it('leaves an empty saved order alone (built order applies)', () => {
     expect(completeStatusOrder([], built)).toEqual([])

@@ -186,6 +186,8 @@ export function NoteHoverPreview({
             className="prose-zen prose-hover-preview"
             dangerouslySetInnerHTML={{ __html: html }}
           />
+        ) : content ? (
+          <div className="text-sm italic text-ink-400">Empty note</div>
         ) : (
           <div className="text-sm text-ink-400">Loading preview…</div>
         )}

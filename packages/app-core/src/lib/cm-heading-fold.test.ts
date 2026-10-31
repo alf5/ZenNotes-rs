@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 
 import { describe, it, expect } from 'vitest'
-import { EditorState } from '@codemirror/state'
-import { foldedRanges, foldService, unfoldEffect } from '@codemirror/language'
+import { Compartment, EditorState } from '@codemirror/state'
+import { foldEffect, foldedRanges, foldService, forceParsing, unfoldEffect } from '@codemirror/language'
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
 import { EditorView } from '@codemirror/view'
 import { foldAllOutline, foldAtCursor, headingFolding, unfoldAtCursor } from './cm-heading-fold'
@@ -106,6 +106,31 @@ describe('heading folding', () => {
     view.destroy()
     parent.remove()
   })
+
+  it('redraws when only the syntax tree changes, as when a cut parse finishes', () => {
+    // Swapping the language in changes the tree and nothing else: no edit, no
+    // selection, no viewport. A parse that finishes after its time budget ran
+    // out reaches the plugin the same way.
+    const language = new Compartment()
+    const doc = '```bash\n# a comment\n```\n\n# Real\n\nbody'
+    const parent = document.createElement('div')
+    document.body.append(parent)
+    const view = new EditorView({
+      parent,
+      state: EditorState.create({ doc, extensions: [language.of([]), headingFolding()] })
+    })
+    const headingLines = (): Array<string | null> =>
+      Array.from(parent.querySelectorAll('.cm-heading-line')).map((line) => line.textContent)
+    // No tree yet, so nothing says the fence is code.
+    expect(headingLines()).toHaveLength(2)
+    view.dispatch({ effects: language.reconfigure(markdown({ base: markdownLanguage })) })
+    forceParsing(view, doc.length, 5000)
+    expect(headingLines()).toHaveLength(1)
+    expect(headingLines()[0]).toContain('# Real')
+
+    view.destroy()
+    parent.remove()
+  })
 })
 
 describe('list item folding (#848)', () => {
@@ -139,6 +164,9 @@ describe('list item folding (#848)', () => {
       parent,
       state: state.update({ selection: { anchor: state.doc.line(line).from } }).state
     })
+    // Folds read the syntax tree, and on a cold, loaded worker the first parse
+    // can run out of its time budget before it reaches the list.
+    forceParsing(view, text.length, 5000)
     return {
       view,
       done: () => {
@@ -244,6 +272,165 @@ describe('list item folding (#848)', () => {
       [9, 10],
       [13, 15]
     ])
+    done()
+  })
+})
+
+describe('heading arrows', () => {
+  const doc = [
+    '# Shapes', // 1
+    '', // 2
+    'Intro', // 3
+    '', // 4
+    '## Empty', // 5: a heading of the same level follows
+    '## Has body', // 6
+    '', // 7
+    'text', // 8
+    '', // 9
+    '### Deep', // 10
+    '#### Deeper', // 11
+    '##### Five', // 12
+    '###### Six', // 13
+    'six body', // 14
+    '## Same level next', // 15
+    '## Followed', // 16
+    '', // 17
+    '```bash', // 18
+    '# comment in fence', // 19
+    '## another in fence', // 20
+    '```', // 21
+    '', // 22
+    '    # indented code', // 23
+    '', // 24
+    '#nospace', // 25
+    '### Three then two', // 26: a higher level follows
+    '## Two', // 27
+    'x', // 28
+    '# Second H1', // 29
+    '## Last line heading' // 30
+  ].join('\n')
+
+  /** Lines each heading's fold hides, first to last. */
+  const sections: Record<number, [number, number]> = {
+    1: [2, 28],
+    6: [7, 14],
+    10: [11, 14],
+    11: [12, 14],
+    12: [13, 14],
+    13: [14, 14],
+    16: [17, 26],
+    27: [28, 28],
+    29: [30, 30]
+  }
+  const levels: Record<number, number> = { 1: 1, 6: 2, 10: 3, 11: 4, 12: 5, 13: 6, 16: 2, 27: 2, 29: 1 }
+
+  function mount(text: string): { view: EditorView; done: () => void } {
+    const parent = document.createElement('div')
+    document.body.append(parent)
+    const view = new EditorView({
+      parent,
+      state: EditorState.create({
+        doc: text,
+        extensions: [markdown({ base: markdownLanguage }), headingFolding({ showLevelLabels: true })]
+      })
+    })
+    // Only the tree knows the `#` lines in the fence and the indented block are code.
+    forceParsing(view, text.length, 5000)
+    return {
+      view,
+      done: () => {
+        view.destroy()
+        parent.remove()
+      }
+    }
+  }
+
+  /** `<line> <label> <arrow>` for every rendered line with any heading
+   *  decoration, once its line classes and the arrow's state attributes are
+   *  checked against the label and the arrow. */
+  function headingRows(view: EditorView): string[] {
+    const rows: string[] = []
+    for (const el of view.dom.querySelectorAll<HTMLElement>('.cm-line')) {
+      const arrow = el.querySelector<HTMLElement>('.cm-heading-fold-arrow')
+      const label = el.querySelector('.cm-heading-level-label')
+      const classes = [...el.classList].filter((name) => name.startsWith('cm-heading-line'))
+      if (!arrow && !label && classes.length === 0) continue
+      const folded = arrow?.classList.contains('is-folded') ?? false
+      expect(arrow?.classList.contains(folded ? 'is-folded' : 'is-open')).toBe(true)
+      expect(arrow?.getAttribute('aria-expanded')).toBe(String(!folded))
+      expect(arrow?.getAttribute('aria-label')).toBe(folded ? 'Expand heading' : 'Collapse heading')
+      expect(classes).toEqual([
+        'cm-heading-line',
+        `cm-heading-line-h${label?.textContent?.slice(1)}`,
+        ...(folded ? ['cm-heading-line-folded'] : [])
+      ])
+      rows.push(`${view.state.doc.lineAt(view.posAtDOM(el)).number} ${label?.textContent} ${arrow?.textContent}`)
+    }
+    return rows
+  }
+
+  const foldedLines = (view: EditorView): Array<[number, number]> => {
+    const out: Array<[number, number]> = []
+    foldedRanges(view.state).between(0, view.state.doc.length, (from, to) => {
+      out.push([view.state.doc.lineAt(from).number + 1, view.state.doc.lineAt(to).number])
+    })
+    return out
+  }
+
+  const arrowOn = (view: EditorView, line: number): HTMLElement => {
+    const arrow = [...view.dom.querySelectorAll<HTMLElement>('.cm-heading-fold-arrow')].find(
+      (el) => view.state.doc.lineAt(view.posAtDOM(el)).number === line
+    )
+    expect(arrow).toBeDefined()
+    return arrow!
+  }
+
+  const open = Object.keys(levels).map((line) => `${line} H${levels[Number(line)]} ▾`)
+
+  it('marks only headings with a section: not one right above the same or a higher level, the last line or code', () => {
+    const { view, done } = mount(doc)
+    expect(headingRows(view)).toEqual(open)
+    done()
+  })
+
+  it('marks a heading folded while its own section is folded, at every level', () => {
+    const { view, done } = mount(doc)
+    for (const [key, [first, last]] of Object.entries(sections)) {
+      const line = Number(key)
+      arrowOn(view, line).click()
+      expect(foldedLines(view)).toEqual([[first, last]])
+      expect(headingRows(view)).toEqual(
+        Object.keys(levels)
+          .map(Number)
+          .filter((other) => other < first || other > last)
+          .map((other) => `${other} H${levels[other]} ${other === line ? '▸' : '▾'}`)
+      )
+      arrowOn(view, line).click()
+      expect(foldedLines(view)).toEqual([])
+      expect(headingRows(view)).toEqual(open)
+    }
+    done()
+  })
+
+  it('keeps the arrow open for a fold that is not exactly its section', () => {
+    const { view, done } = mount(doc)
+    const line = (n: number) => view.state.doc.line(n)
+    // Starts where the section of line 6 starts but ends early.
+    view.dispatch({ effects: foldEffect.of({ from: line(6).to, to: line(8).to }) })
+    expect(headingRows(view)).toContain('6 H2 ▾')
+    view.dispatch({ effects: unfoldEffect.of({ from: line(6).to, to: line(8).to }) })
+    // Ends where the section of line 6 ends but starts later.
+    view.dispatch({ effects: foldEffect.of({ from: line(7).to, to: line(14).to }) })
+    expect(headingRows(view)).toContain('6 H2 ▾')
+    done()
+  })
+
+  it('gives a heading above a trailing newline a section, the empty last line', () => {
+    const { view, done } = mount('# Top\n\n## End\n')
+    expect(headingRows(view)).toEqual(['1 H1 ▾', '3 H2 ▾'])
+    arrowOn(view, 3).click()
+    expect(foldedLines(view)).toEqual([[4, 4]])
+    expect(headingRows(view)).toEqual(['1 H1 ▾', '3 H2 ▸'])
     done()
   })
 })

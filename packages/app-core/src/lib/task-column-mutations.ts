@@ -36,6 +36,18 @@ export function dropMutationsFor(
           }
         ]
       }
+      case 'undated':
+        // A daily note's date is not on the line, so there is no `due:` to
+        // clear: the card would land straight back in its day. Refuse the
+        // drop rather than pretend (#990), as the menu offers no Clear due
+        // date for such a task.
+        if (task.dueInferred) return null
+        return [
+          { kind: 'set-checked', checked: false },
+          { kind: 'set-waiting', waiting: false },
+          { kind: 'set-in-progress', inProgress: false },
+          { kind: 'set-due', due: null }
+        ]
       case 'in-progress':
         // Started work: `[/]`. The due date is left alone, so a card dragged
         // back to Today or Upcoming keeps the date it had.

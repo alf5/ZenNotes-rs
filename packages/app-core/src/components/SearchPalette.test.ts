@@ -15,7 +15,13 @@ vi.mock('../lib/confirm-requests', () => ({ confirmApp }))
 // Closing the palette hands focus back to the editor with a few timed retries;
 // there is no editor here and the retries would outlive the jsdom window.
 const focusEditorNormalMode = vi.hoisted(() => vi.fn())
-vi.mock('../lib/editor-focus', () => ({ focusEditorNormalMode }))
+const focusEditorAfterReadOpen = vi.hoisted(() => vi.fn())
+const focusEditorAfterPaletteClose = vi.hoisted(() => vi.fn())
+vi.mock('../lib/editor-focus', () => ({
+  focusEditorNormalMode,
+  focusEditorAfterReadOpen,
+  focusEditorAfterPaletteClose
+}))
 
 function note(title: string): NoteMeta {
   return {
@@ -93,9 +99,10 @@ describe('SearchPalette: Ctrl+D moves the highlighted note to Trash', () => {
     if (!el) throw new Error('search input not rendered')
     return el
   }
+  // The titles only: each row also shows the note's folder.
   const rows = (): string[] =>
     [...document.querySelectorAll<HTMLButtonElement>('[data-search-idx]')].map(
-      (row) => row.textContent?.replace(/inbox$/i, '').trim() ?? ''
+      (row) => row.querySelector('span')?.textContent?.trim() ?? ''
     )
   const ctrlD = async (): Promise<void> => {
     await act(async () => {
@@ -177,6 +184,8 @@ describe('SearchPalette: the create row opens a New note form', () => {
     createAndOpen = vi.fn(async () => {})
     selectNote = vi.fn(async () => {})
     focusEditorNormalMode.mockClear()
+    focusEditorAfterReadOpen.mockClear()
+    focusEditorAfterPaletteClose.mockClear()
     useStore.setState({
       notes: [
         { ...note('Alpha'), tags: ['ops', 'prod'] },
@@ -314,6 +323,19 @@ describe('SearchPalette: the create row opens a New note form', () => {
     await key(search(), 'Enter')
     expect(selectNote).toHaveBeenCalledWith('inbox/Alpha.md')
     expect(form()).toBeNull()
+    // A pick hands over through the pick's own path, which decides between
+    // focusing the editor (desktop) and leaving the note to be read (phones).
+    expect(focusEditorAfterReadOpen).toHaveBeenCalledTimes(1)
+    expect(focusEditorNormalMode).not.toHaveBeenCalled()
+  })
+
+  it('Escape closes through the search close hand-off, not a plain editor focus', async () => {
+    type(search(), 'Alph')
+    await key(search(), 'Escape')
+    expect(useStore.getState().searchOpen).toBe(false)
+    expect(focusEditorAfterPaletteClose).toHaveBeenCalledTimes(1)
+    expect(focusEditorNormalMode).not.toHaveBeenCalled()
+    expect(focusEditorAfterReadOpen).not.toHaveBeenCalled()
   })
 
   it('a typed path fills the Folder field, and the Folder picker filters, picks and moves on to Tags', async () => {
@@ -556,5 +578,83 @@ describe('SearchPalette: the create row opens a New note form', () => {
     expect(createRow()).toBeNull()
     await key(search(), 'Enter', { shiftKey: true })
     expect(form()).toBeNull()
+  })
+})
+
+describe('SearchPalette: each row shows the note\'s folder (#982)', () => {
+  let host: HTMLDivElement
+  let root: Root
+  let originalState: ReturnType<typeof useStore.getState>
+  let originalScrollIntoView: PropertyDescriptor | undefined
+
+  const at = (path: string, folder: NoteMeta['folder'] = 'inbox'): NoteMeta => ({
+    ...note('Overview'),
+    path,
+    folder
+  })
+
+  beforeEach(() => {
+    originalState = useStore.getState()
+    host = document.createElement('div')
+    document.body.append(host)
+    root = createRoot(host)
+    originalScrollIntoView = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollIntoView')
+    Object.defineProperty(Element.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() })
+    useStore.setState({
+      notes: [
+        at('inbox/Projects/Atlas/docs/Overview.md'),
+        at('inbox/Projects/Billing/docs/Overview.md'),
+        at('archive/2025/Atlas/Overview.md', 'archive'),
+        // A root-mode vault keeps its primary notes at the vault root.
+        at('Overview.md')
+      ],
+      selectedPath: null,
+      noteContents: {},
+      noteDirty: {},
+      searchOpen: true
+    })
+  })
+
+  afterEach(() => {
+    act(() => root.unmount())
+    host.remove()
+    document.body.innerHTML = ''
+    if (originalScrollIntoView) {
+      Object.defineProperty(Element.prototype, 'scrollIntoView', originalScrollIntoView)
+    } else {
+      delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView
+    }
+    useStore.setState(originalState, true)
+  })
+
+  const shown = (): { title: string; folder: string }[] =>
+    [...document.querySelectorAll<HTMLButtonElement>('[data-search-idx]')].map((row) => {
+      const [title, folder] = [...row.querySelectorAll('span')].map((s) => s.textContent ?? '')
+      return { title, folder: folder.replace(/[\u202A\u202C]/g, '') }
+    })
+
+  it('tells notes that share a name apart by their folder', () => {
+    act(() => root.render(createElement(SearchPalette)))
+    expect(shown()).toEqual([
+      { title: 'Overview', folder: 'Projects/Atlas/docs' },
+      { title: 'Overview', folder: 'Projects/Billing/docs' },
+      { title: 'Overview', folder: 'archive/2025/Atlas' },
+      { title: 'Overview', folder: 'inbox' }
+    ])
+  })
+
+  it('cuts a long folder from the left and keeps a root note\'s area label', () => {
+    act(() => root.render(createElement(SearchPalette)))
+    const dirs = [...document.querySelectorAll<HTMLElement>('[data-search-dir]')]
+    expect(dirs).toHaveLength(3)
+    for (const dir of dirs) {
+      // rtl puts the ellipsis on the left; the embedding keeps the path LTR.
+      expect(dir.getAttribute('dir')).toBe('rtl')
+      expect(dir.textContent?.startsWith('\u202A')).toBe(true)
+      expect(dir.className).toContain('truncate')
+    }
+    const rootRow = document.querySelector('[data-search-idx="3"]')!
+    expect(rootRow.querySelector('[data-search-dir]')).toBeNull()
+    expect(rootRow.querySelectorAll('span')[1].className).toContain('uppercase')
   })
 })

@@ -6,7 +6,7 @@ import { TAGS_TAB_PATH } from '@shared/tags'
 import { WORKFLOWS_TAB_PATH } from '@shared/workflows-view'
 import { databaseTabPath, type DatabaseDoc } from '@shared/databases'
 import { assetTabPath } from './lib/asset-tabs'
-import { findLeaf, type PaneLayout, type PaneLeaf } from './lib/pane-layout'
+import { allLeaves, findLeaf, type PaneLayout, type PaneLeaf } from './lib/pane-layout'
 import { NO_VALUE_COLUMN_ID } from './components/TasksKanban'
 
 function makeTask(content: string, taskIndex = 0): VaultTask {
@@ -337,6 +337,54 @@ describe('daily note patterns', () => {
     await useStore.getState().openDailyNoteForDate(new Date(2026, 5, 9))
 
     expect(createNote).toHaveBeenCalledWith('inbox', '2026-06-09-Tue', '2026/06-Jun')
+  })
+})
+
+describe('daily note focus request', () => {
+  const settings = {
+    primaryNotesLocation: 'inbox' as const,
+    dailyNotes: { enabled: true, directory: 'Daily Notes' },
+    weeklyNotes: { enabled: false, directory: 'Weekly Notes' },
+    monthlyNotes: { enabled: false, directory: 'Monthly Notes' },
+    folderIcons: {},
+    folderColors: {},
+    favorites: []
+  }
+  const date = new Date(2026, 5, 9)
+  const path = 'inbox/Daily Notes/2026-06-09.md'
+
+  async function focusRequestsWhileOpening(exists: boolean, readIfExisting?: boolean) {
+    const note = makeNote('# 2026-06-09\n', path)
+    installZen({
+      createNote: vi.fn().mockResolvedValue(note),
+      listNotes: vi.fn().mockResolvedValue([note]),
+      readNote: vi.fn().mockResolvedValue(note),
+      writeNote: vi.fn(async () => note)
+    })
+    const { useStore } = await loadStore()
+    useStore.setState({ notes: exists ? [note] : [], customTemplates: [], vaultSettings: settings as never })
+    const requests: unknown[] = []
+    const listen = (event: Event): void => {
+      requests.push((event as CustomEvent).detail ?? null)
+    }
+    window.addEventListener('zen:focus-editor', listen)
+    try {
+      await useStore
+        .getState()
+        .openDailyNoteForDate(date, readIfExisting === undefined ? undefined : { readIfExisting })
+    } finally {
+      window.removeEventListener('zen:focus-editor', listen)
+    }
+    return requests
+  }
+
+  it('asks for a read landing when the caller opens an existing note to read', async () => {
+    expect(await focusRequestsWhileOpening(true, true)).toEqual([{ read: true }])
+  })
+
+  it('asks for the plain editor focus otherwise: no option, or a note it had to create', async () => {
+    expect(await focusRequestsWhileOpening(true)).toEqual([null])
+    expect(await focusRequestsWhileOpening(false, true)).toEqual([null])
   })
 })
 
@@ -1853,6 +1901,109 @@ describe('vimWrappedLineMotions (#638)', () => {
   })
 })
 
+describe('tasksListOrder (#989)', () => {
+  it('defaults to note order and round-trips priority order', async () => {
+    installZen()
+    const { useStore } = await loadStore()
+    expect(useStore.getState().tasksListOrder).toBe('note')
+
+    useStore.getState().setTasksListOrder('priority')
+    const saved = JSON.parse(localStorage.getItem('zen:prefs:v2') ?? '{}')
+    expect(saved.tasksListOrder).toBe('priority')
+
+    vi.resetModules()
+    const reloaded = await import('./store')
+    expect(reloaded.useStore.getState().tasksListOrder).toBe('priority')
+  })
+
+  it('normalizes an unknown stored value to note order', async () => {
+    installZen()
+    localStorage.setItem('zen:prefs:v2', JSON.stringify({ tasksListOrder: 'due' }))
+    const { useStore } = await loadStore()
+    expect(useStore.getState().tasksListOrder).toBe('note')
+  })
+})
+
+describe('timeline panel state (#1007)', () => {
+  it('reaches two weeks by default and round-trips the range', async () => {
+    installZen()
+    const { useStore } = await loadStore()
+    expect(useStore.getState().timelineRange).toBe('two-weeks')
+    expect(useStore.getState().panelWidths.timeline).toBe(290)
+
+    useStore.getState().setTimelineRange('month')
+    const saved = JSON.parse(localStorage.getItem('zen:prefs:v2') ?? '{}')
+    expect(saved.timelineRange).toBe('month')
+
+    vi.resetModules()
+    const reloaded = await import('./store')
+    expect(reloaded.useStore.getState().timelineRange).toBe('month')
+  })
+
+  it('normalizes an unknown stored range, and keeps the filter out of the saved prefs', async () => {
+    installZen()
+    localStorage.setItem('zen:prefs:v2', JSON.stringify({ timelineRange: 'year' }))
+    const { useStore } = await loadStore()
+    expect(useStore.getState().timelineRange).toBe('two-weeks')
+    useStore.getState().setTimelineFilter('#milestone')
+    useStore.getState().setTimelineRange('all')
+    const saved = JSON.parse(localStorage.getItem('zen:prefs:v2') ?? '{}')
+    expect(saved.timelineFilter).toBeUndefined()
+    expect(saved.timelineRange).toBe('all')
+  })
+
+  it('remembers the panel width like its neighbours', async () => {
+    installZen()
+    const { useStore } = await loadStore()
+    useStore.getState().setPanelWidth('timeline', 1000)
+    expect(useStore.getState().panelWidths.timeline).toBe(640)
+    const saved = JSON.parse(localStorage.getItem('zen:prefs:v2') ?? '{}')
+    expect(saved.panelWidths.timeline).toBe(640)
+  })
+})
+
+describe('folder Gallery', () => {
+  it('sorts by last edit and stays in its folder by default, and round-trips both choices', async () => {
+    installZen()
+    const { useStore } = await loadStore()
+    expect(useStore.getState().gallerySort).toBe('updated')
+    expect(useStore.getState().galleryIncludeSubfolders).toBe(false)
+
+    useStore.getState().setGallerySort('title')
+    useStore.getState().setGalleryIncludeSubfolders(true)
+    const saved = JSON.parse(localStorage.getItem('zen:prefs:v2') ?? '{}')
+    expect(saved.gallerySort).toBe('title')
+    expect(saved.galleryIncludeSubfolders).toBe(true)
+
+    vi.resetModules()
+    const reloaded = await import('./store')
+    expect(reloaded.useStore.getState().gallerySort).toBe('title')
+    expect(reloaded.useStore.getState().galleryIncludeSubfolders).toBe(true)
+  })
+
+  it('reads an unknown stored sort as the default', async () => {
+    installZen()
+    localStorage.setItem('zen:prefs:v2', JSON.stringify({ gallerySort: 'size' }))
+    vi.resetModules()
+    const { useStore } = await import('./store')
+    expect(useStore.getState().gallerySort).toBe('updated')
+  })
+
+  it('opens a folder as a tab in the active pane, one tab per folder', async () => {
+    installZen()
+    const { useStore, isGalleryViewActive } = await loadStore()
+    const { galleryTabPath } = await import('./lib/folder-gallery')
+    await useStore.getState().openFolderGallery('inbox', 'Recipes')
+    expect(isGalleryViewActive(useStore.getState())).toBe(true)
+    expect(useStore.getState().focusedPanel).toBe('editor')
+    await useStore.getState().openFolderGallery('inbox', 'Recipes')
+    await useStore.getState().openFolderGallery('archive', '')
+    const tabs = allLeaves(useStore.getState().paneLayout).flatMap((leaf) => leaf.tabs)
+    expect(tabs.filter((tab) => tab === galleryTabPath('inbox', 'Recipes'))).toHaveLength(1)
+    expect(tabs).toContain(galleryTabPath('archive', ''))
+  })
+})
+
 describe('kanbanCardSort (#889)', () => {
   it('defaults to the manual order and round-trips due-date ordering', async () => {
     installZen()
@@ -2994,5 +3145,31 @@ describe('createAndOpen with tags (#826 follow-up)', () => {
     await useStore.getState().createAndOpen('inbox', '', { title: 'T' })
 
     expect(writeNote).not.toHaveBeenCalled()
+  })
+})
+
+describe('createAndOpen on a slow vault listing (zennotesandroid#128)', () => {
+  it('opens the new note while the vault is still being listed, then takes the listing', async () => {
+    const created = makeNote('# Untitled\n\n', 'inbox/Untitled.md')
+    type Listed = ReturnType<typeof makeNote>
+    let finishListing: (notes: Listed[]) => void = () => {}
+    const listNotes = vi.fn(() => new Promise<Listed[]>((resolve) => { finishListing = resolve }))
+    installZen({
+      createNote: vi.fn().mockResolvedValue(created),
+      listNotes,
+      readNote: vi.fn().mockResolvedValue(created)
+    })
+    const { useStore } = await loadStore()
+
+    const creating = useStore.getState().createAndOpen('inbox', '', { focusTitle: true })
+    await vi.waitFor(() => expect(useStore.getState().selectedPath).toBe('inbox/Untitled.md'))
+    expect(listNotes).toHaveBeenCalled()
+    expect(useStore.getState().notes.map((n) => n.path)).toEqual(['inbox/Untitled.md'])
+    expect(useStore.getState().pendingTitleFocusPath).toBe('inbox/Untitled.md')
+
+    const other = makeNote('# Other\n\n', 'inbox/Other.md')
+    finishListing([created, other])
+    await creating
+    expect(useStore.getState().notes.map((n) => n.path).sort()).toEqual(['inbox/Other.md', 'inbox/Untitled.md'])
   })
 })

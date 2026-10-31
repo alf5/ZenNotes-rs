@@ -16,6 +16,7 @@ import { ContextMenu, type ContextMenuItem } from './ContextMenu'
 import { ResizeHandle } from './ResizeHandle'
 import { Button, IconButton } from './ui/Button'
 import { buildMoveNotePrompt, moveNoteVocabulary, parseMoveNoteTarget } from '../lib/move-note'
+import { assetMoveTargetDir, buildMoveAssetPrompt } from '../lib/move-asset'
 import { naturalCompare } from '../lib/natural-sort'
 import { extractTags } from '../lib/tags'
 import { setDragPayload } from '../lib/dnd'
@@ -353,23 +354,10 @@ export function NoteList(): JSX.Element {
       items.push({
         label: 'Move…',
         onSelect: async () => {
-          const target = await promptApp({
-            title: 'Move asset',
-            description: 'Enter a vault-relative folder path. Leave empty to move to the vault root.',
-            initialValue: currentDir,
-            placeholder: 'media/screenshots',
-            okLabel: 'Move',
-            allowEmptySubmit: true,
-            validate: (value) => {
-              const clean = value.trim()
-              if (clean.includes('..')) return 'Path cannot contain ..'
-              if (clean.split('/').includes('.zennotes')) {
-                return 'Cannot move assets into internal ZenNotes files'
-              }
-              return null
-            }
-          })
-          if (target === null || target === currentDir) return
+          const value = await promptApp(buildMoveAssetPrompt(currentDir))
+          if (value === null) return
+          const target = assetMoveTargetDir(value)
+          if (target === currentDir) return
           await moveAsset(asset.path, target)
         }
       })
@@ -780,6 +768,7 @@ export function NoteList(): JSX.Element {
       <div
         ref={scrollRef}
         data-notelist-count={view.kind === 'assets' ? assetFiles.length : orderedFolderEntries.length}
+        data-panel-scroll
         className="min-h-0 flex-1 overflow-y-auto px-2 py-2"
         onScroll={(event) => setListScrollTop(event.currentTarget.scrollTop)}
       >
@@ -980,6 +969,7 @@ function NoteRow({
       }
       {...(noteListIdx != null ? {
         'data-notelist-idx': noteListIdx,
+        'data-notelist-type': 'note',
         'data-notelist-path': note.path
       } : {})}
     >
@@ -1027,6 +1017,7 @@ function FolderAssetRow({
       {...(noteListIdx != null
         ? {
             'data-notelist-idx': noteListIdx,
+            'data-notelist-type': 'asset',
             'data-notelist-path': asset.path
           }
         : {})}

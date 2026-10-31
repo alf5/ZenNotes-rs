@@ -282,7 +282,7 @@ pub struct VaultSettings {
     pub folder_icons: std::collections::BTreeMap<String, String>,
     /// Passthrough for v2.15+ keys the backend doesn't interpret
     /// (monthlyNotes, folderColors, favorites, view, drawingsLocation,
-    /// databasesLocation, tasksLocation, …). Kept verbatim so a
+    /// databasesLocation, tasksLocation, sharesLocation, …). Kept verbatim so a
     /// get → set round-trip never drops them; the renderer validates.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,

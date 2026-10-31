@@ -22,6 +22,7 @@ export type KeymapId =
   | "global.toggleConnections"
   | "global.toggleOutlinePanel"
   | "global.toggleCommentsPanel"
+  | "global.toggleTimelinePanel"
   | "global.addComment"
   | "global.focusPaneLeft"
   | "global.focusPaneRight"
@@ -50,6 +51,8 @@ export type KeymapId =
   | "tabs.select7"
   | "tabs.select8"
   | "tabs.select9"
+  | "tabs.next"
+  | "tabs.previous"
   | "vim.leaderPrefix"
   | "vim.leaderOpenBuffers"
   | "vim.leaderWorkflows"
@@ -66,6 +69,10 @@ export type KeymapId =
   | "vim.leaderCopyMarkdown"
   | "vim.leaderToggleFavorite"
   | "vim.leaderTableToDatabase"
+  | "vim.leaderNoteCover"
+  | "vim.leaderNoteCoverUnsplash"
+  | "vim.leaderCalloutType"
+  | "vim.leaderCodeLanguage"
   | "vim.leaderQuickCapture"
   | "vim.leaderHideToTray"
   | "vim.leaderTemplatePicker"
@@ -74,6 +81,9 @@ export type KeymapId =
   | "vim.leaderWeeklyNote"
   | "vim.leaderMonthlyNote"
   | "vim.leaderCalendar"
+  | "vim.leaderTimeline"
+  | "vim.leaderUnresolvedLinks"
+  | "vim.leaderFolderGallery"
   | "vim.panePrefix"
   | "vim.paneFocusLeft"
   | "vim.paneFocusDown"
@@ -89,6 +99,7 @@ export type KeymapId =
   | "vim.tabNext"
   | "vim.hintMode"
   | "vim.goToDefinition"
+  | "vim.linkPopover"
   | "vim.createNoteFromLink"
   | "vim.foldCurrent"
   | "vim.unfoldCurrent"
@@ -120,6 +131,7 @@ export type KeymapId =
   | "nav.peekPreview"
   | "nav.restore"
   | "nav.delete"
+  | "nav.sidebarTrash"
   | "nav.toggleTask"
   | "nav.localEx"
   | "nav.newQuickNote"
@@ -127,6 +139,8 @@ export type KeymapId =
   | "tasks.moveTaskUp"
   | "tasks.moveTaskDown"
   | "tasks.savedFilters"
+  | "tags.nextNote"
+  | "tags.previousNote"
   | "editor.moveLineUp"
   | "editor.moveLineDown"
   | "editor.hopMarkerForward"
@@ -135,6 +149,7 @@ export type KeymapId =
   | "editor.unfoldHeading"
   | "editor.toggleCheckbox"
   | "editor.reflowParagraph"
+  | "editor.linkPopover"
   | "editor.reviewNextChange"
   | "editor.reviewPreviousChange"
   | "editor.reviewAcceptChange"
@@ -316,6 +331,17 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     title: "Toggle comments panel",
     description: "Toggle the comments panel in the active pane.",
     defaultBinding: "Mod+Shift+C",
+  },
+  {
+    id: "global.toggleTimelinePanel",
+    kind: "shortcut",
+    scope: "app",
+    group: "global",
+    title: "Toggle timeline panel",
+    // 7 because 1 to 6 are taken (sidebar, connections, outline, and the
+    // three pane modes): the next free digit beside its neighbours. (#1007)
+    description: "Toggle the Timeline panel in the active pane: open tasks in date order.",
+    defaultBinding: "Mod+7",
   },
   {
     id: "global.addComment",
@@ -510,6 +536,33 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
       defaultBindingMac: `Ctrl+${n}`,
     }),
   ),
+  // Step through the open tabs with or without Vim (#973), in the order gt/gT
+  // and the digit shortcuts use. Ctrl+Tab stays Switch to previous note, so
+  // these take the other common conventions: Ctrl+PageDown / Ctrl+PageUp
+  // (browsers, VS Code), and Cmd+Option+Right / Left on macOS (Chrome, VS
+  // Code), where Ctrl+PageDown needs fn.
+  {
+    id: "tabs.next",
+    kind: "shortcut",
+    scope: "app",
+    group: "global",
+    title: "Next tab",
+    description:
+      "Go to the next open tab, counted across panes in the same order gt cycles, wrapping from the last tab to the first. Works with Vim mode on or off.",
+    defaultBinding: "Mod+PageDown",
+    defaultBindingMac: "Alt+Mod+ArrowRight",
+  },
+  {
+    id: "tabs.previous",
+    kind: "shortcut",
+    scope: "app",
+    group: "global",
+    title: "Previous tab",
+    description:
+      "Go to the previous open tab, counted across panes in the same order gT cycles, wrapping from the first tab to the last. Works with Vim mode on or off.",
+    defaultBinding: "Mod+PageUp",
+    defaultBindingMac: "Alt+Mod+ArrowLeft",
+  },
   {
     id: "vim.leaderPrefix",
     kind: "sequence",
@@ -692,6 +745,56 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     maxTokens: 1,
   },
   {
+    id: "vim.leaderNoteCover",
+    kind: "sequence",
+    scope: "leader",
+    group: "vim",
+    title: "Leader note action: cover image",
+    description:
+      "Open the cover picker for the active note: add, change or remove the banner image across its top.",
+    defaultBinding: "c",
+    vimOnly: true,
+    maxTokens: 1,
+  },
+  {
+    id: "vim.leaderNoteCoverUnsplash",
+    kind: "sequence",
+    scope: "leader",
+    group: "vim",
+    title: "Leader note action: cover from Unsplash",
+    description:
+      "Open the cover picker on its Unsplash tab, to search free photos for the active note's cover.",
+    defaultBinding: "u",
+    vimOnly: true,
+    maxTokens: 1,
+  },
+  {
+    id: "vim.leaderCalloutType",
+    kind: "sequence",
+    scope: "leader",
+    group: "vim",
+    title: "Leader note action: callout type",
+    // `c` is the cover; `a` for admonition, and for the alerts GitHub calls them.
+    description:
+      "Open the callout type menu at the cursor: pick a type to turn the paragraph or the selected lines into a callout, or to change the type of the callout the cursor is in.",
+    defaultBinding: "a",
+    vimOnly: true,
+    maxTokens: 1,
+  },
+  {
+    id: "vim.leaderCodeLanguage",
+    kind: "sequence",
+    scope: "leader",
+    group: "vim",
+    title: "Leader note action: code block language",
+    // `l` for language: the note group's own key, pressed twice.
+    description:
+      "Open the code block language picker for the code block the cursor is in: pick a language to write after its fence, or Text (plain) to take it away.",
+    defaultBinding: "l",
+    vimOnly: true,
+    maxTokens: 1,
+  },
+  {
     id: "vim.leaderQuickCapture",
     kind: "sequence",
     scope: "leader",
@@ -777,6 +880,46 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     title: "Leader: toggle calendar",
     description: "Toggle the calendar panel for the active daily or weekly note.",
     defaultBinding: "c",
+    vimOnly: true,
+    maxTokens: 1,
+  },
+  {
+    id: "vim.leaderTimeline",
+    kind: "sequence",
+    scope: "leader",
+    group: "vim",
+    title: "Leader: toggle timeline",
+    // `n` for "next": what is coming up. Unbound at the leader before this.
+    description:
+      "Toggle the Timeline panel and move the keyboard into it: open tasks in date order, overdue and milestones marked.",
+    defaultBinding: "n",
+    vimOnly: true,
+    maxTokens: 1,
+  },
+  {
+    id: "vim.leaderUnresolvedLinks",
+    kind: "sequence",
+    scope: "leader",
+    group: "vim",
+    title: "Leader: unresolved links",
+    // `u` for unresolved: every link in the vault that names a note no one wrote yet.
+    description:
+      "Open the Unresolved Links view: every [[wikilink]] in the vault that points at a note that does not exist yet.",
+    defaultBinding: "u",
+    vimOnly: true,
+    maxTokens: 1,
+  },
+  {
+    id: "vim.leaderFolderGallery",
+    kind: "sequence",
+    scope: "leader",
+    group: "vim",
+    title: "Leader: folder gallery",
+    // `G` for Gallery: `g` was the Atlas already, and a capital is a key of
+    // its own after the leader (`<leader>q` and `<leader>Q` differ).
+    description:
+      "Open the Gallery of the current folder: its notes as cards led by their covers. The folder under the sidebar cursor while the sidebar has focus, otherwise the open note's folder.",
+    defaultBinding: "G",
     vimOnly: true,
     maxTokens: 1,
   },
@@ -957,6 +1100,20 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     defaultBinding: "g D",
     vimOnly: true,
     maxTokens: 2,
+  },
+  {
+    id: "vim.linkPopover",
+    kind: "sequence",
+    scope: "vim-editor",
+    group: "vim",
+    title: "Link popover for link at cursor",
+    // Vim's own `K` looks up the word under the cursor; here the word is a
+    // note, and the lookup shows it.
+    description:
+      "Open the link popover for the [[wikilink]] under the cursor: edit the note it names in place, or create it when it does not exist yet. Escape in normal mode closes it and returns here.",
+    defaultBinding: "K",
+    vimOnly: true,
+    maxTokens: 1,
   },
   {
     id: "vim.foldCurrent",
@@ -1271,9 +1428,19 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     group: "view-actions",
     title: "Delete selected result",
     description:
-      "Permanently delete or move the selected item to trash, depending on the view.",
+      "Permanently delete or move the selected item to trash, depending on the view. In the sidebar it moves the note under the cursor (or the selection that includes it) to the Trash, after a confirm.",
     defaultBinding: "x",
     maxTokens: 1,
+  },
+  {
+    id: "nav.sidebarTrash",
+    kind: "shortcut",
+    scope: "lists",
+    group: "view-actions",
+    title: "Move sidebar note to Trash",
+    description:
+      "With the sidebar focused, move the note under its cursor to the Trash after a confirm, or every selected note when the selection includes that row. Works with Vim mode on or off.",
+    defaultBinding: "Mod+Backspace",
   },
   {
     id: "nav.toggleTask",
@@ -1316,6 +1483,30 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     description:
       "Open the picker of saved Tasks filters and apply one (Tasks view, Vim mode). Save the current filter with :savefilter <name>.",
     defaultBinding: "F",
+    maxTokens: 1,
+  },
+  {
+    id: "tags.nextNote",
+    kind: "sequence",
+    scope: "views",
+    group: "view-actions",
+    title: "Next note in Tags view",
+    description:
+      "Move past the selected note's tagged blocks to the next note in the Tags view (Vim mode).",
+    defaultBinding: "}",
+    vimOnly: true,
+    maxTokens: 1,
+  },
+  {
+    id: "tags.previousNote",
+    kind: "sequence",
+    scope: "views",
+    group: "view-actions",
+    title: "Previous note in Tags view",
+    description:
+      "Move to the previous note in the Tags view, or to the top of the current note's blocks (Vim mode).",
+    defaultBinding: "{",
+    vimOnly: true,
     maxTokens: 1,
   },
   {
@@ -1436,6 +1627,16 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     defaultBindingMac: "Ctrl+Q",
   },
   {
+    id: "editor.linkPopover",
+    kind: "shortcut",
+    scope: "vim-editor",
+    group: "view-actions",
+    title: "Open link popover",
+    description:
+      "Open the link popover for the [[wikilink]] under the cursor and move into it: edit the note it names in place, or create it when it does not exist yet. Escape closes it and returns to the note you were in. Works with Vim mode on or off; Vim mode also has it as `K`.",
+    defaultBinding: "Shift+Mod+K",
+  },
+  {
     id: "nav.localEx",
     kind: "sequence",
     scope: "views",
@@ -1539,7 +1740,8 @@ export function getSequenceTokens(
   return getKeymapBinding(overrides, id)
     .split(/\s+/)
     .map((token) => token.trim())
-    .filter(Boolean);
+    .filter(Boolean)
+    .map((token) => resolveSequenceToken(token));
 }
 
 type RuntimeZenApi = { platformSync?: () => NodeJS.Platform };
@@ -1743,13 +1945,17 @@ export function normalizeSequenceToken(input: string): string | null {
   if (!rawKey) return null;
   let base = normalizeSequenceBaseToken(rawKey);
   if (!base) return null;
+  // `Mod` stays `Mod`: it is the portable spelling of "Cmd on macOS, Ctrl
+  // elsewhere", so a config.toml that says `"nav.delete" = "Mod+Backspace"`
+  // means the same chord on every machine it syncs to. It used to be dropped
+  // here, which stored that binding as a bare Backspace (#972); keydowns never
+  // spell `Mod`, so matching resolves it per platform (resolveSequenceToken).
   const modifiers = normalizeModifiers(
     parts
       .map((part) => normalizeModifierToken(part))
-      .filter((part): part is NonNullable<typeof part> => !!part)
-      .filter((part) => part !== "Mod"),
+      .filter((part): part is NonNullable<typeof part> => !!part),
   );
-  // When a non-Shift modifier (Ctrl/Alt/Meta) is combined with a single
+  // When a non-Shift modifier (Ctrl/Alt/Meta/Mod) is combined with a single
   // ASCII letter, canonicalize to uppercase. Event-produced tokens come
   // out lowercase (e.g. Ctrl+w → `'w'` since Shift isn't held), but the
   // convention in default bindings and user-written keymaps is uppercase
@@ -1757,11 +1963,32 @@ export function normalizeSequenceToken(input: string): string | null {
   if (
     base.length === 1 &&
     /[a-zA-Z]/.test(base) &&
-    modifiers.some((m) => m === "Ctrl" || m === "Alt" || m === "Meta")
+    modifiers.some(
+      (m) => m === "Ctrl" || m === "Alt" || m === "Meta" || m === "Mod",
+    )
   ) {
     base = base.toUpperCase();
   }
   return modifiers.length > 0 ? `${modifiers.join("+")}+${base}` : base;
+}
+
+/**
+ * A stored sequence token as a keydown on this platform reads: `Mod` becomes
+ * `Meta` (Cmd) on macOS and `Ctrl` elsewhere, the way the shortcut format
+ * reads it. `sequenceTokenFromEvent` never produces `Mod`, so every place that
+ * compares a binding's token with an event's goes through this first
+ * (getSequenceTokens and advanceSequence do it for their callers).
+ */
+export function resolveSequenceToken(token: string, mac?: boolean): string {
+  const parts = token.split("+");
+  if (parts.length < 2) return token;
+  const base = parts.pop() as string;
+  if (!parts.includes("Mod")) return token;
+  mac ??= isMacPlatform();
+  const modifiers = normalizeModifiers(
+    parts.map((part) => (part === "Mod" ? (mac ? "Meta" : "Ctrl") : part)),
+  );
+  return `${modifiers.join("+")}+${base}`;
 }
 
 export function normalizeSequenceBinding(input: string): string | null {
@@ -1961,6 +2188,31 @@ export function eventMatchesUserOverride(
   return false;
 }
 
+/**
+ * The app-wide shortcut (an `app`-scope action: the global and tab
+ * shortcuts) this keydown is, under these overrides, or null. Surfaces that
+ * let a chord through to one of their own actions step aside for these, so
+ * a global shortcut keeps its key everywhere.
+ */
+export function appShortcutForEvent(
+  event: KeyboardEvent,
+  overrides: KeymapOverrides | null | undefined,
+): KeymapDefinition | null {
+  for (const definition of KEYMAP_DEFINITIONS) {
+    if (definition.scope !== "app" || definition.kind !== "shortcut") continue;
+    if (matchesShortcut(event, overrides, definition.id)) return definition;
+  }
+  return null;
+}
+
+/** Ctrl, Alt or Cmd/Meta is down: a chord, not a typed key. Shift alone
+ *  types a capital, so it does not count. */
+export function isChordEvent(
+  event: Pick<KeyboardEvent, "ctrlKey" | "metaKey" | "altKey">,
+): boolean {
+  return event.ctrlKey || event.metaKey || event.altKey;
+}
+
 export function matchesSequenceToken(
   event: KeyboardEvent,
   overrides: KeymapOverrides | null | undefined,
@@ -2088,7 +2340,8 @@ export function advanceSequence(
   const tokens = binding
     .split(/\s+/)
     .map((token) => token.trim())
-    .filter(Boolean);
+    .filter(Boolean)
+    .map((token) => resolveSequenceToken(token));
   if (tokens.length === 0) return false;
   const token = sequenceTokenFromEvent(event);
   if (!token) return false;

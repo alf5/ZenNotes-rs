@@ -136,6 +136,30 @@ export function cloudSyncConflictCopyPath(path: string, attempt: number): string
   return `${directory}${stem} ${suffix}${extension}`
 }
 
+/**
+ * The first free name beside `path` for a file that has to make room:
+ * `Note 2.md`, then `Note 3.md`, the names the app gives a note moved into a
+ * folder that already holds one of the same name (Move to Trash, Archive).
+ * `taken` answers for this device; nothing here knows what Cloud holds.
+ */
+export async function cloudSyncFreePath(
+  path: string,
+  taken: (candidate: string) => Promise<boolean>
+): Promise<string> {
+  const normalized = normalizeCloudSyncPath(path)
+  const slash = normalized.lastIndexOf('/')
+  const directory = slash === -1 ? '' : normalized.slice(0, slash + 1)
+  const name = normalized.slice(slash + 1)
+  const dot = name.lastIndexOf('.')
+  const stem = dot > 0 ? name.slice(0, dot) : name
+  const extension = dot > 0 ? name.slice(dot) : ''
+  for (let n = 2; n <= 10_000; n++) {
+    const candidate = `${directory}${stem} ${n}${extension}`
+    if (!(await taken(candidate))) return candidate
+  }
+  throw new Error(`Every name for “${normalized}” is taken. Rename a few of those files, then try again.`)
+}
+
 /** Recognize copies created by pre-v2.44 sync without treating them as safe
  * to delete. The returned original path is only a review hint. */
 export function cloudSyncLegacyConflictOriginalPath(value: string): string | null {

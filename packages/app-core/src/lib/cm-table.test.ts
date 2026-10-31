@@ -18,6 +18,7 @@ import {
   findChar
 } from './cm-table'
 import { closeTableContextMenu } from './cm-table-menu'
+import { getPromptRequest, settlePromptRequest } from './prompt-requests'
 import { isMacPlatform } from './keymaps'
 import { useStore } from '../store'
 import { Vim } from '@replit/codemirror-vim'
@@ -51,10 +52,11 @@ function mount(doc: string): EditorView {
       extensions: [markdown({ base: markdownLanguage }), history(), tablePlugin]
     })
   })
-  // Ensure the GFM table node is parsed, then nudge the field to rebuild.
+  // Ensure the GFM table node is parsed. The field rebuilds whenever the syntax
+  // tree changes, so that is all a mount needs. Nothing edits the note after
+  // it: an edit at the top reparses from there under the same 20 ms budget,
+  // and a cut parse can stop before the table.
   forceParsing(view, doc.length, 5000)
-  view.dispatch({ changes: { from: 0, insert: ' ' } })
-  view.dispatch({ changes: { from: 0, to: 1 } })
   return view
 }
 
@@ -789,6 +791,10 @@ describe('tablePlugin — column widths (#294)', () => {
   it('re-resizing replaces the marker — never duplicates it', () => {
     const view = mount(PLAIN_DOC)
     drag(view, 100, 180)
+    // The marker edit reparses this short note under the 20 ms budget, and a
+    // cut parse stops before the table. Finish it, as the app's parse worker
+    // would, so the second drag finds the widget again.
+    forceParsing(view, view.state.doc.length, 5000)
     drag(view, 100, 140)
     const markers = view.state.doc.toString().match(/zen:cols/g) ?? []
     expect(markers.length).toBe(1)
@@ -883,6 +889,97 @@ describe('table cell link following (#445)', () => {
     cell?.dispatchEvent(new KeyboardEvent('keydown', { key: 'g', bubbles: true }))
     cell?.dispatchEvent(new KeyboardEvent('keydown', { key: 'd', bubbles: true }))
     expect(selectNote).toHaveBeenCalledWith('Target-Note.md')
+    view.destroy()
+  })
+})
+
+describe('unresolved wikilinks in table cells', () => {
+  const saved = {
+    notes: useStore.getState().notes,
+    selectNote: useStore.getState().selectNote,
+    selectedPath: useStore.getState().selectedPath,
+    vimMode: useStore.getState().vimMode
+  }
+  afterEach(() => {
+    const pending = getPromptRequest()
+    if (pending) settlePromptRequest(pending, null)
+    useStore.setState(saved)
+    vi.restoreAllMocks()
+  })
+
+  const existing = { path: 'Existing.md', title: 'Existing', folder: 'inbox' }
+  const DOC = [
+    '| A | B |',
+    '| --- | --- |',
+    '| live | [[Existing]] |',
+    '| dead | [[Missing Note]] |',
+    '| alias | [[Missing Note\\|alias]] |',
+    '| code | `[[Missing Note]]` |'
+  ].join('\n')
+
+  function setup(vimMode = false): ReturnType<typeof vi.fn> {
+    const selectNote = vi.fn(async () => {})
+    useStore.setState({ vimMode, selectedPath: 'Doc.md', notes: [existing], selectNote } as never)
+    return selectNote
+  }
+  const cellLink = (view: EditorView, raw: string): HTMLAnchorElement | null =>
+    [...view.dom.querySelectorAll<HTMLElement>('.cm-table-cell')]
+      .find((cell) => cell.dataset.raw === raw)
+      ?.querySelector<HTMLAnchorElement>('a.wikilink') ?? null
+
+  it('marks a link to a note that does not exist broken, and leaves a live one alone', () => {
+    setup()
+    const view = mount(DOC)
+    expect(cellLink(view, '[[Existing]]')?.classList.contains('broken')).toBe(false)
+    expect(cellLink(view, '[[Missing Note]]')?.classList.contains('broken')).toBe(true)
+    // An alias is decided by its target, not its label.
+    const alias = cellLink(view, '[[Missing Note|alias]]')
+    expect(alias?.textContent).toBe('alias')
+    expect(alias?.classList.contains('broken')).toBe(true)
+    // Inside a code span `[[...]]` is text, not a link.
+    expect(cellLink(view, '`[[Missing Note]]`')).toBeNull()
+    view.destroy()
+  })
+
+  it('turns the link live in place once its note exists, without rebuilding the table', () => {
+    setup()
+    const view = mount(DOC)
+    const widget = view.dom.querySelector('.cm-table-widget')
+    expect(cellLink(view, '[[Missing Note]]')?.classList.contains('broken')).toBe(true)
+    useStore.setState({
+      notes: [existing, { path: 'Missing Note.md', title: 'Missing Note', folder: 'inbox' }]
+    } as never)
+    expect(view.dom.querySelector('.cm-table-widget')).toBe(widget)
+    expect(cellLink(view, '[[Missing Note]]')?.classList.contains('broken')).toBe(false)
+    expect(cellLink(view, '[[Missing Note|alias]]')?.classList.contains('broken')).toBe(false)
+    // And back: the note going away (deleted, renamed) marks it broken again.
+    useStore.setState({ notes: [existing] } as never)
+    expect(cellLink(view, '[[Missing Note]]')?.classList.contains('broken')).toBe(true)
+    view.destroy()
+  })
+
+  it('re-decides a cell when it leaves editing', () => {
+    setup()
+    const view = mount(DOC)
+    const cell = [...view.dom.querySelectorAll<HTMLElement>('.cm-table-cell')].find(
+      (c) => c.dataset.raw === '[[Existing]]'
+    )!
+    cell.focus()
+    cell.textContent = '[[Nowhere]]'
+    cell.dispatchEvent(new Event('input', { bubbles: true }))
+    cell.blur()
+    expect(cell.querySelector('a.wikilink')?.classList.contains('broken')).toBe(true)
+    view.destroy()
+  })
+
+  it('still offers to create the note when a broken cell link is clicked', () => {
+    const selectNote = setup()
+    const view = mount(DOC)
+    const anchor = cellLink(view, '[[Missing Note]]')
+    expect(anchor?.classList.contains('broken')).toBe(true)
+    anchor?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }))
+    expect(getPromptRequest()?.options.title).toBe('Create note for "Missing Note"?')
+    expect(selectNote).not.toHaveBeenCalled()
     view.destroy()
   })
 })

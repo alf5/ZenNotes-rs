@@ -27,6 +27,7 @@ use super::links::open_note_link;
 use crate::ipc::types::NoteComment;
 use crate::vault::atomic::write_file_atomic;
 use crate::vault::comments;
+use crate::vault::metadata::strip_code_content;
 use crate::vault::layout::{ATTACHMENTS_DIRS, FOLDERS, INTERNAL_VAULT_DIR, VAULT_SETTINGS_FILE};
 use crate::vault::notes::{created_at_ms, resolve_safe, to_posix};
 use crate::vault::settings::get_vault_settings;
@@ -207,47 +208,6 @@ fn trim_slashes(s: &str) -> &str {
 }
 
 /* ---------- Markdown parsing ----------------------------------------------- */
-
-static FENCE_RE: LazyLock<Regex> = LazyLock::new(|| re(r"^[ \t]*(`{3,}|~{3,})(.*)$"));
-static INLINE_CODE_RE: LazyLock<Regex> = LazyLock::new(|| re(r"`[^`\n]*`"));
-
-/// Blank out fenced and inline code so the tag, link and excerpt scanners
-/// never read code as content. Line-based and indentation-tolerant: a fence
-/// nested under a list item is still a code block (#293).
-fn strip_code_content(body: &str) -> String {
-    if !body.contains('`') && !body.contains('~') {
-        return body.to_string();
-    }
-    let mut lines: Vec<String> = body.split('\n').map(str::to_string).collect();
-    let mut in_fence = false;
-    let mut fence_char = ' ';
-    let mut fence_len = 0;
-    for line in lines.iter_mut() {
-        if let Ok(Some(m)) = FENCE_RE.captures(line) {
-            let marker = m.get(1).map(|x| x.as_str()).unwrap_or("");
-            let rest = m.get(2).map(|x| x.as_str()).unwrap_or("");
-            let ch = marker.chars().next().unwrap_or(' ');
-            if !in_fence {
-                // A backtick fence's info string may not contain a backtick (CommonMark).
-                if ch == '~' || !rest.contains('`') {
-                    in_fence = true;
-                    fence_char = ch;
-                    fence_len = marker.len();
-                    *line = " ".into();
-                    continue;
-                }
-            } else if ch == fence_char && marker.len() >= fence_len && rest.trim().is_empty() {
-                in_fence = false;
-                *line = " ".into();
-                continue;
-            }
-        }
-        if in_fence {
-            *line = " ".into();
-        }
-    }
-    INLINE_CODE_RE.replace_all(&lines.join("\n"), " ").into_owned()
-}
 
 fn unquote(v: &str) -> String {
     let trimmed = v.trim();

@@ -1,3 +1,63 @@
+# Gap analysis: upstream ZenNotes v2.73.0 → v2.79.0
+
+Status of the mirror as of 2026-10-31, released as ZenNotes-rs 2.79.0.
+
+Upstream reference clone: `~/delme/zennotes`, mirrored at tag `v2.79.0` (its
+three later commits are packaging only). The gap crossed here was 173 commits,
+almost all of it in the vendored packages: Timeline, tagged blocks, covers,
+folder Gallery, database view columns and picked rows, a key for any command,
+callout and code language menus, the Vim-off keyboard fixes. The bridge contract
+gained six optional members (Unsplash) and one optional vault setting
+(`sharesLocation`).
+
+## Done
+
+- `packages/{app-core,bridge-contract,shared-domain}` re-vendored **verbatim**
+  (confirmed byte-identical to `v2.73.0` before replacing, and to `v2.79.0`
+  after). `pele` moves to 1.12.0 through the workspace.
+- `@types/node` follows upstream to 25: vendored `shared-domain/unsplash.ts` sets
+  `RequestInit.cache`, which the package's own `tsc` rejects under 22.
+- `src/bridge/portable-config.ts`: field tables and serializer re-spliced
+  wholesale, byte-identical to upstream again. `[keymaps.commands]` (#971) has no
+  table entry, so the parity test now names it, and a round trip is pinned.
+- **Unsplash covers** (`src/bridge/unsplash.ts`, `src-tauri/src/unsplash.rs`):
+  upstream builds the vendored `createUnsplashClient` in its main process. Here
+  it runs in the renderer, so its rules cannot rot, over two things Rust keeps:
+  the Access Key, only in the OS keychain with no file fallback, and the request,
+  limited to api.unsplash.com's three endpoints with redirects off. The client
+  holds a stand-in, never the key. A pasted key crosses once to be checked and
+  saved. One difference: the 40-requests-a-minute cap counts per window.
+- `vault/metadata.rs`: `stripCodeContent` is now upstream's line-based version,
+  shared with `mcp/ops.rs`. The old regex missed fences in CRLF notes (their code
+  leaked in as tags, upstream's fix in 2.77), and had also never handled indented
+  or `~~~` fences (#293).
+- Quick Capture opens on the display under the pointer (#976): `windows.rs` ports
+  `quick-capture-placement.ts`. Unit tested only, not exercised live: this
+  machine runs niri on Wayland, and the move is best effort where a compositor
+  withholds the pointer position or window placement.
+- `sharesLocation` round-trips through the existing `VaultSettings` passthrough.
+- The MCP golden was re-recorded from upstream 2.79 with six new steps for CRLF
+  notes (fenced tags and links, task toggles): 86 steps match.
+
+## Not carried over
+
+| Gap | Why |
+|---|---|
+| Share > ZenNotes (`share-inbox.ts`, `apps/share-extension`) | **Deferred until it can be tested on a Mac.** A macOS share extension, and macOS builds here are CI-only and unsigned, so macOS may not load it. First step when a Mac is at hand: embed upstream's extension in a Tauri build and see whether it is listed, before porting any filing code. Settings hides its row on Linux and Windows. On macOS, by the code, **Default shares location** still shows and is saved, but nothing files shares. |
+| Trusting system certificates (`system-trust.ts`, #1009) | **Skipped.** It serves Cloud, updates and link previews. Cloud and updates are not in this port. Link previews use `ureq` with its own roots and already refuse private addresses, so it would only help a public address with a private certificate. |
+| Update error copy (`update-error-copy.ts`, #1003) | **Closed, nothing to port.** It only explains auto-updater failures, and this port has no auto-updater. |
+| Cloud sync changes | Cloud sync remains out of scope. |
+
+Vendored text that is wrong here is swapped at build time, leaving `packages/`
+byte-identical (`tooling/vite/vendored-copy.ts`): the Unsplash key row's Electron
+`--password-store` hint, and the What's New entry announcing Share, which now
+says this build does not have it. If upstream rewords either, the build and
+`src/__tests__/vendored-copy.test.ts` fail, and the entry needs updating.
+
+The open items in the v2.73 section below are unchanged.
+
+---
+
 # Gap analysis: upstream ZenNotes v2.45.0 → v2.73.0
 
 Status of the mirror as of 2026-10-21, on branch `mirror-v2.73`.

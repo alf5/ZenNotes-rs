@@ -51,10 +51,11 @@ function mount(doc: string, withWidgets: boolean): EditorView {
       ]
     })
   })
+  // The table field rebuilds whenever the syntax tree changes, so finishing the
+  // parse is all a mount needs. Nothing edits the note after it: an edit at the
+  // top reparses from there under the same 20 ms budget, and a cut parse can
+  // stop before the table.
   forceParsing(view, doc.length, 5000)
-  // Nudge the table field so it rebuilds against the completed parse.
-  view.dispatch({ changes: { from: 0, insert: ' ' } })
-  view.dispatch({ changes: { from: 0, to: 1 } })
   return view
 }
 

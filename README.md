@@ -17,7 +17,7 @@ This Electron → Tauri conversion was performed by **AI: Anthropic's Claude** r
 ported the vault/file/search/tasks backend to Rust, authored the Tauri bridge that implements the
 existing `ZenBridge` contract, set up the GitHub Actions release pipeline, and produced the Arch
 Linux packaging, iterating against real builds and tests at each step. Each later catch-up with
-upstream was done the same way: v2.15 by Claude Fable 5, v2.45 by Claude Opus 5, and v2.73 by
+upstream was done the same way: v2.15 by Claude Fable 5, v2.45 by Claude Opus 5, and v2.73 and v2.79 by
 Claude Opus 5.5.
 
 ## What's different from upstream ZenNotes
@@ -30,7 +30,7 @@ Claude Opus 5.5.
 - **Scope:** desktop app only. Not part of this port: the original's web/server/self-hosted modes, ZenNotes Cloud (sync, backups, publishing), the `zn` CLI, Raycast, the auto-updater, TikZ, and PDF/Word export.
 - **MCP:** the binary is its own MCP server: `zennotes-rs mcp [--vault <path or name>]` serves the original's 34 vault tools over stdio, on local vaults, and Settings → MCP installs it into Claude Code, Claude Desktop, Codex or OpenCode (as `zennotes-rs`, so it can sit beside the original's `zennotes` entry). Its replies are checked against the original's server; see [GAP-ANALYSIS.md](GAP-ANALYSIS.md). In Settings, their pages either do not appear or say they are not available in this build.
 - **Identity:** application id `com.zennotes-rs.app`, deep-link scheme `zennotes-rs://`.
-- **Upstream parity:** mirrored to ZenNotes **v2.73.0**. See [GAP-ANALYSIS.md](GAP-ANALYSIS.md) for what is and is not carried over.
+- **Upstream parity:** mirrored to ZenNotes **v2.79.0**. See [GAP-ANALYSIS.md](GAP-ANALYSIS.md) for what is and is not carried over.
 
 ### Sharing a vault and settings with upstream ZenNotes
 
@@ -57,7 +57,7 @@ Licensed **MIT** (see [LICENSE](LICENSE)), the same as the upstream project.
 
 ---
 
-> The remainder of this document is the **original ZenNotes README** (as of upstream v2.73.0),
+> The remainder of this document is the **original ZenNotes README** (as of upstream v2.79.0),
 > reproduced verbatim for reference and attribution. Paths, commands, and links below refer to
 > the upstream Electron monorepo, not to this Tauri port.
 

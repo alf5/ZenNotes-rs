@@ -6,6 +6,7 @@ import type {
 import {
   CLOUD_SYNC_SETTINGS_CONFLICT_PATH,
   CLOUD_SYNC_VAULT_SETTINGS_PATH,
+  cloudSyncFreePath,
   cloudSyncPathKey,
   isCloudSyncVaultSettingsPath,
   normalizeCloudSyncPath,
@@ -139,6 +140,33 @@ export class PortableCloudSyncRepository implements CloudSyncRepository {
     const items: CloudSyncLocalItem[] = []
     await this.walk('', items)
     return items.sort((left, right) => left.path.localeCompare(right.path))
+  }
+
+  /**
+   * The file at exactly this path, read as scan() reads it, found with one
+   * listing per folder on the way down. Every name must match its listing
+   * exactly; a case-only difference anywhere is left to the scan, which
+   * reports the spelling on disk.
+   */
+  async readLocalItem(path: string): Promise<CloudSyncLocalItem | null> {
+    const normalized = this.path(path)
+    if (!shouldSyncVaultPath(normalized)) return null
+    const segments = normalized.split('/')
+    let directory = ''
+    for (const [index, segment] of segments.entries()) {
+      const last = index === segments.length - 1
+      let entries: CloudSyncFileEntry[]
+      try {
+        entries = await this.fs.readdir(directory)
+      } catch {
+        return null
+      }
+      const entry = entries.find((candidate) => candidate.name.normalize('NFC') === segment)
+      if (!entry || entry.type !== (last ? 'file' : 'directory')) return null
+      directory = directory ? `${directory}/${segment}` : segment
+      if (!last && !shouldTraverseCloudSyncDirectory(directory)) return null
+    }
+    return this.readItem(normalized)
   }
 
   async pendingConflictPaths(): Promise<string[]> {
@@ -305,7 +333,7 @@ export class PortableCloudSyncRepository implements CloudSyncRepository {
   async applyConflictResolutionFiles(input: {
     expected_path: string | null
     expected_sha256: string | null
-    files: Array<{ path: string; content: CloudSyncContent }>
+    files: Array<{ path: string; content: CloudSyncContent; displace_existing?: boolean }>
   }): Promise<void> {
     const expectedPath = input.expected_path ? this.path(input.expected_path) : null
     const current = expectedPath ? await this.readItemOrNull(expectedPath) : null
@@ -319,11 +347,19 @@ export class PortableCloudSyncRepository implements CloudSyncRepository {
     // Validate every source before creating a copy or replacing the original.
     for (const file of files) await this.validateContent(file.content)
     const expectedKey = expectedPath ? cloudSyncPathKey(expectedPath) : null
+    const reserved = new Set(files.map((file) => cloudSyncPathKey(file.path)))
+    const displacements: Array<{ from: string; to: string }> = []
     for (const file of files) {
       if (cloudSyncPathKey(file.path) === expectedKey) continue
-      if ((await this.fs.stat(file.path)) !== null) {
+      const occupant = await this.fs.stat(file.path)
+      if (occupant === null) continue
+      if (!file.displace_existing || occupant !== 'file') {
         throw new Error(`A file named “${file.path}” already exists. Choose another name.`)
       }
+      const to = await cloudSyncFreePath(file.path, async (candidate) =>
+        reserved.has(cloudSyncPathKey(candidate)) || (await this.fs.stat(candidate)) !== null)
+      reserved.add(cloudSyncPathKey(to))
+      displacements.push({ from: file.path, to })
     }
 
     const ordered = [...files].sort((left, right) =>
@@ -334,8 +370,13 @@ export class PortableCloudSyncRepository implements CloudSyncRepository {
           : 0
     )
     const newPaths: string[] = []
+    const displaced: Array<{ from: string; to: string }> = []
     let replacingExpected = false
     try {
+      for (const move of displacements) {
+        await this.fs.rename(move.from, move.to)
+        displaced.push(move)
+      }
       for (const file of ordered) {
         if (cloudSyncPathKey(file.path) === expectedKey) replacingExpected = true
         else newPaths.push(file.path)
@@ -351,6 +392,9 @@ export class PortableCloudSyncRepository implements CloudSyncRepository {
       if (expectedPath && replacingExpected) {
         if (current) await this.write(expectedPath, current.content).catch(() => undefined)
         else await this.fs.deleteFile(expectedPath).catch(() => undefined)
+      }
+      for (const move of displaced.reverse()) {
+        await this.fs.rename(move.to, move.from).catch(() => undefined)
       }
       throw error
     }
@@ -564,8 +608,8 @@ export class PortableCloudSyncRepository implements CloudSyncRepository {
 }
 
 function normalizedResolutionFiles(
-  files: Array<{ path: string; content: CloudSyncContent }>
-): Array<{ path: string; content: CloudSyncContent }> {
+  files: Array<{ path: string; content: CloudSyncContent; displace_existing?: boolean }>
+): Array<{ path: string; content: CloudSyncContent; displace_existing?: boolean }> {
   const normalized = files.map((file) => ({
     ...file,
     path: normalizeCloudSyncPath(file.path)

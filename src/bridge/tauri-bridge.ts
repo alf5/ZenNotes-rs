@@ -28,6 +28,7 @@ import {
   type ZenCapabilities
 } from '@zennotes/bridge-contract/bridge'
 import type { ZenPlatform } from '@zennotes/bridge-contract/platform'
+import { unsplash } from './unsplash'
 import type { ExternalUrlResult } from '@zennotes/bridge-contract/application-links'
 import {
   DEFAULT_VAULT_SETTINGS,
@@ -127,7 +128,7 @@ import { relocateAssetWithReferences, renameNoteWithLinks } from './link-rewrite
 const APP_INFO: ZenAppInfo = {
   name: 'zennotes-rs',
   productName: 'ZenNotes-rs',
-  version: '2.73.1',
+  version: '2.79.0',
   description: 'ZenNotes-rs desktop',
   homepage: 'https://github.com/alf5/ZenNotes-rs',
   runtime: 'desktop',
@@ -586,6 +587,12 @@ const bridge: ZenBridge = {
     invoke('vault_open_external_file', { href }),
   fetchLinkMetadata: (url: string): Promise<LinkMetadata> =>
     invoke('vault_fetch_link_metadata', { url }),
+  searchUnsplash: (query: string, page: number) => unsplash.search(query, page),
+  trackUnsplashDownload: (downloadLocation: string) => unsplash.trackDownload(downloadLocation),
+  getUnsplashKeyStatus: () => unsplash.status(),
+  saveUnsplashKey: (key: string) => unsplash.save(key),
+  testUnsplashKey: () => unsplash.test(),
+  clearUnsplashKey: () => unsplash.clear(),
   openFolderTemporary: (absPath: string): Promise<void> =>
     invoke('app_open_folder_temporary', { rawPath: absPath }),
   toggleDevTools: (): Promise<void> => invoke('devtools_toggle'),

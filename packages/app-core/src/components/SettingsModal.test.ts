@@ -41,6 +41,8 @@ const mocks = vi.hoisted(() => {
       darkSidebar: false,
       showWindowTitleBar: true,
       setShowWindowTitleBar: vi.fn(),
+      showStatusBar: true,
+      setShowStatusBar: vi.fn(),
       editorFontSize: 16,
       editorLineHeight: 1.6,
       editorScrollOff: 0,
@@ -53,11 +55,14 @@ const mocks = vi.hoisted(() => {
       kanbanFolderRoot: "",
       kanbanStatuses: [] as string[],
       keymapOverrides: {} as Record<string, string>,
+      commandKeymaps: {} as Record<string, string>,
+      setCommandKeymapBinding: vi.fn(),
       lineNumberMode: "off",
       mathRenderer: "katex" as "katex" | "typst",
       monoFont: null,
       previewMaxWidth: 760,
-      quickNoteTitlePrefix: null,
+      quickNoteTitlePrefix: null as string | null,
+      setQuickNoteTitlePrefix: vi.fn(),
       remoteWorkspaceInfo: null as null | { mode: string; baseUrl: string | null; authConfigured: boolean; capabilities: Record<string, unknown> | null; profileId: string | null; bootError: string | null },
       remoteWorkspaceProfiles: [],
       ripgrepBinaryPath: null,
@@ -102,6 +107,7 @@ const mocks = vi.hoisted(() => {
   return {
     state,
     runtime: "desktop" as "desktop" | "web",
+    platform: "linux" as string,
     capabilities: {} as Record<string, boolean>,
     setSettingsOpen: state.setSettingsOpen,
     setVaultSettings: state.setVaultSettings,
@@ -126,7 +132,7 @@ vi.mock("../lib/app-update-state", () => ({
 
 vi.mock("@zennotes/bridge-contract/bridge", () => ({
   getZenBridge: () => ({
-    platformSync: () => "linux",
+    platformSync: () => mocks.platform,
     getAppInfo: () => ({
       runtime: mocks.runtime,
       version: "2.4.0",
@@ -162,6 +168,7 @@ const REACHED_THROUGH_LOCATION_ROW = new Set([
   "drawings-folder",
   "databases-folder",
   "tasks-folder",
+  "shares-folder",
 ]);
 
 type BuiltSettingsCategory = SettingsSearchCategory & {
@@ -205,6 +212,7 @@ describe("SettingsModal date note directories", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.runtime = "desktop";
+    mocks.platform = "linux";
     originalScrollIntoView = Object.getOwnPropertyDescriptor(Element.prototype, "scrollIntoView");
     Object.defineProperty(Element.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
     mocks.state.vimMode = false;
@@ -290,6 +298,16 @@ describe("SettingsModal date note directories", () => {
     expect(mocks.state.setShowWindowTitleBar).toHaveBeenCalledWith(false);
   });
 
+  it("finds the status bar by the Cloud row it carries and turns it off", async () => {
+    await act(async () => root.render(createElement(SettingsModal)));
+    const search = host.querySelector<HTMLInputElement>('input[placeholder="Search settings…"]');
+    await act(async () => changeInput(search!, "cloud connected"));
+    const toggle = host.querySelector<HTMLButtonElement>('[data-settings-search-id="status-bar"] [role="switch"]');
+    expect(toggle?.getAttribute("aria-checked")).toBe("true");
+    await act(async () => toggle!.click());
+    expect(mocks.state.setShowStatusBar).toHaveBeenCalledWith(false);
+  });
+
   it("finds the new-file location rows by the words people search for", async () => {
     await act(async () => root.render(createElement(SettingsModal)));
     const search = host.querySelector<HTMLInputElement>('input[placeholder="Search settings…"]')!;
@@ -310,6 +328,85 @@ describe("SettingsModal date note directories", () => {
       await act(async () => result!.click());
       expect(host.querySelector(`[data-settings-search-id="${settingId}"]`), query).toBeTruthy();
     }
+  });
+
+  it("offers the shares location on macOS and saves a specific folder", async () => {
+    mocks.platform = "darwin";
+    await act(async () => root.render(createElement(SettingsModal)));
+    const search = host.querySelector<HTMLInputElement>('input[placeholder="Search settings…"]')!;
+    await act(async () => changeInput(search, "safari"));
+    const result = [...host.querySelectorAll<HTMLButtonElement>("aside nav button")].find(
+      (button) => button.textContent?.includes("Default shares location"),
+    );
+    expect(result).toBeTruthy();
+    await act(async () => result!.click());
+    const row = host.querySelector('[data-settings-search-id="shares-location"]');
+    const folder = [...(row?.querySelectorAll<HTMLButtonElement>("button") ?? [])].find(
+      (button) => button.textContent === "Specific folder",
+    );
+    expect(folder).toBeTruthy();
+    await act(async () => folder!.click());
+    expect(mocks.setVaultSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ sharesLocation: { mode: "folder" } }),
+    );
+  });
+
+  it("offers the shares location on a server vault only when the server keeps it", async () => {
+    mocks.platform = "darwin";
+    mocks.state.workspaceMode = "remote";
+    const serverWith = (capabilities: Record<string, unknown>) => ({
+      mode: "remote",
+      baseUrl: "http://localhost:7878",
+      authConfigured: true,
+      capabilities,
+      profileId: null,
+      bootError: null,
+    });
+    const sharesRowFound = async () => {
+      await act(async () => root.render(createElement(SettingsModal)));
+      const search = host.querySelector<HTMLInputElement>('input[placeholder="Search settings…"]')!;
+      await act(async () => changeInput(search, "safari"));
+      return [...host.querySelectorAll<HTMLButtonElement>("aside nav button")].some(
+        (button) => button.textContent?.includes("Default shares location"),
+      );
+    };
+    mocks.state.remoteWorkspaceInfo = serverWith({ supportsCustomTemplates: true });
+    expect(await sharesRowFound()).toBe(false);
+    mocks.state.remoteWorkspaceInfo = serverWith({ supportsSharesLocation: true });
+    expect(await sharesRowFound()).toBe(true);
+  });
+
+  it("names the Unsplash key in the Covers section only where the key row exists", async () => {
+    const coversDescription = async (): Promise<string> => {
+      await act(async () => root.render(createElement(SettingsModal)));
+      const typography = [...host.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent?.trim() === "Typography",
+      );
+      expect(typography).toBeTruthy();
+      await act(async () => typography!.click());
+      return host.textContent ?? "";
+    };
+    // The phones' bridge has no Unsplash methods.
+    let text = await coversDescription();
+    expect(text).toContain("How a note's cover shows.");
+    expect(text).not.toContain("Unsplash key the cover picker searches with");
+
+    await act(async () => root.render(createElement("div")));
+    Object.assign(window.zen, {
+      getUnsplashKeyStatus: vi.fn().mockResolvedValue({ set: false, store: "system", canStore: true }),
+    });
+    text = await coversDescription();
+    expect(text).toContain("and the Unsplash key the cover picker searches with.");
+  });
+
+  it("leaves the shares location out where there is no Share menu extension", async () => {
+    await act(async () => root.render(createElement(SettingsModal)));
+    const search = host.querySelector<HTMLInputElement>('input[placeholder="Search settings…"]')!;
+    await act(async () => changeInput(search, "safari"));
+    const result = [...host.querySelectorAll<HTMLButtonElement>("aside nav button")].find(
+      (button) => button.textContent?.includes("Default shares location"),
+    );
+    expect(result).toBeFalsy();
   });
 
   it("says where a specific tasks folder really lands for the vault's layout", async () => {
@@ -571,6 +668,38 @@ describe("SettingsModal date note directories", () => {
     });
   });
 
+  it("keeps a typed space in the Quick Note prefix and saves a cleared field as no prefix (#1008)", async () => {
+    mocks.state.quickNoteTitlePrefix = "Quick Note";
+    await act(async () => root.render(createElement(SettingsModal)));
+    expect(await openSearchHit("quick note prefix", "Quick Note prefix")).toBe("quick-note-prefix");
+    const input = host.querySelector<HTMLInputElement>(
+      '[data-settings-search-id="quick-note-prefix"] input',
+    )!;
+    expect(input.value).toBe("Quick Note");
+    // A blank field shows what blank means, not the old default in grey.
+    expect(input.placeholder).toBe("No prefix");
+
+    await act(async () => {
+      input.focus();
+      input.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    });
+    await act(async () => changeInput(input, "My "));
+    expect(mocks.state.setQuickNoteTitlePrefix).toHaveBeenLastCalledWith("My");
+    expect(input.value).toBe("My ");
+    await act(async () => changeInput(input, "My Notes"));
+    expect(mocks.state.setQuickNoteTitlePrefix).toHaveBeenLastCalledWith("My Notes");
+
+    await act(async () => changeInput(input, ""));
+    expect(mocks.state.setQuickNoteTitlePrefix).toHaveBeenLastCalledWith(null);
+    expect(input.value).toBe("");
+
+    // Leaving the field shows the stored value again (this mock store never
+    // takes the writes, so it still holds "Quick Note").
+    await act(async () => blurInput(input));
+    expect(input.value).toBe("Quick Note");
+    mocks.state.quickNoteTitlePrefix = null;
+  });
+
   it("opens the text replacements tab and saves edited rules", async () => {
     await act(async () => {
       root.render(createElement(SettingsModal));
@@ -756,6 +885,101 @@ describe("SettingsModal date note directories", () => {
     const recorder = document.body.textContent ?? "";
     expect(recorder).toContain("Current: Unbound");
   });
+  function pressOnWindow(init: KeyboardEventInit & { key: string; code: string }): void {
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }),
+    );
+  }
+
+  describe("the Commands group (#971)", () => {
+    beforeEach(() => {
+      mocks.state.commandKeymaps = {};
+      (window.zen as unknown as { platformSync: () => string }).platformSync = () =>
+        mocks.platform;
+    });
+
+    it("lists a palette command with its category and id, unbound, and records a key for it", async () => {
+      const row = await openKeymapRow("Move Note to Trash");
+      expect(row.dataset.commandKeymapRow).toBe("note.trash");
+      expect(row.textContent).toContain("Note");
+      expect(row.textContent).toContain("note.trash");
+      expect(row.textContent).toContain("Unbound");
+      expect(rowButton(row, "Unbind").disabled).toBe(true);
+      expect(rowButton(row, "Reset").disabled).toBe(true);
+
+      await act(async () => rowButton(row, "Change…").click());
+      expect(document.querySelector('[data-keymap-recorder="command"]')).toBeTruthy();
+      await act(async () =>
+        pressOnWindow({ key: "Backspace", code: "Backspace", ctrlKey: true }),
+      );
+      expect(
+        document.querySelector("[data-keymap-recorder-binding]")?.textContent,
+      ).toBe("Ctrl+Backspace");
+      await act(async () => pressOnWindow({ key: "Enter", code: "Enter" }));
+      expect(mocks.state.setCommandKeymapBinding).toHaveBeenCalledWith(
+        "note.trash",
+        "Mod+Backspace",
+      );
+    });
+
+    it("finds a command by its id in the filter", async () => {
+      const row = await openKeymapRow("Restore Note from Trash");
+      expect(row.dataset.commandKeymapRow).toBe("note.restore");
+      const filter = host.querySelector<HTMLInputElement>(
+        'input[placeholder="Filter keymaps…"]',
+      )!;
+      await act(async () => changeInput(filter, "note.delete-permanently"));
+      expect(
+        [...host.querySelectorAll("[data-command-keymap-row]")].map(
+          (el) => (el as HTMLElement).dataset.commandKeymapRow,
+        ),
+      ).toEqual(["note.delete-permanently"]);
+    });
+
+    it("unbinds and resets a command from its row", async () => {
+      mocks.state.commandKeymaps = { "note.trash": "Mod+Backspace" };
+      const row = await openKeymapRow("Move Note to Trash");
+      expect(row.textContent).toContain("Ctrl+Backspace");
+      await act(async () => rowButton(row, "Unbind").click());
+      expect(mocks.state.setCommandKeymapBinding).toHaveBeenCalledWith("note.trash", "");
+      await act(async () => rowButton(row, "Reset").click());
+      expect(mocks.state.setCommandKeymapBinding).toHaveBeenCalledWith("note.trash", null);
+    });
+
+    it("marks clashes both ways: another command, a default it wins over, and the action that lost its key", async () => {
+      mocks.state.commandKeymaps = {
+        "note.trash": "Mod+L",
+        "note.archive": "Mod+L",
+      };
+      const trash = await openKeymapRow("Move Note to Trash");
+      expect(trash.textContent).toContain("Conflicts with Move Note to Archive");
+      expect(trash.textContent).toContain("Wins over Toggle checkbox");
+      const filter = host.querySelector<HTMLInputElement>(
+        'input[placeholder="Filter keymaps…"]',
+      )!;
+      await act(async () => changeInput(filter, "Toggle checkbox"));
+      const action = host.querySelector<HTMLElement>(
+        '[data-keymap-row="editor.toggleCheckbox"]',
+      )!;
+      expect(action.textContent).toContain("Taken by command Move Note to Trash");
+    });
+
+    it("marks a leader sequence inert while Vim mode is off", async () => {
+      mocks.state.vimMode = false;
+      mocks.state.commandKeymaps = { "note.archive": "Leader x a" };
+      const row = await openKeymapRow("Move Note to Archive");
+      expect(row.textContent).toContain("Space x a");
+      expect(row.querySelector("[data-command-keymap-inert]")).toBeTruthy();
+    });
+
+    it("lets Settings search find a command row by its title", async () => {
+      await act(async () => root.render(createElement(SettingsModal)));
+      expect(await openSearchHit("move note to trash", "Move Note to Trash")).toBe(
+        "command-keymap:note.trash",
+      );
+    });
+  });
+
   async function openTemplatesSection(): Promise<void> {
     await act(async () => {
       root.render(createElement(SettingsModal));

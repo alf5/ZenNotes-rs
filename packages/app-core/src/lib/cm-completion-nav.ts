@@ -198,7 +198,7 @@ export const completionNavKeymap = Prec.highest(
  * Alt together), so the modifiers cannot be pinned down; only a bare Ctrl or a
  * Cmd chord is certainly not text.
  */
-function isTypedPipe(event: KeyboardEvent): boolean {
+export function isTypedPipe(event: KeyboardEvent): boolean {
   if (event.key !== '|' || event.metaKey) return false
   return !(event.ctrlKey && !event.altKey)
 }

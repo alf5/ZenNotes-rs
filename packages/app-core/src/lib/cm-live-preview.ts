@@ -26,12 +26,14 @@ import { useCloudSyncStatusStore } from './cloud-auto-sync'
 import { oversizedCloudFileNotice, oversizedCloudFiles } from './cloud-oversized-files'
 import { noteEditorPath } from './note-editor-context'
 import { isResolvedMarkdownLink, terminatedLinkTailEnd } from './cm-markdown-links'
+import { revealedSelectionRanges, sourceRevealChanged } from './cm-source-reveal'
 import { parseBlockAnchors } from './block-anchors'
 import { setImageBlockDragPayload } from './image-block-dnd'
 import { imageCacheKey, rememberImageOnLoad, takeCachedImage } from './image-element-cache'
 import { attachImageResizeHandle, setImageWidthOnLine } from './image-resize'
 import { assetTabPath } from './asset-tabs'
 import { openVaultAssetExternally } from './external-file-link'
+import { canShowPdfInline } from './pdf-inline'
 import {
   getExcalidrawPreview,
   parseEmbedSizeHint,
@@ -46,7 +48,8 @@ import {
  * Obsidian-style WYSIWYG feel. When you move off a line the `#`, `**`,
  * `[`, `](url)`, backticks, etc. fade away and the heading/bold/link
  * renders cleanly. When you land on that line again, the markers come
- * back so you can edit them.
+ * back so you can edit them. A note that is being read, not edited,
+ * renders every line, the selection's too (cm-source-reveal.ts).
  */
 
 /** Node names from @lezer/markdown that correspond to syntax markers. */
@@ -158,7 +161,7 @@ function selectionTouchesRange(
   from: number,
   to: number
 ): boolean {
-  for (const range of state.selection.ranges) {
+  for (const range of revealedSelectionRanges(state)) {
     if (range.empty) {
       if (range.from >= from && range.from <= to) return true
       continue
@@ -632,6 +635,10 @@ class LocalPdfWidget extends WidgetType {
      *  the compact card's primary action ("focus reference" vs
      *  "pin as reference"). */
     private readonly pinnedAsRef: boolean,
+    /** False where the engine cannot draw a PDF in the page (Android's
+     *  WebView): the card then opens the file in another app, since an
+     *  iframe, inline or in the reference pane, would stay blank. */
+    private readonly inline: boolean,
     private readonly notice: string | null = null
   ) {
     super()
@@ -646,7 +653,8 @@ class LocalPdfWidget extends WidgetType {
       other.href === this.href &&
       other.resolvedUrl === this.resolvedUrl &&
       other.compact === this.compact &&
-      other.pinnedAsRef === this.pinnedAsRef
+      other.pinnedAsRef === this.pinnedAsRef &&
+      other.inline === this.inline
     )
   }
 
@@ -698,13 +706,23 @@ class LocalPdfWidget extends WidgetType {
       const button = document.createElement('button')
       button.type = 'button'
       button.className = 'local-asset-pinned-ref-button'
-      button.title = this.pinnedAsRef
-        ? 'Showing in the reference pane (click to focus)'
-        : 'Open this PDF in the reference pane'
+      button.title = !this.inline
+        ? 'Open this PDF in another app'
+        : this.pinnedAsRef
+          ? 'Showing in the reference pane (click to focus)'
+          : 'Open this PDF in the reference pane'
       button.addEventListener('click', (event) => {
         event.preventDefault()
         event.stopPropagation()
         const state = useStore.getState()
+        if (!this.inline) {
+          const root = state.vault?.root
+          const notePath = state.activeNote?.path
+          const assetPath =
+            root && notePath ? resolveAssetVaultRelativePath(root, notePath, this.href) : null
+          if (assetPath) void openVaultAssetExternally(assetPath, { confirm: false })
+          return
+        }
         if (this.pinnedAsRef) {
           if (!state.pinnedRefVisible) state.togglePinnedRefVisible()
           return
@@ -728,7 +746,11 @@ class LocalPdfWidget extends WidgetType {
 
       const badge = document.createElement('span')
       badge.className = 'local-asset-pinned-ref-badge'
-      badge.textContent = this.pinnedAsRef ? 'in reference pane' : 'open as reference'
+      badge.textContent = !this.inline
+        ? 'open'
+        : this.pinnedAsRef
+          ? 'in reference pane'
+          : 'open as reference'
 
       // Per-block preview toggle — opens the PDF inline right here in
       // the editor without pinning it as the side reference. Useful
@@ -751,7 +773,9 @@ class LocalPdfWidget extends WidgetType {
       editButton.classList.add('local-asset-pinned-ref-edit')
 
       button.append(icon, text, badge)
-      figure.append(button, previewButton, editButton)
+      // Nothing to preview where an inline frame stays blank.
+      if (this.inline) figure.append(button, previewButton, editButton)
+      else figure.append(button, editButton)
       setCloudSyncNotice(figure, this.notice)
       return figure
     }
@@ -1296,9 +1320,10 @@ function computeDecorations(view: EditorView): DecorationSet {
   const { state } = view
 
   // Every line that holds part of a selection range is "active" and
-  // therefore keeps its syntax markers visible for editing.
+  // therefore keeps its syntax markers visible for editing, once the note is
+  // being edited rather than read.
   const activeLines = new Set<number>()
-  for (const r of state.selection.ranges) {
+  for (const r of revealedSelectionRanges(state)) {
     const fromLine = state.doc.lineAt(r.from).number
     const toLine = state.doc.lineAt(r.to).number
     for (let l = fromLine; l <= toLine; l++) activeLines.add(l)
@@ -1469,9 +1494,12 @@ function computeDecorations(view: EditorView): DecorationSet {
         // Otherwise the per-block toggle inverts the global pref, so
         // "Preview" round-trips with "Collapse" no matter which
         // default the user has selected.
+        // An engine with no PDF viewer always gets the card, which opens the
+        // file elsewhere: the full embed would be an empty frame.
+        const inline = canShowPdfInline()
         const defaultCompact = st.pdfEmbedInEditMode === 'compact'
         const toggled = isPdfExpanded(view, parsedPdf.href)
-        const compact = isPinned ? true : defaultCompact !== toggled
+        const compact = !inline || isPinned ? true : defaultCompact !== toggled
         replacedLines.add(lineNo)
         pending.push({
           from: line.from,
@@ -1489,6 +1517,7 @@ function computeDecorations(view: EditorView): DecorationSet {
                   parsedPdf.resolvedUrl,
                   compact,
                   isPinned,
+                  inline,
                   cloudNotice(parsedPdf.href)
                 )
           })
@@ -1830,6 +1859,7 @@ export const livePreviewPlugin = ViewPlugin.fromClass(
         update.selectionSet ||
         update.viewportChanged ||
         update.focusChanged ||
+        sourceRevealChanged(update) ||
         syntaxTree(update.startState) !== syntaxTree(update.state) ||
         externalRefresh
       ) {

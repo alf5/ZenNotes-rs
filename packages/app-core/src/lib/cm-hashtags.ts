@@ -79,7 +79,13 @@ const hashtagPlugin = ViewPlugin.fromClass(
       this.decorations = buildDecorations(view)
     }
     update(update: ViewUpdate): void {
-      if (update.docChanged || update.viewportChanged) {
+      if (
+        update.docChanged ||
+        update.viewportChanged ||
+        // A parse cut short by its time budget finishes in a later update
+        // that changes nothing else.
+        syntaxTree(update.startState) !== syntaxTree(update.state)
+      ) {
         this.decorations = buildDecorations(update.view)
       }
     }

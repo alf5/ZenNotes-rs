@@ -28,7 +28,8 @@ import { isArchiveTabPath } from '@shared/archive'
 import { isTrashTabPath } from '@shared/trash'
 import { isQuickNotesTabPath } from '@shared/quick-notes'
 import { resolveSystemFolderLabels, type SystemFolderLabels } from '../lib/system-folder-labels'
-import { focusEditorNormalMode } from '../lib/editor-focus'
+import { focusEditorAfterReadOpen, focusEditorAfterPaletteClose } from '../lib/editor-focus'
+import { noteFolderLabel } from '../lib/vault-layout'
 import { Modal } from './ui/Modal'
 
 interface BufferEntry {
@@ -47,9 +48,11 @@ function fallbackTitle(path: string): string {
   return filename.replace(/\.md$/i, '') || path
 }
 
-/** The row's secondary column: the note's folder, not the full path — the
- *  filename part would just repeat the title, and it was crowding the title
- *  out of the row (#635). The full path stays searchable via keywords. */
+/** The row's secondary column: the note's folder, not the full path, since
+ *  the filename part would just repeat the title, and it was crowding the title
+ *  out of the row (#635). The full path stays searchable via keywords. A note
+ *  the store knows gets the folder note search and the [[ picker show
+ *  (`noteFolderLabel`); this is only for a tab whose note is not listed. */
 function parentDir(path: string): string {
   const idx = path.lastIndexOf('/')
   return idx > 0 ? path.slice(0, idx) : ''
@@ -63,6 +66,7 @@ interface BuildDeps {
   notes: ReturnType<typeof useStore.getState>['notes']
   noteDirty: ReturnType<typeof useStore.getState>['noteDirty']
   systemFolderLabels: SystemFolderLabels
+  vaultSettings: ReturnType<typeof useStore.getState>['vaultSettings']
 }
 
 function buildEntries(deps: BuildDeps): BufferEntry[] {
@@ -201,7 +205,7 @@ function buildEntries(deps: BuildDeps): BufferEntry[] {
     entries.push({
       path,
       title,
-      subtitle: parentDir(path),
+      subtitle: meta ? noteFolderLabel(meta, deps.vaultSettings) || meta.folder : parentDir(path),
       keywords: [title, path, meta?.folder].filter(Boolean).join(' '),
       badge,
       current: isCurrent,
@@ -249,6 +253,7 @@ export function BufferPalette(): JSX.Element {
   const notes = useStore((s) => s.notes)
   const noteDirty = useStore((s) => s.noteDirty)
   const systemFolderLabels = useStore((s) => s.systemFolderLabels)
+  const vaultSettings = useStore((s) => s.vaultSettings)
 
   const entries = useMemo(
     () =>
@@ -259,9 +264,19 @@ export function BufferPalette(): JSX.Element {
         noteContents,
         notes,
         noteDirty,
-        systemFolderLabels
+        systemFolderLabels,
+        vaultSettings
       }),
-    [paneLayout, activePaneId, selectedPath, noteContents, notes, noteDirty, systemFolderLabels]
+    [
+      paneLayout,
+      activePaneId,
+      selectedPath,
+      noteContents,
+      notes,
+      noteDirty,
+      systemFolderLabels,
+      vaultSettings
+    ]
   )
 
   const [query, setQuery] = useState('')
@@ -308,12 +323,12 @@ export function BufferPalette(): JSX.Element {
       setActivePane(targetPaneId)
     }
 
-    focusEditorNormalMode()
+    focusEditorAfterReadOpen()
   }
 
   const close = (): void => {
     setOpen(false)
-    focusEditorNormalMode()
+    focusEditorAfterPaletteClose()
   }
 
   const closeSelected = async (): Promise<void> => {

@@ -105,6 +105,45 @@ pub async fn vault_fetch_link_metadata(url: String) -> crate::ipc::types::LinkMe
         .unwrap_or_else(|_| crate::ipc::types::LinkMetadata::fail(for_fail))
 }
 
+/// One request to api.unsplash.com for the cover picker (`unsplash.rs`). An
+/// `Err` means Unsplash could not be reached; any HTTP answer is `Ok`.
+#[tauri::command]
+pub async fn unsplash_request(
+    url: String,
+    key: Option<String>,
+) -> Result<crate::unsplash::UnsplashReply, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::unsplash::request(&url, key.as_deref()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Whether an Access Key is kept. The key itself never crosses the bridge.
+#[tauri::command]
+pub async fn unsplash_key_is_set() -> bool {
+    tauri::async_runtime::spawn_blocking(crate::unsplash::key_is_set)
+        .await
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+pub async fn unsplash_key_can_store() -> bool {
+    tauri::async_runtime::spawn_blocking(crate::unsplash::key_can_store)
+        .await
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+pub async fn unsplash_key_set(key: String) -> bool {
+    tauri::async_runtime::spawn_blocking(move || crate::unsplash::key_set(&key))
+        .await
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+pub async fn unsplash_key_clear() {
+    let _ = tauri::async_runtime::spawn_blocking(crate::unsplash::key_clear).await;
+}
+
 /// `devtools:toggle` — Settings → Developer tools. Tauri only compiles
 /// devtools into debug builds (or with the `devtools` feature); release
 /// builds no-op, matching the button's best-effort contract.

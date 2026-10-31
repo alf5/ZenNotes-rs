@@ -6,6 +6,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { useStore } from '../store'
 import { buildCommands, type Command } from '../lib/commands'
+import { commandLanding } from '../lib/command-landing'
 import {
   loadRecentCommandIds,
   recordCommandUse,
@@ -18,7 +19,7 @@ import {
   canReturnToCommandList,
   shouldRefocusEditorAfterCommand
 } from '../lib/command-palette-mode'
-import { THEMES, type ThemeFamily, type ThemeMode, type ThemeOption } from '../lib/themes'
+import { rankThemes, type ThemeFamily, type ThemeMode, type ThemeOption } from '../lib/themes'
 import {
   buildVaultSwitcherEntries,
   newWindowVaultRows,
@@ -27,10 +28,18 @@ import {
 } from '../lib/vault-switcher'
 import { runWorkflowById } from '../lib/workflow-trigger'
 import type { WorkflowIndexEntry } from '../lib/workflow-index'
-import { focusEditorNormalMode } from '../lib/editor-focus'
+import {
+  focusEditorAfterPaletteClose,
+  focusEditorAfterReadOpen,
+  focusEditorNormalMode
+} from '../lib/editor-focus'
 import { useCloudSyncStatusStore } from '../lib/cloud-auto-sync'
 import { getPublishNoteRequest } from '../lib/publish-note-requests'
 import { Modal } from './ui/Modal'
+import { KeymapRecorderModal } from './KeymapRecorder'
+import { isBindableCommandId } from '../lib/command-keymaps'
+import { formatKeyToken } from '../lib/keymaps'
+import { useToastStore } from '../lib/toast'
 
 type Mode = 'main' | 'theme' | 'vault' | 'workflow'
 
@@ -71,11 +80,30 @@ export function CommandPalette(): JSX.Element {
   const listRef = useRef<HTMLDivElement | null>(null)
 
   // Original theme snapshot captured when entering the theme picker.
-  // Used to revert if the user cancels with Escape or clicks outside.
-  const originalThemeRef = useRef<ThemeSnapshot | null>(null)
+  // Used to revert if the user cancels with Escape or clicks outside. A
+  // palette opened straight on the theme list (a key bound to Themes…)
+  // takes it as it opens.
+  const originalThemeRef = useRef<ThemeSnapshot | null>(
+    initialMode === 'theme'
+      ? {
+          id: useStore.getState().themeId,
+          family: useStore.getState().themeFamily,
+          mode: useStore.getState().themeMode
+        }
+      : null
+  )
   const committedRef = useRef(false)
 
-  const allCommands = useMemo(() => buildCommands(), [])
+  const commandKeymaps = useStore((s) => s.commandKeymaps)
+  const keymapOverrides = useStore((s) => s.keymapOverrides)
+  const vimMode = useStore((s) => s.vimMode)
+  const setCommandKeymapBinding = useStore((s) => s.setCommandKeymapBinding)
+  // Alt+Enter on a row records a key for that command right here (#971).
+  const [recordingFor, setRecordingFor] = useState<Command | null>(null)
+
+  // Rebuilt when a command gets a key, so its row shows it straight away.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const allCommands = useMemo(() => buildCommands(), [commandKeymaps])
 
   // Recently-used commands surfaced at the top — only with an empty query, in
   // command mode. `allCommands` is already filtered by each command's `when`
@@ -104,15 +132,7 @@ export function CommandPalette(): JSX.Element {
     return [...recentCommands, ...ranked.filter((c) => !recentSet.has(c.id))]
   }, [allCommands, query, recentCommands])
 
-  const themeResults = useMemo<ThemeOption[]>(
-    () =>
-      rankItems(THEMES, query, [
-        { get: (t) => t.label, weight: 1 },
-        { get: (t) => t.family, weight: 0.9 },
-        { get: (t) => t.variant, weight: 0.6 }
-      ]),
-    [query]
-  )
+  const themeResults = useMemo<ThemeOption[]>(() => rankThemes(query), [query])
 
   const vaultOptions = useMemo<VaultRow[]>(() => {
     const entries = buildVaultSwitcherEntries({
@@ -177,6 +197,8 @@ export function CommandPalette(): JSX.Element {
       void refreshLocalVaults()
       if (supportsRemoteWorkspace) void refreshRemoteWorkspaceProfiles()
     }
+    // The same re-read the picker does when drilled into from the list.
+    if (initialMode === 'workflow') void useStore.getState().loadWorkflowIndex()
   }, [initialMode, refreshLocalVaults, refreshRemoteWorkspaceProfiles, supportsRemoteWorkspace])
   // Selection sync:
   //  - Main mode: start at the top of the results on every query change.
@@ -208,7 +230,19 @@ export function CommandPalette(): JSX.Element {
   }, [active])
 
   /* -------- Theme preview on active change -------- */
+  // A new filter or mode re-syncs `active` in the effect above, but that lands
+  // on the next render: in this one `active` still indexes the previous list
+  // (or the command list), and previewing it applied a theme nobody had
+  // highlighted (typing `l` from Gruvbox Hard dark switched to Nord Light),
+  // which the next re-sync then locked onto. So a preview waits until `active`
+  // was set against the list it indexes, including on the first render.
+  const previewBasisRef = useRef<{ mode: Mode; results: ThemeOption[] } | null>(null)
   useEffect(() => {
+    const basis = previewBasisRef.current
+    if (!basis || basis.mode !== mode || basis.results !== themeResults) {
+      previewBasisRef.current = { mode, results: themeResults }
+      return
+    }
     if (mode !== 'theme') return
     if (active < 0) return
     const theme = themeResults[active]
@@ -276,7 +310,7 @@ export function CommandPalette(): JSX.Element {
       revertTheme()
     }
     setOpen(false)
-    focusEditorNormalMode()
+    focusEditorAfterPaletteClose()
   }
 
   /* -------- Actions -------- */
@@ -300,8 +334,24 @@ export function CommandPalette(): JSX.Element {
       return
     }
     setOpen(false)
+    // Asked before the run: afterwards today's note exists either way.
+    const landing = commandLanding(cmd)
+    const panelBefore = useStore.getState().focusedPanel
     try {
-      await cmd.run()
+      const ran = cmd.run()
+      // A command that moves the keyboard to a panel as it runs (Focus
+      // Sidebar) is read here, before the await: by then the palette has
+      // closed and given the focus back to whatever held it, and when that
+      // was the editor, the editor claimed its panel again. Read afterwards,
+      // the command looked as if it had landed on the editor, and the refocus
+      // below took the keyboard straight back from the sidebar.
+      const panelHandedTo = useStore.getState().focusedPanel
+      await ran
+      const latest = useStore.getState()
+      const landedPanel =
+        panelHandedTo !== panelBefore && panelHandedTo != null && panelHandedTo !== 'editor'
+          ? panelHandedTo
+          : latest.focusedPanel
       // A command that opens a note (or otherwise lands on the editor) should
       // move DOM focus there — not just set focusedPanel. Closing the palette
       // otherwise leaves focus on whatever was focused before (e.g. the
@@ -311,26 +361,60 @@ export function CommandPalette(): JSX.Element {
       // command opened Settings or another palette (search, vault text search,
       // outline, …) so we don't pull focus behind it, and likewise for the Cloud
       // conflict queue, the Cloud settings prompt and the Publish Note dialog,
-      // which claim focus themselves and are tracked outside the store.
+      // which claim focus themselves and are tracked outside the store, and
+      // for a menu the command opened (Set Callout Type…): the menu holds the
+      // keyboard, and the letters typed to filter it would land in the note.
+      // On a phone the command decides where the keyboard goes
+      // (lib/command-landing.ts): a note that was already there is left to
+      // read, a command whose point is typing takes the editor, and anything
+      // else (a toggle, a view) leaves the focus where it was. On desktop all
+      // three focus the editor.
       if (
         shouldRefocusEditorAfterCommand(
-          useStore.getState(),
+          { ...latest, focusedPanel: landedPanel },
           useCloudSyncStatusStore.getState().conflictReviewOpen ||
             useCloudSyncStatusStore.getState().settingsConflictPromptOpen ||
-            getPublishNoteRequest() !== null
+            getPublishNoteRequest() !== null ||
+            document.querySelector('[data-ctx-menu]') !== null
         )
-      )
-        focusEditorNormalMode()
+      ) {
+        if (landing === 'read') focusEditorAfterReadOpen()
+        else if (landing === 'edit') focusEditorNormalMode()
+        else focusEditorAfterPaletteClose()
+      }
     } catch (err) {
       console.error('command failed', cmd.id, err)
     }
+  }
+
+  /**
+   * Alt+Enter: record a key for the highlighted command without leaving the
+   * palette. The recorder opens over it, Enter saves, Escape comes back to
+   * the same row and query, and the row shows its new key. Inline rather
+   * than a jump to Settings → Keymap, which would drop the query, land on a
+   * page of three hundred rows and take two Escapes to come back from; the
+   * recorder is the same one Settings uses, conflict checks and all.
+   */
+  const startRecording = (cmd: Command): void => {
+    if (!isBindableCommandId(cmd.id)) {
+      useToastStore
+        .getState()
+        .addToast(
+          `${cmd.title} can't take a key: the palette makes it for what is in this vault, so it comes and goes`,
+          'info'
+        )
+      return
+    }
+    setRecordingFor(cmd)
   }
 
   const commitTheme = (theme: ThemeOption): void => {
     setTheme({ id: theme.id, family: theme.family, mode: theme.mode })
     committedRef.current = true
     setOpen(false)
-    focusEditorNormalMode()
+    // A theme is a `stay` landing (lib/command-landing.ts): on a phone the
+    // keyboard stays down over the note being read.
+    focusEditorAfterPaletteClose()
   }
 
   const runPickedWorkflow = (entry: WorkflowIndexEntry): void => {
@@ -368,6 +452,7 @@ export function CommandPalette(): JSX.Element {
             : 'Pick a vault'
 
   return (
+    <>
     <Modal size="md" layer="palette" onClose={() => closePalette()} closeOnEsc={false}>
       {canReturnToCommandList(mode, initialMode) && (
           <div className="flex items-center gap-2 border-b border-paper-300/70 bg-paper-200/40 px-4 py-2 text-xs text-ink-500">
@@ -408,6 +493,16 @@ export function CommandPalette(): JSX.Element {
                 e.preventDefault()
                 e.stopPropagation()
                 setActive((a) => Math.max(0, a - 1))
+              } else if (
+                e.key === 'Enter' &&
+                e.altKey &&
+                !e.metaKey &&
+                !e.ctrlKey &&
+                mode === 'main'
+              ) {
+                e.preventDefault()
+                const cmd = commandResults[active]
+                if (cmd) startRecording(cmd)
               } else if (e.key === 'Enter') {
                 e.preventDefault()
                 if (mode === 'main') {
@@ -604,6 +699,11 @@ export function CommandPalette(): JSX.Element {
                 ? 'keep theme'
                 : 'switch'}
           </span>
+          {mode === 'main' && (
+            <span data-palette-bind-hint="">
+              <kbd className="rounded bg-paper-200 px-1">{formatKeyToken('Alt+Enter')}</kbd> set key
+            </span>
+          )}
           <span>
             <kbd className="rounded bg-paper-200 px-1">esc</kbd>{' '}
             {!canReturnToCommandList(mode, initialMode)
@@ -614,5 +714,29 @@ export function CommandPalette(): JSX.Element {
           </span>
         </div>
     </Modal>
+    {recordingFor && (
+      <KeymapRecorderModal
+        target={{
+          kind: 'command',
+          id: recordingFor.id,
+          title: recordingFor.bindTitle ?? recordingFor.title,
+          category: recordingFor.category,
+          builtinShortcut: recordingFor.builtinShortcut || undefined
+        }}
+        overrides={keymapOverrides}
+        commandKeymaps={commandKeymaps}
+        vimMode={vimMode}
+        onClose={() => setRecordingFor(null)}
+        onSave={(binding) => {
+          setCommandKeymapBinding(recordingFor.id, binding)
+          setRecordingFor(null)
+        }}
+        onUnbind={() => {
+          setCommandKeymapBinding(recordingFor.id, '')
+          setRecordingFor(null)
+        }}
+      />
+    )}
+    </>
   )
 }

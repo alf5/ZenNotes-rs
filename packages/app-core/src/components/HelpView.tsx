@@ -66,6 +66,7 @@ function resolveShortcutKeys(
     if (action === 'Open Settings') return shortcut(overrides, 'global.openSettings')
     if (action === 'Toggle sidebar') return shortcut(overrides, 'global.toggleSidebar')
     if (action === 'Toggle connections') return shortcut(overrides, 'global.toggleConnections')
+    if (action === 'Toggle timeline panel') return shortcut(overrides, 'global.toggleTimelinePanel')
     if (action === 'Toggle Zen mode') return shortcut(overrides, 'global.toggleZenMode')
     if (action === 'Close active tab') return shortcut(overrides, 'global.closeActiveTab')
     if (action === 'Export note as PDF') return shortcut(overrides, 'global.exportNotePdf')
@@ -73,6 +74,7 @@ function resolveShortcutKeys(
     if (action === 'Zoom out') return shortcut(overrides, 'global.zoomOut')
     if (action === 'Reset zoom') return shortcut(overrides, 'global.zoomReset')
     if (action === 'Toggle word wrap') return shortcut(overrides, 'global.toggleWordWrap')
+    if (action === 'Open link popover') return shortcut(overrides, 'editor.linkPopover')
   }
 
   if (sectionId === 'quick-capture-window') {
@@ -100,6 +102,21 @@ function resolveShortcutKeys(
     }
     if (action === 'Toggle left sidebar') return leaderShortcut(overrides, 'vim.leaderToggleSidebar')
     if (action === 'Note outline') return leaderShortcut(overrides, 'vim.leaderNoteOutline')
+    if (action === 'Toggle timeline') return leaderShortcut(overrides, 'vim.leaderTimeline')
+    if (action === 'Unresolved links') return leaderShortcut(overrides, 'vim.leaderUnresolvedLinks')
+    if (action === 'Folder gallery') return leaderShortcut(overrides, 'vim.leaderFolderGallery')
+    if (action === 'Callout type') {
+      return chord(
+        leaderShortcut(overrides, 'vim.leaderNoteActions'),
+        shortcut(overrides, 'vim.leaderCalloutType')
+      )
+    }
+    if (action === 'Code block language') {
+      return chord(
+        leaderShortcut(overrides, 'vim.leaderNoteActions'),
+        shortcut(overrides, 'vim.leaderCodeLanguage')
+      )
+    }
     if (action === 'Switch vault') return leaderShortcut(overrides, 'vim.leaderSwitchVault')
     if (action === 'Open workflows') return leaderShortcut(overrides, 'vim.leaderWorkflows')
     if (action === 'Review Cloud conflicts') {
@@ -138,6 +155,22 @@ function resolveShortcutKeys(
     if (action === 'Open context menu') return shortcut(overrides, 'nav.contextMenu')
   }
 
+  if (sectionId === 'gallery-view') {
+    if (action === 'Move across the grid') {
+      return alternatives([
+        shortcut(overrides, 'nav.moveLeft'),
+        shortcut(overrides, 'nav.moveDown'),
+        shortcut(overrides, 'nav.moveUp'),
+        shortcut(overrides, 'nav.moveRight')
+      ])
+    }
+    if (action === 'First or last card') {
+      return alternatives([shortcut(overrides, 'nav.jumpTop'), shortcut(overrides, 'nav.jumpBottom')])
+    }
+    if (action === 'Open the note') return alternatives(['Enter', shortcut(overrides, 'nav.openResult')])
+    if (action === 'Filter by title') return shortcut(overrides, 'nav.filter')
+  }
+
   if (sectionId === 'preview-and-connections') {
     if (action === 'Scroll preview') {
       return alternatives([shortcut(overrides, 'nav.moveDown'), shortcut(overrides, 'nav.moveUp')])
@@ -159,6 +192,7 @@ function resolveShortcutKeys(
 function resolveVimCommandLabel(command: string, overrides: KeymapOverrides): string {
   if (command === 'gd') return shortcut(overrides, 'vim.goToDefinition')
   if (command === 'gD') return shortcut(overrides, 'vim.createNoteFromLink')
+  if (command === 'K') return shortcut(overrides, 'vim.linkPopover')
   if (command === 'Mod+L') return shortcut(overrides, 'editor.toggleCheckbox')
   if (command === '<Space> l f') {
     return chord(

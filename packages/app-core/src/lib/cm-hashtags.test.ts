@@ -2,7 +2,7 @@
 
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
 import { forceParsing } from '@codemirror/language'
-import { EditorState } from '@codemirror/state'
+import { Compartment, EditorState } from '@codemirror/state'
 import { EditorView } from '@codemirror/view'
 import { describe, expect, it } from 'vitest'
 import { hashtagExtension } from './cm-hashtags'
@@ -44,5 +44,28 @@ describe('hashtagPlugin', () => {
     )
     expect(tags).toEqual(['#real'])
     view.destroy()
+  })
+
+  it('redraws when only the syntax tree changes, as when a cut parse finishes', () => {
+    // Swapping the language in changes the tree and nothing else: no edit, no
+    // selection, no viewport. A parse that finishes after its time budget ran
+    // out reaches the plugin the same way.
+    const language = new Compartment()
+    const doc = '```c\n#include <stdio.h>\n```\n\n#real'
+    const parent = document.createElement('div')
+    document.body.append(parent)
+    const view = new EditorView({
+      parent,
+      state: EditorState.create({ doc, extensions: [language.of([]), hashtagExtension] })
+    })
+    const tags = (): Array<string | null> =>
+      Array.from(view.dom.querySelectorAll('.cm-hashtag')).map((e) => e.textContent)
+    // No tree yet, so nothing says the fence is code.
+    expect(tags()).toEqual(['#include', '#real'])
+    view.dispatch({ effects: language.reconfigure(markdown({ base: markdownLanguage })) })
+    forceParsing(view, doc.length, 5000)
+    expect(tags()).toEqual(['#real'])
+    view.destroy()
+    parent.remove()
   })
 })

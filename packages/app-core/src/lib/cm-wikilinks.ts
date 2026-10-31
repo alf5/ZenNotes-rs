@@ -101,19 +101,24 @@ type WikilinkCompletion = Completion & {
   _subtitle: string
 }
 
-export function wikilinkSource(context: CompletionContext): CompletionResult | null {
-  const match = wikilinkMatch(context)
-  if (!match) return null
-
+/** The `[[` suggestions for `query`: notes, assets and databases from the live
+ *  store, ranked the way every `[[` picker shows them (the table cells too). */
+export function wikilinkCandidates(query: string): LinkCandidate[] {
   const state = useStore.getState()
-  const activePath = state.activeNote?.path ?? null
-  const ranked = linkCandidates(match.query, {
+  return linkCandidates(query, {
     notes: state.notes,
     assetFiles: state.assetFiles,
     folders: state.folders,
     vaultSettings: state.vaultSettings,
-    activePath
+    activePath: state.activeNote?.path ?? null
   })
+}
+
+export function wikilinkSource(context: CompletionContext): CompletionResult | null {
+  const match = wikilinkMatch(context)
+  if (!match) return null
+
+  const ranked = wikilinkCandidates(match.query)
 
   const options: Completion[] = ranked.map((candidate: LinkCandidate) => {
     const target = candidate.target
