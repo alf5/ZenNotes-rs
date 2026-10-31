@@ -161,7 +161,7 @@ describe('single-note Cloud resolution', () => {
       expect(f.mutate).not.toHaveBeenCalled()
       expect(f.write).toHaveBeenCalledWith(
         expect.objectContaining({
-          files: expect.arrayContaining([{ path: 'Note.md', content: content('cloud') }])
+          files: expect.arrayContaining([{ path: 'Note.md', content: content('cloud'), displace_existing: true }])
         })
       )
       expect(f.state().pending_conflicts).toEqual({})

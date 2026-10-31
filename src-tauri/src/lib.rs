@@ -23,6 +23,7 @@ mod standalone_links;
 mod state;
 mod tray;
 mod undo_history;
+mod unsplash;
 mod vault;
 mod watcher;
 mod windows;
@@ -253,6 +254,11 @@ pub fn run() {
             vault_cmds::vault_write_drawing,
             vault_cmds::app_open_folder_temporary,
             os_cmds::vault_fetch_link_metadata,
+            os_cmds::unsplash_request,
+            os_cmds::unsplash_key_is_set,
+            os_cmds::unsplash_key_can_store,
+            os_cmds::unsplash_key_set,
+            os_cmds::unsplash_key_clear,
             workspace_cmds::workspace_list_remote_profiles,
             workspace_cmds::workspace_save_remote_profile,
             workspace_cmds::workspace_delete_remote_profile,

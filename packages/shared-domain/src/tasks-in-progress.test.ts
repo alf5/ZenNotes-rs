@@ -51,9 +51,10 @@ describe('task in-progress primitives (#512)', () => {
       ctx
     )
     const g = groupTasks(tasks, new Date(2026, 0, 1))
-    // In progress is still today's work: it sits beside the open task rather
-    // than collecting under a group of its own like forwarded/cancelled do.
-    expect(g.today.map((t) => t.content)).toEqual(['open', 'started'])
+    // In progress is still open work: it sits beside the open task (both are
+    // undated here) rather than collecting under a group of its own like
+    // forwarded/cancelled do.
+    expect(g.undated.map((t) => t.content)).toEqual(['open', 'started'])
     expect(g.done.map((t) => t.content)).toEqual(['done'])
     expect(g.forwarded.map((t) => t.content)).toEqual(['gone [[X]]'])
     expect(g.cancelled.map((t) => t.content)).toEqual(['scrapped'])

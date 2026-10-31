@@ -2137,6 +2137,122 @@
       ]
     },
     {
+      "tool": "write_note",
+      "args": {
+        "path": "inbox/Windows.md",
+        "body": "# Saved on Windows\r\n\r\n```c\r\n#include <stdio.h>\r\n// [[Secret Note]]\r\n```\r\n\r\n#realtag [[Real Link]]\r\n\r\n- [ ] one\r\n- [ ] two\r\n"
+      },
+      "isError": false,
+      "result": {
+        "path": "inbox/Windows.md",
+        "link": "zennotes://open?path=inbox/Windows.md",
+        "title": "Windows",
+        "folder": "inbox",
+        "createdAt": "<time>",
+        "updatedAt": "<time>",
+        "size": 123,
+        "tags": [
+          "realtag"
+        ],
+        "wikilinks": [
+          "Real Link"
+        ],
+        "excerpt": "Saved on Windows #realtag Real Link - [ ] one - [ ] two"
+      }
+    },
+    {
+      "tool": "list_notes",
+      "args": {
+        "tag": "realtag"
+      },
+      "isError": false,
+      "result": [
+        {
+          "path": "inbox/Windows.md",
+          "link": "zennotes://open?path=inbox/Windows.md",
+          "title": "Windows",
+          "folder": "inbox",
+          "createdAt": "<time>",
+          "updatedAt": "<time>",
+          "size": 123,
+          "tags": [
+            "realtag"
+          ],
+          "wikilinks": [
+            "Real Link"
+          ],
+          "excerpt": "Saved on Windows #realtag Real Link - [ ] one - [ ] two"
+        }
+      ]
+    },
+    {
+      "tool": "list_notes",
+      "args": {
+        "tag": "include"
+      },
+      "isError": false,
+      "result": []
+    },
+    {
+      "tool": "toggle_task",
+      "args": {
+        "id": "inbox/Windows.md#1"
+      },
+      "isError": false,
+      "result": {
+        "id": "inbox/Windows.md#1",
+        "sourcePath": "inbox/Windows.md",
+        "link": "zennotes://open?path=inbox/Windows.md",
+        "noteTitle": "Windows",
+        "noteFolder": "inbox",
+        "lineNumber": 10,
+        "taskIndex": 1,
+        "rawText": "- [x] two",
+        "content": "two",
+        "checked": true,
+        "cancelled": false,
+        "inProgress": false,
+        "forwarded": false,
+        "waiting": false,
+        "tags": []
+      }
+    },
+    {
+      "tool": "read_note",
+      "args": {
+        "path": "inbox/Windows.md"
+      },
+      "isError": false,
+      "result": {
+        "path": "inbox/Windows.md",
+        "link": "zennotes://open?path=inbox/Windows.md",
+        "title": "Windows",
+        "folder": "inbox",
+        "createdAt": "<time>",
+        "updatedAt": "<time>",
+        "size": 112,
+        "tags": [
+          "realtag"
+        ],
+        "wikilinks": [
+          "Real Link"
+        ],
+        "excerpt": "Saved on Windows #realtag Real Link - [ ] one - [x] two",
+        "body": "# Saved on Windows\n\n```c\n#include <stdio.h>\n// [[Secret Note]]\n```\n\n#realtag [[Real Link]]\n\n- [ ] one\n- [x] two\n"
+      }
+    },
+    {
+      "tool": "delete_note",
+      "args": {
+        "path": "inbox/Windows.md",
+        "confirm": true
+      },
+      "isError": false,
+      "result": {
+        "ok": true
+      }
+    },
+    {
       "tool": "delete_folder",
       "args": {
         "folder": "inbox",

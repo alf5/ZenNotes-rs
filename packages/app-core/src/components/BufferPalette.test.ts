@@ -3,6 +3,7 @@
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { DEFAULT_VAULT_SETTINGS, type NoteFolder, type NoteMeta } from '@shared/ipc'
 import { findLeaf, type PaneLeaf } from '../lib/pane-layout'
 import { useStore } from '../store'
 import { BufferPalette } from './BufferPalette'
@@ -108,5 +109,30 @@ describe('BufferPalette (#641)', () => {
     expect(document.querySelector<HTMLButtonElement>('[data-buf-idx="0"]')?.textContent).toContain(
       'B'
     )
+  })
+
+  it('shows the folder note search and the [[ picker show for each buffer', () => {
+    const note = (path: string, folder: NoteFolder): NoteMeta =>
+      ({ path, folder, title: 'Overview', tags: [], wikilinks: [] }) as unknown as NoteMeta
+    const tabs = [
+      'inbox/Projects/Atlas/Overview.md',
+      'archive/2025/Atlas/Overview.md',
+      'inbox/Overview.md',
+      'inbox/Unlisted/Overview.md'
+    ]
+    useStore.setState({
+      paneLayout: { kind: 'leaf', id: 'pane-a', tabs, pinnedTabs: [], activeTab: tabs[0] },
+      selectedPath: tabs[0],
+      notes: [note(tabs[0], 'inbox'), note(tabs[1], 'archive'), note(tabs[2], 'inbox')],
+      vaultSettings: { ...DEFAULT_VAULT_SETTINGS, primaryNotesLocation: 'inbox' }
+    })
+    act(() => root.render(createElement(BufferPalette)))
+    // Natural order: the hidden tabs, then the current one. A tab whose note
+    // is not listed falls back to its path's folder.
+    expect(
+      [...document.querySelectorAll<HTMLElement>('[data-buf-idx] span[dir="rtl"]')].map((span) =>
+        span.textContent?.replace(/[\u202A\u202C]/g, '')
+      )
+    ).toEqual(['archive/2025/Atlas', 'inbox', 'inbox/Unlisted', 'Projects/Atlas'])
   })
 })

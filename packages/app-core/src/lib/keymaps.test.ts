@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   advanceSequence,
+  appShortcutForEvent,
   eventMatchesUserOverride,
   findKeymapConflict,
   getDefaultKeymapBinding,
@@ -15,11 +16,15 @@ import {
   matchesSequenceToken,
   matchesShortcut,
   matchesShortcutBinding,
+  normalizeKeymapBinding,
   normalizeKeymapOverrides,
+  normalizeSequenceToken,
   normalizeShortcutBinding,
+  resolveSequenceToken,
   shortcutBindingFromEvent,
   sequenceTokenFromEvent
 } from './keymaps'
+import { toVimSequence } from './vim-key-sequence'
 
 interface FakeEventInit {
   key: string
@@ -228,6 +233,54 @@ describe('sequenceTokenFromEvent', () => {
   it('records bracket keys for Vim buffer sequences', () => {
     expect(sequenceTokenFromEvent(fakeEvent({ key: '[', code: 'BracketLeft' }))).toBe('[')
     expect(sequenceTokenFromEvent(fakeEvent({ key: ']', code: 'BracketRight' }))).toBe(']')
+  })
+})
+
+describe('next / previous tab (#973)', () => {
+  it('default to Ctrl+PageDown / Ctrl+PageUp, and Cmd+Option+arrows on the Mac', () => {
+    withPlatform('darwin', () => {
+      expect(getDefaultKeymapBinding('tabs.next')).toBe('Alt+Mod+ArrowRight')
+      expect(getDefaultKeymapBinding('tabs.previous')).toBe('Alt+Mod+ArrowLeft')
+    })
+    for (const platform of ['linux', 'win32'] as const) {
+      withPlatform(platform, () => {
+        expect(getDefaultKeymapBinding('tabs.next')).toBe('Mod+PageDown')
+        expect(getDefaultKeymapBinding('tabs.previous')).toBe('Mod+PageUp')
+      })
+    }
+  })
+
+  it('fire on those chords and leave plain paging and word motions alone', () => {
+    withPlatform('linux', () => {
+      const ctrl = (key: string): KeyboardEvent => fakeEvent({ key, code: key, ctrlKey: true })
+      expect(matchesShortcut(ctrl('PageDown'), {}, 'tabs.next')).toBe(true)
+      expect(matchesShortcut(ctrl('PageUp'), {}, 'tabs.previous')).toBe(true)
+      expect(matchesShortcut(fakeEvent({ key: 'PageDown', code: 'PageDown' }), {}, 'tabs.next')).toBe(false)
+    })
+    withPlatform('darwin', () => {
+      const cmdOption = (key: string): KeyboardEvent =>
+        fakeEvent({ key, code: key, metaKey: true, altKey: true })
+      expect(matchesShortcut(cmdOption('ArrowRight'), {}, 'tabs.next')).toBe(true)
+      expect(matchesShortcut(cmdOption('ArrowLeft'), {}, 'tabs.previous')).toBe(true)
+      // Cmd+Right is end of line and Option+Right a word: neither is a tab step.
+      const cmdRight = fakeEvent({ key: 'ArrowRight', code: 'ArrowRight', metaKey: true })
+      const optionRight = fakeEvent({ key: 'ArrowRight', code: 'ArrowRight', altKey: true })
+      expect(matchesShortcut(cmdRight, {}, 'tabs.next')).toBe(false)
+      expect(matchesShortcut(optionRight, {}, 'tabs.next')).toBe(false)
+    })
+  })
+
+  it('clash with no other default, and leave Ctrl+Tab to Switch to previous note', () => {
+    for (const platform of ['darwin', 'linux', 'win32'] as const) {
+      withPlatform(platform, () => {
+        for (const id of ['tabs.next', 'tabs.previous'] as const) {
+          expect(findKeymapConflict({}, id, getDefaultKeymapBinding(id))).toBeNull()
+        }
+        const ctrlTab = fakeEvent({ key: 'Tab', code: 'Tab', ctrlKey: true })
+        expect(matchesShortcut(ctrlTab, {}, 'global.toggleRecentNote')).toBe(true)
+        expect(matchesShortcut(ctrlTab, {}, 'tabs.next')).toBe(false)
+      })
+    }
   })
 })
 
@@ -537,5 +590,196 @@ describe('keymapAvailableOnHost', () => {
     const rest = ids.filter((id) => !review.includes(id) && !harper.includes(id))
     expect(rest.length).toBeGreaterThan(50)
     for (const id of rest) expect(keymapAvailableOnHost(id, {})).toBe(true)
+  })
+})
+
+describe('Timeline panel keymaps (#1007)', () => {
+  it('binds Mod+7 and leader n, like the other right-hand panels', () => {
+    expect(getKeymapDefinition('global.toggleTimelinePanel')).toMatchObject({
+      kind: 'shortcut',
+      scope: 'app',
+      group: 'global',
+      title: 'Toggle timeline panel',
+      defaultBinding: 'Mod+7'
+    })
+    expect(getKeymapDefinition('vim.leaderTimeline')).toMatchObject({
+      kind: 'sequence',
+      scope: 'leader',
+      group: 'vim',
+      title: 'Leader: toggle timeline',
+      defaultBinding: 'n',
+      vimOnly: true
+    })
+  })
+
+  it('takes a key no other global shortcut or leader action holds', () => {
+    expect(findKeymapConflict({}, 'global.toggleTimelinePanel', 'Mod+7')).toBeNull()
+    // No leader binding at any depth uses n, so nothing else answers it.
+    const leaderKeys = getKeymapDefinitions()
+      .filter((def) => def.scope === 'leader' && def.id !== 'vim.leaderTimeline')
+      .map((def) => def.defaultBinding)
+    expect(leaderKeys).not.toContain('n')
+  })
+
+  it('fires on Cmd+7 on the Mac and Ctrl+7 elsewhere, and not on the tab digits', () => {
+    withPlatform('darwin', () => {
+      const cmd7 = fakeEvent({ key: '7', code: 'Digit7', metaKey: true })
+      expect(matchesShortcut(cmd7, {}, 'global.toggleTimelinePanel')).toBe(true)
+      expect(matchesShortcut(cmd7, {}, 'tabs.select7')).toBe(false)
+      const ctrl7 = fakeEvent({ key: '7', code: 'Digit7', ctrlKey: true })
+      expect(matchesShortcut(ctrl7, {}, 'global.toggleTimelinePanel')).toBe(false)
+    })
+    withPlatform('linux', () => {
+      const ctrl7 = fakeEvent({ key: '7', code: 'Digit7', ctrlKey: true })
+      expect(matchesShortcut(ctrl7, {}, 'global.toggleTimelinePanel')).toBe(true)
+      const alt7 = fakeEvent({ key: '7', code: 'Digit7', altKey: true })
+      expect(matchesShortcut(alt7, {}, 'global.toggleTimelinePanel')).toBe(false)
+    })
+  })
+
+  it('can be rebound or unbound like its neighbours', () => {
+    withPlatform('darwin', () => {
+      const unbound = { 'global.toggleTimelinePanel': '', 'vim.leaderTimeline': '' }
+      expect(normalizeKeymapOverrides(unbound)).toEqual(unbound)
+      expect(getKeymapDisplay(unbound, 'global.toggleTimelinePanel')).toBe('')
+      const cmd7 = fakeEvent({ key: '7', code: 'Digit7', metaKey: true })
+      expect(matchesShortcut(cmd7, unbound, 'global.toggleTimelinePanel')).toBe(false)
+      const n = fakeEvent({ key: 'n', code: 'KeyN' })
+      expect(matchesSequenceToken(n, {}, 'vim.leaderTimeline')).toBe(true)
+      expect(matchesSequenceToken(n, unbound, 'vim.leaderTimeline')).toBe(false)
+      const rebound = { 'vim.leaderTimeline': 'T' }
+      const shiftT = fakeEvent({ key: 'T', code: 'KeyT', shiftKey: true })
+      expect(matchesSequenceToken(shiftT, rebound, 'vim.leaderTimeline')).toBe(true)
+    })
+  })
+})
+
+describe('Mod in sequence bindings (#972)', () => {
+  const cmdBackspace = (): KeyboardEvent =>
+    fakeEvent({ key: 'Backspace', code: 'Backspace', metaKey: true })
+  const ctrlBackspace = (): KeyboardEvent =>
+    fakeEvent({ key: 'Backspace', code: 'Backspace', ctrlKey: true })
+
+  it('keeps Mod in the stored token instead of dropping it to a bare key', () => {
+    for (const platform of ['darwin', 'linux', 'win32'] as const) {
+      withPlatform(platform, () => {
+        expect(normalizeSequenceToken('Mod+Backspace')).toBe('Mod+Backspace')
+        expect(normalizeKeymapBinding('nav.delete', 'Mod+Backspace')).toBe('Mod+Backspace')
+        // A letter under Mod is canonical uppercase, like under Ctrl.
+        expect(normalizeSequenceToken('Mod+d')).toBe('Mod+D')
+        expect(normalizeSequenceToken('Shift+Mod+Backspace')).toBe('Shift+Mod+Backspace')
+      })
+    }
+  })
+
+  it('leaves tokens without Mod exactly as before', () => {
+    expect(normalizeSequenceToken('x')).toBe('x')
+    expect(normalizeSequenceToken('G')).toBe('G')
+    expect(normalizeSequenceToken('Ctrl+w')).toBe('Ctrl+W')
+    expect(normalizeSequenceToken('Cmd+Backspace')).toBe('Meta+Backspace')
+    expect(normalizeSequenceToken('Backspace')).toBe('Backspace')
+  })
+
+  it('resolves Mod to Cmd on macOS and Ctrl elsewhere when matching', () => {
+    expect(resolveSequenceToken('Mod+Backspace', true)).toBe('Meta+Backspace')
+    expect(resolveSequenceToken('Mod+Backspace', false)).toBe('Ctrl+Backspace')
+    expect(resolveSequenceToken('Shift+Mod+K', true)).toBe('Shift+Meta+K')
+    expect(resolveSequenceToken('Alt+Mod+K', false)).toBe('Ctrl+Alt+K')
+    expect(resolveSequenceToken('Ctrl+Mod+K', false)).toBe('Ctrl+K')
+    expect(resolveSequenceToken('x', true)).toBe('x')
+    expect(resolveSequenceToken('Ctrl+W', true)).toBe('Ctrl+W')
+  })
+
+  it('matches Cmd+Backspace on macOS and Ctrl+Backspace on Linux and Windows', () => {
+    const overrides = normalizeKeymapOverrides({ 'nav.delete': 'Mod+Backspace' })
+    expect(overrides).toEqual({ 'nav.delete': 'Mod+Backspace' })
+    withPlatform('darwin', () => {
+      expect(getSequenceTokens(overrides, 'nav.delete')).toEqual(['Meta+Backspace'])
+      expect(matchesSequenceToken(cmdBackspace(), overrides, 'nav.delete')).toBe(true)
+      expect(matchesSequenceToken(ctrlBackspace(), overrides, 'nav.delete')).toBe(false)
+      // A plain Backspace is no longer the key.
+      const plain = fakeEvent({ key: 'Backspace', code: 'Backspace' })
+      expect(matchesSequenceToken(plain, overrides, 'nav.delete')).toBe(false)
+    })
+    for (const platform of ['linux', 'win32'] as const) {
+      withPlatform(platform, () => {
+        expect(getSequenceTokens(overrides, 'nav.delete')).toEqual(['Ctrl+Backspace'])
+        expect(matchesSequenceToken(ctrlBackspace(), overrides, 'nav.delete')).toBe(true)
+        expect(matchesSequenceToken(cmdBackspace(), overrides, 'nav.delete')).toBe(false)
+      })
+    }
+  })
+
+  it('keeps an entry already saved as the bare key bare, and explicit Ctrl/Cmd spellings as written', () => {
+    withPlatform('darwin', () => {
+      const bare = normalizeKeymapOverrides({ 'nav.delete': 'Backspace' })
+      expect(bare).toEqual({ 'nav.delete': 'Backspace' })
+      const plain = fakeEvent({ key: 'Backspace', code: 'Backspace' })
+      expect(matchesSequenceToken(plain, bare, 'nav.delete')).toBe(true)
+      expect(matchesSequenceToken(cmdBackspace(), bare, 'nav.delete')).toBe(false)
+      const ctrl = normalizeKeymapOverrides({ 'nav.delete': 'Ctrl+Backspace' })
+      expect(matchesSequenceToken(ctrlBackspace(), ctrl, 'nav.delete')).toBe(true)
+      const cmd = normalizeKeymapOverrides({ 'nav.delete': 'Cmd+Backspace' })
+      expect(cmd).toEqual({ 'nav.delete': 'Meta+Backspace' })
+      expect(matchesSequenceToken(cmdBackspace(), cmd, 'nav.delete')).toBe(true)
+    })
+  })
+
+  it('event tokens never spell Mod, on either platform', () => {
+    withPlatform('darwin', () => {
+      expect(sequenceTokenFromEvent(cmdBackspace())).toBe('Meta+Backspace')
+      expect(sequenceTokenFromEvent(ctrlBackspace())).toBe('Ctrl+Backspace')
+    })
+    withPlatform('linux', () => {
+      expect(sequenceTokenFromEvent(ctrlBackspace())).toBe('Ctrl+Backspace')
+    })
+  })
+
+  it('walks a sequence whose first key carries Mod', () => {
+    withPlatform('linux', () => {
+      const pending = { current: 0 }
+      const timer: { current?: ReturnType<typeof setTimeout> } = {}
+      const onMatch = vi.fn()
+      const first = fakeEvent({ key: 'g', code: 'KeyG', ctrlKey: true })
+      const second = fakeEvent({ key: 'g', code: 'KeyG' })
+      expect(advanceSequence(first, 'Mod+G g', pending, timer, onMatch, () => {})).toBe(true)
+      expect(advanceSequence(second, 'Mod+G g', pending, timer, onMatch, () => {})).toBe(true)
+      expect(onMatch).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it('names the global shortcut that has a chord', () => {
+    withPlatform('darwin', () => {
+      const cmdP = fakeEvent({ key: 'p', code: 'KeyP', metaKey: true })
+      expect(appShortcutForEvent(cmdP, {})?.id).toBe('global.searchNotes')
+      expect(appShortcutForEvent(cmdBackspace(), {})).toBeNull()
+      // Moved off its key, Search notes no longer has it.
+      expect(appShortcutForEvent(cmdP, { 'global.searchNotes': '' })).toBeNull()
+    })
+  })
+
+  it('hands Vim Cmd on macOS and Ctrl elsewhere for a Mod token', () => {
+    withPlatform('darwin', () => expect(toVimSequence('Mod+D')).toBe('<D-d>'))
+    withPlatform('linux', () => expect(toVimSequence('Mod+D')).toBe('<C-d>'))
+    withPlatform('linux', () => expect(toVimSequence('Ctrl+Mod+D')).toBe('<C-d>'))
+  })
+})
+
+describe('Move sidebar note to Trash (#972)', () => {
+  it('is a Mod+Backspace chord in either mode, rebindable and unbindable', () => {
+    const definition = getKeymapDefinition('nav.sidebarTrash')
+    expect(definition).toMatchObject({ kind: 'shortcut', defaultBinding: 'Mod+Backspace' })
+    expect(definition.vimOnly).toBeUndefined()
+    withPlatform('darwin', () => {
+      const cmd = fakeEvent({ key: 'Backspace', code: 'Backspace', metaKey: true })
+      expect(matchesShortcut(cmd, {}, 'nav.sidebarTrash')).toBe(true)
+      expect(matchesShortcut(cmd, { 'nav.sidebarTrash': '' }, 'nav.sidebarTrash')).toBe(false)
+      const del = fakeEvent({ key: 'Delete', code: 'Delete' })
+      expect(matchesShortcut(del, { 'nav.sidebarTrash': 'Delete' }, 'nav.sidebarTrash')).toBe(true)
+    })
+    withPlatform('linux', () => {
+      const ctrl = fakeEvent({ key: 'Backspace', code: 'Backspace', ctrlKey: true })
+      expect(matchesShortcut(ctrl, {}, 'nav.sidebarTrash')).toBe(true)
+    })
   })
 })

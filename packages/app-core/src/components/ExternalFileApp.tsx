@@ -14,7 +14,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Annotation, Compartment, EditorState, type Transaction } from '@codemirror/state'
 import { EditorView, highlightActiveLine, keymap } from '@codemirror/view'
 import { Vim, vim } from '@replit/codemirror-vim'
-import { history, historyKeymap, indentWithTab } from '@codemirror/commands'
+import { history, indentWithTab } from '@codemirror/commands'
+import { scrollerClickFocus } from '../lib/cm-scroller-click-focus'
+import { appHistoryKeymap } from '../lib/history-keymap'
 import { vimAwareDefaultKeymap, vimAwareMarkdownKeymap, vimAwareSearchKeymap } from '../lib/cm-vim-default-keymap'
 import { mapDefaultHalfPageKeys, registerHalfPageMotion } from '../lib/cm-vim-half-page-motion'
 import { vimVisualHighlightExtension } from '../lib/cm-vim-visual-highlight'
@@ -28,6 +30,7 @@ import { isTouchPrimaryDevice, vimImeGuard } from '../lib/cm-vim-ime-guard'
 import { syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language'
 import type { ExternalFileContent } from '@shared/ipc'
 import { livePreviewPlugin } from '../lib/cm-live-preview'
+import { sourceRevealExtension } from '../lib/cm-source-reveal'
 import { headingFolding } from '../lib/cm-heading-fold'
 import { LazyPreview as Preview } from './LazyPreview'
 import { CloseIcon, InboxIcon } from './icons'
@@ -165,6 +168,7 @@ export function ExternalFileApp(): JSX.Element {
         doc: bodyRef.current ?? '',
         extensions: [
           appMarkdownSnippetExtension(),
+          sourceRevealExtension,
           new Compartment().of(prefs.vimMode ? vim() : []),
           // No text input outside Vim insert mode, as in every other editor:
           // without it a CJK input method composed over hjkl and typed `ia`
@@ -172,6 +176,7 @@ export function ExternalFileApp(): JSX.Element {
           vimImeGuard(() => prefs.vimBlockImeInNormalMode && !isTouchPrimaryDevice()),
           vimVisualHighlightExtension,
           history(),
+          scrollerClickFocus,
           floatingCursorDrawSelection(),
           editorTabSize(prefs.editorTabSize),
           highlightActiveLine(),
@@ -191,7 +196,7 @@ export function ExternalFileApp(): JSX.Element {
             ...vimHalfPageKeymap(prefs.vimMode, {}),
             indentWithTab,
             ...vimAwareDefaultKeymap(prefs.vimMode),
-            ...historyKeymap,
+            ...appHistoryKeymap,
             ...vimAwareSearchKeymap(prefs.vimMode)
           ]),
           EditorView.domEventHandlers({

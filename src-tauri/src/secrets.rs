@@ -85,3 +85,31 @@ pub fn delete_secret(config_dir: &PathBuf, id: &str) {
 pub fn has_secret(config_dir: &PathBuf, id: &str) -> bool {
     get_secret(config_dir, id).is_some()
 }
+
+/// Keychain-only storage, for a secret that must never fall back to a file
+/// (the Unsplash Access Key, whose terms keep it confidential). `account` is
+/// the full keychain account name.
+pub fn keychain_get(account: &str) -> Option<String> {
+    keyring::Entry::new(SERVICE, account).ok()?.get_password().ok()
+}
+
+pub fn keychain_set(account: &str, secret: &str) -> bool {
+    keyring::Entry::new(SERVICE, account)
+        .and_then(|e| e.set_password(secret))
+        .is_ok()
+}
+
+pub fn keychain_delete(account: &str) {
+    if let Ok(entry) = keyring::Entry::new(SERVICE, account) {
+        let _ = entry.delete_credential();
+    }
+}
+
+/// Whether the OS keychain answers at all: a Linux desktop without a keyring
+/// says no here, the way upstream's `safeStorage.isEncryptionAvailable` does.
+pub fn keychain_available(account: &str) -> bool {
+    match keyring::Entry::new(SERVICE, account).map(|e| e.get_password()) {
+        Ok(Ok(_)) | Ok(Err(keyring::Error::NoEntry)) => true,
+        _ => false,
+    }
+}

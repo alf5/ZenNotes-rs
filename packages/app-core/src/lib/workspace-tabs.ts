@@ -8,8 +8,10 @@ import { isWorkflowsTabPath } from '@shared/workflows-view'
 import { isAtlasTabPath } from '@shared/atlas-view'
 import { isDatabaseTabPath } from '@shared/databases'
 import { isAssetsViewTabPath } from '@shared/assets-view'
+import { isUnresolvedLinksTabPath } from '@shared/unresolved-links'
 import { isAssetTabPath } from './asset-tabs'
 import { isDiagramTabPath } from './diagram-tabs'
+import { isGalleryTabPath } from './folder-gallery'
 import { allLeaves, type PaneLayout } from './pane-layout'
 
 export function isWorkspaceVirtualTabPath(path: string): boolean {
@@ -23,6 +25,8 @@ export function isWorkspaceVirtualTabPath(path: string): boolean {
     isArchiveTabPath(path) ||
     isTrashTabPath(path) ||
     isAssetsViewTabPath(path) ||
+    isUnresolvedLinksTabPath(path) ||
+    isGalleryTabPath(path) ||
     isAssetTabPath(path) ||
     isDiagramTabPath(path) ||
     isDatabaseTabPath(path)

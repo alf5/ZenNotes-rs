@@ -45,10 +45,10 @@ import {
   type KanbanGroupBy,
   type TaskMutation
 } from '../store'
-import { filterTasks } from '../lib/tasks-filter'
+import { filterTasks, type NoteTagsByPath } from '../lib/tasks-filter'
 import { isOverlayOrDialogOpen } from '../lib/overlay-open'
 import { ContextMenu, type ContextMenuItem } from './ContextMenu'
-import { buildTaskMenuItems } from '../lib/task-context-menu'
+import { buildTaskMenuItems, chooseTaskDueDate } from '../lib/task-context-menu'
 import { ArrowUpRightIcon, PencilIcon } from './icons'
 import { InlineMarkdown } from '../lib/inline-markdown'
 import { CloudTaskConflictIndicator } from './CloudTaskConflictIndicator'
@@ -67,6 +67,9 @@ interface Props {
    *  column set, group-by options, and card-order persistence keep working
    *  from the full task list. (#583) */
   filter?: string
+  /** Each note's tags, so the filter finds a file task by a tag in its body,
+   *  as the list and calendar do (#1008). */
+  noteTags?: NoteTagsByPath | null
   today: Date
   onOpenTask: (task: VaultTask) => void
   onToggleTask: (task: VaultTask) => void
@@ -120,9 +123,10 @@ export function statusColumns(tasks: VaultTask[], today: Date): Column[] {
   // started work gets its own column between the to-do buckets and Done, and
   // a glance shows how much is in flight (#677). `@waiting` still wins: a
   // blocked card reads as blocked and comes back here when the wait clears.
-  const inProgress = [...groups.today, ...groups.upcoming].filter((t) => t.inProgress)
+  const inProgress = [...groups.today, ...groups.upcoming, ...groups.undated].filter((t) => t.inProgress)
   const today_ = groups.today.filter((t) => !t.inProgress)
   const upcoming = groups.upcoming.filter((t) => !t.inProgress)
+  const undated = groups.undated.filter((t) => !t.inProgress)
   const overdueBadge = (list: VaultTask[]): Column['badge'] => {
     const value = list.filter((t) => isTaskOverdue(t, today)).length
     return value > 0 ? { kind: 'overdue', value } : undefined
@@ -130,6 +134,8 @@ export function statusColumns(tasks: VaultTask[], today: Date): Column[] {
   return [
     { id: 'today', label: 'Today', tasks: today_, badge: overdueBadge(today_) },
     { id: 'upcoming', label: 'Upcoming', tasks: upcoming },
+    // Open work with no date (#990); dropping a card here clears its `due:`.
+    { id: 'undated', label: 'No due date', tasks: undated },
     {
       id: IN_PROGRESS_COLUMN_ID,
       label: 'In progress',
@@ -668,7 +674,14 @@ interface DragPreview {
 
 const POINTER_DRAG_THRESHOLD = 5
 
-export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: Props): JSX.Element {
+export function TasksKanban({
+  tasks,
+  filter,
+  noteTags,
+  today,
+  onOpenTask,
+  onToggleTask
+}: Props): JSX.Element {
   const groupBy = useStore((s) => s.kanbanGroupBy)
   const cardSort = useStore((s) => s.kanbanCardSort)
   const setCardSort = useStore((s) => s.setKanbanCardSort)
@@ -846,7 +859,7 @@ export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: 
   const columns = useMemo(() => {
     if (!filterQuery) return fullColumns
     return fullColumns.map((column) => {
-      const visible = filterTasks(column.tasks, filterQuery)
+      const visible = filterTasks(column.tasks, filterQuery, noteTags)
       if (visible.length === column.tasks.length) return column
       let badge = column.badge
       if (badge?.kind === 'overdue') {
@@ -855,7 +868,7 @@ export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: 
       }
       return { ...column, tasks: visible, badge }
     })
-  }, [fullColumns, filterQuery, today])
+  }, [fullColumns, filterQuery, noteTags, today])
   columnsRef.current = columns
   fullColumnsRef.current = fullColumns
 
@@ -1809,6 +1822,13 @@ export function TasksKanban({ tasks, filter, today, onOpenTask, onToggleTask }: 
           if (vimMode && focusedTask) {
             consume()
             void cancelTaskFromList(focusedTask)
+          }
+          return
+        // Any due date from the calendar `@date` opens (#991).
+        case '@':
+          if (vimMode && focusedTask) {
+            consume()
+            void chooseTaskDueDate(focusedTask)
           }
           return
         default:

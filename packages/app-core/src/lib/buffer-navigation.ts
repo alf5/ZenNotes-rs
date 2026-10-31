@@ -108,6 +108,33 @@ export function getBufferSelectTarget(
   return targetFor(paneLayout, leaf.id, leaf.tabs, order[clamped - 1])
 }
 
+/** Next / previous tab for the app shortcuts and the palette (#973), with or
+ *  without Vim: the order gt/gT walk, wrapping at either end, but open tabs
+ *  only. gt with one tab open falls back to recent notes or a new quick note,
+ *  the way Vim's buffer commands do; a "next tab" with one tab open has
+ *  nowhere to go. From a pane showing no tab, next starts at the first tab
+ *  and previous at the last. */
+export function getTabStepTarget(
+  paneLayout: PaneLayout,
+  activePaneId: string,
+  delta: number
+): BufferNavigationTarget {
+  const leaf = findLeaf(paneLayout, activePaneId)
+  if (!leaf) return { kind: 'none' }
+
+  const order = openTabOrder(paneLayout)
+  const baseIndex = leaf.activeTab ? order.indexOf(leaf.activeTab) : -1
+  let nextIndex: number
+  if (baseIndex < 0) {
+    if (order.length === 0) return { kind: 'none' }
+    nextIndex = delta > 0 ? 0 : order.length - 1
+  } else {
+    if (order.length < 2) return { kind: 'none' }
+    nextIndex = (((baseIndex + delta) % order.length) + order.length) % order.length
+  }
+  return targetFor(paneLayout, leaf.id, leaf.tabs, order[nextIndex])
+}
+
 function applyTarget(runtime: BufferNavigationRuntime, target: BufferNavigationTarget): void {
   if (target.kind === 'focus') {
     void runtime.focusTabInPane(target.paneId, target.path)
@@ -137,4 +164,8 @@ export function selectActiveBuffer(runtime: BufferNavigationRuntime, index: numb
     runtime,
     getBufferSelectTarget(runtime.paneLayout, runtime.activePaneId, index)
   )
+}
+
+export function stepActiveTab(runtime: BufferNavigationRuntime, delta: number): void {
+  applyTarget(runtime, getTabStepTarget(runtime.paneLayout, runtime.activePaneId, delta))
 }

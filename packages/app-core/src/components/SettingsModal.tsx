@@ -57,13 +57,10 @@ import {
 } from "@shared/workflows/presets";
 import { startWorkflowTutorial } from "../lib/workflow-tutorial-flow";
 import type { LineNumberMode, WhichKeyHintMode } from "../store";
-import type {
-  KeymapDefinition,
-  KeymapId,
-  KeymapOverrides,
-} from "../lib/keymaps";
+import type { KeymapId, KeymapOverrides } from "../lib/keymaps";
 import {
   findKeymapConflict,
+  formatKeyToken,
   formatKeymapBinding,
   getDefaultKeymapBinding,
   getKeymapBinding,
@@ -72,11 +69,24 @@ import {
   isMacPlatform,
   isUnboundBinding,
   keymapAvailableOnHost,
-  sequenceTokenFromEvent,
   shortcutBindingFromEvent,
   UNBOUND_BINDING,
   UNBOUND_LABEL,
 } from "../lib/keymaps";
+import { keymapBindingTakenBy } from "../lib/list-view-keys";
+import { COMMAND_CATALOG } from "@shared/commands-catalog";
+import {
+  commandBindingKind,
+  findActionCommandConflicts,
+  findCommandBindingConflicts,
+  formatCommandBinding,
+  type CommandKeymaps,
+} from "../lib/command-keymaps";
+import { buildCommands } from "../lib/commands";
+import {
+  KeymapRecorderModal,
+  type KeymapRecorderTarget,
+} from "./KeymapRecorder";
 import {
   resolveAuto,
   THEMES,
@@ -124,11 +134,17 @@ import {
   specificFolderDestination,
 } from "../lib/vault-layout";
 import { BUILTIN_TEMPLATES } from "@shared/builtin-templates";
-import { composeTemplateFile, mergeTemplates } from "@shared/template-files";
+import {
+  composeTemplateFile,
+  findTemplate,
+  mergeTemplates,
+  templateSettingId,
+} from "@shared/template-files";
 import { TemplateEditorModal } from "./TemplateEditorModal";
 import type { NoteTemplate } from "@bridge-contract/templates";
 import {
   getSettingsSearchResults,
+  inNavigationOrder,
   type SettingsSearchCategory,
 } from "../lib/settings-search";
 import { useAppUpdateState } from "../lib/app-update-state";
@@ -158,7 +174,10 @@ import {
 import { CustomCodeLanguagesSettings } from "./CustomCodeLanguagesSettings";
 import { TextReplacementsSettings } from "./TextReplacementsSettings";
 import { CloudSettings } from "./CloudSettings";
+import { ErrorDetails } from "./ErrorDetails";
 import { consumeSettingsTarget } from "../lib/settings-navigation";
+import { unsplashKeySupported } from "../lib/unsplash-key";
+import { UnsplashKeySetting } from "./UnsplashKeySetting";
 import { normalizeApplicationSchemes } from "@shared/application-links";
 
 type SettingsCategoryId =
@@ -309,6 +328,10 @@ const SETTINGS_SECTIONS: {
   { id: "vault", title: "Vault", categoryIds: ["vault", "cloud", "templates"] },
   { id: "system", title: "System", categoryIds: ["mcp", "cli", "about"] },
 ];
+
+const SETTINGS_NAVIGATION_ORDER = SETTINGS_SECTIONS.flatMap(
+  (section) => section.categoryIds,
+);
 
 function settingsSearchTargetProps(settingId: string | undefined): {
   "data-settings-search-id"?: string;
@@ -584,10 +607,19 @@ function AppUpdatesCard({ homepage }: { homepage?: string }): JSX.Element {
           </a>
         </div>
       </div>
-      <p className="mt-3 text-sm leading-6 text-ink-600">
+      <p
+        data-app-update-message=""
+        className="mt-3 text-sm leading-6 text-ink-600"
+      >
         {appUpdateState?.message ??
           "Check GitHub releases for a newer ZenNotes build."}
       </p>
+      {appUpdateState?.phase === "error" && appUpdateState.detail && (
+        <ErrorDetails
+          detail={appUpdateState.detail}
+          data-app-update-details=""
+        />
+      )}
       {appUpdateState?.phase === "downloading" && (
         <div className="mt-3">
           <div className="h-2 overflow-hidden rounded-full bg-paper-200/90">
@@ -672,6 +704,8 @@ export function SettingsModal(): JSX.Element {
   );
   const keymapOverrides = useStore((s) => s.keymapOverrides);
   const setKeymapBinding = useStore((s) => s.setKeymapBinding);
+  const commandKeymaps = useStore((s) => s.commandKeymaps);
+  const setCommandKeymapBinding = useStore((s) => s.setCommandKeymapBinding);
   const resetAllKeymaps = useStore((s) => s.resetAllKeymaps);
   const whichKeyHints = useStore((s) => s.whichKeyHints);
   const setWhichKeyHints = useStore((s) => s.setWhichKeyHints);
@@ -687,6 +721,8 @@ export function SettingsModal(): JSX.Element {
   const setRipgrepBinaryPath = useStore((s) => s.setRipgrepBinaryPath);
   const fzfBinaryPath = useStore((s) => s.fzfBinaryPath);
   const setFzfBinaryPath = useStore((s) => s.setFzfBinaryPath);
+  const searchTaggedBlocks = useStore((s) => s.searchTaggedBlocks);
+  const setSearchTaggedBlocks = useStore((s) => s.setSearchTaggedBlocks);
   const externalApplicationSchemes = useStore((s) => s.externalApplicationSchemes);
   const setExternalApplicationSchemes = useStore((s) => s.setExternalApplicationSchemes);
   const [externalApplicationIssue, setExternalApplicationIssue] = useState<string | null>(null);
@@ -698,11 +734,15 @@ export function SettingsModal(): JSX.Element {
   const setRenderTablesInLivePreview = useStore(
     (s) => s.setRenderTablesInLivePreview,
   );
+  const detectCodeLanguages = useStore((s) => s.detectCodeLanguages);
+  const setDetectCodeLanguages = useStore((s) => s.setDetectCodeLanguages);
   const completedTaskStyle = useStore((s) => s.completedTaskStyle);
   const setCompletedTaskStyle = useStore((s) => s.setCompletedTaskStyle);
   const showArchivedTasks = useStore((s) => s.showArchivedTasks);
   const kanbanCardSort = useStore((s) => s.kanbanCardSort);
   const setKanbanCardSort = useStore((s) => s.setKanbanCardSort);
+  const tasksListOrder = useStore((s) => s.tasksListOrder);
+  const setTasksListOrder = useStore((s) => s.setTasksListOrder);
   const setShowArchivedTasks = useStore((s) => s.setShowArchivedTasks);
   const mathRenderer = useStore((s) => s.mathRenderer);
   const mathFontScale = useStore((s) => s.mathFontScale);
@@ -740,6 +780,8 @@ export function SettingsModal(): JSX.Element {
   const editorTabSize = useStore((s) => s.editorTabSize);
   const setEditorTabSize = useStore((s) => s.setEditorTabSize);
   const setListIndentGuides = useStore((s) => s.setListIndentGuides);
+  const linkPopoverOnHover = useStore((s) => s.linkPopoverOnHover);
+  const setLinkPopoverOnHover = useStore((s) => s.setLinkPopoverOnHover);
   const textReplacementsEnabled = useStore((s) => s.textReplacementsEnabled);
   const setTextReplacementsEnabled = useStore(
     (s) => s.setTextReplacementsEnabled,
@@ -778,11 +820,21 @@ export function SettingsModal(): JSX.Element {
   const setPdfEmbedInEditMode = useStore((s) => s.setPdfEmbedInEditMode);
   const contentAlign = useStore((s) => s.contentAlign);
   const setContentAlign = useStore((s) => s.setContentAlign);
+  const noteCoverPlacement = useStore((s) => s.noteCoverPlacement);
+  const setNoteCoverPlacement = useStore((s) => s.setNoteCoverPlacement);
   const vault = useStore((s) => s.vault);
   const workspaceMode = useStore((s) => s.workspaceMode);
   const renameVault = useStore((s) => s.renameVault);
   const vaultDisplayName = useStore((s) => s.vaultSettings.displayName ?? "");
   const remoteWorkspaceInfo = useStore((s) => s.remoteWorkspaceInfo);
+  // Share > ZenNotes is a macOS share extension inside the desktop app. A
+  // self-hosted server keeps the setting from 2.79 (supportsSharesLocation);
+  // an older one drops it on every save, so the row stays hidden there.
+  const sharesLocationAvailable =
+    appInfo.runtime === "desktop" &&
+    zenBridge.platformSync() === "darwin" &&
+    (workspaceMode !== "remote" ||
+      remoteWorkspaceInfo?.capabilities?.supportsSharesLocation === true);
   const remoteWorkspaceProfiles = useStore((s) => s.remoteWorkspaceProfiles);
   const vaultSettings = useStore((s) => s.vaultSettings);
   const persistVaultSettings = useStore((s) => s.setVaultSettings);
@@ -938,6 +990,8 @@ export function SettingsModal(): JSX.Element {
   const showWindowTitleBar = useStore((s) => s.showWindowTitleBar);
   const keepRunningInTray = useTrayStore((s) => s.keepRunningInTray);
   const setShowWindowTitleBar = useStore((s) => s.setShowWindowTitleBar);
+  const showStatusBar = useStore((s) => s.showStatusBar);
+  const setShowStatusBar = useStore((s) => s.setShowStatusBar);
   const setDarkSidebar = useStore((s) => s.setDarkSidebar);
   const showSidebarChevrons = useStore((s) => s.showSidebarChevrons);
   const setShowSidebarChevrons = useStore((s) => s.setShowSidebarChevrons);
@@ -1381,6 +1435,11 @@ export function SettingsModal(): JSX.Element {
   const opensOnCloudVault =
     supportsCloudSync && initialSettingsTarget === "cloud";
   const [cloudVaultReveal, setCloudVaultReveal] = useState(opensOnCloudVault);
+  // The cover picker's Unsplash tab sends the person here to paste a key, so
+  // the keyboard lands in the field itself rather than the settings search.
+  const opensOnUnsplashKey =
+    initialSettingsTarget === "unsplash" && unsplashKeySupported();
+  const unsplashKeyInputRef = useRef<HTMLInputElement>(null);
   const settleCloudVaultReveal = useCallback(() => setCloudVaultReveal(false), []);
   // Settings draws its own backdrop and panel, so it never got the focus
   // handling the shared Modal shell gives every other dialog: the keyboard
@@ -1391,16 +1450,33 @@ export function SettingsModal(): JSX.Element {
   // search is not what was asked for, so the panel holds focus instead.
   useDialogFocus(
     ref,
-    isTouchPrimaryDevice() || opensOnCloudVault ? ref : navSearchRef,
+    isTouchPrimaryDevice() || opensOnCloudVault
+      ? ref
+      : opensOnUnsplashKey
+        ? unsplashKeyInputRef
+        : navSearchRef,
   );
   const settingsSearchHighlightTimerRef = useRef<number | null>(null);
   const [activeCategory, setActiveCategory] = useState<SettingsCategoryId>(
-    () => initialSettingsTarget === "external-links" ? "editor" : initialSettingsTarget ?? "appearance",
+    () =>
+      initialSettingsTarget === "external-links"
+        ? "editor"
+        : initialSettingsTarget === "periodic-notes"
+          ? "vault"
+          : initialSettingsTarget === "unsplash"
+            ? "typography"
+            : initialSettingsTarget ?? "appearance",
   );
   // Per-category active sub-tab (dense categories split their content into sub-tabs).
   const [activeSubTabByCategory, setActiveSubTabByCategory] = useState<
     Partial<Record<SettingsCategoryId, string>>
-  >(() => initialSettingsTarget === "external-links" ? { editor: "links" } : {});
+  >(() =>
+    initialSettingsTarget === "external-links"
+      ? { editor: "links" }
+      : initialSettingsTarget === "periodic-notes"
+        ? { vault: "periodic" }
+        : {},
+  );
   const [activeSearchResultId, setActiveSearchResultId] = useState<
     string | null
   >(null);
@@ -1498,6 +1574,12 @@ export function SettingsModal(): JSX.Element {
     });
   }, []);
 
+  useEffect(() => {
+    if (opensOnUnsplashKey) jumpToSettingsSearchTarget("unsplash-access-key");
+    // Once, for the page another surface asked for.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const leaderKeyHintsTargetId = vimMode ? "leader-key-hints" : "vim-mode";
   const wrappedLineMotionsTargetId = vimMode
     ? "wrapped-line-motions"
@@ -1571,6 +1653,25 @@ export function SettingsModal(): JSX.Element {
               ? "Show the main window title and controls, or hide them to reclaim vertical space."
               : "Show the bar with the open note's title, or hide it to reclaim vertical space.",
           keywords: ["decorations", "frameless", "traffic lights", "tiling", "hyprland", "linux", "header"],
+        },
+        {
+          id: "status-bar",
+          title: "Status bar",
+          description:
+            "Show the bar along the bottom with Cloud sync status and the note's backlinks, words and position. Turned off, it still appears while Cloud needs you.",
+          keywords: [
+            "status bar",
+            "footer",
+            "bottom bar",
+            "cloud",
+            "sync",
+            "cloud connected",
+            "set up",
+            "word count",
+            "backlinks",
+            "cursor position",
+            "hide",
+          ],
         },
         {
           id: "keep-running-in-tray",
@@ -2018,6 +2119,13 @@ export function SettingsModal(): JSX.Element {
               />
             )}
             <ToggleRow
+              label="Status bar"
+              description="Show the bar along the bottom with Cloud sync status and the note’s backlinks, words and position. Turned off, it still appears while Cloud needs you: a sync that stopped or failed, files to review, or a sign-in to redo."
+              value={showStatusBar}
+              settingId="status-bar"
+              onChange={setShowStatusBar}
+            />
+            <ToggleRow
               label="Dark sidebar"
               description="Tint the sidebar one step darker than the canvas so the chrome reads as a separate surface."
               value={darkSidebar}
@@ -2188,6 +2296,13 @@ export function SettingsModal(): JSX.Element {
           keywords: ["scroll", "scrolloff", "vim", "cursor", "margin"],
         },
         {
+          id: "search-tagged-blocks",
+          title: "Show tagged blocks in note search",
+          description:
+            "When a Search notes query has a #tag, list the tagged blocks under each note, so a matching idea opens at its line.",
+          keywords: ["search", "tags", "blocks", "palette", "note search", "ideas", "clutter"],
+        },
+        {
           id: "vault-text-search-backend",
           title: "Vault text search backend",
           description:
@@ -2225,6 +2340,25 @@ export function SettingsModal(): JSX.Element {
             "vim",
             "plain text",
             "source",
+          ],
+        },
+        {
+          id: "detect-code-languages",
+          title: "Detect code block languages",
+          description:
+            "Guess the language of a code block that names none, and highlight it with the guess.",
+          keywords: [
+            "code",
+            "code block",
+            "fence",
+            "language",
+            "syntax",
+            "highlight",
+            "highlighting",
+            "detect",
+            "detection",
+            "guess",
+            "auto",
           ],
         },
         {
@@ -2450,6 +2584,12 @@ export function SettingsModal(): JSX.Element {
           title: "Indent guides",
           description: "Vertical guide lines at each nested list level.",
           keywords: ["indent", "guides", "list", "nested", "outline", "lines"],
+        },
+        {
+          id: "link-popover-on-hover",
+          title: "Link popover on hover",
+          description: "Rest the pointer on a [[wikilink]] to edit or create its note in place.",
+          keywords: ["link", "popover", "hover", "preview", "wikilink", "peek", "floating", "create"],
         },
         {
           id: "text-replacements-enabled",
@@ -2787,12 +2927,25 @@ export function SettingsModal(): JSX.Element {
           id: "search",
           title: "Search",
           searchIds: [
+            "search-tagged-blocks",
             "vault-text-search-backend",
             "ripgrep-binary-path",
             "fzf-binary-path",
           ],
           content: (
             <div className="space-y-6">
+              <Section
+                title="Note search"
+                description="What the Search notes palette lists."
+              >
+                <ToggleRow
+                  label="Show tagged blocks in note search"
+                  description="When your query has a #tag, list up to two tagged blocks under each note (the list item, paragraph or section carrying the tag), with a row that opens the rest in the Tags view. Off keeps one row per note."
+                  value={searchTaggedBlocks}
+                  settingId="search-tagged-blocks"
+                  onChange={setSearchTaggedBlocks}
+                />
+              </Section>
               <Section
                 title="Search"
                 description="Choose how vault-wide text search is powered."
@@ -2882,6 +3035,7 @@ export function SettingsModal(): JSX.Element {
           searchIds: [
             "live-preview",
             "render-tables",
+            "detect-code-languages",
             "completed-task-style",
             "math-renderer",
             "math-font-scale",
@@ -2899,6 +3053,7 @@ export function SettingsModal(): JSX.Element {
             "heading-level-labels",
             "editor-tab-size",
             "list-indent-guides",
+            "link-popover-on-hover",
             "auto-pairs",
             "auto-pair-quotes-in-prose",
             "note-tabs",
@@ -2933,6 +3088,13 @@ export function SettingsModal(): JSX.Element {
                     onChange={setRenderTablesInLivePreview}
                   />
                 )}
+                <ToggleRow
+                  label="Detect code block languages"
+                  description="Guess the language of a code block that names none and highlight it, in the editor and the reading view. The guess is labeled “detected” and never written to the note; pick it from the block's language button to keep it."
+                  value={detectCodeLanguages}
+                  settingId="detect-code-languages"
+                  onChange={setDetectCodeLanguages}
+                />
                 <SegmentedRow
                   label="Completed task style"
                   description="How a checked task's text looks in the editor and preview: strike it through, gray it out, or both. The checkbox always shows checked."
@@ -3084,6 +3246,13 @@ export function SettingsModal(): JSX.Element {
                   onChange={setListIndentGuides}
                 />
                 <ToggleRow
+                  label="Link popover on hover"
+                  description={`Rest the pointer on a [[wikilink]] in the editor to open its note in a small floating editor, or to create it when it does not exist yet. Off, the link popover still opens from the keyboard: ${vimMode && getKeymapDisplay(keymapOverrides, "vim.linkPopover") ? `${getKeymapDisplay(keymapOverrides, "vim.linkPopover")} on the link, or ` : ""}${getKeymapDisplay(keymapOverrides, "editor.linkPopover") || "the Open Link Popover command"}.`}
+                  value={linkPopoverOnHover}
+                  settingId="link-popover-on-hover"
+                  onChange={setLinkPopoverOnHover}
+                />
+                <ToggleRow
                   label="Auto-pair brackets and delimiters"
                   description="Insert matching [] () and {} as you type, wrap selected text, and skip over a closing delimiter that is already present. Quotes pair inside inline code and fenced code blocks. In Vim mode this only applies in insert mode."
                   value={autoPairs}
@@ -3165,11 +3334,14 @@ export function SettingsModal(): JSX.Element {
                   settingId="date-titled-quick-notes"
                   onChange={setQuickNoteDateTitle}
                 />
+                {/* A cleared field means no prefix, so the placeholder says so
+                    rather than showing the old default in grey, which read as
+                    if "Quick Note" were still set (#1008). */}
                 <TextInputRow
                   label="Quick Note prefix"
                   description="Used when naming new Quick Notes. Leave blank for a bare timestamp or date."
                   value={quickNoteTitlePrefix ?? ""}
-                  placeholder="Quick Note"
+                  placeholder="No prefix"
                   settingId="quick-note-prefix"
                   onChange={setQuickNoteTitlePrefix}
                 />
@@ -3402,6 +3574,14 @@ export function SettingsModal(): JSX.Element {
             "keyboard",
           ],
         },
+        // One row per palette command (#971), found by its title or id and
+        // landing on the command's row in the Commands group.
+        ...COMMAND_CATALOG.map((entry) => ({
+          id: `command-keymap:${entry.id}`,
+          title: entry.title,
+          description: `Give the ${entry.category} command a key · ${entry.id}`,
+          keywords: [entry.id],
+        })),
       ],
       content: (
         <div
@@ -3411,7 +3591,11 @@ export function SettingsModal(): JSX.Element {
           <KeymapSettings
             vimMode={vimMode}
             overrides={keymapOverrides}
+            commandKeymaps={commandKeymaps ?? {}}
             onSetBinding={(id, binding) => setKeymapBinding(id, binding)}
+            onSetCommandBinding={(id, binding) =>
+              setCommandKeymapBinding(id, binding)
+            }
             onResetAll={resetAllKeymaps}
           />
         </div>
@@ -3463,6 +3647,21 @@ export function SettingsModal(): JSX.Element {
             "root",
             "column",
             "directory",
+          ],
+        },
+        {
+          id: "tasks-list-order",
+          title: "Tasks list order",
+          description:
+            "Order the tasks in each group of the Tasks list by their notes' line order or by priority.",
+          keywords: [
+            "tasks",
+            "list",
+            "sort",
+            "order",
+            "priority",
+            "high",
+            "note",
           ],
         },
         {
@@ -3561,6 +3760,22 @@ export function SettingsModal(): JSX.Element {
             />
           </Section>
           <Section
+            title="List order"
+            description="How the tasks inside each group of the Tasks list are ordered."
+          >
+            <SegmentedRow
+              label="Tasks list order"
+              description="Note order follows each note's line order, which Shift+J/K and dragging rearrange. Priority puts high priority first, then medium, low, and none, with ties by due date; reordering works in Note order. In the list: the Order menu, or s in Vim mode."
+              value={tasksListOrder}
+              settingId="tasks-list-order"
+              options={[
+                { value: "note", label: "Note order" },
+                { value: "priority", label: "Priority" },
+              ]}
+              onChange={(next) => setTasksListOrder(next)}
+            />
+          </Section>
+          <Section
             title="Archived notes"
             description="What happens to a note's tasks when the note moves to the Archive."
           >
@@ -3602,7 +3817,7 @@ export function SettingsModal(): JSX.Element {
       id: "typography",
       title: "Typography",
       description:
-        "Fonts, line height, reading width, alignment, and line numbers.",
+        "Fonts, line height, reading width, alignment, line numbers, and note covers.",
       keywords: [
         "font",
         "size",
@@ -3610,6 +3825,7 @@ export function SettingsModal(): JSX.Element {
         "width",
         "alignment",
         "numbers",
+        "cover",
       ],
       searchItems: [
         {
@@ -3661,6 +3877,28 @@ export function SettingsModal(): JSX.Element {
           description:
             "Center note content within the column or left-align it to the pane edge.",
           keywords: ["alignment", "center", "left"],
+        },
+        {
+          id: "note-covers",
+          title: "Note covers",
+          description:
+            "Where a note's cover image shows: scrolling with the text, pinned above it, or hidden.",
+          keywords: ["cover", "banner", "header", "image", "pinned", "hidden"],
+        },
+        {
+          id: "unsplash-access-key",
+          title: "Unsplash access key",
+          description:
+            "Your own Unsplash key, which the cover picker's Unsplash tab searches with.",
+          keywords: [
+            "unsplash",
+            "cover",
+            "api key",
+            "access key",
+            "photo",
+            "banner",
+          ],
+          available: unsplashKeySupported(),
         },
         {
           id: "line-numbers",
@@ -3791,6 +4029,33 @@ export function SettingsModal(): JSX.Element {
                 ]}
                 onChange={(next) => setLineNumberPosition(next)}
               />
+            )}
+          </Section>
+
+          <Section
+            title="Covers"
+            description={
+              // A host without the Unsplash bridge (the phones) shows no key
+              // row below, so the section does not promise one.
+              unsplashKeySupported()
+                ? "How a note's cover shows, and the Unsplash key the cover picker searches with."
+                : "How a note's cover shows."
+            }
+          >
+            <SegmentedRow
+              label="Note covers"
+              description="Where a note's cover image (its banner) shows: on top of the text, scrolling away with it; pinned above the editor and Read view; or hidden. Hiding it leaves the note's frontmatter alone."
+              value={noteCoverPlacement}
+              settingId="note-covers"
+              options={[
+                { value: "scroll", label: "Scroll with note" },
+                { value: "pinned", label: "Pinned" },
+                { value: "hidden", label: "Hidden" },
+              ]}
+              onChange={(next) => setNoteCoverPlacement(next)}
+            />
+            {unsplashKeySupported() && (
+              <UnsplashKeySetting inputRef={unsplashKeyInputRef} />
             )}
           </Section>
         </div>
@@ -3941,6 +4206,22 @@ export function SettingsModal(): JSX.Element {
             "new task",
             "todos",
           ],
+        },
+        {
+          id: "shares-location",
+          title: "Default shares location",
+          description:
+            "Where pages and text shared from Safari and other apps (Share > ZenNotes) are filed: Quick Notes, your primary notes area, or a folder you name.",
+          keywords: [
+            "share",
+            "shares",
+            "share menu",
+            "share extension",
+            "safari",
+            "clippings",
+            "web clipper",
+          ],
+          available: sharesLocationAvailable,
         },
         {
           id: "view-settings-scope",
@@ -4534,6 +4815,7 @@ export function SettingsModal(): JSX.Element {
             "drawings-location",
             "databases-location",
             "tasks-location",
+            ...(sharesLocationAvailable ? ["shares-location"] : []),
             "view-settings-scope",
           ],
           content: (
@@ -4674,6 +4956,42 @@ export function SettingsModal(): JSX.Element {
                     }
                   />
                 )}
+                {sharesLocationAvailable && (
+                  <SegmentedRow
+                    label="Default shares location"
+                    description="Where a page or text shared from Safari and other apps with Share > ZenNotes is filed. `Specific folder` uses a folder you name inside your primary notes area."
+                    value={vaultSettings.sharesLocation?.mode ?? "quick"}
+                    settingId="shares-location"
+                    options={[
+                      { value: "quick", label: "Quick Notes" },
+                      { value: "primary", label: "Primary location" },
+                      { value: "folder", label: "Specific folder" },
+                    ]}
+                    onChange={(mode) =>
+                      void persistVaultSettings({
+                        ...vaultSettings,
+                        sharesLocation: { ...vaultSettings.sharesLocation, mode },
+                      })
+                    }
+                  />
+                )}
+                {sharesLocationAvailable &&
+                  vaultSettings.sharesLocation?.mode === "folder" && (
+                    <TextInputRow
+                      label="Shares folder"
+                      description={`A folder inside your primary notes area, e.g. \`Clippings\`. Shares go to ${specificFolderDestinationLabel(vaultSettings.sharesLocation?.folder, vaultSettings)}.`}
+                      value={vaultSettings.sharesLocation?.folder ?? ""}
+                      placeholder="Clippings"
+                      settingId="shares-folder"
+                      commitOnBlur
+                      onChange={(next) =>
+                        void persistVaultSettings({
+                          ...vaultSettings,
+                          sharesLocation: { mode: "folder", folder: next ?? "" },
+                        })
+                      }
+                    />
+                  )}
               </Section>
               <Section
                 title="View settings"
@@ -4859,7 +5177,7 @@ export function SettingsModal(): JSX.Element {
                     />
                     <ToggleRow
                       label="Tasks are due on the note's date"
-                      description="A task written inside a daily note appears on the calendar for that day automatically, without typing a due date. An explicit `due:YYYY-MM-DD` still wins."
+                      description="A task written inside a daily note is due that day automatically, in the Tasks list, board and calendar and on Home, without typing a due date. An explicit `due:YYYY-MM-DD` still wins."
                       value={
                         vaultSettings.dailyNotes.tasksDueOnNoteDate !== false
                       }
@@ -5847,7 +6165,10 @@ export function SettingsModal(): JSX.Element {
   ];
 
   const query = navQuery.trim().toLowerCase();
-  const searchResults = getSettingsSearchResults(categories, query);
+  const searchResults = getSettingsSearchResults(
+    inNavigationOrder(categories, SETTINGS_NAVIGATION_ORDER),
+    query,
+  );
   const visibleSearchResult =
     searchResults.find((result) => result.id === activeSearchResultId) ??
     searchResults.find((result) => result.category.id === activeCategory) ??
@@ -6187,19 +6508,56 @@ export function SettingsModal(): JSX.Element {
   );
 }
 
+/** The key a command already has from elsewhere (a leader chord, `:w`), read
+ *  off the live command list. Empty where that list cannot be built. */
+function liveBuiltinShortcuts(): Map<string, string> {
+  try {
+    return new Map(
+      buildCommands({ includeUnavailable: true }).map((command) => [
+        command.id,
+        command.builtinShortcut ?? "",
+      ]),
+    );
+  } catch {
+    return new Map();
+  }
+}
+
+const KEYMAP_CHIP =
+  "rounded-full border px-2 py-0.5 text-2xs font-medium uppercase tracking-[0.14em]";
+const KEYMAP_ROW_BUTTON =
+  "rounded-xl border px-3 py-1.5 text-xs font-medium transition-colors";
+const KEYMAP_ROW_BUTTON_ON =
+  "border-paper-300/70 bg-paper-100/80 text-ink-700 hover:bg-paper-200";
+const KEYMAP_ROW_BUTTON_OFF =
+  "cursor-not-allowed border-paper-300/60 bg-paper-100/45 text-ink-400";
+
 function KeymapSettings({
   vimMode,
   overrides,
+  commandKeymaps,
   onSetBinding,
+  onSetCommandBinding,
   onResetAll,
 }: {
   vimMode: boolean;
   overrides: KeymapOverrides;
+  commandKeymaps: CommandKeymaps;
   onSetBinding: (id: KeymapId, binding: string | null) => void;
+  onSetCommandBinding: (id: string, binding: string | null) => void;
   onResetAll: () => void;
 }): JSX.Element {
   const [query, setQuery] = useState("");
-  const [recording, setRecording] = useState<KeymapDefinition | null>(null);
+  const [recording, setRecording] = useState<KeymapRecorderTarget | null>(
+    null,
+  );
+  const conflictContext = { overrides, commandKeymaps };
+  const builtinShortcuts = useMemo(
+    () => liveBuiltinShortcuts(),
+    // The composed chords follow the leader and Vim mode.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [overrides, vimMode],
+  );
 
   const groups = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -6208,14 +6566,6 @@ function KeymapSettings({
       .map((group) => {
         const items = group.items.filter((definition) => {
           if (!keymapAvailableOnHost(definition.id, capabilities)) return false;
-          if (
-            definition.vimOnly &&
-            !vimMode &&
-            definition.id !== "global.searchNotesNonVim"
-          ) {
-            // Keep Vim-only bindings visible so users can prep their layout
-            // before turning Vim mode back on, but still let the filter work.
-          }
           if (!q) return true;
           const display =
             getKeymapDisplay(overrides, definition.id) || UNBOUND_LABEL;
@@ -6233,9 +6583,24 @@ function KeymapSettings({
         ): group is ReturnType<typeof getKeymapDefinitionsByGroup>[number] =>
           !!group,
       );
-  }, [overrides, query, vimMode]);
+  }, [overrides, query]);
 
-  const hasOverrides = Object.keys(overrides).length > 0;
+  // The fifth group (#971): every palette command with a fixed id. Found by
+  // its title, category, keywords or id, and by the key it has.
+  const commandRows = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return COMMAND_CATALOG.filter((entry) => {
+      if (!q) return true;
+      const display =
+        formatCommandBinding(commandKeymaps[entry.id], overrides) ||
+        UNBOUND_LABEL;
+      return [entry.title, entry.category, entry.keywords ?? "", entry.id, display]
+        .some((part) => part.toLowerCase().includes(q));
+    });
+  }, [commandKeymaps, overrides, query]);
+
+  const hasOverrides =
+    Object.keys(overrides).length > 0 || Object.keys(commandKeymaps).length > 0;
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-4">
@@ -6249,9 +6614,9 @@ function KeymapSettings({
               </div>
               <div className="mt-1 text-xs leading-5 text-ink-500">
                 Record a new key or sequence for the app’s keyboard-first
-                actions, or unbind one so no key triggers it. Standard
-                accessibility fallbacks like arrows, Enter, and Escape still
-                work.
+                actions, give any command in the palette a key of its own, or
+                unbind one so no key triggers it. Standard accessibility
+                fallbacks like arrows, Enter, and Escape still work.
               </div>
             </div>
             <div className="flex max-w-full flex-wrap items-center gap-2">
@@ -6294,14 +6659,30 @@ function KeymapSettings({
                     definition.id,
                     current,
                   );
+                  // A command's key on this action's key (#971), seen from
+                  // the action's side.
+                  const commandHits = findActionCommandConflicts(
+                    definition.id,
+                    current,
+                    conflictContext,
+                  );
                   const inactive =
                     (definition.vimOnly && !vimMode) ||
                     (definition.nonVimOnly && vimMode);
+                  // A list action's chord that an app-wide key takes first
+                  // can never fire where the action lives (#972).
+                  const takenBy = keymapBindingTakenBy(
+                    overrides,
+                    definition.id,
+                    current,
+                    vimMode,
+                  );
                   // The binding and its buttons wrap under the title on a
                   // narrow pane instead of squeezing it to a word per line.
                   return (
                     <div
                       key={definition.id}
+                      data-keymap-row={definition.id}
                       className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3 px-5 py-4"
                     >
                       <div className="min-w-0 flex-1 basis-56">
@@ -6310,22 +6691,65 @@ function KeymapSettings({
                             {definition.title}
                           </span>
                           {inactive && (
-                            <span className="rounded-full border border-paper-300/70 bg-paper-100/85 px-2 py-0.5 text-2xs font-medium uppercase tracking-[0.14em] text-ink-500">
+                            <span
+                              className={`${KEYMAP_CHIP} border-paper-300/70 bg-paper-100/85 text-ink-500`}
+                            >
                               {definition.vimOnly ? "Vim only" : "Non-Vim only"}
                             </span>
                           )}
                           {custom && (
-                            <span className="rounded-full border border-accent/25 bg-accent/10 px-2 py-0.5 text-2xs font-medium uppercase tracking-[0.14em] text-accent">
+                            <span
+                              className={`${KEYMAP_CHIP} border-accent/25 bg-accent/10 text-accent`}
+                            >
                               Custom
                             </span>
                           )}
                           {conflict && (
                             <span
-                              className="rounded-full border border-danger/35 bg-danger/10 px-2 py-0.5 text-2xs font-medium uppercase tracking-[0.14em] text-danger"
+                              className={`${KEYMAP_CHIP} border-danger/35 bg-danger/10 text-danger`}
                               title={`Also bound to “${conflict.title}”. Two global shortcuts on one key means one is ignored. Reassign one to resolve.`}
                             >
                               Conflicts with {conflict.title}
                             </span>
+                          )}
+                          {takenBy && (
+                            <span
+                              data-keymap-conflict="never-fires"
+                              className={`${KEYMAP_CHIP} border-warning/35 bg-warning/10 text-ink-700`}
+                              title={`“${takenBy.title}” has this key everywhere in the app, so it never reaches this action. Pick another key, or move that one.`}
+                            >
+                              Never fires: {takenBy.title} has this key
+                            </span>
+                          )}
+                          {commandHits.map((hit) =>
+                            definition.scope === "leader" ? (
+                              <span
+                                key={hit.id}
+                                data-keymap-conflict="blocks-command"
+                                className={`${KEYMAP_CHIP} border-warning/35 bg-warning/10 text-ink-700`}
+                                title={`Your key sequence for the command “${hit.title}” starts with this leader key. Built-in leader keys always win, so that command cannot be reached until one of them moves.`}
+                              >
+                                Blocks command {hit.title}
+                              </span>
+                            ) : custom ? (
+                              <span
+                                key={hit.id}
+                                data-keymap-conflict="command"
+                                className={`${KEYMAP_CHIP} border-danger/35 bg-danger/10 text-danger`}
+                                title={`Your key for the command “${hit.title}” is the same. The command wins; reassign one to resolve.`}
+                              >
+                                Conflicts with command {hit.title}
+                              </span>
+                            ) : (
+                              <span
+                                key={hit.id}
+                                data-keymap-conflict="taken-by-command"
+                                className={`${KEYMAP_CHIP} border-warning/35 bg-warning/10 text-ink-700`}
+                                title={`Your key for the command “${hit.title}” wins over this default, so this action does not answer it.`}
+                              >
+                                Taken by command {hit.title}
+                              </span>
+                            ),
                           )}
                         </div>
                         <div className="mt-1 text-xs leading-5 text-ink-500">
@@ -6347,8 +6771,10 @@ function KeymapSettings({
                         </span>
                         <button
                           type="button"
-                          onClick={() => setRecording(definition)}
-                          className="rounded-xl border border-paper-300/70 bg-paper-100/80 px-3 py-1.5 text-xs font-medium text-ink-800 transition-colors hover:bg-paper-200"
+                          onClick={() =>
+                            setRecording({ kind: "action", definition })
+                          }
+                          className={`${KEYMAP_ROW_BUTTON} border-paper-300/70 bg-paper-100/80 text-ink-800 hover:bg-paper-200`}
                         >
                           Change…
                         </button>
@@ -6359,12 +6785,7 @@ function KeymapSettings({
                             onSetBinding(definition.id, UNBOUND_BINDING)
                           }
                           title="Remove the key entirely. Nothing triggers this action until it is rebound or reset."
-                          className={[
-                            "rounded-xl border px-3 py-1.5 text-xs font-medium transition-colors",
-                            unbound
-                              ? "cursor-not-allowed border-paper-300/60 bg-paper-100/45 text-ink-400"
-                              : "border-paper-300/70 bg-paper-100/80 text-ink-700 hover:bg-paper-200",
-                          ].join(" ")}
+                          className={`${KEYMAP_ROW_BUTTON} ${unbound ? KEYMAP_ROW_BUTTON_OFF : KEYMAP_ROW_BUTTON_ON}`}
                         >
                           Unbind
                         </button>
@@ -6372,12 +6793,7 @@ function KeymapSettings({
                           type="button"
                           disabled={!custom}
                           onClick={() => onSetBinding(definition.id, null)}
-                          className={[
-                            "rounded-xl border px-3 py-1.5 text-xs font-medium transition-colors",
-                            custom
-                              ? "border-paper-300/70 bg-paper-100/80 text-ink-700 hover:bg-paper-200"
-                              : "cursor-not-allowed border-paper-300/60 bg-paper-100/45 text-ink-400",
-                          ].join(" ")}
+                          className={`${KEYMAP_ROW_BUTTON} ${custom ? KEYMAP_ROW_BUTTON_ON : KEYMAP_ROW_BUTTON_OFF}`}
                         >
                           Reset
                         </button>
@@ -6388,7 +6804,146 @@ function KeymapSettings({
               </div>
             </div>
           ))}
-          {groups.length === 0 && (
+          {commandRows.length > 0 && (
+            <div data-keymap-group="commands">
+              <div className="px-5 pt-4 text-xs font-medium uppercase tracking-[0.18em] text-ink-500">
+                Commands
+              </div>
+              <div className="px-5 pt-1 text-xs leading-5 text-ink-500">
+                Every command in the palette can take a key: a chord with
+                Ctrl, Alt or {isMacPlatform() ? "Cmd" : "Meta"}, a function
+                key, or with Vim mode on a leader sequence. All start unbound.{" "}
+                {formatKeyToken("Alt+Enter")} on a palette row records one there
+                too.
+              </div>
+              <div className="pb-4">
+                {commandRows.map((entry) => {
+                  const binding = commandKeymaps[entry.id];
+                  const custom = binding !== undefined;
+                  const kind = commandBindingKind(binding);
+                  const unbound = !kind;
+                  const { blocking, shadows } = findCommandBindingConflicts(
+                    entry.id,
+                    binding ?? "",
+                    conflictContext,
+                  );
+                  const inert = kind === "sequence" && !vimMode;
+                  const builtin = builtinShortcuts.get(entry.id) ?? "";
+                  return (
+                    <div
+                      key={entry.id}
+                      data-command-keymap-row={entry.id}
+                      {...settingsSearchTargetProps(`command-keymap:${entry.id}`)}
+                      className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3 px-5 py-4"
+                    >
+                      <div className="min-w-0 flex-1 basis-56">
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                          <span className="text-sm font-medium text-ink-900">
+                            {entry.title}
+                          </span>
+                          <span
+                            className={`${KEYMAP_CHIP} border-paper-300/70 bg-paper-100/85 text-ink-500`}
+                          >
+                            {entry.category}
+                          </span>
+                          {inert && (
+                            <span
+                              data-command-keymap-inert=""
+                              className={`${KEYMAP_CHIP} border-paper-300/70 bg-paper-100/85 text-ink-500`}
+                              title="A leader sequence runs through Vim mode's leader key, so it does nothing while Vim mode is off."
+                            >
+                              Inert with Vim off
+                            </span>
+                          )}
+                          {custom && (
+                            <span
+                              className={`${KEYMAP_CHIP} border-accent/25 bg-accent/10 text-accent`}
+                            >
+                              Custom
+                            </span>
+                          )}
+                          {blocking.map((hit) => (
+                            <span
+                              key={`b-${hit.id}`}
+                              data-keymap-conflict="blocking"
+                              className={`${KEYMAP_CHIP} border-danger/35 bg-danger/10 text-danger`}
+                              title={`Also bound to “${hit.title}”. Reassign one to resolve.`}
+                            >
+                              Conflicts with {hit.title}
+                            </span>
+                          ))}
+                          {shadows.map((hit) => (
+                            <span
+                              key={`s-${hit.id}`}
+                              data-keymap-conflict="shadows"
+                              className={`${KEYMAP_CHIP} border-warning/35 bg-warning/10 text-ink-700`}
+                              title={`This is the default key of “${hit.title}”. Your key wins, so that action does not answer it.`}
+                            >
+                              Wins over {hit.title}
+                            </span>
+                          ))}
+                        </div>
+                        <div className="mt-1 text-xs leading-5 text-ink-500">
+                          <code className="font-mono">{entry.id}</code>
+                          {builtin && <> · also {builtin}</>}
+                        </div>
+                      </div>
+                      <div className="flex max-w-full flex-wrap items-center gap-2">
+                        <span
+                          data-command-keymap-binding=""
+                          className={[
+                            "rounded-xl border px-3 py-1.5 text-xs font-medium",
+                            unbound
+                              ? "border-dashed border-paper-300/70 bg-paper-100/45 text-ink-500"
+                              : "border-paper-300/70 bg-paper-100/85 text-ink-900",
+                          ].join(" ")}
+                        >
+                          {unbound
+                            ? UNBOUND_LABEL
+                            : formatCommandBinding(binding, overrides)}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setRecording({
+                              kind: "command",
+                              id: entry.id,
+                              title: entry.title,
+                              category: entry.category,
+                              builtinShortcut: builtin || undefined,
+                            })
+                          }
+                          className={`${KEYMAP_ROW_BUTTON} border-paper-300/70 bg-paper-100/80 text-ink-800 hover:bg-paper-200`}
+                        >
+                          Change…
+                        </button>
+                        <button
+                          type="button"
+                          disabled={unbound}
+                          onClick={() =>
+                            onSetCommandBinding(entry.id, UNBOUND_BINDING)
+                          }
+                          title="Remove the key entirely."
+                          className={`${KEYMAP_ROW_BUTTON} ${unbound ? KEYMAP_ROW_BUTTON_OFF : KEYMAP_ROW_BUTTON_ON}`}
+                        >
+                          Unbind
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!custom}
+                          onClick={() => onSetCommandBinding(entry.id, null)}
+                          className={`${KEYMAP_ROW_BUTTON} ${custom ? KEYMAP_ROW_BUTTON_ON : KEYMAP_ROW_BUTTON_OFF}`}
+                        >
+                          Reset
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          {groups.length === 0 && commandRows.length === 0 && (
             <div className="px-5 py-10 text-center text-sm text-ink-500">
               No keymaps match your filter.
             </div>
@@ -6398,21 +6953,30 @@ function KeymapSettings({
 
       {recording && (
         <KeymapRecorderModal
-          definition={recording}
+          target={recording}
           overrides={overrides}
-          currentBinding={getKeymapBinding(overrides, recording.id)}
+          commandKeymaps={commandKeymaps}
+          vimMode={vimMode}
           onClose={() => setRecording(null)}
           onSave={(binding) => {
-            onSetBinding(
-              recording.id,
-              binding === getDefaultKeymapBinding(recording.id)
-                ? null
-                : binding,
-            );
+            if (recording.kind === "action") {
+              onSetBinding(
+                recording.definition.id,
+                binding === getDefaultKeymapBinding(recording.definition.id)
+                  ? null
+                  : binding,
+              );
+            } else {
+              onSetCommandBinding(recording.id, binding);
+            }
             setRecording(null);
           }}
           onUnbind={() => {
-            onSetBinding(recording.id, UNBOUND_BINDING);
+            if (recording.kind === "action") {
+              onSetBinding(recording.definition.id, UNBOUND_BINDING);
+            } else {
+              onSetCommandBinding(recording.id, UNBOUND_BINDING);
+            }
             setRecording(null);
           }}
         />
@@ -6502,172 +7066,6 @@ function IgnoredKeysRow({ settingId }: { settingId?: string }): JSX.Element {
         </div>
       )}
     </div>
-  );
-}
-
-function KeymapRecorderModal({
-  definition,
-  overrides,
-  currentBinding,
-  onClose,
-  onSave,
-  onUnbind,
-}: {
-  definition: KeymapDefinition;
-  overrides: KeymapOverrides;
-  currentBinding: string;
-  onClose: () => void;
-  onSave: (binding: string) => void;
-  onUnbind: () => void;
-}): JSX.Element {
-  const [binding, setBinding] = useState(currentBinding);
-  const mac = isMacPlatform();
-  // Block saving a global shortcut that another action already owns (#298).
-  const conflict = binding
-    ? findKeymapConflict(overrides, definition.id, binding)
-    : null;
-
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent): void => {
-      const target = event.target as HTMLElement | null;
-      if (
-        target &&
-        (target.tagName === "INPUT" || target.tagName === "TEXTAREA")
-      )
-        return;
-      const key = event.key;
-      if (key === "Backspace" || key === "Delete") {
-        event.preventDefault();
-        event.stopPropagation();
-        if (definition.kind === "shortcut") {
-          setBinding("");
-          return;
-        }
-        setBinding((current) => {
-          const tokens = current.split(/\s+/).filter(Boolean);
-          tokens.pop();
-          return tokens.join(" ");
-        });
-        return;
-      }
-
-      const next =
-        definition.kind === "shortcut"
-          ? shortcutBindingFromEvent(event)
-          : sequenceTokenFromEvent(event);
-      if (!next) return;
-
-      event.preventDefault();
-      event.stopPropagation();
-
-      if (definition.kind === "shortcut") {
-        setBinding(next);
-        return;
-      }
-
-      setBinding((current) => {
-        const limit = definition.maxTokens ?? 2;
-        const tokens = current.split(/\s+/).filter(Boolean);
-        if (limit <= 1) return next;
-        if (tokens.length >= limit) return next;
-        return [...tokens, next].join(" ");
-      });
-    };
-
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [definition]);
-
-  const display = binding
-    ? formatKeymapBinding(binding, definition.kind)
-    : "Press a key…";
-
-  return createPortal(
-    <div className="fixed inset-0 z-toast flex items-center justify-center bg-black/35 px-4 backdrop-blur-sm">
-      <div className="w-[min(440px,92vw)] overflow-hidden rounded-2xl border border-paper-300/70 bg-paper-100 shadow-float">
-        <div className="border-b border-paper-300/60 px-5 py-4">
-          <div className="text-base font-semibold text-ink-900">
-            {definition.title}
-          </div>
-          <div className="mt-1 text-sm text-ink-500">
-            {definition.description}
-          </div>
-        </div>
-        <div className="px-5 py-4">
-          <div className="rounded-xl border border-paper-300/70 bg-paper-50/80 px-4 py-4">
-            <div className="text-xs font-medium uppercase tracking-[0.16em] text-ink-500">
-              Recording
-            </div>
-            <div className="mt-2 text-2xl font-semibold text-ink-900">
-              {display}
-            </div>
-            <div className="mt-2 text-xs leading-5 text-ink-500">
-              {definition.kind === "shortcut"
-                ? `Press the shortcut you want; Backspace clears it. ${mac ? "Command" : "Ctrl"}-style chords are saved in the app’s cross-platform format. Unbind leaves the action with no key at all.`
-                : `Press the sequence you want. Backspace removes the last token, and multi-step sequences stop at ${definition.maxTokens ?? 2} key${(definition.maxTokens ?? 2) === 1 ? "" : "s"}. Unbind leaves the action with no key at all.`}
-            </div>
-          </div>
-          {conflict && (
-            <div className="mt-3 flex items-start gap-2 rounded-xl border border-danger/35 bg-danger/10 px-3 py-2.5 text-xs leading-5 text-danger">
-              <span aria-hidden>⚠</span>
-              <span>
-                Already used by{" "}
-                <strong className="font-semibold">{conflict.title}</strong>. Two
-                global shortcuts can’t share a key. Reset or reassign that one
-                first.
-              </span>
-            </div>
-          )}
-          <div className="mt-3 text-xs text-ink-500">
-            Current:{" "}
-            {isUnboundBinding(currentBinding)
-              ? UNBOUND_LABEL
-              : formatKeymapBinding(currentBinding, definition.kind)}
-          </div>
-          <div className="mt-1 text-xs text-ink-500">
-            Default:{" "}
-            {formatKeymapBinding(
-              getDefaultKeymapBinding(definition.id),
-              definition.kind,
-            )}
-          </div>
-        </div>
-        <div className="flex items-center justify-between gap-3 border-t border-paper-300/60 px-5 py-3">
-          <button
-            type="button"
-            onClick={onUnbind}
-            disabled={isUnboundBinding(currentBinding)}
-            title="Save this action with no key at all."
-            className={[
-              "rounded-md border px-3 py-1.5 text-xs font-medium transition-colors",
-              isUnboundBinding(currentBinding)
-                ? "cursor-not-allowed border-paper-300/60 bg-paper-100/45 text-ink-400"
-                : "border-paper-300 bg-paper-100 text-ink-700 hover:bg-paper-200",
-            ].join(" ")}
-          >
-            Unbind
-          </button>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="rounded-md border border-paper-300 bg-paper-100 px-3 py-1.5 text-xs font-medium text-ink-700 transition-colors hover:bg-paper-200"
-            >
-              Cancel
-            </button>
-            <Button
-              variant="primary"
-              size="sm"
-              disabled={!binding || !!conflict}
-              onClick={() => onSave(binding)}
-            >
-              Save
-            </Button>
-          </div>
-        </div>
-      </div>
-    </div>,
-    document.body,
   );
 }
 
@@ -7221,9 +7619,14 @@ function TextInputRow({
   const [draft, setDraft] = useState(value);
   const [focused, setFocused] = useState(false);
 
+  // The field shows what was typed while it has focus, and the stored value
+  // otherwise. A live row commits the trimmed text on every keystroke; drawing
+  // the stored copy back into the field dropped a space the moment it was
+  // typed, so a two-word value such as "Quick Note" could not be typed key by
+  // key (#1008).
   useEffect(() => {
-    if (!commitOnBlur || !focused) setDraft(value);
-  }, [commitOnBlur, focused, value]);
+    if (!focused) setDraft(value);
+  }, [focused, value]);
 
   const commit = (raw: string): void => {
     const next = raw.trim();
@@ -7257,19 +7660,15 @@ function TextInputRow({
         )}
       </div>
       <input
-        value={commitOnBlur ? draft : value}
+        value={draft}
         onFocus={() => setFocused(true)}
         onChange={(e) => {
-          if (commitOnBlur) {
-            setDraft(e.target.value);
-            return;
-          }
-          commit(e.target.value);
+          setDraft(e.target.value);
+          if (!commitOnBlur) commit(e.target.value);
         }}
         onBlur={(e) => {
-          if (!commitOnBlur) return;
           setFocused(false);
-          commit(e.target.value);
+          if (commitOnBlur) commit(e.target.value);
         }}
         onKeyDown={(e) => {
           if (!commitOnBlur) return;
@@ -7303,8 +7702,9 @@ function TemplateSelectRow({
 }): JSX.Element {
   // A configured template that no longer exists (deleted) shows as missing so
   // the user can pick a replacement; daily/weekly creation falls back to blank.
-  const missing = !!value && !templates.some((t) => t.id === value);
-  const selected = templates.find((t) => t.id === value);
+  // A built-in's id still names it once edited (findTemplate).
+  const selected = findTemplate(templates, value);
+  const missing = !!value && !selected;
   const triggerLabel = missing
     ? "[Missing template]"
     : selected
@@ -7329,7 +7729,7 @@ function TemplateSelectRow({
   // Highlight the current selection when the menu opens.
   useEffect(() => {
     if (!open) return;
-    const current = value ? items.findIndex((t) => t?.id === value) : 0;
+    const current = value ? items.findIndex((t) => !!t && t === selected) : 0;
     setActiveIdx(current >= 0 ? current : 0);
   }, [open, items, value]);
 
@@ -7402,7 +7802,8 @@ function TemplateSelectRow({
       setActiveIdx((i) => Math.max(0, i - 1));
     } else if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
-      commit(items[activeIdx]?.id);
+      const picked = items[activeIdx];
+      commit(picked ? templateSettingId(picked) : undefined);
     } else if (e.key === "Escape") {
       e.preventDefault();
       setOpen(false);
@@ -7474,7 +7875,7 @@ function TemplateSelectRow({
           >
             <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto py-1">
               {items.map((tpl, idx) => {
-                const isSelected = tpl ? tpl.id === value : !value && !missing;
+                const isSelected = tpl ? tpl === selected : !value && !missing;
                 const text = tpl
                   ? `${tpl.category} · ${tpl.name}`
                   : "None (blank note)";
@@ -7485,7 +7886,7 @@ function TemplateSelectRow({
                     role="option"
                     aria-selected={isSelected}
                     data-idx={idx}
-                    onClick={() => commit(tpl?.id)}
+                    onClick={() => commit(tpl ? templateSettingId(tpl) : undefined)}
                     onMouseMove={() => setActiveIdx(idx)}
                     className={[
                       "flex w-full items-center px-3 py-1.5 text-left text-sm",

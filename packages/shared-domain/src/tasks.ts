@@ -24,6 +24,8 @@ export type { TaskPriority, VaultTask } from '@zennotes/bridge-contract/tasks'
 export interface VaultTaskGroups {
   today: VaultTask[]
   upcoming: VaultTask[]
+  /** Open tasks with no due date, written or inferred from a daily note (#990). */
+  undated: VaultTask[]
   waiting: VaultTask[]
   done: VaultTask[]
   forwarded: VaultTask[]
@@ -440,13 +442,20 @@ export function filterTasksForDisplay(tasks: VaultTask[], showArchived: boolean)
   return tasks.filter((task) => task.noteFolder !== 'archive')
 }
 
-/** Group using a "today" anchor — caller supplies it so tests are stable and
+/** Group using a "today" anchor the caller supplies, so tests are stable and
  *  the user's timezone is respected. Waiting overrides everything except Done.
- *  Tasks without a due date land in Today. */
+ *
+ *  Tasks without a due date have their own group. They used to land in Today,
+ *  so a task made with New task (only `dateCreated` in its frontmatter) sat
+ *  among today's work and the "No due date" a user went looking for did not
+ *  exist (#990). A task in a daily note counts as due on that note's date
+ *  when the caller has applied `inferDailyTaskDueDates`, so the daily-note
+ *  workflow keeps its tasks in Today. */
 export function groupTasks(tasks: VaultTask[], today: Date): VaultTaskGroups {
   const todayIso = toIsoDate(today)
   const today_: VaultTask[] = []
   const upcoming: VaultTask[] = []
+  const undated: VaultTask[] = []
   const waiting: VaultTask[] = []
   const done: VaultTask[] = []
   const forwarded: VaultTask[] = []
@@ -471,7 +480,7 @@ export function groupTasks(tasks: VaultTask[], today: Date): VaultTaskGroups {
       continue
     }
     if (!task.due) {
-      today_.push(task)
+      undated.push(task)
       continue
     }
     if (task.due < todayIso) {
@@ -504,6 +513,7 @@ export function groupTasks(tasks: VaultTask[], today: Date): VaultTaskGroups {
 
   today_.sort(byPriorityThenDue)
   upcoming.sort(byDueThenPath)
+  undated.sort(byPriorityThenDue)
   waiting.sort(byPriorityThenDue)
   done.sort((a, b) => {
     if (a.sourcePath !== b.sourcePath) return a.sourcePath < b.sourcePath ? -1 : 1
@@ -515,7 +525,7 @@ export function groupTasks(tasks: VaultTask[], today: Date): VaultTaskGroups {
     return a.taskIndex - b.taskIndex
   })
 
-  return { today: today_, upcoming, waiting, done, forwarded, cancelled, overdueCount }
+  return { today: today_, upcoming, undated, waiting, done, forwarded, cancelled, overdueCount }
 }
 
 /** Helper for UIs that need to know whether a task is overdue relative to now. */

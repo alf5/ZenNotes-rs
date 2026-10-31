@@ -2,6 +2,7 @@ import type { VaultTask } from '@shared/tasks'
 import { toIsoDateLocal } from '@shared/tasks'
 import type { ContextMenuItem } from '../components/ContextMenu'
 import { useStore } from '../store'
+import { promptDate } from './date-prompt-requests'
 import { forwardTaskWithPicker } from './forward-task'
 
 /**
@@ -38,6 +39,24 @@ export interface TaskMenuOptions {
 
 function addDaysIso(today: Date, n: number): string {
   return toIsoDateLocal(new Date(today.getFullYear(), today.getMonth(), today.getDate() + n))
+}
+
+/**
+ * Any due date from a month calendar (#991). The presets stop at next week, and
+ * a day further out meant looking it up first, then typing `due:` on the line,
+ * which is the most work on a phone. The calendar is the one `@date` opens in a
+ * note, so it starts on the task's due date (today without one) and takes a
+ * tap, arrows or a typed date. Behind the menu entry and the `@` key alike.
+ */
+export async function chooseTaskDueDate(task: VaultTask, today: Date = new Date()): Promise<void> {
+  const iso = await promptDate({
+    title: 'Due date',
+    description: task.content,
+    initialDate: task.due ?? toIsoDateLocal(today),
+    okLabel: 'Set due date'
+  })
+  if (!iso || (iso === task.due && !task.dueInferred)) return
+  await useStore.getState().applyTaskMutation(task, { kind: 'set-due', due: iso })
 }
 
 export function buildTaskMenuItems(
@@ -96,7 +115,8 @@ export function buildTaskMenuItems(
       label: 'Due next week',
       hint: dueIn(7),
       onSelect: () => mutate({ kind: 'set-due', due: dueIn(7) })
-    }
+    },
+    { label: 'Choose a date…', hint: key('@'), onSelect: () => void chooseTaskDueDate(task, today) }
   )
   // An inferred due date comes from the daily note the task lives in, not from a
   // `due:` token, so there is nothing on the line to clear.

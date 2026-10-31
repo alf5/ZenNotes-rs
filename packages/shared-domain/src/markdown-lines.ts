@@ -7,11 +7,14 @@
 // export) can consume the same rules as the renderer.
 
 // A fenced code block opens with a run of >=3 backticks or tildes; the second
-// group is the rest of the line (the info string).
-export const FENCE_OPEN_RE = /^\s*(`{3,}|~{3,})(.*)$/
+// group is the rest of the line (the info string). Callers split at `\n`
+// only, so a CRLF body hands both patterns lines that still end in `\r`, which
+// neither `.` nor `[ \t]` matches: the `\r?` before `$` lets those fences open
+// and close.
+export const FENCE_OPEN_RE = /^\s*(`{3,}|~{3,})(.*)\r?$/
 // A closing fence is a run of fence characters alone on its line, save for
 // trailing whitespace (no info string).
-export const FENCE_CLOSE_RE = /^\s*(`{3,}|~{3,})[ \t]*$/
+export const FENCE_CLOSE_RE = /^\s*(`{3,}|~{3,})[ \t]*\r?$/
 
 /**
  * A YAML frontmatter fence: `---` alone on its line, surrounding whitespace
@@ -51,11 +54,23 @@ export interface MarkdownLine {
   from: number
 }
 
+export interface ScanMarkdownLinesOptions {
+  /**
+   * Also yield the lines of a leading YAML frontmatter block (its fences
+   * included). Outline and anchor grammars never want them; a link scanner
+   * does, because `related: "[[Doc]]"` is a link the vault index counts.
+   */
+  includeFrontmatter?: boolean
+}
+
 /**
  * Walk the lines of a note body that markdown owns, skipping leading YAML
  * frontmatter and the inside of fenced code blocks.
  */
-export function scanMarkdownLines(body: string): MarkdownLine[] {
+export function scanMarkdownLines(
+  body: string,
+  options: ScanMarkdownLinesOptions = {}
+): MarkdownLine[] {
   const scanned: MarkdownLine[] = []
   if (!body) return scanned
 
@@ -77,7 +92,12 @@ export function scanMarkdownLines(body: string): MarkdownLine[] {
 
     // Skip the leading frontmatter block wholesale: its fences and `key: value`
     // lines are YAML, not markdown, and must never surface as outline entries.
-    if (i <= frontmatterEnd) continue
+    if (i <= frontmatterEnd) {
+      if (options.includeFrontmatter) {
+        scanned.push({ text: raw, next: lines[i + 1], line: i + 1, from: lineStart })
+      }
+      continue
+    }
 
     if (fence) {
       const close = raw.match(FENCE_CLOSE_RE)

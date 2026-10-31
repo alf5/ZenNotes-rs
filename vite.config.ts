@@ -5,6 +5,7 @@ import { dirname, resolve, sep } from 'node:path'
 import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import { harperWasmAsset } from './tooling/vite/harper-wasm-asset'
+import { vendoredCopy } from './tooling/vite/vendored-copy'
 
 // Mirror of the ZenNotes web/desktop renderer build (apps/web/vite.config.ts).
 // Same manual-chunk + module-preload strategy so the reused frontend bundles
@@ -294,7 +295,7 @@ export default defineConfig({
       ignored: ['**/src-tauri/**']
     }
   },
-  plugins: [onigurumaDataUrl(), harperWasmAsset(), react(), excalidrawFonts()],
+  plugins: [vendoredCopy(), onigurumaDataUrl(), harperWasmAsset(), react(), excalidrawFonts()],
   // Typst ships a WASM compiler loaded lazily via `?url` + dynamic import; keep
   // it out of the esbuild dep pre-bundler so the wasm glue stays intact. The
   // same goes for Harper, whose worker is an inline blob the pre-bundler

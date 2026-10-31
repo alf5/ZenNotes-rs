@@ -38,10 +38,10 @@ describe('keyboard navigation into rendered block math', () => {
       })
     })
     views.push(view)
+    // The math field rebuilds whenever the syntax tree changes, so finishing the
+    // parse is all a mount needs. An edit after it would reparse this short note
+    // from scratch under the same 20 ms budget and could end on a cut tree.
     forceParsing(view, DOC.length, 5000)
-    // Nudge a rebuild so decorations reflect the fully parsed tree.
-    view.dispatch({ changes: { from: DOC.length, insert: ' ' } })
-    view.dispatch({ changes: { from: DOC.length, to: DOC.length + 1 } })
     view.focus()
     return view
   }

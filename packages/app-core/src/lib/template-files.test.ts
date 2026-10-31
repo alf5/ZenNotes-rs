@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import {
   composeTemplateFile,
+  findTemplate,
   mergeTemplates,
   parseCustomTemplate,
   parseFrontmatter,
-  slugifyTemplateName
+  slugifyTemplateName,
+  templateSettingId
 } from '@shared/template-files'
+import { BUILTIN_TEMPLATES } from '@shared/builtin-templates'
 import type { NoteTemplate } from '@bridge-contract/templates'
 
 describe('parseFrontmatter', () => {
@@ -140,3 +143,51 @@ describe('composeTemplateFile builtinId round trip', () => {
     expect(parseCustomTemplate(raw, '.zennotes/templates/adr.md').builtinId).toBe('builtin.adr')
   })
 })
+
+describe('findTemplate', () => {
+  // The Daily Note built-in, edited in Settings: Focus renamed to Today.
+  const edited = parseCustomTemplate(
+    composeTemplateFile({
+      name: 'Daily Note',
+      category: 'Personal',
+      titleTemplate: '{{date:YYYY-MM-DD}}',
+      builtinId: 'builtin.daily',
+      body: '# {{date:dddd, MMMM D, YYYY}}\n\n## Today\n\n- {{cursor}}\n'
+    }),
+    '.zennotes/templates/daily-note.md'
+  )
+  const merged = mergeTemplates(BUILTIN_TEMPLATES, [edited])
+
+  it("reaches the edited copy through the built-in's id, which merging drops", () => {
+    expect(merged.some((t) => t.id === 'builtin.daily')).toBe(false)
+    const found = findTemplate(merged, 'builtin.daily')
+    expect(found?.id).toBe(edited.id)
+    expect(found?.body).toContain('## Today')
+  })
+
+  it('still finds templates by their own id, and a built-in nobody edited', () => {
+    expect(findTemplate(merged, edited.id)).toBe(edited)
+    expect(findTemplate(merged, 'builtin.weekly')?.builtin).toBe(true)
+  })
+
+  it('prefers a template that has the id itself over an edited copy pointing at it', () => {
+    const both: NoteTemplate[] = [
+      { ...edited, id: 'custom:other', builtinId: 'builtin.adr' },
+      BUILTIN_TEMPLATES.find((t) => t.id === 'builtin.adr')!
+    ]
+    expect(findTemplate(both, 'builtin.adr')?.builtin).toBe(true)
+  })
+
+  it('finds nothing for no id or a template that is gone', () => {
+    expect(findTemplate(merged, undefined)).toBeUndefined()
+    expect(findTemplate(merged, 'custom:deleted')).toBeUndefined()
+  })
+
+  it("stores the built-in's id for an edited copy, so a reset falls back to the built-in", () => {
+    expect(templateSettingId(edited)).toBe('builtin.daily')
+    expect(templateSettingId(BUILTIN_TEMPLATES[0])).toBe(BUILTIN_TEMPLATES[0].id)
+    const afterReset = mergeTemplates(BUILTIN_TEMPLATES, [])
+    expect(findTemplate(afterReset, templateSettingId(edited))?.id).toBe('builtin.daily')
+  })
+})
+

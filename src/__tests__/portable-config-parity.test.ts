@@ -17,9 +17,24 @@
  */
 import { describe, expect, it } from 'vitest'
 import { PORTABLE_PREF_KEYS } from '@shared/app-config'
-import { portableConfigMappedKeys } from '../bridge/portable-config'
+import { deserializeConfig, portableConfigMappedKeys, serializeConfig } from '../bridge/portable-config'
 
 describe('portable config TOML mappings', () => {
+  it('carries command keys under [keymaps.commands] and keeps action overrides apart', () => {
+    const portable = {
+      keymapOverrides: { 'nav.back': 'Ctrl+O' },
+      commandKeymaps: { 'note.trash': 'Mod+Backspace', 'note.restore': '' }
+    }
+    const back = deserializeConfig(serializeConfig(portable)).portable
+    expect(back.keymapOverrides).toEqual(portable.keymapOverrides)
+    expect(back.commandKeymaps).toEqual(portable.commandKeymaps)
+  })
+
+  it('moves a command id written straight under [keymaps] into the command keys', () => {
+    const { portable } = deserializeConfig('[keymaps]\n"note.trash" = "Mod+Backspace"\n')
+    expect(portable.commandKeymaps).toEqual({ 'note.trash': 'Mod+Backspace' })
+  })
+
   it('covers every portable pref upstream defines', () => {
     const mapped = portableConfigMappedKeys()
     // Upstream maps every portable pref since v2.52 (keepViewModeAcrossNotes

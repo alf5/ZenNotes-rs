@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { NoteMeta } from '@shared/ipc'
 import type { PaneLayout } from './pane-layout'
-import { getBufferNavigationTarget, getBufferSelectTarget } from './buffer-navigation'
+import { getBufferNavigationTarget, getBufferSelectTarget, getTabStepTarget } from './buffer-navigation'
 
 function note(path: string, updatedAt: number, folder: NoteMeta['folder'] = 'inbox'): Pick<NoteMeta, 'path' | 'folder' | 'updatedAt'> {
   return { path, folder, updatedAt }
@@ -113,3 +113,50 @@ describe('getBufferSelectTarget (#497)', () => {
     expect(getBufferSelectTarget(layout, 'pane-a', 1)).toEqual({ kind: 'none' })
   })
 })
+
+describe('getTabStepTarget (#973)', () => {
+  const twoPanes: PaneLayout = {
+    kind: 'split',
+    id: 'root',
+    direction: 'row',
+    sizes: [0.5, 0.5],
+    children: [leaf('pane-a', ['one.md', 'two.md'], 'two.md'), leaf('pane-b', ['three.md'], 'three.md')]
+  }
+
+  it('steps in the order gt and gT walk, across panes', () => {
+    expect(getTabStepTarget(twoPanes, 'pane-a', 1)).toEqual({ kind: 'focus', paneId: 'pane-b', path: 'three.md' })
+    expect(getTabStepTarget(twoPanes, 'pane-a', -1)).toEqual({ kind: 'focus', paneId: 'pane-a', path: 'one.md' })
+    for (const delta of [1, -1]) {
+      expect(getTabStepTarget(twoPanes, 'pane-a', delta)).toEqual(
+        getBufferNavigationTarget(twoPanes, 'pane-a', [], delta)
+      )
+    }
+  })
+
+  it('wraps from the last tab to the first and back', () => {
+    expect(getTabStepTarget(twoPanes, 'pane-b', 1)).toEqual({ kind: 'focus', paneId: 'pane-a', path: 'one.md' })
+    const first: PaneLayout = leaf('pane-a', ['one.md', 'two.md'], 'one.md')
+    expect(getTabStepTarget(first, 'pane-a', -1)).toEqual({ kind: 'focus', paneId: 'pane-a', path: 'two.md' })
+  })
+
+  it('goes nowhere with one tab open, where gt would open a recent note', () => {
+    const single = leaf('pane-a', ['one.md'], 'one.md')
+    const notes = [note('two.md', 2), note('one.md', 1)]
+    expect(getTabStepTarget(single, 'pane-a', 1)).toEqual({ kind: 'none' })
+    expect(getBufferNavigationTarget(single, 'pane-a', notes, 1).kind).toBe('open')
+    expect(getTabStepTarget(leaf('pane-a', [], null), 'pane-a', 1)).toEqual({ kind: 'none' })
+  })
+
+  it('starts at the first tab, or the last going back, from a pane showing none', () => {
+    const layout: PaneLayout = {
+      kind: 'split',
+      id: 'root',
+      direction: 'row',
+      sizes: [0.5, 0.5],
+      children: [leaf('pane-a', ['one.md', 'two.md'], 'one.md'), leaf('pane-b', [], null)]
+    }
+    expect(getTabStepTarget(layout, 'pane-b', 1)).toEqual({ kind: 'focus', paneId: 'pane-a', path: 'one.md' })
+    expect(getTabStepTarget(layout, 'pane-b', -1)).toEqual({ kind: 'focus', paneId: 'pane-a', path: 'two.md' })
+  })
+})
+

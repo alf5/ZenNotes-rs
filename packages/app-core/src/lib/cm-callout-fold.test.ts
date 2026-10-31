@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
 
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
-import { forceParsing, foldedRanges } from '@codemirror/language'
-import { Compartment, EditorState } from '@codemirror/state'
+import { forceParsing, foldedRanges, syntaxTreeAvailable } from '@codemirror/language'
+import { Compartment, EditorState, type Extension } from '@codemirror/state'
 import { EditorView } from '@codemirror/view'
 import { afterEach, describe, expect, it } from 'vitest'
-import { calloutFolding } from './cm-callout-fold'
+import { calloutFolding, toggleCalloutFold } from './cm-callout-fold'
 import { foldAllOutline, foldAtCursor, headingFolding } from './cm-heading-fold'
+import { noteMarkdown } from './cm-markdown-language'
 import { wysiwygBlocksPlugin } from './cm-wysiwyg-blocks'
 import { noteEditingSync } from './note-lifecycle-lock'
 
@@ -36,13 +37,16 @@ afterEach(() => {
   document.body.innerHTML = ''
 })
 
-function mount(doc = DOC, { caretLine = 14, livePreview = new Compartment() } = {}): EditorView {
+function mount(
+  doc = DOC,
+  { caretLine = 14, livePreview = new Compartment(), language = new Compartment(), parsed = true } = {}
+): EditorView {
   const parent = document.createElement('div')
   document.body.append(parent)
   const state = EditorState.create({
     doc,
     extensions: [
-      markdown({ base: markdownLanguage }),
+      language.of(parsed ? markdown({ base: markdownLanguage }) : []),
       headingFolding(),
       livePreview.of([wysiwygBlocksPlugin, calloutFolding()])
     ]
@@ -55,6 +59,27 @@ function mount(doc = DOC, { caretLine = 14, livePreview = new Compartment() } = 
   views.push(view)
   return view
 }
+
+/** The editor's note grammar, whose tree always spans the whole note however
+ *  far the parse got, and plain markdown, whose tree ends where it stopped. */
+const GRAMMARS = [
+  ['the note grammar', noteMarkdown],
+  ['plain markdown', () => markdown({ base: markdownLanguage })]
+] as const
+
+/** Swap a markdown language in, so the tree changes and nothing else, as
+ *  when the parser reaches more of a long note; then parse up to `upto`. */
+function parseLater(
+  view: EditorView,
+  language: Compartment,
+  { upto = view.state.doc.length, grammar = noteMarkdown as () => Extension } = {}
+): void {
+  view.dispatch({ effects: language.reconfigure(grammar()) })
+  forceParsing(view, upto, 5000)
+}
+
+/** Paragraphs of filler, past where the first parse stops. */
+const FILLER = Array.from({ length: 400 }, (_, i) => `Filler paragraph ${i} keeps the note long.`).join('\n\n')
 
 /** Folded ranges as [first line, last line] pairs. */
 function folds(view: EditorView): [number, number][] {
@@ -137,6 +162,86 @@ describe('foldable callouts in the editor (#853)', () => {
     })
     await settle()
     expect(folds(view)).toEqual([[1, 2]])
+  })
+
+  it.each(GRAMMARS)('folds a collapsed callout the parser reaches only after the note opened (%s)', async (_, grammar) => {
+    const doc = `${DOC}\n\n${FILLER}\n\n> [!note]- At the end\n> end body\n\nEnd.`
+    const language = new Compartment()
+    const view = mount(doc, { language, parsed: false })
+    await settle()
+    expect(folds(view)).toEqual([])
+    // The first parse covers the top of the note only.
+    parseLater(view, language, { upto: 500, grammar })
+    expect(syntaxTreeAvailable(view.state)).toBe(false)
+    await settle()
+    expect(folds(view)).toEqual([[3, 6]])
+    forceParsing(view, view.state.doc.length, 5000)
+    await settle()
+    const end = view.state.doc.lines - 3
+    expect(folds(view)).toEqual([
+      [3, 6],
+      [end, end + 1]
+    ])
+    // Opened by the reader, it stays open through later parses.
+    toggleCalloutFold(view, view.state.doc.line(end).from)
+    parseLater(view, language, { grammar })
+    await settle()
+    expect(folds(view)).toEqual([[3, 6]])
+  })
+
+  it.each(GRAMMARS)('waits for the end of a collapsed callout the parse stopped inside (%s)', async (_, grammar) => {
+    const doc = `${DOC}\n\n${FILLER}\n\n> [!warning]- Long\n> first part\n>\n> second part\n\nEnd.`
+    const language = new Compartment()
+    const view = mount(doc, { language, parsed: false })
+    await settle()
+    const title = view.state.doc.lines - 5
+    // Stopped inside it, the parse shows the callout ending at its first part.
+    parseLater(view, language, { upto: view.state.doc.line(title).from + 4, grammar })
+    expect(syntaxTreeAvailable(view.state)).toBe(false)
+    await settle()
+    expect(folds(view)).toEqual([[3, 6]])
+    forceParsing(view, view.state.doc.length, 5000)
+    await settle()
+    expect(folds(view)).toEqual([
+      [3, 6],
+      [title, title + 3]
+    ])
+  })
+
+  it.each(GRAMMARS)('folds collapsed callouts that open and end the note once a tree reaches them (%s)', async (_, grammar) => {
+    const doc = '> [!note]- First\n> first body\n\nMiddle.\n\n> [!note]- Last\n> last body\n'
+    const language = new Compartment()
+    const view = mount(doc, { language, parsed: false, caretLine: 4 })
+    await settle()
+    parseLater(view, language, { grammar })
+    await settle()
+    expect(folds(view)).toEqual([
+      [1, 2],
+      [6, 7]
+    ])
+  })
+
+  it('leaves open a collapsed callout typed where the parser had not reached', async () => {
+    const language = new Compartment()
+    const view = mount(DOC, { language, parsed: false })
+    await settle()
+    view.dispatch({
+      changes: { from: view.state.doc.length, insert: '\n\n> [!note]- Typed\n> typed body' },
+      selection: { anchor: 0 }
+    })
+    await settle()
+    parseLater(view, language)
+    await settle()
+    expect(folds(view)).toEqual([[3, 6]])
+  })
+
+  it('does not fold a collapsed callout over the caret', async () => {
+    const language = new Compartment()
+    const view = mount(`${DOC}\n\n> [!note]- Second\n> second body`, { language, parsed: false, caretLine: 4 })
+    await settle()
+    parseLater(view, language)
+    await settle()
+    expect(folds(view)).toEqual([[16, 17]])
   })
 
   it('folds a callout from its title line with the fold keys, the whole body', async () => {

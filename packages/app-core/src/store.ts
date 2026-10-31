@@ -87,7 +87,7 @@ import {
   isDatabaseCsvPath
 } from '@shared/databases'
 import { parseFrontmatter } from '@shared/template-files'
-import { recordTitle, composePageBody } from './lib/database-cells'
+import { recordTitle, composePageBody, planRecordPages, recordPageToAdopt } from './lib/database-cells'
 import { applyManualMove, manualOrderCompare, parentDirOf } from './lib/manual-order'
 import { TAGS_TAB_PATH, isTagsTabPath } from '@shared/tags'
 import { WORKFLOWS_TAB_PATH, isWorkflowsTabPath } from '@shared/workflows-view'
@@ -96,6 +96,7 @@ import { HELP_TAB_PATH, isHelpTabPath } from '@shared/help'
 import { ARCHIVE_TAB_PATH, isArchiveTabPath } from '@shared/archive'
 import { TRASH_TAB_PATH, isTrashTabPath } from '@shared/trash'
 import { ASSETS_VIEW_TAB_PATH } from '@shared/assets-view'
+import { UNRESOLVED_LINKS_TAB_PATH } from '@shared/unresolved-links'
 import { QUICK_NOTES_TAB_PATH, isQuickNotesTabPath } from '@shared/quick-notes'
 import { isAssetTabPath, assetPathFromTab, assetTabPath } from './lib/asset-tabs'
 import {
@@ -142,6 +143,7 @@ import {
 import { composeNewNoteBody } from './lib/search-create'
 import type { KeymapId, KeymapOverrides } from './lib/keymaps'
 import { normalizeKeymapOverrides } from './lib/keymaps'
+import { normalizeCommandKeymaps, type CommandKeymaps } from './lib/command-keymaps'
 import {
   PORTABLE_PREF_KEYS,
   pickPortablePrefs,
@@ -196,6 +198,7 @@ import type { WorkflowRunReceipt, WorkflowUndoResult } from '@bridge-contract/wo
 import { BUILTIN_TEMPLATES } from '@shared/builtin-templates'
 import {
   composeTemplateFile,
+  findTemplate,
   mergeTemplates,
   parseCustomTemplate,
   slugifyTemplateName
@@ -262,6 +265,18 @@ import {
   type SavedTaskFilters
 } from './lib/saved-task-filters'
 import { normalizeIgnoredKeys } from './lib/ignored-keys'
+import {
+  DEFAULT_TIMELINE_RANGE,
+  normalizeTimelineRange,
+  type TimelineRange
+} from './lib/timeline-rail'
+import {
+  galleryTabPath,
+  isGalleryTabPath,
+  normalizeGallerySort,
+  rewriteGalleryTabPath,
+  type GallerySort
+} from './lib/folder-gallery'
 import { normalizeApplicationSchemes } from '@shared/application-links'
 import { normalizeEditorTabSize } from './lib/editor-tab-size'
 import { recentNoteToggleTarget } from './lib/recent-note-toggle'
@@ -292,8 +307,12 @@ export type LineNumberMode = 'off' | 'absolute' | 'relative'
  *  left of the text column ('text', default) or pinned to the editor's far-left
  *  edge ('edge'). No visible effect when content is left-aligned. (#228) */
 export type LineNumberPosition = 'edge' | 'text'
+/** Where a note's cover image sits: on top of the text and scrolling with it
+ *  ('scroll', default), pinned above the editor and preview ('pinned'), or
+ *  not drawn at all ('hidden'; the frontmatter is untouched). */
+export type NoteCoverPlacement = 'scroll' | 'pinned' | 'hidden'
 export type WhichKeyHintMode = 'timed' | 'sticky'
-export type CommandPaletteInitialMode = 'main' | 'vault'
+export type CommandPaletteInitialMode = 'main' | 'vault' | 'theme' | 'workflow'
 
 const PREFS_KEY = 'zen:prefs:v2'
 const WORKSPACE_KEY = 'zen:workspace:v1'
@@ -302,9 +321,15 @@ const WORKSPACE_KEY = 'zen:workspace:v1'
  *  event (handled in App.tsx via `focusEditorNormalMode`) so the store doesn't
  *  have to import editor-focus, which imports the store. Used when a focused
  *  panel (Tasks/Tags) closes so typing lands in the editor again. (#353) */
-function requestEditorFocus(): void {
+function requestEditorFocus(options: { read?: boolean } = {}): void {
   if (typeof window === 'undefined') return
-  window.dispatchEvent(new Event('zen:focus-editor'))
+  // `read`: the note already existed and was opened to be read, which App
+  // hands over like a search pick (left unfocused on a phone).
+  window.dispatchEvent(
+    options.read
+      ? new CustomEvent('zen:focus-editor', { detail: { read: true } })
+      : new Event('zen:focus-editor')
+  )
 }
 /** Debounce for mirroring the workspace snapshot to the synced vault file —
  *  localStorage updates immediately; the file lags to bound sync churn. (#292) */
@@ -477,13 +502,13 @@ async function refreshVaultIndexes(): Promise<void> {
     })
 }
 
-/** Find a template (built-in or custom) by id, or undefined if it's gone. */
+/** Find a template (built-in or custom) by id, or undefined if it's gone. A
+ *  built-in's id reaches its edited copy (see findTemplate). */
 function resolveTemplate(
   customTemplates: NoteTemplate[],
   id: string | undefined
 ): NoteTemplate | undefined {
-  if (!id) return undefined
-  return mergeTemplates(BUILTIN_TEMPLATES, customTemplates).find((t) => t.id === id)
+  return findTemplate(mergeTemplates(BUILTIN_TEMPLATES, customTemplates), id)
 }
 
 function isDeletedAssetRecord(value: unknown): value is DeletedAsset {
@@ -499,15 +524,24 @@ function isDeletedAssetRecord(value: unknown): value is DeletedAsset {
 /** Which weekday the calendar grid starts on. `locale` derives it from the
  *  user's locale (falling back to Monday). */
 export type CalendarWeekStart = 'monday' | 'sunday' | 'locale'
+
+/** How a daily, weekly or monthly note opener lands. `readIfExisting`: a note
+ *  that is already there opens to be read (the command palette's Open Today's
+ *  Daily Note and friends), so a phone keeps its keyboard down; one the opener
+ *  has to create still takes the focus, to be written in. */
+export interface PeriodicNoteOpenOptions {
+  readIfExisting?: boolean
+}
 const VALID_CALENDAR_WEEK_STARTS: CalendarWeekStart[] = ['monday', 'sunday', 'locale']
 
 /** The editor-pane right-side panels whose width the user can drag-resize. */
-export type RightPanelId = 'outline' | 'connections' | 'comments' | 'calendar'
+export type RightPanelId = 'outline' | 'connections' | 'comments' | 'calendar' | 'timeline'
 export interface PanelWidths {
   outline: number
   connections: number
   comments: number
   calendar: number
+  timeline: number
 }
 export const MIN_RIGHT_PANEL_WIDTH = 200
 export const MAX_RIGHT_PANEL_WIDTH = 640
@@ -515,7 +549,8 @@ export const DEFAULT_PANEL_WIDTHS: PanelWidths = {
   outline: 260,
   connections: 288,
   comments: 360,
-  calendar: 280
+  calendar: 280,
+  timeline: 290
 }
 
 function clampPanelWidth(px: number): number {
@@ -530,7 +565,8 @@ function normalizePanelWidths(value: unknown): PanelWidths {
     outline: pick('outline'),
     connections: pick('connections'),
     comments: pick('comments'),
-    calendar: pick('calendar')
+    calendar: pick('calendar'),
+    timeline: pick('timeline')
   }
 }
 
@@ -552,6 +588,10 @@ interface Prefs {
    *  or the complete logical line when word wrap is enabled. */
   vimWrappedLineMotions: VimWrappedLineMotionMode
   keymapOverrides: KeymapOverrides
+  /** Keys the user gave command palette commands (#971): command id to a
+   *  chord or a `Leader x t` sequence; "" is a deliberate unbind. Kept apart
+   *  from `keymapOverrides`, whose ids name built-in actions. */
+  commandKeymaps: CommandKeymaps
   /** Enabled CSS overrides, keyed by filename (e.g. `"focus.css": "on"`). Persisted. */
   enabledOverrides: Record<string, string>
   /** Visual color tweaks from the picker UI, keyed by token slug (e.g. `"accent": "#ff3b30"`). Persisted. */
@@ -568,14 +608,23 @@ interface Prefs {
   ripgrepBinaryPath: string | null
   /** Optional explicit binary path for fzf. Blank uses PATH lookup. */
   fzfBinaryPath: string | null
+  /** With a #tag in Search notes, list each note's tagged blocks under it (#837). */
+  searchTaggedBlocks: boolean
   livePreview: boolean      // hide markdown syntax on inactive lines
   /** Show an H1 through H6 badge before Markdown headings in the editor. */
   showHeadingLevelLabels: boolean
   /** Vertical guide lines at each nested-list level in the editor (#491). */
   listIndentGuides: boolean
+  /** Resting the pointer on a `[[wikilink]]` in the editor opens the link
+   *  popover. Off leaves the popover to its keys (`K`, the editor shortcut). */
+  linkPopoverOnHover: boolean
   /** Render Markdown tables as interactive WYSIWYG widgets in live preview.
    *  Off keeps tables as plain editable markdown — full keyboard/Vim editing. */
   renderTablesInLivePreview: boolean
+  /** Guess the language of a code block that names none, and highlight it
+   *  with the guess, in Edit mode and the reading view alike (#1014). The
+   *  guess is never written to the note. */
+  detectCodeLanguages: boolean
   /** How a completed task's text is styled (strike / gray / both / none) in the
    *  editor and preview. Applied via `html[data-completed-task-style]`. */
   completedTaskStyle: CompletedTaskStyle
@@ -673,6 +722,9 @@ interface Prefs {
   /** Tint the sidebar surface a step darker than the main canvas. */
   darkSidebar: boolean
   showWindowTitleBar: boolean
+  /** Show the bar along the bottom of the workspace (Cloud sync status and the
+   *  note's stats). Off, it still shows while Cloud needs the user. */
+  showStatusBar: boolean
   /** Show disclosure arrows for collapsible sidebar folders and sections. */
   showSidebarChevrons: boolean
   /** Keys of collapsed folders in the sidebar tree. */
@@ -721,6 +773,9 @@ interface Prefs {
   /** Whether the editor and preview content sit centered (with the
    *  width capped) or are left-aligned to the pane edge. */
   contentAlign: 'center' | 'left'
+  /** Where a note's cover image sits: at the top of the text, scrolling
+   *  away with it; pinned above the editor and preview; or not shown. */
+  noteCoverPlacement: NoteCoverPlacement
   /** Sidebar Tags section collapsed — keeps the tag pills hidden
    *  without removing the section entirely. */
   tagsCollapsed: boolean
@@ -762,6 +817,16 @@ interface Prefs {
    *  they were dragged into (due date until then), `due` always sorts them by
    *  due date and leaves that arrangement untouched for later. (#889) */
   kanbanCardSort: KanbanCardSort
+  /** Tasks list groups in their notes' line order or by priority. (#989) */
+  tasksListOrder: TasksListOrder
+  /** How far ahead the Timeline panel reaches. (#1007) */
+  timelineRange: TimelineRange
+  /** The Gallery's card order: last edited, newest, or by title. Portable
+   *  (`gallery_sort` under [view]). */
+  gallerySort: GallerySort
+  /** Whether a Gallery shows the notes in its folder's subfolders too.
+   *  Portable (`gallery_include_subfolders` under [view]). */
+  galleryIncludeSubfolders: boolean
   /** Display-only Kanban column title overrides. Keyed by `${groupBy}:${columnId}`. */
   kanbanColumnTitles: Record<string, string>
   /** Manual Kanban column arrangement per board. Keyed by groupBy → ordered
@@ -788,6 +853,9 @@ interface Prefs {
 export type TasksViewMode = 'list' | 'calendar' | 'kanban'
 export type KanbanGroupBy = 'status' | 'priority' | 'folder' | `field:${string}`
 export type KanbanCardSort = 'manual' | 'due'
+/** `note` keeps each Tasks list group in its notes' line order (what J/K
+ *  rearrange); `priority` puts high before medium before low. (#989) */
+export type TasksListOrder = 'note' | 'priority'
 /** How the Tags view combines multiple selected tags: `all` = intersection
  *  (AND, narrows), `any` = union (OR, widens). */
 export type TagMatchMode = 'all' | 'any'
@@ -1093,16 +1161,20 @@ export const DEFAULT_PREFS: Prefs = {
   vimBlockImeInNormalMode: true,
   vimWrappedLineMotions: 'display',
   keymapOverrides: {},
+  commandKeymaps: {},
   whichKeyHints: true,
   whichKeyHintMode: 'timed',
   whichKeyHintTimeoutMs: 900,
   vaultTextSearchBackend: 'auto',
   ripgrepBinaryPath: null,
   fzfBinaryPath: null,
+  searchTaggedBlocks: true,
   livePreview: true,
   showHeadingLevelLabels: false,
   listIndentGuides: true,
+  linkPopoverOnHover: true,
   renderTablesInLivePreview: true,
+  detectCodeLanguages: true,
   completedTaskStyle: 'none',
   mathRenderer: 'katex',
   typstTagPreambles: false,
@@ -1158,6 +1230,7 @@ export const DEFAULT_PREFS: Prefs = {
   unifiedSidebar: true,
   darkSidebar: true,
   showWindowTitleBar: true,
+  showStatusBar: true,
   showSidebarChevrons: true,
   collapsedFolders: [],
   pinnedRefPath: null,
@@ -1175,6 +1248,7 @@ export const DEFAULT_PREFS: Prefs = {
   pinnedRefKind: 'note',
   noteRefs: {},
   contentAlign: 'center',
+  noteCoverPlacement: 'scroll',
   tagsCollapsed: false,
   nestedTags: true,
   // Off by default, deliberately: workflows can rewrite notes in bulk, and the
@@ -1192,6 +1266,10 @@ export const DEFAULT_PREFS: Prefs = {
   showArchivedTasks: false,
   kanbanGroupBy: 'status',
   kanbanCardSort: 'manual',
+  tasksListOrder: 'note',
+  timelineRange: DEFAULT_TIMELINE_RANGE,
+  gallerySort: 'updated',
+  galleryIncludeSubfolders: false,
   kanbanColumnTitles: {},
   kanbanColumnOrder: {},
   kanbanCardOrder: {},
@@ -1236,6 +1314,13 @@ function normalizePrefs(p: Partial<Prefs>): Prefs {
         ? p.vimWrappedLineMotions
         : DEFAULT_PREFS.vimWrappedLineMotions,
     keymapOverrides: normalizeKeymapOverrides(p.keymapOverrides),
+    // Read against the overrides above: a sequence that would start on a
+    // built-in leader key is refused, and the leader in use is the one
+    // these overrides set.
+    commandKeymaps: normalizeCommandKeymaps(
+      p.commandKeymaps,
+      normalizeKeymapOverrides(p.keymapOverrides)
+    ),
     enabledOverrides: normalizeEnabledOverrides(p.enabledOverrides),
     themeTweaks: normalizeThemeTweaks(p.themeTweaks),
     whichKeyHints:
@@ -1263,6 +1348,10 @@ function normalizePrefs(p: Partial<Prefs>): Prefs {
       typeof p.fzfBinaryPath === 'string' || p.fzfBinaryPath === null
         ? (p.fzfBinaryPath as string | null)
         : DEFAULT_PREFS.fzfBinaryPath,
+    searchTaggedBlocks:
+      typeof p.searchTaggedBlocks === 'boolean'
+        ? p.searchTaggedBlocks
+        : DEFAULT_PREFS.searchTaggedBlocks,
     livePreview:
       typeof p.livePreview === 'boolean' ? p.livePreview : DEFAULT_PREFS.livePreview,
     showHeadingLevelLabels:
@@ -1273,10 +1362,18 @@ function normalizePrefs(p: Partial<Prefs>): Prefs {
       typeof p.listIndentGuides === 'boolean'
         ? p.listIndentGuides
         : DEFAULT_PREFS.listIndentGuides,
+    linkPopoverOnHover:
+      typeof p.linkPopoverOnHover === 'boolean'
+        ? p.linkPopoverOnHover
+        : DEFAULT_PREFS.linkPopoverOnHover,
     renderTablesInLivePreview:
       typeof p.renderTablesInLivePreview === 'boolean'
         ? p.renderTablesInLivePreview
         : DEFAULT_PREFS.renderTablesInLivePreview,
+    detectCodeLanguages:
+      typeof p.detectCodeLanguages === 'boolean'
+        ? p.detectCodeLanguages
+        : DEFAULT_PREFS.detectCodeLanguages,
     completedTaskStyle:
       p.completedTaskStyle === 'strikethrough' ||
       p.completedTaskStyle === 'gray' ||
@@ -1430,6 +1527,8 @@ function normalizePrefs(p: Partial<Prefs>): Prefs {
       typeof p.showWindowTitleBar === 'boolean'
         ? p.showWindowTitleBar
         : DEFAULT_PREFS.showWindowTitleBar,
+    showStatusBar:
+      typeof p.showStatusBar === 'boolean' ? p.showStatusBar : DEFAULT_PREFS.showStatusBar,
     darkSidebar:
       typeof p.darkSidebar === 'boolean'
         ? p.darkSidebar
@@ -1507,6 +1606,12 @@ function normalizePrefs(p: Partial<Prefs>): Prefs {
       p.contentAlign === 'left' || p.contentAlign === 'center'
         ? p.contentAlign
         : DEFAULT_PREFS.contentAlign,
+    noteCoverPlacement:
+      p.noteCoverPlacement === 'scroll' ||
+      p.noteCoverPlacement === 'pinned' ||
+      p.noteCoverPlacement === 'hidden'
+        ? p.noteCoverPlacement
+        : DEFAULT_PREFS.noteCoverPlacement,
     tagsCollapsed:
       typeof p.tagsCollapsed === 'boolean' ? p.tagsCollapsed : DEFAULT_PREFS.tagsCollapsed,
     nestedTags: typeof p.nestedTags === 'boolean' ? p.nestedTags : DEFAULT_PREFS.nestedTags,
@@ -1546,6 +1651,13 @@ function normalizePrefs(p: Partial<Prefs>): Prefs {
         : DEFAULT_PREFS.showArchivedTasks,
     kanbanGroupBy: normalizeKanbanGroupBy(p.kanbanGroupBy),
     kanbanCardSort: p.kanbanCardSort === 'due' ? 'due' : 'manual',
+    tasksListOrder: p.tasksListOrder === 'priority' ? 'priority' : 'note',
+    timelineRange: normalizeTimelineRange(p.timelineRange),
+    gallerySort: normalizeGallerySort(p.gallerySort),
+    galleryIncludeSubfolders:
+      typeof p.galleryIncludeSubfolders === 'boolean'
+        ? p.galleryIncludeSubfolders
+        : DEFAULT_PREFS.galleryIncludeSubfolders,
     kanbanColumnTitles: normalizeKanbanColumnTitles(p.kanbanColumnTitles),
     kanbanColumnOrder: normalizeKanbanColumnOrder(p.kanbanColumnOrder),
     kanbanCardOrder: normalizeKanbanCardOrder(p.kanbanCardOrder),
@@ -1807,6 +1919,29 @@ export interface ConnectionPreviewState {
   anchorRect: PreviewAnchorRect
 }
 
+/**
+ * The link popover: the note a `[[wikilink]]` names, editable in place over
+ * the note that links to it (Logseq-style), or an offer to create it when no
+ * note answers the link yet.
+ */
+export interface LinkPopoverState {
+  /** The target as written, `Doc#Heading` included. */
+  target: string
+  /** The note the link opens, or null while no note answers it. */
+  path: string | null
+  /** Screen rect of the link the popover hangs off. */
+  anchorRect: PreviewAnchorRect
+  /** 'hover' closes when the pointer leaves; 'pinned' waits for Escape, a
+   *  click outside or the close button. Working in a hover popover pins it. */
+  mode: 'hover' | 'pinned'
+  /** Take keyboard focus as it shows: it was opened from a key. */
+  focus: boolean
+  /** The note was just created from the popover: start at its end, typing. */
+  created: boolean
+  /** Bumped by every open, so reopening one link reruns the popover's setup. */
+  serial: number
+}
+
 export interface CreateDatabaseOptions {
   /** Initial columns and rows (a converted Markdown table, #832). */
   seed?: DatabaseSeed
@@ -1838,12 +1973,18 @@ function isDatabaseSurfaceTabPath(path: string | null | undefined): path is stri
  * database surfaces — so opening a row's record page and pressing Ctrl+O jumps
  * back to the grid — and the Tasks and Tags views, which are destinations the
  * user navigates to on purpose and expects the jumplist to return to (#633).
+ * A folder's Gallery is one too: open a note from it, and Ctrl+O comes back.
  * Other virtual tabs (plain assets, help, trash…) stay excluded.
  */
 function isJumpHistoryTabPath(path: string | null | undefined): path is string {
   if (!path) return false
   if (!isWorkspaceVirtualTabPath(path)) return true
-  return isDatabaseSurfaceTabPath(path) || isTasksTabPath(path) || isTagsTabPath(path)
+  return (
+    isDatabaseSurfaceTabPath(path) ||
+    isTasksTabPath(path) ||
+    isTagsTabPath(path) ||
+    isGalleryTabPath(path)
+  )
 }
 
 function captureNoteJumpLocation(state: {
@@ -2382,6 +2523,7 @@ function collectPrefs(s: {
   vimBlockImeInNormalMode: boolean
   vimWrappedLineMotions: VimWrappedLineMotionMode
   keymapOverrides: KeymapOverrides
+  commandKeymaps: CommandKeymaps
   enabledOverrides: Record<string, string>
   themeTweaks: Record<string, string>
   whichKeyHints: boolean
@@ -2390,10 +2532,13 @@ function collectPrefs(s: {
   vaultTextSearchBackend: VaultTextSearchBackendPreference
   ripgrepBinaryPath: string | null
   fzfBinaryPath: string | null
+  searchTaggedBlocks: boolean
   livePreview: boolean
   showHeadingLevelLabels: boolean
   listIndentGuides: boolean
+  linkPopoverOnHover: boolean
   renderTablesInLivePreview: boolean
+  detectCodeLanguages: boolean
   completedTaskStyle: CompletedTaskStyle
   mathRenderer: MathRenderer
   typstTagPreambles: boolean
@@ -2444,6 +2589,7 @@ function collectPrefs(s: {
   unifiedSidebar: boolean
   darkSidebar: boolean
   showWindowTitleBar: boolean
+  showStatusBar: boolean
   showSidebarChevrons: boolean
   collapsedFolders: string[]
   pinnedRefPath: string | null
@@ -2461,6 +2607,7 @@ function collectPrefs(s: {
   pinnedRefKind: 'note' | 'asset'
   noteRefs: Record<string, { path: string; kind: 'note' | 'asset' }>
   contentAlign: 'center' | 'left'
+  noteCoverPlacement: NoteCoverPlacement
   tagsCollapsed: boolean
   nestedTags: boolean
   workflowsEnabled: boolean
@@ -2478,6 +2625,10 @@ function collectPrefs(s: {
   showArchivedTasks: boolean
   kanbanGroupBy: KanbanGroupBy
   kanbanCardSort: KanbanCardSort
+  tasksListOrder: TasksListOrder
+  timelineRange: TimelineRange
+  gallerySort: GallerySort
+  galleryIncludeSubfolders: boolean
   kanbanColumnTitles: Record<string, string>
   kanbanColumnOrder: Record<string, string[]>
   kanbanCardOrder: Record<string, string[]>
@@ -2496,6 +2647,7 @@ function collectPrefs(s: {
     vimBlockImeInNormalMode: s.vimBlockImeInNormalMode,
     vimWrappedLineMotions: s.vimWrappedLineMotions,
     keymapOverrides: s.keymapOverrides,
+    commandKeymaps: s.commandKeymaps,
     enabledOverrides: s.enabledOverrides,
     themeTweaks: s.themeTweaks,
     whichKeyHints: s.whichKeyHints,
@@ -2504,10 +2656,13 @@ function collectPrefs(s: {
     vaultTextSearchBackend: s.vaultTextSearchBackend,
     ripgrepBinaryPath: s.ripgrepBinaryPath,
     fzfBinaryPath: s.fzfBinaryPath,
+    searchTaggedBlocks: s.searchTaggedBlocks,
     livePreview: s.livePreview,
     showHeadingLevelLabels: s.showHeadingLevelLabels,
     listIndentGuides: s.listIndentGuides,
+    linkPopoverOnHover: s.linkPopoverOnHover,
     renderTablesInLivePreview: s.renderTablesInLivePreview,
+    detectCodeLanguages: s.detectCodeLanguages,
     completedTaskStyle: s.completedTaskStyle,
     mathRenderer: s.mathRenderer,
     typstTagPreambles: s.typstTagPreambles,
@@ -2558,6 +2713,7 @@ function collectPrefs(s: {
     unifiedSidebar: s.unifiedSidebar,
     darkSidebar: s.darkSidebar,
     showWindowTitleBar: s.showWindowTitleBar,
+    showStatusBar: s.showStatusBar,
     showSidebarChevrons: s.showSidebarChevrons,
     collapsedFolders: s.collapsedFolders,
     pinnedRefPath: s.pinnedRefPath,
@@ -2575,6 +2731,7 @@ function collectPrefs(s: {
     pinnedRefKind: s.pinnedRefKind,
     noteRefs: s.noteRefs,
     contentAlign: s.contentAlign,
+    noteCoverPlacement: s.noteCoverPlacement,
     tagsCollapsed: s.tagsCollapsed,
     nestedTags: s.nestedTags,
     workflowsEnabled: s.workflowsEnabled,
@@ -2589,6 +2746,10 @@ function collectPrefs(s: {
     showArchivedTasks: s.showArchivedTasks,
     kanbanGroupBy: s.kanbanGroupBy,
     kanbanCardSort: s.kanbanCardSort,
+    tasksListOrder: s.tasksListOrder,
+    timelineRange: s.timelineRange,
+    gallerySort: s.gallerySort,
+    galleryIncludeSubfolders: s.galleryIncludeSubfolders,
     kanbanColumnTitles: s.kanbanColumnTitles,
     kanbanColumnOrder: s.kanbanColumnOrder,
     kanbanCardOrder: s.kanbanCardOrder,
@@ -2882,12 +3043,12 @@ function hasTasksViewOpen(state: { paneLayout: PaneLayout }): boolean {
 
 /** True when a surface backed by `vaultTasks` is on screen and therefore needs
  *  the shared task cache kept fresh on note edits. Tasks tabs are in the pane
- *  tree; Home and calendar expose the navigation markers also read by VimNav. */
+ *  tree; Home, the calendar and the Timeline expose DOM markers. */
 function tasksSurfaceVisible(state: { paneLayout: PaneLayout }): boolean {
   if (hasTasksViewOpen(state)) return true
   return (
     typeof document !== 'undefined' &&
-    document.querySelector('[data-calendar-panel], [data-home-nav]') !== null
+    document.querySelector('[data-calendar-panel], [data-timeline-panel], [data-home-nav]') !== null
   )
 }
 
@@ -2925,6 +3086,24 @@ export function isArchiveViewActive(state: {
 }): boolean {
   const leaf = findLeaf(state.paneLayout, state.activePaneId)
   return leaf?.activeTab === ARCHIVE_TAB_PATH
+}
+
+/** True when the active pane's active tab is the Unresolved Links view. */
+export function isUnresolvedLinksViewActive(state: {
+  paneLayout: PaneLayout
+  activePaneId: string
+}): boolean {
+  const leaf = findLeaf(state.paneLayout, state.activePaneId)
+  return leaf?.activeTab === UNRESOLVED_LINKS_TAB_PATH
+}
+
+/** True when the active pane's active tab is a folder's Gallery. */
+export function isGalleryViewActive(state: {
+  paneLayout: PaneLayout
+  activePaneId: string
+}): boolean {
+  const leaf = findLeaf(state.paneLayout, state.activePaneId)
+  return isGalleryTabPath(leaf?.activeTab)
 }
 
 /** True when the active pane's active tab is the built-in Assets view. */
@@ -2989,6 +3168,14 @@ interface Store {
   templatePaletteOpen: boolean
   /** "Embed existing drawing" picker visibility. */
   embedDrawingPaletteOpen: boolean
+  /** The note the cover picker is open for, or null while it is closed. */
+  noteCoverPickerPath: string | null
+  /** The tab and search the picker opens on (`:cover unsplash fog`, Space l u);
+   *  null for the Covers tab with an empty field. */
+  noteCoverPickerStart: { tab: 'covers' | 'unsplash'; query: string } | null
+  /** A cover in reposition mode. `owner` is the on-screen copy that took the
+   *  request; null until one does (the palette asks for "the" cover). */
+  noteCoverReposition: { path: string; owner: string | null } | null
   /** Bumped whenever an Excalidraw drawing changes on disk so embed widgets
    *  and preview components invalidate their cached PNG and re-render. */
   excalidrawPreviewVersion: number
@@ -3026,6 +3213,7 @@ interface Store {
   /** Display-row or logical-line semantics for $, I, A and dependent operators. */
   vimWrappedLineMotions: VimWrappedLineMotionMode
   keymapOverrides: KeymapOverrides
+  commandKeymaps: CommandKeymaps
   /** Enabled CSS overrides, keyed by filename. Persisted to config [overrides]. */
   enabledOverrides: Record<string, string>
   /** Visual color tweaks (token slug → color). Persisted to config [tweaks]. */
@@ -3036,10 +3224,13 @@ interface Store {
   vaultTextSearchBackend: VaultTextSearchBackendPreference
   ripgrepBinaryPath: string | null
   fzfBinaryPath: string | null
+  searchTaggedBlocks: boolean
   livePreview: boolean
   showHeadingLevelLabels: boolean
   listIndentGuides: boolean
+  linkPopoverOnHover: boolean
   renderTablesInLivePreview: boolean
+  detectCodeLanguages: boolean
   completedTaskStyle: CompletedTaskStyle
   mathRenderer: MathRenderer
   typstTagPreambles: boolean
@@ -3120,6 +3311,7 @@ interface Store {
   unifiedSidebar: boolean
   darkSidebar: boolean
   showWindowTitleBar: boolean
+  showStatusBar: boolean
   showSidebarChevrons: boolean
   /** Manual (drag-to-reorder) note order for `noteSortOrder: 'manual'`, keyed
    *  by parent directory → ordered note paths. Persisted per vault (#224). */
@@ -3142,7 +3334,8 @@ interface Store {
   /** Auto-title new Quick Notes to today's date instead of the
    *  default "Quick Note <ts>" pattern. */
   quickNoteDateTitle: boolean
-  /** Prefix used when generating new Quick Note titles. */
+  /** Prefix used when generating new Quick Note titles. `null` is a
+   *  cleared field: no prefix, a bare timestamp or date (#1008). */
   quickNoteTitlePrefix: string | null
 
   /** Whether long lines wrap or scroll horizontally in the editor. */
@@ -3177,6 +3370,8 @@ interface Store {
   /** Center the editor + preview content (with the width cap) or
    *  left-align it to the pane edge. */
   contentAlign: 'center' | 'left'
+  /** Where a note's cover image sits (Settings, Editor). */
+  noteCoverPlacement: NoteCoverPlacement
 
   /** Sidebar Tags section collapsed — hides the pill rail but keeps
    *  the section header visible as a toggle. Persisted. */
@@ -3237,6 +3432,18 @@ interface Store {
   kanbanGroupBy: KanbanGroupBy
   /** Cards in each Kanban column by hand-placed order or by due date. (#889) */
   kanbanCardSort: KanbanCardSort
+  /** Tasks list groups in note order or by priority. (#989) */
+  tasksListOrder: TasksListOrder
+  /** How far ahead the Timeline panel reaches: two weeks, a month, or every
+   *  dated task. Portable (`timeline_range` under [view]). (#1007) */
+  timelineRange: TimelineRange
+  /** The Gallery's card order, shared by every Gallery tab. Portable. */
+  gallerySort: GallerySort
+  /** Whether a Gallery reaches into its folder's subfolders. Portable. */
+  galleryIncludeSubfolders: boolean
+  /** The Timeline panel's filter, in the Tasks filter syntax. Session state:
+   *  shared by every pane's Timeline, cleared on restart. (#1007) */
+  timelineFilter: string
   /** Display-only column title overrides for the Tasks Kanban view. */
   kanbanColumnTitles: Record<string, string>
   /** Manual column arrangement per board (groupBy → ordered column ids). */
@@ -3272,6 +3479,10 @@ interface Store {
   /** Whether multiple selected tags combine with AND (`all`, the default —
    *  narrows) or OR (`any` — widens). */
   tagMatchMode: TagMatchMode
+  /** Text for the Tags view to put in its filter the next time it renders,
+   *  then clear: how the Search notes palette hands over a "+N more" row with
+   *  its free text still applied (#837). */
+  tagViewFilterSeed: string | null
 
   /** Vim navigation: which panel is keyboard-focused. */
   focusedPanel: Panel | null
@@ -3304,6 +3515,7 @@ interface Store {
    *  pane navigation can restore where you were. (#477) */
   outlineCursorIndex: number
   connectionPreview: ConnectionPreviewState | null
+  linkPopover: LinkPopoverState | null
   editorViewRef: EditorView | null
   editorCursorPosition: EditorCursorPosition | null
   pendingTitleFocusPath: string | null
@@ -3384,10 +3596,17 @@ interface Store {
    *  open + focused. If `tag` is omitted, just opens the tab with the
    *  current selection. First open with a tag starts a fresh selection. */
   openTagView: (tag?: string) => Promise<void>
+  /** Open the Tags view on exactly these tags, matching all of them, with
+   *  `filter` in its filter box: the rest of a Search notes result, one
+   *  keystroke away. */
+  openTagViewFor: (tags: string[], filter?: string) => Promise<void>
   /** Open the Workflows canvas as a tab in the active pane. */
   openWorkflowsView: () => Promise<void>
   /** Open the Atlas map as a tab in the active pane. */
   openAtlasView: () => Promise<void>
+  /** Open a folder's Gallery (its notes as cards, led by their covers) as a
+   *  tab in the active pane. */
+  openFolderGallery: (folder: NoteFolder, subpath: string) => Promise<void>
   /** Close the Tags tab in every pane and clear the selection. */
   closeTagView: () => void
   /** Open the built-in Help tab in the active pane. */
@@ -3397,6 +3616,8 @@ interface Store {
   /** Open the built-in Archive tab in the active pane. */
   openArchiveView: () => Promise<void>
   openAssetsView: () => Promise<void>
+  /** Open the built-in Unresolved Links view in the active pane. */
+  openUnresolvedLinksView: () => Promise<void>
   /** Open the built-in Trash tab in the active pane. */
   openTrashView: () => Promise<void>
   /** Read a CSV database (CSV + sidecar) into `databases` if not already loaded. */
@@ -3434,6 +3655,11 @@ interface Store {
   forgetDatabase: (csvPath: string) => Promise<void>
   /** Open a record as a markdown "page" note (creating + linking it on first open). */
   openRecordPage: (csvPath: string, rowId: string) => Promise<void>
+  /** Give every record of a database that has no page its page note, so each
+   *  one is a note links can reach. Asks first; null when nothing ran. */
+  createAllRecordPages: (
+    csvPath: string
+  ) => Promise<{ created: number; linked: number; existing: number; untitled: number } | null>
   /** Rename a record's linked page note to match its title (no-op if unlinked). */
   renameRecordPage: (csvPath: string, rowId: string) => Promise<void>
   /** Add or remove a tag from the Tags view selection without touching
@@ -3490,6 +3716,11 @@ interface Store {
   confirmArchiveNotes: (paths: string[]) => Promise<boolean>
   setKanbanGroupBy: (group: KanbanGroupBy) => void
   setKanbanCardSort: (sort: KanbanCardSort) => void
+  setTasksListOrder: (order: TasksListOrder) => void
+  setTimelineRange: (range: TimelineRange) => void
+  setTimelineFilter: (query: string) => void
+  setGallerySort: (sort: GallerySort) => void
+  setGalleryIncludeSubfolders: (include: boolean) => void
   setKanbanColumnTitle: (
     group: KanbanGroupBy,
     columnId: string,
@@ -3519,7 +3750,7 @@ interface Store {
   openNoteAtOffset: (
     relPath: string,
     offset: number,
-    options?: { scrollMode?: 'center' | 'start' }
+    options?: { scrollMode?: 'center' | 'start'; highlightLine?: boolean }
   ) => Promise<void>
   /** Reload the vault's Typst preamble notes (tag-driven math definitions). */
   refreshTypstPreambles: () => Promise<void>
@@ -3650,6 +3881,10 @@ interface Store {
   setVimBlockImeInNormalMode: (on: boolean) => void
   setVimWrappedLineMotions: (mode: VimWrappedLineMotionMode) => void
   setKeymapBinding: (id: KeymapId, binding: string | null) => void
+  /** Give a command palette command a key (#971): a canonical binding from
+   *  `parseCommandBinding`, "" to unbind it, null to clear the entry. */
+  setCommandKeymapBinding: (id: string, binding: string | null) => void
+  /** Reset every action to its default and take every command's key away. */
   resetAllKeymaps: () => void
   setWhichKeyHints: (on: boolean) => void
   setWhichKeyHintMode: (mode: WhichKeyHintMode) => void
@@ -3657,10 +3892,13 @@ interface Store {
   setVaultTextSearchBackend: (backend: VaultTextSearchBackendPreference) => void
   setRipgrepBinaryPath: (path: string | null) => void
   setFzfBinaryPath: (path: string | null) => void
+  setSearchTaggedBlocks: (enabled: boolean) => void
   setLivePreview: (on: boolean) => void
   setShowHeadingLevelLabels: (on: boolean) => void
   setListIndentGuides: (on: boolean) => void
+  setLinkPopoverOnHover: (on: boolean) => void
   setRenderTablesInLivePreview: (on: boolean) => void
+  setDetectCodeLanguages: (on: boolean) => void
   setCompletedTaskStyle: (style: CompletedTaskStyle) => void
   setMathRenderer: (renderer: MathRenderer) => void
   setTypstTagPreambles: (on: boolean) => void
@@ -3749,6 +3987,7 @@ interface Store {
   setUnifiedSidebar: (on: boolean) => void
   setDarkSidebar: (on: boolean) => void
   setShowWindowTitleBar: (on: boolean) => void
+  setShowStatusBar: (on: boolean) => void
   setShowSidebarChevrons: (on: boolean) => void
   toggleCollapseFolder: (key: string) => void
   setCollapsedFolders: (keys: string[]) => void
@@ -3774,11 +4013,16 @@ interface Store {
 
   setQuickNoteDateTitle: (on: boolean) => void
   setQuickNoteTitlePrefix: (prefix: string | null) => void
-  openTodayDailyNote: () => Promise<void>
-  openThisWeekWeeklyNote: () => Promise<void>
-  openThisMonthMonthlyNote: () => Promise<void>
+  openTodayDailyNote: (options?: PeriodicNoteOpenOptions) => Promise<void>
+  openThisWeekWeeklyNote: (options?: PeriodicNoteOpenOptions) => Promise<void>
+  openThisMonthMonthlyNote: (options?: PeriodicNoteOpenOptions) => Promise<void>
   setTemplatePaletteOpen: (open: boolean) => void
   setEmbedDrawingPaletteOpen: (open: boolean) => void
+  setNoteCoverPickerPath: (
+    path: string | null,
+    start?: { tab: 'covers' | 'unsplash'; query: string } | null
+  ) => void
+  setNoteCoverReposition: (reposition: { path: string; owner: string | null } | null) => void
   /** Create a new Excalidraw drawing and open it in a dedicated tab. */
   newDrawing: () => Promise<void>
   /** Create a new Excalidraw drawing, embed it at the cursor in the active
@@ -3820,6 +4064,7 @@ interface Store {
   setEditorMaxWidth: (px: number) => void
   setPdfEmbedInEditMode: (mode: 'compact' | 'full') => void
   setContentAlign: (align: 'center' | 'left') => void
+  setNoteCoverPlacement: (placement: NoteCoverPlacement) => void
   setTagsCollapsed: (collapsed: boolean) => void
   setNestedTags: (enabled: boolean) => void
   /** Toggle a nested-tag tree node between expanded and collapsed by its full path. */
@@ -3827,9 +4072,9 @@ interface Store {
   setAutoCalendarPanel: (enabled: boolean) => void
   setCalendarWeekStart: (start: CalendarWeekStart) => void
   setCalendarShowWeekNumbers: (show: boolean) => void
-  openDailyNoteForDate: (date: Date) => Promise<void>
-  openWeeklyNoteForDate: (date: Date) => Promise<void>
-  openMonthlyNoteForDate: (date: Date) => Promise<void>
+  openDailyNoteForDate: (date: Date, options?: PeriodicNoteOpenOptions) => Promise<void>
+  openWeeklyNoteForDate: (date: Date, options?: PeriodicNoteOpenOptions) => Promise<void>
+  openMonthlyNoteForDate: (date: Date, options?: PeriodicNoteOpenOptions) => Promise<void>
   /** Find the daily note for `date`, creating it on disk (template-aware)
    *  WITHOUT navigating to it. Returns its meta, or null if daily notes are
    *  disabled or creation failed. */
@@ -3861,6 +4106,18 @@ interface Store {
   setConnectionsCursorIndex: (idx: number) => void
   setOutlineCursorIndex: (idx: number) => void
   setConnectionPreview: (preview: ConnectionPreviewState | null) => void
+  /** Show the link popover. An existing note is read into the shared content
+   *  cache first, so the popover edits the same buffer as every pane. */
+  openLinkPopover: (popover: Omit<LinkPopoverState, 'serial'>) => Promise<void>
+  /** Keep a hover popover open once the user works in it. */
+  pinLinkPopover: () => void
+  /** Point the open popover at a note it just created, and focus it. */
+  showNoteInLinkPopover: (path: string) => Promise<void>
+  /** Close the popover; its note is saved first when it has unsaved edits. */
+  closeLinkPopover: () => void
+  /** Create a note without opening it, for the link popover to edit in place.
+   *  Resolves to the new note, or null when it could not be made. */
+  createNoteInPlace: (folder: NoteFolder, subpath: string, title: string) => Promise<NoteMeta | null>
   setEditorViewRef: (view: EditorView | null) => void
   setEditorCursorPosition: (position: EditorCursorPosition | null) => void
 
@@ -4516,6 +4773,8 @@ function rewriteFolderWorkspace(
         : nextPrefix + path.slice(prefix.length)
       : path
   const rewrite = (path: string): string | null => {
+    // A Gallery tab follows its folder, and closes with it.
+    if (isGalleryTabPath(path)) return rewriteGalleryTabPath(path, rewriteFile, s.vaultSettings)
     const csv = csvPathFromDatabaseTab(path)
     const asset = isAssetTabPath(path) ? assetPathFromTab(path) : null
     const mapped = rewriteFile(csv ?? asset ?? path)
@@ -4624,6 +4883,7 @@ function rewriteFolderWorkspace(
     pendingJumpLocation: pendingPath ? { ...s.pendingJumpLocation!, path: pendingPath } : null,
     pendingTitleFocusPath: s.pendingTitleFocusPath ? rewrite(s.pendingTitleFocusPath) : null,
     pinnedRefPath: s.pinnedRefPath ? rewrite(s.pinnedRefPath) : null,
+    linkPopover: rewriteLinkPopover(s.linkPopover, rewrite),
     ...activeFieldsFrom(ensured.layout, ensured.activePaneId, contents, dirty)
   }
 }
@@ -4844,6 +5104,69 @@ function rememberPrefetchedPath(path: string): void {
   prefetchedNotePaths.push(path)
 }
 
+/**
+ * Notes whose cached content the link popover still needs. The popover edits
+ * a note through `noteContents`, like any pane, but no pane may have that
+ * note open, and every cache prune drops unreferenced paths. A closed
+ * popover keeps its note held until the last edit is saved: dropping the
+ * cache first would leave the debounced save nothing to write.
+ */
+const closingLinkPopoverPaths = new Set<string>()
+
+function linkPopoverHeldPaths(s: Pick<Store, 'linkPopover'>): string[] {
+  const held = [...closingLinkPopoverPaths]
+  if (s.linkPopover?.path) held.push(s.linkPopover.path)
+  return held
+}
+
+function linkPopoverHolds(s: Pick<Store, 'linkPopover'>, path: string): boolean {
+  return s.linkPopover?.path === path || closingLinkPopoverPaths.has(path)
+}
+
+function rewriteLinkPopover(
+  popover: LinkPopoverState | null,
+  rewrite: (path: string) => string | null
+): LinkPopoverState | null {
+  if (!popover?.path) return popover
+  const path = rewrite(popover.path)
+  if (path === null) return null
+  return path === popover.path ? popover : { ...popover, path }
+}
+
+/**
+ * Let go of a note the link popover stopped showing (closed, or replaced by
+ * another link's note): save its last edit, then drop the cached copy unless
+ * something else shows it, so a later open reads it fresh from disk, as
+ * closing a tab does. The caller adds `path` to `closingLinkPopoverPaths`
+ * before clearing the popover, which keeps the cache alive until the save.
+ */
+async function releaseLinkPopoverNote(path: string): Promise<void> {
+  const store = useStore
+  try {
+    if (store.getState().noteDirty[path]) await store.getState().persistNote(path)
+  } finally {
+    closingLinkPopoverPaths.delete(path)
+    store.setState((s) => {
+      const referenced =
+        s.selectedPath === path ||
+        s.pinnedRefPath === path ||
+        linkPopoverHolds(s, path) ||
+        allLeaves(s.paneLayout).some((leaf) => leaf.tabs.includes(path))
+      if (referenced || s.noteDirty[path] || !s.noteContents[path]) return {}
+      const { [path]: _drop, ...contents } = s.noteContents
+      const { [path]: _d, ...dirty } = s.noteDirty
+      void _drop
+      void _d
+      return { noteContents: contents, noteDirty: dirty }
+    })
+  }
+}
+
+/** Bumped by every popover open and close, so a slow note read that loses
+ *  the race to a close (the pointer left first) does not reopen it. */
+let linkPopoverRequest = 0
+let linkPopoverSerial = 0
+
 function prunePrefetchedContents(s: Store): Partial<Store> {
   if (prefetchedNotePaths.length <= MAX_PREFETCHED_NOTE_CONTENTS) return {}
 
@@ -4855,6 +5178,7 @@ function prunePrefetchedContents(s: Store): Partial<Store> {
     const referenced =
       s.selectedPath === path ||
       s.pinnedRefPath === path ||
+      linkPopoverHolds(s, path) ||
       allLeaves(s.paneLayout).some((leaf) => leaf.tabs.includes(path))
     if (referenced || dirty[path]) continue
     delete contents[path]
@@ -4929,6 +5253,7 @@ function withoutNoteInWorkspace(s: Store, path: string): Partial<Store> {
     noteDirty: dirty,
     pendingJumpLocation: null,
     pinnedRefPath: s.pinnedRefPath === path ? null : s.pinnedRefPath,
+    linkPopover: s.linkPopover?.path === path ? null : s.linkPopover,
     ...activeFieldsFrom(ensured.layout, ensured.activePaneId, contents, dirty)
   }
 }
@@ -5848,6 +6173,9 @@ export const useStore = create<Store>((set, get) => {
   outlinePaletteOpen: false,
   templatePaletteOpen: false,
   embedDrawingPaletteOpen: false,
+  noteCoverPickerPath: null,
+  noteCoverPickerStart: null,
+  noteCoverReposition: null,
   excalidrawPreviewVersion: 0,
   templatePaletteMode: 'create',
   templatePaletteTarget: null,
@@ -5869,6 +6197,7 @@ export const useStore = create<Store>((set, get) => {
   vimBlockImeInNormalMode: loadPrefs().vimBlockImeInNormalMode,
   vimWrappedLineMotions: loadPrefs().vimWrappedLineMotions,
   keymapOverrides: loadPrefs().keymapOverrides,
+  commandKeymaps: loadPrefs().commandKeymaps,
   enabledOverrides: loadPrefs().enabledOverrides,
   themeTweaks: loadPrefs().themeTweaks,
   whichKeyHints: loadPrefs().whichKeyHints,
@@ -5877,10 +6206,13 @@ export const useStore = create<Store>((set, get) => {
   vaultTextSearchBackend: loadPrefs().vaultTextSearchBackend,
   ripgrepBinaryPath: loadPrefs().ripgrepBinaryPath,
   fzfBinaryPath: loadPrefs().fzfBinaryPath,
+  searchTaggedBlocks: loadPrefs().searchTaggedBlocks,
   livePreview: loadPrefs().livePreview,
   showHeadingLevelLabels: loadPrefs().showHeadingLevelLabels,
   listIndentGuides: loadPrefs().listIndentGuides,
+  linkPopoverOnHover: loadPrefs().linkPopoverOnHover,
   renderTablesInLivePreview: loadPrefs().renderTablesInLivePreview,
+  detectCodeLanguages: loadPrefs().detectCodeLanguages,
   completedTaskStyle: loadPrefs().completedTaskStyle,
   mathRenderer: loadPrefs().mathRenderer,
   typstTagPreambles: loadPrefs().typstTagPreambles,
@@ -5934,6 +6266,7 @@ export const useStore = create<Store>((set, get) => {
   unifiedSidebar: loadPrefs().unifiedSidebar,
   darkSidebar: loadPrefs().darkSidebar,
   showWindowTitleBar: loadPrefs().showWindowTitleBar,
+  showStatusBar: loadPrefs().showStatusBar,
   showSidebarChevrons: loadPrefs().showSidebarChevrons,
   collapsedFolders: DEFAULT_PREFS.collapsedFolders,
   pinnedRefPath: loadPrefs().pinnedRefPath,
@@ -5952,6 +6285,7 @@ export const useStore = create<Store>((set, get) => {
   pinnedRefKind: loadPrefs().pinnedRefKind,
   noteRefs: loadPrefs().noteRefs,
   contentAlign: loadPrefs().contentAlign,
+  noteCoverPlacement: loadPrefs().noteCoverPlacement,
   tagsCollapsed: loadPrefs().tagsCollapsed,
   nestedTags: loadPrefs().nestedTags,
   workflowsEnabled: loadPrefs().workflowsEnabled,
@@ -5966,6 +6300,11 @@ export const useStore = create<Store>((set, get) => {
   showArchivedTasks: loadPrefs().showArchivedTasks,
   kanbanGroupBy: loadPrefs().kanbanGroupBy,
   kanbanCardSort: loadPrefs().kanbanCardSort,
+  tasksListOrder: loadPrefs().tasksListOrder,
+  timelineRange: loadPrefs().timelineRange,
+  timelineFilter: '',
+  gallerySort: loadPrefs().gallerySort,
+  galleryIncludeSubfolders: loadPrefs().galleryIncludeSubfolders,
   kanbanColumnTitles: loadPrefs().kanbanColumnTitles,
   kanbanColumnOrder: loadPrefs().kanbanColumnOrder,
   kanbanCardOrder: loadPrefs().kanbanCardOrder,
@@ -5990,6 +6329,7 @@ export const useStore = create<Store>((set, get) => {
   databasesLoading: {},
   selectedTags: [],
   tagMatchMode: 'all',
+  tagViewFilterSeed: null,
   focusedPanel: null,
   sidebarCursorIndex: 0,
   dateNavExpanded: [],
@@ -6001,6 +6341,7 @@ export const useStore = create<Store>((set, get) => {
   connectionsCursorIndex: 0,
   outlineCursorIndex: 0,
   connectionPreview: null,
+  linkPopover: null,
   editorViewRef: null,
   editorCursorPosition: null,
   pendingTitleFocusPath: null,
@@ -6210,6 +6551,12 @@ export const useStore = create<Store>((set, get) => {
     // itself, which also moves focus off the sidebar row this was blurring.
   },
 
+  openTagViewFor: async (tags, filter) => {
+    get().setSelectedTags(tags)
+    set({ tagMatchMode: 'all', tagViewFilterSeed: filter ?? '' })
+    await get().openTagView()
+  },
+
   openTagView: async (tag) => {
     const state = get()
     const trimmed = tag?.trim() ?? ''
@@ -6272,6 +6619,24 @@ export const useStore = create<Store>((set, get) => {
   openTrashView: async () => {
     const state = get()
     await get().openNoteInPane(state.activePaneId, TRASH_TAB_PATH)
+    ;(document.activeElement as HTMLElement | null)?.blur?.()
+    set({ focusedPanel: 'editor' })
+  },
+
+  openUnresolvedLinksView: async () => {
+    // A link at a file in the vault is not missing, so the scan needs the
+    // asset list; it is read lazily and may not be there yet.
+    if (!get().assetFilesListed) await get().refreshAssets()
+    await get().openNoteInPane(get().activePaneId, UNRESOLVED_LINKS_TAB_PATH)
+    ;(document.activeElement as HTMLElement | null)?.blur?.()
+    set({ focusedPanel: 'editor' })
+  },
+
+  openFolderGallery: async (folder, subpath) => {
+    // A card draws a vault cover from the vault's file list, which is read
+    // lazily and may not be there yet.
+    if (!get().assetFilesListed) await get().refreshAssets()
+    await get().openNoteInPane(get().activePaneId, galleryTabPath(folder, subpath))
     ;(document.activeElement as HTMLElement | null)?.blur?.()
     set({ focusedPanel: 'editor' })
   },
@@ -6426,7 +6791,13 @@ export const useStore = create<Store>((set, get) => {
         meta.path,
         composeTaskFile({ title, dateCreated: new Date().toISOString() })
       )
-      await get().refreshTasks()
+      // One file changed, so a loaded task list takes that file's tasks. A
+      // full scan reads every note, which on a phone vault kept "Task added"
+      // waiting for seconds (zennotesandroid#128). An empty list may never
+      // have been loaded, and Home and the calendar load it only while it is
+      // empty, so it is loaded whole, without holding up the toast.
+      if (get().vaultTasks.length > 0) await get().rescanTasksForPath(meta.path)
+      else void get().refreshTasks()
       // On the Tasks view the new task shows up in the list. Anywhere else (the
       // palette, `:newtask`, a phone's Action Button) nothing on screen
       // changes, so say it landed and offer the note.
@@ -6688,6 +7059,16 @@ export const useStore = create<Store>((set, get) => {
       }
     }
     if (!pagePath) {
+      // A page file already there under the record's name but not mapped (a
+      // script wrote it, say) is linked, not shadowed by a `Title 2.md`.
+      const notePaths = new Set(get().notes.map((note) => note.path))
+      const found = recordPageToAdopt(doc, row, (path) => notePaths.has(path))
+      if (found) {
+        pagePath = found
+        get().updateDatabaseSchema(csvPath, { ...doc, pages: { ...(doc.pages ?? {}), [rowId]: found } })
+      }
+    }
+    if (!pagePath) {
       try {
         const body = composePageBody(doc, row, `# ${recordTitle(doc, row)}\n\n`)
         pagePath = await window.zen.createRecordPage(csvPath, recordTitle(doc, row), body)
@@ -6711,6 +7092,115 @@ export const useStore = create<Store>((set, get) => {
       }
     }
     await get().selectNote(pagePath)
+  }),
+  createAllRecordPages: trackNoteWrite(null, async (csvPath) => {
+    const doc = get().databases[csvPath]
+    if (!doc) return null
+    if (!formDirFromCsvPath(csvPath)) {
+      useToastStore
+        .getState()
+        .addToast('This database is a loose CSV file, which cannot hold record pages.', 'info')
+      return null
+    }
+    // Record pages are notes (listNotes surfaces them), so the note list says
+    // which mapped pages are still there without reading every file.
+    const notePaths = new Set(get().notes.map((note) => note.path))
+    const plan = planRecordPages(doc, (path) => notePaths.has(path))
+    const counts = { created: 0, linked: plan.adopt.length, existing: plan.existing, untitled: plan.untitled }
+    if (plan.missing.length === 0 && plan.adopt.length === 0) {
+      useToastStore
+        .getState()
+        .addToast(
+          plan.untitled > 0
+            ? `Every titled record already has a page. ${plan.untitled} ${plan.untitled === 1 ? 'record without a title has' : 'records without a title have'} none.`
+            : 'Every record already has a page.',
+          'info'
+        )
+      return counts
+    }
+    const n = plan.missing.length
+    const linking = plan.adopt.length
+    const ok = await confirmApp({
+      title:
+        n > 0
+          ? `Create pages for ${n} ${n === 1 ? 'record' : 'records'}?`
+          : `Link ${linking} ${linking === 1 ? 'record' : 'records'} to ${linking === 1 ? 'its page' : 'their pages'}?`,
+      description:
+        (n > 0
+          ? `Each gets a note in the ${doc.title} folder, named after the record, so it can be linked.`
+          : '') +
+        (linking > 0
+          ? ` ${linking === 1 ? '1 record already has a page file' : `${linking} records already have page files`} in the folder; ${linking === 1 ? 'it is' : 'those are'} linked, not copied.`
+          : '') +
+        (plan.existing > 0
+          ? ` ${plan.existing} ${plan.existing === 1 ? 'record that already has a page keeps' : 'records that already have a page keep'} it.`
+          : '') +
+        (plan.untitled > 0
+          ? ` ${plan.untitled} ${plan.untitled === 1 ? 'record without a title is' : 'records without a title are'} left out.`
+          : ''),
+      confirmLabel: n > 0 ? 'Create pages' : 'Link pages',
+      cancelLabel: 'Cancel'
+    })
+    if (!ok) return null
+    const pages: Record<string, string> = Object.fromEntries(plan.adopt.map(({ row, page }) => [row.id, page]))
+    const created: Record<string, string> = {}
+    let failure: unknown = null
+    for (const row of plan.missing) {
+      const title = recordTitle(doc, row)
+      try {
+        created[row.id] = await window.zen.createRecordPage(
+          csvPath,
+          title,
+          composePageBody(doc, row, `# ${title}\n\n`)
+        )
+      } catch (err) {
+        failure = err
+        break
+      }
+    }
+    counts.created = Object.keys(created).length
+    Object.assign(pages, created)
+    // One schema write for the whole run, onto the latest doc: rows edited or
+    // deleted while the pages were written keep those edits.
+    const latest = get().databases[csvPath]
+    if (latest && Object.keys(pages).length > 0) {
+      const live = new Set(latest.rows.map((row) => row.id))
+      const kept = Object.fromEntries(Object.entries(pages).filter(([id]) => live.has(id)))
+      get().updateDatabaseSchema(csvPath, {
+        ...latest,
+        pages: { ...(latest.pages ?? {}), ...kept },
+        // A page just written holds only its heading; a linked one keeps
+        // whatever it had, which the next read of the database measures.
+        pageHasContent: {
+          ...(latest.pageHasContent ?? {}),
+          ...Object.fromEntries(Object.keys(created).filter((id) => live.has(id)).map((id) => [id, false]))
+        }
+      })
+    }
+    if (failure) {
+      console.error('createAllRecordPages failed', failure)
+      useToastStore
+        .getState()
+        .addToast(
+          `Created ${counts.created} of ${n} record pages, then: ${failure instanceof Error ? failure.message : String(failure)}`,
+          'error'
+        )
+      return counts
+    }
+    useToastStore
+      .getState()
+      .addToast(
+        [
+          counts.created > 0 ? `Created ${counts.created} record ${counts.created === 1 ? 'page' : 'pages'}` : '',
+          counts.linked > 0
+            ? `${counts.created > 0 ? 'linked' : 'Linked'} ${counts.linked} existing ${counts.linked === 1 ? 'page' : 'pages'}`
+            : ''
+        ]
+          .filter(Boolean)
+          .join(' and ') + '.',
+        'success'
+      )
+    return counts
   }),
   renameRecordPage: async (csvPath, rowId) => {
     const isCurrent = captureFolderActionContext(get)
@@ -7322,6 +7812,23 @@ export const useStore = create<Store>((set, get) => {
     set({ kanbanCardSort: sort })
     savePrefs(collectPrefs(get()))
   },
+  setTasksListOrder: (order) => {
+    set({ tasksListOrder: order })
+    savePrefs(collectPrefs(get()))
+  },
+  setTimelineRange: (range) => {
+    set({ timelineRange: normalizeTimelineRange(range) })
+    savePrefs(collectPrefs(get()))
+  },
+  setTimelineFilter: (query) => set({ timelineFilter: query }),
+  setGallerySort: (sort) => {
+    set({ gallerySort: normalizeGallerySort(sort) })
+    savePrefs(collectPrefs(get()))
+  },
+  setGalleryIncludeSubfolders: (include) => {
+    set({ galleryIncludeSubfolders: include })
+    savePrefs(collectPrefs(get()))
+  },
   setKanbanColumnTitle: (group, columnId, title) => {
     const key = `${group}:${columnId}`
     const normalized = typeof title === 'string' ? normalizeKanbanColumnTitle(title) : null
@@ -7455,7 +7962,8 @@ export const useStore = create<Store>((set, get) => {
       editorSelectionHead: anchor,
       editorScrollTop: 0,
       previewScrollTop: 0,
-      editorScrollMode: options?.scrollMode ?? 'center'
+      editorScrollMode: options?.scrollMode ?? 'center',
+      ...(options?.highlightLine ? { highlightLine: true } : {})
     }
     set({
       pendingJumpLocation,
@@ -7591,6 +8099,8 @@ export const useStore = create<Store>((set, get) => {
           for (const tab of leaf.tabs) referenced.add(tab)
         }
         if (pinnedRefPath) referenced.add(pinnedRefPath)
+        // The link popover edits a cached note no pane may have open.
+        for (const held of linkPopoverHeldPaths(s)) referenced.add(held)
         const contents: Record<string, NoteContent> = {}
         const dirty: Record<string, boolean> = {}
         for (const [path, content] of Object.entries(s.noteContents)) {
@@ -7768,6 +8278,7 @@ export const useStore = create<Store>((set, get) => {
           noteContents: contents,
           noteDirty: dirty,
           pinnedRefPath: s.pinnedRefPath === notePath ? null : s.pinnedRefPath,
+          linkPopover: s.linkPopover?.path === notePath ? null : s.linkPopover,
           ...activeFieldsFrom(ensured.layout, ensured.activePaneId, contents, dirty)
         }
       })
@@ -8379,12 +8890,18 @@ export const useStore = create<Store>((set, get) => {
       if (options?.tags && options.tags.length > 0) {
         await window.zen.writeNote(meta.path, composeNewNoteBody(meta.title, options.tags))
       }
-      await get().refreshNotes()
-      set({
+      // Open the note first and re-list the vault after. Opening needs only
+      // the note, and on a phone vault the full listing is one storage query
+      // per folder: waiting for it kept a new note 12 to 15 seconds away
+      // (zennotesandroid#128). The note joins the list at once so a second
+      // quick note right away still picks the next free title.
+      set((s) => ({
+        notes: s.notes.some((n) => n.path === meta.path) ? s.notes : [...s.notes, meta],
         view: { kind: 'folder', folder, subpath },
         pendingTitleFocusPath: options?.focusTitle ? meta.path : null
-      })
+      }))
       await get().selectNote(meta.path)
+      await get().refreshNotes()
     } catch (err) {
       console.error('createNote failed', err)
     }
@@ -8863,6 +9380,9 @@ export const useStore = create<Store>((set, get) => {
     }),
   setBufferPaletteOpen: (open) => set({ bufferPaletteOpen: open }),
   setEmbedDrawingPaletteOpen: (open) => set({ embedDrawingPaletteOpen: open }),
+  setNoteCoverPickerPath: (path, start = null) =>
+    set({ noteCoverPickerPath: path, noteCoverPickerStart: path ? start : null }),
+  setNoteCoverReposition: (reposition) => set({ noteCoverReposition: reposition }),
   setOutlinePaletteOpen: (open) => set({ outlinePaletteOpen: open }),
   setQuery: (q) => set({ query: q }),
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
@@ -8941,8 +9461,18 @@ export const useStore = create<Store>((set, get) => {
     })
     savePrefs(collectPrefs(get()))
   },
+  setCommandKeymapBinding: (id, binding) => {
+    set((s) => {
+      const next = { ...s.commandKeymaps }
+      // As with the actions: null clears the entry, "" is a stored unbind.
+      if (binding === null) delete next[id]
+      else next[id] = binding
+      return { commandKeymaps: next }
+    })
+    savePrefs(collectPrefs(get()))
+  },
   resetAllKeymaps: () => {
-    set({ keymapOverrides: {} })
+    set({ keymapOverrides: {}, commandKeymaps: {} })
     savePrefs(collectPrefs(get()))
   },
   setOverrideEnabled: (name, on) => {
@@ -8992,6 +9522,10 @@ export const useStore = create<Store>((set, get) => {
     set({ fzfBinaryPath: path })
     savePrefs(collectPrefs(get()))
   },
+  setSearchTaggedBlocks: (enabled) => {
+    set({ searchTaggedBlocks: enabled })
+    savePrefs(collectPrefs(get()))
+  },
   setLivePreview: (on) => {
     set({ livePreview: on })
     savePrefs(collectPrefs(get()))
@@ -9004,8 +9538,16 @@ export const useStore = create<Store>((set, get) => {
     set({ listIndentGuides: on })
     savePrefs(collectPrefs(get()))
   },
+  setLinkPopoverOnHover: (on) => {
+    set({ linkPopoverOnHover: on })
+    savePrefs(collectPrefs(get()))
+  },
   setRenderTablesInLivePreview: (on) => {
     set({ renderTablesInLivePreview: on })
+    savePrefs(collectPrefs(get()))
+  },
+  setDetectCodeLanguages: (on) => {
+    set({ detectCodeLanguages: on })
     savePrefs(collectPrefs(get()))
   },
   setCompletedTaskStyle: (style) => {
@@ -9196,6 +9738,11 @@ export const useStore = create<Store>((set, get) => {
       if (s.pinnedRefPath && s.noteContents[s.pinnedRefPath]) {
         contents[s.pinnedRefPath] = s.noteContents[s.pinnedRefPath]
         dirty[s.pinnedRefPath] = s.noteDirty[s.pinnedRefPath] ?? false
+      }
+      for (const held of linkPopoverHeldPaths(s)) {
+        if (!s.noteContents[held]) continue
+        contents[held] = s.noteContents[held]
+        dirty[held] = s.noteDirty[held] ?? false
       }
       return {
         tabsEnabled: false,
@@ -9392,6 +9939,10 @@ export const useStore = create<Store>((set, get) => {
     set({ showWindowTitleBar: on })
     savePrefs(collectPrefs(get()))
   },
+  setShowStatusBar: (on) => {
+    set({ showStatusBar: on })
+    savePrefs(collectPrefs(get()))
+  },
   setDarkSidebar: (on) => {
     set({ darkSidebar: on })
     savePrefs(collectPrefs(get()))
@@ -9560,7 +10111,7 @@ export const useStore = create<Store>((set, get) => {
     savePrefs(collectPrefs(get()))
   },
 
-  openDailyNoteForDate: async (date) => {
+  openDailyNoteForDate: async (date, options) => {
     const state = get()
     const settings = normalizeVaultSettings(state.vaultSettings)
     if (!settings.dailyNotes.enabled) return
@@ -9581,7 +10132,8 @@ export const useStore = create<Store>((set, get) => {
     // instead of leaving focus on the sidebar item that just got selected. The
     // command is a jump-and-type flow and is often fired from outside the
     // editor (leader key, palette), where focus would otherwise stay put. (#353)
-    requestEditorFocus()
+    // A caller that opens it to read asks for that when the note was there.
+    requestEditorFocus({ read: !!existing && options?.readIfExisting === true })
     // Opening *today's* note rolls unfinished tasks forward from past daily
     // notes (Obsidian-style) when enabled. Fire-and-forget so the note shows
     // right away; the rollover appends into the now-open buffer.
@@ -9590,8 +10142,8 @@ export const useStore = create<Store>((set, get) => {
     }
   },
 
-  openTodayDailyNote: async () => {
-    await get().openDailyNoteForDate(new Date())
+  openTodayDailyNote: async (options) => {
+    await get().openDailyNoteForDate(new Date(), options)
   },
 
   ensureDailyNoteForDate: trackNoteWrite(null, async (date) => {
@@ -9775,7 +10327,7 @@ export const useStore = create<Store>((set, get) => {
     return movedLines.length
   }),
 
-  openWeeklyNoteForDate: async (date) => {
+  openWeeklyNoteForDate: async (date, options) => {
     const state = get()
     const settings = normalizeVaultSettings(state.vaultSettings)
     if (!settings.weeklyNotes.enabled) return
@@ -9793,14 +10345,14 @@ export const useStore = create<Store>((set, get) => {
       }
     }
     // Focus the editor so `i` starts insert immediately (see openDailyNoteForDate).
-    requestEditorFocus()
+    requestEditorFocus({ read: !!existing && options?.readIfExisting === true })
   },
 
-  openThisWeekWeeklyNote: async () => {
-    await get().openWeeklyNoteForDate(new Date())
+  openThisWeekWeeklyNote: async (options) => {
+    await get().openWeeklyNoteForDate(new Date(), options)
   },
 
-  openMonthlyNoteForDate: async (date) => {
+  openMonthlyNoteForDate: async (date, options) => {
     const state = get()
     const settings = normalizeVaultSettings(state.vaultSettings)
     if (!settings.monthlyNotes.enabled) return
@@ -9818,11 +10370,11 @@ export const useStore = create<Store>((set, get) => {
       }
     }
     // Focus the editor so `i` starts insert immediately (see openDailyNoteForDate).
-    requestEditorFocus()
+    requestEditorFocus({ read: !!existing && options?.readIfExisting === true })
   },
 
-  openThisMonthMonthlyNote: async () => {
-    await get().openMonthlyNoteForDate(new Date())
+  openThisMonthMonthlyNote: async (options) => {
+    await get().openMonthlyNoteForDate(new Date(), options)
   },
 
   setTemplatePaletteOpen: (open) =>
@@ -10038,6 +10590,10 @@ export const useStore = create<Store>((set, get) => {
     set({ contentAlign: align })
     savePrefs(collectPrefs(get()))
   },
+  setNoteCoverPlacement: (placement) => {
+    set({ noteCoverPlacement: placement })
+    savePrefs(collectPrefs(get()))
+  },
   setTagsCollapsed: (collapsed) => {
     set({ tagsCollapsed: collapsed })
     savePrefs(collectPrefs(get()))
@@ -10137,6 +10693,67 @@ export const useStore = create<Store>((set, get) => {
   setConnectionsCursorIndex: (idx) => set({ connectionsCursorIndex: idx }),
   setOutlineCursorIndex: (idx) => set({ outlineCursorIndex: idx }),
   setConnectionPreview: (preview) => set({ connectionPreview: preview }),
+  openLinkPopover: async (popover) => {
+    const request = ++linkPopoverRequest
+    const path = popover.path
+    if (path && !get().noteContents[path]) {
+      let content: NoteContent
+      try {
+        content = await readNoteContent(path, get())
+      } catch (err) {
+        console.error('openLinkPopover readNote failed', err)
+        return
+      }
+      if (request !== linkPopoverRequest) return
+      set((s) =>
+        s.noteContents[path]
+          ? {}
+          : {
+              noteContents: { ...s.noteContents, [path]: content },
+              noteDirty: { ...s.noteDirty, [path]: false }
+            }
+      )
+    }
+    if (request !== linkPopoverRequest) return
+    const replaced = get().linkPopover?.path
+    if (replaced && replaced !== path) closingLinkPopoverPaths.add(replaced)
+    set({ linkPopover: { ...popover, serial: ++linkPopoverSerial } })
+    if (replaced && replaced !== path) void releaseLinkPopoverNote(replaced)
+  },
+  pinLinkPopover: () => {
+    const popover = get().linkPopover
+    if (!popover || popover.mode === 'pinned') return
+    set({ linkPopover: { ...popover, mode: 'pinned' } })
+  },
+  showNoteInLinkPopover: async (path) => {
+    const popover = get().linkPopover
+    if (!popover) return
+    await get().openLinkPopover({ ...popover, path, mode: 'pinned', focus: true, created: true })
+  },
+  closeLinkPopover: () => {
+    linkPopoverRequest++
+    const popover = get().linkPopover
+    if (!popover) return
+    const path = popover.path
+    if (path) closingLinkPopoverPaths.add(path)
+    set({ linkPopover: null })
+    if (path) void releaseLinkPopoverNote(path)
+  },
+  createNoteInPlace: trackNoteWrite(null, async (folder, subpath, title) => {
+    try {
+      const meta = await window.zen.createNote(folder, title, subpath)
+      rememberEditModeForCreatedNote(meta.path)
+      emitNoteEvent('note-created', meta.path)
+      set((s) => ({
+        notes: s.notes.some((n) => n.path === meta.path) ? s.notes : [...s.notes, meta]
+      }))
+      await get().refreshNotes()
+      return get().notes.find((n) => n.path === meta.path) ?? meta
+    } catch (err) {
+      console.error('createNoteInPlace failed', err)
+      return null
+    }
+  }),
   setEditorViewRef: (view) =>
     set({
       editorViewRef: view,
@@ -10432,6 +11049,7 @@ export const useStore = create<Store>((set, get) => {
       const ensured = ensureActivePane(nextLayout, s.activePaneId)
       const stillOpen =
         s.pinnedRefPath === path ||
+        linkPopoverHolds(s, path) ||
         allLeaves(nextLayout).some((l) => l.tabs.includes(path))
       const contents = { ...s.noteContents }
       const dirty = { ...s.noteDirty }
@@ -10504,6 +11122,7 @@ export const useStore = create<Store>((set, get) => {
       // including the pinned-reference pane.
       const stillOpen =
         cur.pinnedRefPath === path ||
+        linkPopoverHolds(cur, path) ||
         allLeaves(layout).some((l) => l.tabs.includes(path))
       const nextContents = { ...contents }
       const nextDirty = { ...dirty }
@@ -10561,6 +11180,7 @@ export const useStore = create<Store>((set, get) => {
       layout = splitLeaf(layout, targetPaneId, edge, newLeaf)
       const stillOpen =
         cur.pinnedRefPath === path ||
+        linkPopoverHolds(cur, path) ||
         allLeaves(layout).some((l) => l.tabs.includes(path))
       const nextContents = { ...contents }
       const nextDirty = { ...dirty }

@@ -19,13 +19,14 @@ import {
   ViewPlugin,
   type ViewUpdate
 } from '@codemirror/view'
+import { revealedSelectionRanges, sourceRevealChanged } from './cm-source-reveal'
 import { useStore } from '../store'
 import { isSameFileBlockLink, isSameFileHeadingLink, resolveWikilinkTarget } from './wikilinks'
 import { openDatabaseFromWikilink, openWikilinkTarget } from './wikilink-navigation'
 import { createNoteFromLinkNow, offerCreateNoteFromLink } from './create-note-from-link'
 import { openWikilinkAttachment } from './open-wikilink-attachment'
-import { resolveAssetPathAmong } from './asset-path-resolution'
-import { listDatabaseLinkTargets, resolveDatabaseWikilink } from './database-links'
+import { listDatabaseLinkTargets } from './database-links'
+import { wikilinkReaches } from './unresolved-links'
 import { setHoveredLink } from './hovered-link'
 
 // Same shape as the Preview pipeline (remarkWikilinks).
@@ -41,10 +42,11 @@ const bracketMark = Decoration.mark({ class: 'cm-wikilink-bracket' })
 const refreshWikilinksEffect = StateEffect.define<null>()
 
 /**
- * Whether a wikilink target reaches something: a note, a spot in this note, a
- * `.base` database, or a file in the vault. Anything else would create a note
- * when followed, and is drawn as unresolved (#768). Mirrors the reading view's
- * `broken` decision in Preview.tsx.
+ * Whether a wikilink target reaches something (`wikilinkReaches`): a note, a
+ * spot in this note, a `.base` database, or a file in the vault. Anything else
+ * would create a note when followed, and is drawn as unresolved (#768).
+ * Mirrors the reading view's `broken` decision in Preview.tsx, and is the same
+ * call the Unresolved Links view makes for every link in the vault.
  *
  * Decorations rebuild on every selection change, and note resolution scans
  * the whole notes list, so answers are memoized until any input changes.
@@ -60,7 +62,7 @@ interface ResolverCache {
 }
 let resolverCache: ResolverCache | null = null
 
-function wikilinkResolves(target: string): boolean {
+export function wikilinkResolves(target: string): boolean {
   const s = useStore.getState()
   // A surface that mounts the editor with a partial store (tests, the
   // standalone windows) has no vault lists to check against. A link there is
@@ -98,12 +100,11 @@ function wikilinkResolves(target: string): boolean {
   if (cached != null) return cached
   let resolves = true
   try {
-    resolves =
-      resolveWikilinkTarget(notes, target) != null ||
-      isSameFileHeadingLink(target) ||
-      isSameFileBlockLink(target) ||
-      resolveDatabaseWikilink(resolverCache.databases, target) != null ||
-      resolveAssetPathAmong(assetFiles, selectedPath ?? '', target) != null
+    resolves = wikilinkReaches(target, selectedPath ?? '', {
+      notes,
+      databases: resolverCache.databases,
+      assets: assetFiles
+    })
   } catch {
     resolves = true
   }
@@ -116,7 +117,7 @@ function wikilinkResolves(target: string): boolean {
  * literal text, not a link, so it should render as code (matching the Preview
  * pipeline, whose remark transform never visits code nodes). (#248)
  */
-function isInsideCode(state: EditorView['state'], pos: number): boolean {
+export function isInsideCode(state: EditorView['state'], pos: number): boolean {
   let node = syntaxTree(state).resolveInner(pos, 1)
   while (node) {
     const n = node.name
@@ -132,7 +133,7 @@ function selectionTouches(
   from: number,
   to: number
 ): boolean {
-  for (const range of state.selection.ranges) {
+  for (const range of revealedSelectionRanges(state)) {
     if (range.empty) {
       if (range.from >= from && range.from <= to) return true
     } else if (Math.max(range.from, from) < Math.min(range.to, to)) {
@@ -223,7 +224,16 @@ const wikilinkRenderPlugin = ViewPlugin.fromClass(
       const refreshed = update.transactions.some((tr) =>
         tr.effects.some((effect) => effect.is(refreshWikilinksEffect))
       )
-      if (refreshed || update.docChanged || update.selectionSet || update.viewportChanged) {
+      if (
+        refreshed ||
+        update.docChanged ||
+        update.selectionSet ||
+        sourceRevealChanged(update) ||
+        update.viewportChanged ||
+        // A parse cut short by its time budget finishes in a later update
+        // that changes nothing else.
+        syntaxTree(update.startState) !== syntaxTree(update.state)
+      ) {
         this.decorations = buildDecorations(update.view)
       }
     }

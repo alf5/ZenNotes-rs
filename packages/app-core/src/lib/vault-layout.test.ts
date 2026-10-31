@@ -5,12 +5,14 @@ import {
   assetFolderSubpath,
   classifyDateNote,
   dailyNoteLocationForDate,
+  dateNoteForTitle,
   dateNoteFolderMayBelongToDatePattern,
   dateNoteDirectoryDisplayLabel,
   favoriteFolderKey,
   folderForVaultRelativePath,
   isCalendarToggleAvailable,
   isFavoriteFolderKey,
+  noteFolderLabel,
   noteFolderSubpath,
   normalizeVaultSettings,
   resolveCreateLocation,
@@ -617,6 +619,50 @@ describe('folderForVaultRelativePath with remapped system folders (#398)', () =>
   })
 })
 
+describe('noteFolderLabel: the folder note search, the buffer switcher and the [[ picker show', () => {
+  const inboxMode = { primaryNotesLocation: 'inbox' } as VaultSettings
+  const rootMode = { primaryNotesLocation: 'root' } as VaultSettings
+
+  it('shows a main-area folder without the area directory, in either vault mode', () => {
+    expect(noteFolderLabel({ folder: 'inbox', path: 'inbox/Projects/Atlas/n.md' }, inboxMode)).toBe(
+      'Projects/Atlas'
+    )
+    expect(noteFolderLabel({ folder: 'inbox', path: 'Projects/Atlas/n.md' }, rootMode)).toBe(
+      'Projects/Atlas'
+    )
+  })
+
+  it('follows a remapped notes area', () => {
+    const remapped = {
+      primaryNotesLocation: 'inbox',
+      systemFolderPaths: { inbox: '00 - Notes' }
+    } as VaultSettings
+    expect(noteFolderLabel({ folder: 'inbox', path: '00 - Notes/Projects/n.md' }, remapped)).toBe(
+      'Projects'
+    )
+  })
+
+  it('leaves a note at the top of the main area for the caller to label', () => {
+    expect(noteFolderLabel({ folder: 'inbox', path: 'inbox/n.md' }, inboxMode)).toBe('')
+    expect(noteFolderLabel({ folder: 'inbox', path: 'n.md' }, rootMode)).toBe('')
+  })
+
+  it('keeps the area directory for every other area, as it is named on disk', () => {
+    expect(noteFolderLabel({ folder: 'archive', path: 'archive/2025/Atlas/n.md' }, inboxMode)).toBe(
+      'archive/2025/Atlas'
+    )
+    expect(noteFolderLabel({ folder: 'archive', path: 'archive/n.md' }, rootMode)).toBe('archive')
+    expect(noteFolderLabel({ folder: 'quick', path: 'quick/n.md' }, inboxMode)).toBe('quick')
+    const remapped = {
+      primaryNotesLocation: 'inbox',
+      systemFolderPaths: { archive: '99 - Archive' }
+    } as VaultSettings
+    expect(noteFolderLabel({ folder: 'archive', path: '99 - Archive/2025/n.md' }, remapped)).toBe(
+      '99 - Archive/2025'
+    )
+  })
+})
+
 describe('favorites', () => {
   it('discriminates folder keys from note paths by the colon', () => {
     expect(isFavoriteFolderKey('inbox:Projects')).toBe(true)
@@ -918,3 +964,60 @@ describe('normalizeVaultSettings: harper', () => {
     expect(normalizeVaultSettings(base).harper).toBeUndefined()
   })
 })
+
+describe('dateNoteForTitle', () => {
+  const withPeriodic = (overrides: Partial<VaultSettings> = {}): VaultSettings =>
+    normalizeVaultSettings({
+      dailyNotes: { enabled: true, directory: 'Daily Notes' },
+      weeklyNotes: { enabled: true, directory: 'Weekly Notes' },
+      monthlyNotes: { enabled: true, directory: 'Monthly Notes' },
+      ...overrides
+    } as Partial<VaultSettings> as VaultSettings)
+
+  it('names the daily note a dead [[2026-11-03]] points at', () => {
+    const info = dateNoteForTitle('2026-11-03', withPeriodic())
+    expect(info?.kind).toBe('daily')
+    expect(info?.date.getFullYear()).toBe(2026)
+    expect(info?.date.getMonth()).toBe(10)
+    expect(info?.date.getDate()).toBe(3)
+    // And creating it lands where the calendar looks for it.
+    expect(dailyNoteLocationForDate(info!.date, withPeriodic())).toEqual({
+      title: '2026-11-03',
+      subpath: 'Daily Notes'
+    })
+  })
+
+  it('names weekly and monthly notes by their own patterns', () => {
+    const week = dateNoteForTitle('2026-W45', withPeriodic())
+    expect(week?.kind).toBe('weekly')
+    expect(weeklyNoteLocationForDate(week!.date, withPeriodic()).title).toBe('2026-W45')
+    const month = dateNoteForTitle('2026-11', withPeriodic())
+    expect(month?.kind).toBe('monthly')
+    expect(month?.date.getMonth()).toBe(10)
+  })
+
+  it('follows a custom title pattern, and only its exact output', () => {
+    const settings = withPeriodic({
+      dailyNotes: { enabled: true, directory: 'Journal', titlePattern: 'dd.MM.yyyy' }
+    } as Partial<VaultSettings>)
+    expect(dateNoteForTitle('03.11.2026', settings)?.kind).toBe('daily')
+    expect(dateNoteForTitle('2026-11-03', settings)).toBeNull()
+    expect(dateNoteForTitle('3.11.2026', settings)).toBeNull()
+  })
+
+  it('names nothing for a kind that is off, a day that does not exist, or other titles', () => {
+    expect(dateNoteForTitle('2026-11-03', normalizeVaultSettings(null))).toBeNull()
+    expect(dateNoteForTitle('2026-02-30', withPeriodic())).toBeNull()
+    expect(dateNoteForTitle('Meeting notes', withPeriodic())).toBeNull()
+    expect(dateNoteForTitle('2026-11-03 standup', withPeriodic())).toBeNull()
+  })
+
+  it('names nothing when the title alone cannot pin the date', () => {
+    // The year lives in the directory, so `11-03` could be any year's.
+    const settings = withPeriodic({
+      dailyNotes: { enabled: true, directory: 'yyyy', titlePattern: 'MM-dd' }
+    } as Partial<VaultSettings>)
+    expect(dateNoteForTitle('11-03', settings)).toBeNull()
+  })
+})
+

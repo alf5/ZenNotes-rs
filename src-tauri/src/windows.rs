@@ -7,7 +7,9 @@
 //! are not reproduced). Floating note, quick-capture and external-file windows
 //! all work against the active vault.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WebviewWindow};
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
@@ -66,6 +68,8 @@ pub fn toggle_quick_capture(app: &AppHandle, pinned: bool) -> Result<(), String>
             // until it hides (upstream last-window.ts).
             crate::tray::schedule_quit_if_only_quick_capture_left(app);
         } else {
+            // A hidden panel opens on the display under the pointer (#976).
+            move_quick_capture_to_pointer_display(app, &win);
             let _ = win.show();
             let _ = win.set_focus();
         }
@@ -86,6 +90,119 @@ pub fn toggle_quick_capture(app: &AppHandle, pinned: bool) -> Result<(), String>
         .build()
         .map_err(|e| format!("Failed to open quick capture: {e}"))?;
     Ok(())
+}
+
+/// A rectangle on the virtual desktop, in physical pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ScreenRect {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+impl ScreenRect {
+    fn contains(&self, r: &ScreenRect) -> bool {
+        r.x >= self.x
+            && r.y >= self.y
+            && r.x + r.width as i32 <= self.x + self.width as i32
+            && r.y + r.height as i32 <= self.y + self.height as i32
+    }
+}
+
+/// Port of upstream `quickCaptureBoundsOnDisplay`: `None` on the display it is
+/// already on; back on a display it has been on, where it last sat there if
+/// that still fits; otherwise the same relative place in the work area, shrunk
+/// to fit and kept inside it.
+fn quick_capture_bounds_on_display(
+    bounds: ScreenRect,
+    from: (&str, ScreenRect),
+    to: (&str, ScreenRect),
+    remembered: Option<ScreenRect>,
+) -> Option<ScreenRect> {
+    if from.0 == to.0 {
+        return None;
+    }
+    let (source, area) = (from.1, to.1);
+    if let Some(spot) = remembered.filter(|spot| area.contains(spot)) {
+        return Some(spot);
+    }
+    let width = bounds.width.min(area.width);
+    let height = bounds.height.min(area.height);
+    let fraction = |at: i32, size: u32, start: i32, span: u32| {
+        if span == 0 {
+            return 0.5;
+        }
+        ((at as f64 + size as f64 / 2.0 - start as f64) / span as f64).clamp(0.0, 1.0)
+    };
+    let place = |f: f64, start: i32, span: u32, size: u32| {
+        let at = (start as f64 + f * span as f64 - size as f64 / 2.0).round() as i32;
+        at.clamp(start, start + (span - size) as i32)
+    };
+    Some(ScreenRect {
+        x: place(fraction(bounds.x, bounds.width, source.x, source.width), area.x, area.width, width),
+        y: place(fraction(bounds.y, bounds.height, source.y, source.height), area.y, area.height, height),
+        width,
+        height,
+    })
+}
+
+/// Where the panel last sat on each display it left, by monitor name.
+static QUICK_CAPTURE_SPOTS: LazyLock<Mutex<HashMap<String, ScreenRect>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn monitor_area(monitor: &tauri::Monitor) -> (String, ScreenRect) {
+    let area = monitor.work_area();
+    let name = monitor
+        .name()
+        .cloned()
+        .unwrap_or_else(|| format!("{},{}", monitor.position().x, monitor.position().y));
+    (
+        name,
+        ScreenRect {
+            x: area.position.x,
+            y: area.position.y,
+            width: area.size.width,
+            height: area.size.height,
+        },
+    )
+}
+
+/// Best effort: a compositor that hides the pointer or refuses to place
+/// windows (Wayland) leaves the panel to the window manager, as before.
+fn move_quick_capture_to_pointer_display(app: &AppHandle, win: &WebviewWindow) {
+    let (Ok(position), Ok(size), Ok(pointer), Ok(Some(current))) = (
+        win.outer_position(),
+        win.outer_size(),
+        app.cursor_position(),
+        win.current_monitor(),
+    ) else {
+        return;
+    };
+    let Ok(Some(target)) = app.monitor_from_point(pointer.x, pointer.y) else {
+        return;
+    };
+    let bounds = ScreenRect {
+        x: position.x,
+        y: position.y,
+        width: size.width,
+        height: size.height,
+    };
+    let (from, to) = (monitor_area(&current), monitor_area(&target));
+    let Ok(mut spots) = QUICK_CAPTURE_SPOTS.lock() else {
+        return;
+    };
+    let next = quick_capture_bounds_on_display(
+        bounds,
+        (&from.0, from.1),
+        (&to.0, to.1),
+        spots.get(&to.0).copied(),
+    );
+    if let Some(next) = next {
+        spots.insert(from.0, bounds);
+        let _ = win.set_size(tauri::PhysicalSize::new(next.width, next.height));
+        let _ = win.set_position(tauri::PhysicalPosition::new(next.x, next.y));
+    }
 }
 
 pub fn set_quick_capture_pinned(app: &AppHandle, pinned: bool) {
@@ -204,4 +321,45 @@ pub fn move_external_file_to_vault(
         vault_root: root.to_string_lossy().to_string(),
         rel_path: meta.path,
     })
+}
+
+#[cfg(test)]
+mod quick_capture_placement_tests {
+    use super::*;
+
+    const LEFT: ScreenRect = ScreenRect { x: 0, y: 0, width: 1920, height: 1080 };
+    const RIGHT: ScreenRect = ScreenRect { x: 1920, y: 0, width: 1280, height: 720 };
+
+    fn panel(x: i32, y: i32) -> ScreenRect {
+        ScreenRect { x, y, width: 640, height: 420 }
+    }
+
+    #[test]
+    fn stays_put_on_its_own_display() {
+        let next = quick_capture_bounds_on_display(panel(10, 10), ("a", LEFT), ("a", LEFT), None);
+        assert_eq!(next, None);
+    }
+
+    #[test]
+    fn a_centered_panel_opens_centered_on_another_display() {
+        let next = quick_capture_bounds_on_display(panel(640, 330), ("a", LEFT), ("b", RIGHT), None);
+        assert_eq!(next, Some(panel(1920 + 320, 150)));
+    }
+
+    #[test]
+    fn returns_to_where_it_last_sat_while_that_still_fits() {
+        let spot = panel(2000, 20);
+        let next = quick_capture_bounds_on_display(panel(0, 0), ("a", LEFT), ("b", RIGHT), Some(spot));
+        assert_eq!(next, Some(spot));
+        let gone = panel(9000, 20);
+        let next = quick_capture_bounds_on_display(panel(0, 0), ("a", LEFT), ("b", RIGHT), Some(gone));
+        assert_ne!(next, Some(gone));
+    }
+
+    #[test]
+    fn shrinks_to_fit_and_stays_inside_a_smaller_work_area() {
+        let small = ScreenRect { x: -500, y: 0, width: 500, height: 300 };
+        let next = quick_capture_bounds_on_display(panel(1280, 660), ("a", LEFT), ("b", small), None);
+        assert_eq!(next, Some(ScreenRect { x: -500, y: 0, width: 500, height: 300 }));
+    }
 }

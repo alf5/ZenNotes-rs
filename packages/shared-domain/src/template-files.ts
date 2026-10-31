@@ -114,6 +114,29 @@ export function mergeTemplates(
   })
 }
 
+/**
+ * The template an id names in a merged list. Editing a built-in saves an
+ * edited copy under its own id, carrying the built-in's id as `builtinId`,
+ * and mergeTemplates drops the built-in it replaces. Anything that stored
+ * the built-in's id (the daily, weekly and monthly note templates) has to
+ * reach the edited copy through it: looking up the id alone found nothing,
+ * so a daily note came out blank once the Daily Note template was edited.
+ */
+export function findTemplate(
+  templates: readonly NoteTemplate[],
+  id: string | undefined
+): NoteTemplate | undefined {
+  if (!id) return undefined
+  return templates.find((t) => t.id === id) ?? templates.find((t) => t.builtinId === id)
+}
+
+/** The id a setting should store for `template`: the built-in's for an
+ *  edited copy, so resetting the copy falls back to the built-in rather
+ *  than leaving the setting pointing at a file that is gone. */
+export function templateSettingId(template: NoteTemplate): string {
+  return template.builtinId ?? template.id
+}
+
 export interface ComposeTemplateInput {
   name: string
   description?: string

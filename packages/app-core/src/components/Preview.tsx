@@ -6,6 +6,7 @@ import type { NoteMeta } from "@shared/ipc";
 import { renderMarkdown } from "../lib/markdown";
 import { substituteLiveTokens } from "../lib/live-template-tokens";
 import {
+  setMarkdownDetectCodeLanguages,
   setMarkdownLooseMathDelimiters,
   setMarkdownMathRenderer,
 } from "../lib/markdown-settings";
@@ -82,6 +83,7 @@ import { NoteHoverPreview } from "./NoteHoverPreview";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import { ArrowUpRightIcon, MaximizeIcon, MinimizeIcon } from "./icons";
 import { promptApp } from "../lib/prompt-requests";
+import { assetMoveTargetDir, buildMoveAssetPrompt } from "../lib/move-asset";
 import { renderMermaidSvg } from "../lib/mermaid-render";
 import { confirmApp } from "../lib/confirm-requests";
 
@@ -195,6 +197,7 @@ export const Preview = memo(function Preview({
   const ref = useRef<HTMLDivElement | null>(null);
   const mathRenderer = useStore((s) => s.mathRenderer);
   const looseMathDelimiters = useStore((s) => s.looseMathDelimiters);
+  const detectCodeLanguages = useStore((s) => s.detectCodeLanguages);
   const vault = useStore((s) => s.vault);
   const notes = useStore((s) => s.notes);
   const folders = useStore((s) => s.folders);
@@ -345,6 +348,7 @@ export const Preview = memo(function Preview({
     // takes effect on the very next render without an effect-ordering race.
     setMarkdownMathRenderer(mathRenderer);
     setMarkdownLooseMathDelimiters(looseMathDelimiters);
+    setMarkdownDetectCodeLanguages(detectCodeLanguages);
     return renderMarkdown(
       substituteLiveTokens(expandedForCurrent ?? markdown, noteUpdatedAt),
     );
@@ -356,6 +360,7 @@ export const Preview = memo(function Preview({
     noteUpdatedAt,
     mathRenderer,
     looseMathDelimiters,
+    detectCodeLanguages,
     customCodeLanguagesRevision,
   ]);
   const assetFilesKey = useMemo(
@@ -1051,23 +1056,10 @@ export const Preview = memo(function Preview({
       items.push({
         label: "Move…",
         onSelect: async () => {
-          const target = await promptApp({
-            title: "Move asset",
-            description: "Enter a vault-relative folder path. Leave empty to move to the vault root.",
-            initialValue: currentDir,
-            placeholder: "media/screenshots",
-            okLabel: "Move",
-            allowEmptySubmit: true,
-            validate: (value) => {
-              const clean = value.trim();
-              if (clean.includes("..")) return "Path cannot contain ..";
-              if (clean.split("/").includes(".zennotes")) {
-                return "Cannot move assets into internal ZenNotes files";
-              }
-              return null;
-            },
-          });
-          if (target === null || target === currentDir) return;
+          const value = await promptApp(buildMoveAssetPrompt(currentDir));
+          if (value === null) return;
+          const target = assetMoveTargetDir(value);
+          if (target === currentDir) return;
           await moveAsset(vaultRel, target);
         },
       });

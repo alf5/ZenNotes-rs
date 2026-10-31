@@ -1569,6 +1569,39 @@ textarea,
   margin-left: 0;
   margin-right: 0;
 }
+/* Note covers (`banner:` frontmatter). One responsive height everywhere, so
+   the editor and the Read view line up in split mode; pinned covers sit above
+   both surfaces and stay shorter, since they never scroll away. */
+.zen-note-cover {
+  height: clamp(8rem, 26vh, 17.5rem);
+}
+.zen-note-cover.zen-note-cover-pinned {
+  height: clamp(6rem, 18vh, 12rem);
+}
+/* A cover's credit shows with its buttons, on hover or focus. A screen that
+   cannot hover (a phone, a tablet) shows it all the time, or it would never
+   show at all. A Gallery card's thumbnail follows the same rule. */
+@media (hover: none) {
+  .zen-note-cover .zen-note-cover-credit,
+  .zen-gallery-cover .zen-note-cover-credit {
+    opacity: 1;
+  }
+}
+/* In the editor the cover lives in a block widget inside the capped text
+   column; the bleed variables (measured by cm-note-cover.ts) widen it to the
+   whole pane. The gap under it is padding: CodeMirror measures a block widget
+   by its border box, and a vertical margin would throw its height map off. */
+.cm-editor .cm-note-cover-slot {
+  position: relative;
+  z-index: 201; /* above the sticky line-number gutter */
+  margin-left: calc(-1 * var(--zen-cover-bleed-left, 0px));
+  margin-right: calc(-1 * var(--zen-cover-bleed-right, 0px));
+  padding-bottom: 1.25rem;
+  cursor: default;
+}
+.cm-editor.zen-has-note-cover .cm-scroller {
+  padding-top: 0;
+}
 .cm-editor .cm-line {
   padding: 0;
   line-height: var(--z-editor-line-height, 1.7);
@@ -2236,6 +2269,19 @@ html[data-completed-task-style="gray-strikethrough"] .cm-editor .cm-task-done * 
   border-bottom-left-radius: 8px;
   border-bottom-right-radius: 8px;
 }
+/* A cover's lines folded into one (cm-cover-fold.ts): muted like a key, and
+ * always one row. A name too long for the card ends in an ellipsis, with the
+ * whole line in the tooltip. */
+.cm-editor .cm-frontmatter-cover {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: top;
+  color: rgb(var(--z-grey-1));
+  cursor: text;
+}
 .cm-editor .tok-heading,
 .cm-editor .tok-heading1,
 .cm-editor .tok-heading2,
@@ -2290,6 +2336,16 @@ html[data-completed-task-style="gray-strikethrough"] .cm-editor .cm-task-done * 
 .cm-editor .tok-url {
   color: rgb(var(--z-accent));
   text-decoration: none;
+}
+/* `tok-link` is a mark around the highlight spans (cm-markdown-links.ts), so a
+   label inside a list, heading, or emphasis sits in a span whose own body color
+   (`.tok-list` and friends above) beats the color the mark passes down. The
+   label span takes the accent back here. `:where()` keeps the specificity of
+   the `.tok-link` class this span carried before 2.50.3, so the tokens declared
+   after this rule (link brackets, titles, labels) keep their own colors, and an
+   undefined `[ref]`, which gets no mark, stays prose. */
+.cm-editor :where(.tok-link) .tok-link-syntax {
+  color: rgb(var(--z-accent));
 }
 .cm-editor .tok-monospace {
   font-family: var(
@@ -3485,6 +3541,9 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
 }
 .cm-editor .local-pdf-embed-header {
   display: flex;
+  /* At phone width the actions take a line of their own below the name
+     rather than running past the card's clipped edge. */
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   padding: 8px 12px;
@@ -3554,8 +3613,14 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
      truncating text never gets a chance to ellipsis. */
   min-width: 0;
   display: inline-flex;
+  /* A phone-width card has no room for the name and the badge on one line:
+     the badge goes under the name instead of squeezing the name to nothing
+     and spilling over the Preview button beside the card (Dave, Discord,
+     2026-10-27). Nothing inside paints past the dashed edge. */
+  flex-wrap: wrap;
+  overflow: hidden;
   align-items: center;
-  gap: 8px;
+  gap: 2px 8px;
   padding: 8px 12px;
   border-radius: 10px;
   border: 1px dashed rgb(var(--z-accent) / 0.45);
@@ -3583,7 +3648,11 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
   font-size: 0.9rem;
 }
 :is(.prose-zen, .cm-editor) .local-asset-pinned-ref-badge {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 0.7rem;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -3827,6 +3896,37 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
   text-decoration-color: rgb(var(--z-accent));
 }
 
+/* The link popover's editor. The main editor's 20vh bottom runway, centered
+   measure and 32px gutter are sized for a whole pane; in a floating card they
+   only push the note out of sight. */
+.zn-link-popover .cm-editor {
+  height: auto;
+  max-height: 100%;
+  font-size: calc(var(--z-editor-font-size, 16px) * 0.875);
+}
+/* A card a few lines tall cannot spend most of them on a 2em title. */
+.zn-link-popover .cm-editor .tok-heading1 {
+  font-size: 1.45em;
+}
+.zn-link-popover .cm-editor .tok-heading2 {
+  font-size: 1.3em;
+}
+.zn-link-popover .cm-editor .tok-heading3 {
+  font-size: 1.15em;
+}
+.zn-link-popover .cm-editor .cm-scroller {
+  padding: 8px 0 12px 0;
+}
+.zn-link-popover .cm-editor .cm-content {
+  max-width: none;
+  margin: 0;
+  padding: 0 14px;
+}
+.zn-link-popover [data-link-popover-editor] {
+  display: flex;
+  flex-direction: column;
+}
+
 .prose-hover-preview {
   font-size: 13px;
   line-height: var(--z-editor-line-height, 1.7);
@@ -4054,7 +4154,11 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
    it again. The roles mirror the mermaid themeVariables they replace: nodes on
    bg-2 with a bg-3 border, subgraphs on bg-softer, edges in grey-1, and the
    chart series in the same order pie slices and git branches used. Fonts are
-   not set here: Pele writes the font it measured with into the SVG. */
+   not set here: Pele writes the font it measured with into the SVG.
+   `--pele-fg-on-light` and `--pele-fg-on-dark` stay at Pele's near-black and
+   white on purpose: they colour text on a fill the author chose (`classDef`,
+   `style`, a sequence `rect`), so they have to contrast with that fill, and no
+   theme token is dark in every theme or light in every theme. */
 .pele {
   --pele-bg: rgb(var(--z-bg));
   --pele-fg: rgb(var(--z-fg-1));
@@ -5448,31 +5552,84 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
   border-bottom-left-radius: 8px;
   border-bottom-right-radius: 8px;
 }
-/* Language label pinned top-right of the block; clicking it copies the code,
-   so there is no separate copy or fold control. */
-.cm-wysiwyg .cm-code-flair {
+/* Language button and copy button pinned top-right of the block (#1014). The
+   language button opens the code block language picker; a guessed language
+   reads muted, in a dashed outline, since it is not in the file. */
+.cm-wysiwyg .cm-code-flair-bar {
   position: absolute;
   top: 3px;
   right: 8px;
   z-index: 2;
-  padding: 1px 7px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
   font-family: var(--z-interface-font, system-ui, sans-serif);
   font-size: 11px;
   line-height: 1.5;
+  /* One line however narrow the pane: "python · detected" must not wrap a
+     letter per line. */
+  white-space: nowrap;
+}
+.cm-wysiwyg .cm-code-flair,
+.cm-wysiwyg .cm-code-copy {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
   color: rgb(var(--z-grey-1));
+  font: inherit;
   cursor: pointer;
   user-select: none;
-  transition: background 0.12s ease, color 0.12s ease;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
 }
-.cm-wysiwyg .cm-code-flair:hover {
+.cm-wysiwyg .cm-code-flair {
+  gap: 3px;
+  padding: 0 5px 0 7px;
+}
+.cm-wysiwyg .cm-code-copy {
+  justify-content: center;
+  width: 20px;
+  height: 18px;
+  padding: 0;
+}
+.cm-wysiwyg .cm-code-flair svg,
+.cm-wysiwyg .cm-code-copy svg {
+  flex-shrink: 0;
+}
+.cm-wysiwyg .cm-code-flair svg {
+  opacity: 0.7;
+}
+.cm-wysiwyg .cm-code-flair:hover,
+.cm-wysiwyg .cm-code-copy:hover {
   background: rgb(var(--z-bg-3) / 0.85);
   color: rgb(var(--z-fg));
 }
-.cm-wysiwyg .cm-code-flair.is-copied {
+.cm-wysiwyg .cm-code-flair.is-detected {
+  border-style: dashed;
+  border-color: rgb(var(--z-grey-1) / 0.45);
+  color: rgb(var(--z-grey-1) / 0.85);
+  font-style: italic;
+}
+.cm-wysiwyg .cm-code-flair.is-detected:hover {
+  border-color: rgb(var(--z-grey-1) / 0.7);
+}
+.cm-wysiwyg .cm-code-copy.is-copied {
   color: rgb(var(--z-accent));
+}
+/* A finger needs more than the 18px a pointer does: grow the hit area to
+   44px tall past the button, without moving the code under it. */
+@media (pointer: coarse) {
+  .cm-wysiwyg .cm-code-flair-bar {
+    gap: 6px;
+  }
+  .cm-wysiwyg .cm-code-flair::after,
+  .cm-wysiwyg .cm-code-copy::after {
+    content: '';
+    position: absolute;
+    inset: -13px -3px;
+  }
 }
 
 /* --- WYSIWYG live table widget (Edit mode) --------------------------- */
@@ -5670,6 +5827,14 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
   color: rgb(var(--z-accent));
   text-decoration: underline;
   text-decoration-color: rgb(var(--z-accent) / 0.4);
+}
+/* A [[wikilink]] whose note does not exist yet: the editor's
+   `.cm-wikilink-broken` look, muted with a dashed underline, so a cell link
+   that would create a note reads apart from one that opens a note. */
+.cm-table-widget .cm-table-cell a.wikilink.broken {
+  color: theme("colors.ink.500");
+  text-decoration-style: dashed;
+  text-decoration-color: theme("colors.ink.400");
 }
 .cm-table-widget td[align="center"] .cm-table-cell,
 .cm-table-widget th[align="center"] .cm-table-cell {

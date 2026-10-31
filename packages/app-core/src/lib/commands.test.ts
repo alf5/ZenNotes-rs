@@ -374,6 +374,30 @@ describe('New Note in Current Folder (#403)', () => {
   })
 })
 
+describe('New Quick Note title (#1008)', () => {
+  it('titles with the bare timestamp after the prefix field is cleared', async () => {
+    const { buildCommands, useStore } = await loadCommands()
+    const createAndOpen = vi.fn()
+    useStore.setState({ notes: [], quickNoteDateTitle: false, createAndOpen })
+    // The Settings field calls the setter with null once it is empty.
+    useStore.getState().setQuickNoteTitlePrefix(null)
+    expect(useStore.getState().quickNoteTitlePrefix).toBeNull()
+    buildCommands().find((c) => c.id === 'note.new.quick')?.run()
+    const title = createAndOpen.mock.calls[0]?.[2]?.title as string
+    expect(title).toMatch(/^\d{4}-\d{2}-\d{2} \d{4}$/)
+  })
+
+  it('keeps the prefix the field holds', async () => {
+    const { buildCommands, useStore } = await loadCommands()
+    const createAndOpen = vi.fn()
+    useStore.setState({ notes: [], quickNoteDateTitle: true, createAndOpen })
+    useStore.getState().setQuickNoteTitlePrefix('  Scratch  ')
+    buildCommands().find((c) => c.id === 'note.new.quick')?.run()
+    const title = createAndOpen.mock.calls[0]?.[2]?.title as string
+    expect(title).toMatch(/^Scratch \d{4}-\d{2}-\d{2}$/)
+  })
+})
+
 describe('note commands for a trashed note (#712)', () => {
   const note = {
     path: 'trash/Old idea.md',
@@ -466,5 +490,246 @@ describe('saved Tasks filters (#731)', () => {
     await entries[1].run()
     expect(openTasksView).toHaveBeenCalledTimes(1)
     expect(useStore.getState().tasksFilter).toBe('@project:alpha')
+  })
+})
+
+describe('reference pane commands with a per-note pin', () => {
+  // A PDF card pins for its note only. The phones close their full-screen
+  // reference sheet with Hide Reference Pane, and only saw the global pin, so
+  // Done and Back did nothing over a PDF (Dave, Discord, 2026-10-27).
+  it('offers Hide and Focus for a pin on the open note, and Hide hides it', async () => {
+    const { buildCommands, runAppCommand, useStore } = {
+      ...(await loadCommands()),
+      ...(await import('../commands'))
+    }
+    useStore.setState({
+      selectedPath: 'inbox/The trip.md',
+      noteRefs: { 'inbox/The trip.md': { path: 'assets/Tourtickets.pdf', kind: 'asset' } },
+      pinnedRefPath: null,
+      pinnedRefVisible: true
+    })
+    const ids = buildCommands().map((c) => c.id)
+    expect(ids).toContain('ref.toggle')
+    expect(ids).toContain('ref.focus')
+
+    expect(await runAppCommand('ref.toggle')).toBe(true)
+    expect(useStore.getState().pinnedRefVisible).toBe(false)
+  })
+
+  it('stays out of the palette with no pin for the open note or globally', async () => {
+    const { buildCommands, useStore } = await loadCommands()
+    useStore.setState({
+      selectedPath: 'inbox/Other.md',
+      noteRefs: { 'inbox/The trip.md': { path: 'assets/Tourtickets.pdf', kind: 'asset' } },
+      pinnedRefPath: null
+    })
+    expect(buildCommands().some((c) => c.id === 'ref.toggle')).toBe(false)
+  })
+})
+
+describe('commands that open a note to read', () => {
+  const today = new Date()
+  const iso = [
+    today.getFullYear(),
+    String(today.getMonth() + 1).padStart(2, '0'),
+    String(today.getDate()).padStart(2, '0')
+  ].join('-')
+  const daily = {
+    path: `inbox/Daily Notes/${iso}.md`,
+    title: iso,
+    folder: 'inbox',
+    siblingOrder: 0,
+    createdAt: 0,
+    updatedAt: 1,
+    size: 0,
+    tags: [],
+    wikilinks: [],
+    assetEmbeds: [],
+    hasAttachments: false,
+    excerpt: ''
+  } as never
+
+  async function commandsWith(notes: never[]) {
+    const { buildCommands, useStore } = await loadCommands()
+    const settings = useStore.getState().vaultSettings
+    useStore.setState({
+      notes,
+      selectedPath: 'inbox/Plan.md',
+      activeNote: { folder: 'inbox', path: 'inbox/Plan.md', title: 'Plan', body: '' } as never,
+      closedTabStack: [{ path: 'inbox/Old.md' }] as never,
+      vaultSettings: {
+        ...settings,
+        dailyNotes: { ...settings.dailyNotes, enabled: true, directory: 'Daily Notes' },
+        weeklyNotes: { ...settings.weeklyNotes, enabled: true },
+        monthlyNotes: { ...settings.monthlyNotes, enabled: true }
+      }
+    })
+    return { commands: buildCommands({ includeUnavailable: true }), useStore }
+  }
+
+  it('marks only the commands that go to a note already there', async () => {
+    const { commands } = await commandsWith([])
+    const marked = commands.filter((c) => c.opensToRead).map((c) => c.id).sort()
+    expect(marked).toEqual([
+      'nav.back',
+      'nav.forward',
+      'nav.toggle-recent',
+      'note.daily.rollover',
+      'note.daily.today',
+      'note.monthly.thisMonth',
+      'note.weekly.thisWeek',
+      'tab.close',
+      'tab.next',
+      'tab.previous',
+      'tab.reopen'
+    ])
+    // History and tabs only ever land on notes that exist.
+    const navigation = ['nav.back', 'nav.forward', 'nav.toggle-recent', 'tab.close', 'tab.next']
+    for (const id of [...navigation, 'tab.previous', 'tab.reopen']) {
+      expect(commands.find((c) => c.id === id)?.opensToRead?.()).toBe(true)
+    }
+    // Writing commands keep the editor focus.
+    const writing = ['note.new.inbox', 'note.new.quick', 'note.new.here', 'task.new', 'template.create']
+    for (const id of [...writing, 'database.new', 'drawing.new', 'embed.drawing.new', 'nav.focus.editor']) {
+      expect(commands.find((c) => c.id === id)?.opensToRead).toBeUndefined()
+    }
+  })
+
+  it("reads today's daily note when it is there, and writes in one the command creates", async () => {
+    let { commands } = await commandsWith([])
+    expect(commands.find((c) => c.id === 'note.daily.today')?.opensToRead?.()).toBe(false)
+    expect(commands.find((c) => c.id === 'note.daily.rollover')?.opensToRead?.()).toBe(false)
+    ;({ commands } = await commandsWith([daily]))
+    expect(commands.find((c) => c.id === 'note.daily.today')?.opensToRead?.()).toBe(true)
+    expect(commands.find((c) => c.id === 'note.daily.rollover')?.opensToRead?.()).toBe(true)
+  })
+
+  it('asks the periodic openers to open an existing note to read', async () => {
+    const { commands, useStore } = await commandsWith([daily])
+    const openTodayDailyNote = vi.fn().mockResolvedValue(undefined)
+    const openThisWeekWeeklyNote = vi.fn().mockResolvedValue(undefined)
+    const openThisMonthMonthlyNote = vi.fn().mockResolvedValue(undefined)
+    useStore.setState({ openTodayDailyNote, openThisWeekWeeklyNote, openThisMonthMonthlyNote })
+    await commands.find((c) => c.id === 'note.daily.today')?.run()
+    await commands.find((c) => c.id === 'note.weekly.thisWeek')?.run()
+    await commands.find((c) => c.id === 'note.monthly.thisMonth')?.run()
+    expect(openTodayDailyNote).toHaveBeenCalledWith({ readIfExisting: true })
+    expect(openThisWeekWeeklyNote).toHaveBeenCalledWith({ readIfExisting: true })
+    expect(openThisMonthMonthlyNote).toHaveBeenCalledWith({ readIfExisting: true })
+  })
+})
+
+describe('Toggle Status Bar (Piotr on Discord)', () => {
+  it('flips the setting and saves it with the other preferences', async () => {
+    const { buildCommands, useStore } = await loadCommands()
+    expect(useStore.getState().showStatusBar).toBe(true)
+    const toggle = buildCommands().find((c) => c.id === 'view.status-bar')
+    expect(toggle?.title).toBe('Toggle Status Bar')
+    await toggle?.run()
+    expect(useStore.getState().showStatusBar).toBe(false)
+    expect(JSON.parse(localStorage.getItem('zen:prefs:v2') ?? '{}').showStatusBar).toBe(false)
+    await buildCommands().find((c) => c.id === 'view.status-bar')?.run()
+    expect(useStore.getState().showStatusBar).toBe(true)
+  })
+})
+
+describe('commands that give a phone editor the keyboard', () => {
+  it('names only commands that exist', async () => {
+    const { buildCommands } = await loadCommands()
+    const { EDITOR_FOCUS_COMMAND_IDS } = await import('./command-landing')
+    const ids = new Set(buildCommands({ includeUnavailable: true }).map((c) => c.id))
+    for (const id of EDITOR_FOCUS_COMMAND_IDS) expect(ids.has(id), id).toBe(true)
+  })
+})
+
+describe('a key the user gave a command (#971)', () => {
+  const active = { folder: 'inbox', path: 'inbox/Plan.md', title: 'Plan', body: '' } as never
+
+  it('shows on the palette row, ahead of the key the command already had', async () => {
+    const { buildCommands, useStore } = await loadCommands()
+    useStore.setState({ activeNote: active, commandKeymaps: { 'note.favorite': 'F5' } })
+    const favorite = buildCommands().find((c) => c.id === 'note.favorite')
+    expect(favorite?.shortcut).toBe('F5 / Space l s')
+    expect(favorite?.builtinShortcut).toBe('Space l s')
+    const trash = buildCommands().find((c) => c.id === 'note.trash')
+    expect(trash?.shortcut).toBeUndefined()
+  })
+
+  it('shows a leader sequence only while Vim mode is on', async () => {
+    const { buildCommands, useStore } = await loadCommands()
+    useStore.setState({ activeNote: active, commandKeymaps: { 'note.trash': 'Leader x t' } })
+    expect(buildCommands().find((c) => c.id === 'note.trash')?.shortcut).toBe('Space x t')
+    useStore.setState({ vimMode: false })
+    expect(buildCommands().find((c) => c.id === 'note.trash')?.shortcut).toBeUndefined()
+  })
+
+  it('gives the shared guards a reason, and the note family its own', async () => {
+    const { buildCommands, useStore } = await loadCommands()
+    useStore.setState({ activeNote: null, selectedPath: null, editorViewRef: null })
+    const all = buildCommands({ includeUnavailable: true })
+    const reason = (id: string): string | undefined =>
+      all.find((c) => c.id === id)?.unavailableReason?.()
+    expect(reason('note.rename')).toBe('Rename Note… needs an open note')
+    expect(reason('editor.reflow-paragraph')).toBe('Reflow Paragraph needs a note open in the editor')
+    expect(reason('note.trash')).toBe('Move Note to Trash needs an open note')
+    useStore.setState({ activeNote: { ...(active as object), folder: 'trash' } as never })
+    expect(reason('note.trash')).toBe('This note is already in the Trash')
+    expect(reason('note.unarchive')).toBe('Unarchive Note only works on a note in the Archive')
+  })
+})
+
+describe('Vim-only keys in the palette', () => {
+  it('names no leader chord, pane prefix, ex command or Vim key with Vim mode off', async () => {
+    const { buildCommands, useStore } = await loadCommands()
+    const { getKeymapDisplay } = await import('./keymaps')
+    useStore.setState({ vimMode: false, activeNote: null })
+    const overrides = useStore.getState().keymapOverrides
+    const leader = getKeymapDisplay(overrides, 'vim.leaderPrefix')
+    const pane = getKeymapDisplay(overrides, 'vim.panePrefix')
+    // The commands whose key is a Vim-group key, checked by id: on Linux and
+    // Windows a Vim key can read the same as a global one (Vim's Ctrl+O and
+    // Open File's Mod+O both show as Ctrl+O), so a display match alone would
+    // flag a key that works in both modes.
+    const vimKeyed: Record<string, string> = {
+      'fold.heading': getKeymapDisplay(overrides, 'vim.foldCurrent'),
+      'fold.unfold-heading': getKeymapDisplay(overrides, 'vim.unfoldCurrent'),
+      'fold.all': getKeymapDisplay(overrides, 'vim.foldAll'),
+      'fold.unfold-all': getKeymapDisplay(overrides, 'vim.unfoldAll'),
+      'nav.back': getKeymapDisplay(overrides, 'vim.historyBack'),
+      'nav.forward': getKeymapDisplay(overrides, 'vim.historyForward')
+    }
+    const leaks = buildCommands({ includeUnavailable: true })
+      .filter((command) => {
+        const shown = command.shortcut ?? ''
+        if (!shown) return false
+        return (
+          shown.startsWith(':') ||
+          (!!leader && shown.startsWith(`${leader} `)) ||
+          (!!pane && shown.startsWith(`${pane} `)) ||
+          (command.id in vimKeyed && shown === vimKeyed[command.id])
+        )
+      })
+      .map((command) => `${command.id}: ${command.shortcut}`)
+    expect(leaks).toEqual([])
+  })
+
+  it('still names them with Vim mode on', async () => {
+    const { buildCommands, useStore } = await loadCommands()
+    useStore.setState({ vimMode: true })
+    const shown = new Map(buildCommands({ includeUnavailable: true }).map((c) => [c.id, c.shortcut ?? '']))
+    expect(shown.get('note.format')).toBe(':format')
+    expect(shown.get('note.favorite')).toMatch(/\S+ \S+ \S+/)
+  })
+})
+
+describe('Go Back and Go Forward keys', () => {
+  it('show the global keys with Vim mode off', async () => {
+    const { buildCommands, useStore } = await loadCommands()
+    const { getKeymapDisplay } = await import('./keymaps')
+    useStore.setState({ vimMode: false })
+    const overrides = useStore.getState().keymapOverrides
+    const shown = new Map(buildCommands({ includeUnavailable: true }).map((c) => [c.id, c.shortcut ?? '']))
+    expect(shown.get('nav.back')).toBe(getKeymapDisplay(overrides, 'global.historyBack'))
+    expect(shown.get('nav.forward')).toBe(getKeymapDisplay(overrides, 'global.historyForward'))
   })
 })

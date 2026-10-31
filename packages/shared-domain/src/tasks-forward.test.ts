@@ -35,7 +35,7 @@ describe('task forwarding primitives (#316)', () => {
     const tasks = parseTasksFromBody('- [ ] open\n- [x] done\n- [>] gone [[X]]', ctx)
     const g = groupTasks(tasks, new Date(2026, 0, 1))
     expect(g.forwarded.map((t) => t.content)).toEqual(['gone [[X]]'])
-    expect(g.today.map((t) => t.content)).toEqual(['open'])
+    expect(g.undated.map((t) => t.content)).toEqual(['open'])
     expect(g.done.map((t) => t.content)).toEqual(['done'])
   })
 })

@@ -2,7 +2,7 @@
 
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
 import { forceParsing } from '@codemirror/language'
-import { EditorState } from '@codemirror/state'
+import { Compartment, EditorState } from '@codemirror/state'
 import { EditorView } from '@codemirror/view'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { liveTemplateTokenExtension } from './cm-live-template-tokens'
@@ -80,5 +80,31 @@ describe('liveTemplateTokenExtension (#784)', () => {
     storeState.notes = [{ path: 'inbox/Evergreen.md', updatedAt: savedAt }]
     for (const fn of listeners) fn(storeState, prev)
     expect(view.dom.querySelector('.cm-live-token')?.textContent).toBe('2026-08-25')
+  })
+
+  it('redraws when only the syntax tree changes, as when a cut parse finishes', () => {
+    // Swapping the language in changes the tree and nothing else: no edit, no
+    // selection, no viewport. A parse that finishes after its time budget ran
+    // out reaches the plugin the same way.
+    storeState.notes = [{ path: 'inbox/Evergreen.md', updatedAt: savedAt }]
+    const language = new Compartment()
+    const doc = '```\n{{modified_date}}\n```\n\nUpdated: {{modified_date}}'
+    const parent = document.createElement('div')
+    document.body.append(parent)
+    const view = new EditorView({
+      parent,
+      state: EditorState.create({
+        doc,
+        selection: { anchor: 0 },
+        extensions: [language.of([]), liveTemplateTokenExtension]
+      })
+    })
+    views.push(view)
+    // No tree yet, so nothing says the fence is code.
+    expect(view.dom.querySelectorAll('.cm-live-token')).toHaveLength(2)
+    view.dispatch({ effects: language.reconfigure(markdown({ base: markdownLanguage })) })
+    forceParsing(view, doc.length, 5000)
+    expect(view.dom.querySelectorAll('.cm-live-token')).toHaveLength(1)
+    expect(view.dom.textContent).toContain('```{{modified_date}}```')
   })
 })

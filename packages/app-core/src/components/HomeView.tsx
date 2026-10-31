@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import type { NoteMeta } from '@shared/ipc'
-import { filterTasksForDisplay, type VaultTask } from '@shared/tasks'
+import { filterTasksForDisplay, inferDailyTaskDueDates, type VaultTask } from '@shared/tasks'
 import { useStore } from '../store'
 import { computeTasksRender } from '../lib/tasks-filter'
 import { focusEditorNormalMode } from '../lib/editor-focus'
 import { InlineMarkdown } from '../lib/inline-markdown'
 import { getSystemFolderLabel } from '../lib/system-folder-labels'
 import {
+  buildDailyNoteDateByPath,
   isPrimaryNotesAtRoot,
   noteFolderSubpath,
   resolveFavoriteItems,
@@ -33,6 +34,7 @@ const MAX_TASKS = 6
 const NO_COLLAPSE = {
   today: false,
   upcoming: false,
+  undated: false,
   waiting: false,
   forwarded: false,
   done: false,
@@ -220,15 +222,19 @@ export function HomeView({
     [sidebarOpen, onShowSidebar, setView]
   )
 
+  // Today is what is due today or overdue, as in the Tasks list: a task in a
+  // daily note takes the note's date there, and an undated one waits under No
+  // due date instead (#990), so Home applies the same daily-note dates.
   const { today, overdueCount } = useMemo(() => {
+    const dueByPath = buildDailyNoteDateByPath(notes, vaultSettings)
     const render = computeTasksRender(
-      filterTasksForDisplay(vaultTasks, showArchivedTasks),
+      inferDailyTaskDueDates(filterTasksForDisplay(vaultTasks, showArchivedTasks), dueByPath),
       '',
       new Date(now),
       NO_COLLAPSE
     )
     return { today: render.groups.today, overdueCount: render.groups.overdueCount }
-  }, [vaultTasks, showArchivedTasks, now])
+  }, [vaultTasks, showArchivedTasks, now, notes, vaultSettings])
 
   const visibleTasks = today.slice(0, MAX_TASKS)
   const hiddenTaskCount = today.length - visibleTasks.length

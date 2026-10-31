@@ -18,8 +18,6 @@ import type { NoteContent, NoteMeta } from '@shared/ipc'
 import {
   filterTasksForDisplay,
   inferDailyTaskDueDates,
-  isTaskOpen,
-  parseTasksFromBody,
   tasksDueOn,
   type VaultTask,
 } from '@shared/tasks'
@@ -31,8 +29,17 @@ import {
   normalizeVaultSettings,
   weeklyNoteTitle,
 } from '../lib/vault-layout'
-import { getISOWeek, getISOWeekYear } from '../lib/template-render'
-import { countWords } from '../lib/word-count'
+import { getISOWeek } from '../lib/template-render'
+import {
+  addMonths,
+  buildGrid,
+  dotsFor,
+  isoDateStr,
+  isoWeekStr,
+  measureNote,
+  parseIsoDate,
+  type NoteStats,
+} from '../lib/calendar-data'
 import { InlineMarkdown } from '../lib/inline-markdown'
 import { CloudTaskConflictIndicator } from './CloudTaskConflictIndicator'
 import { resolveWeekStartDay } from '../lib/week-start'
@@ -41,97 +48,78 @@ import { confirmApp } from '../lib/confirm-requests'
 import { usePanelResize } from '../lib/use-panel-resize'
 import { PanelResizeHandle } from './PanelResizeHandle'
 import { ContextMenu, type ContextMenuItem } from './ContextMenu'
+import { LazyNoteHoverPreview as NoteHoverPreview } from './LazyNoteHoverPreview'
 import { buildTaskMenuItems } from '../lib/task-context-menu'
+import { taskTail } from '../lib/task-tail'
 
 const FULL_DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-const WORDS_PER_DOT = 80
-const MAX_DOTS = 3
 const HOVER_DELAY_MS = 280
-
-interface NoteStats {
-  /** `${updatedAt}:${size}` — re-read when this changes. */
-  sig: string
-  words: number
-  openTasks: number
-}
-
-function addMonths(d: Date, n: number): Date {
-  return new Date(d.getFullYear(), d.getMonth() + n, 1)
-}
-
-/** 6-row (42-cell) grid for the month containing `anchor`, starting on `firstDay`. */
-function buildGrid(anchor: Date, firstDay: number): Date[] {
-  const first = new Date(anchor.getFullYear(), anchor.getMonth(), 1)
-  const offset = (first.getDay() - firstDay + 7) % 7
-  const start = new Date(first.getFullYear(), first.getMonth(), 1 - offset)
-  return Array.from({ length: 42 }, (_, i) => {
-    const d = new Date(start)
-    d.setDate(start.getDate() + i)
-    return d
-  })
-}
-
-function isoDateStr(d: Date): string {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(
-    d.getDate()
-  ).padStart(2, '0')}`
-}
-
-/** Parse a `YYYY-MM-DD` string back to a local-midnight Date. */
-function parseIsoDate(iso: string): Date {
-  const [y, m, d] = iso.split('-').map((s) => Number.parseInt(s, 10))
-  return new Date(y, m - 1, d)
-}
-
-// Every task state, so the "lossless" promise below actually holds for a `[>]`
-// or `[/]` task too: an unmatched prefix falls back to the token-stripped
-// `content`, which an inline edit would then write back over the real line.
-// (#512)
-const TASK_PREFIX_RE = /^\s*(?:>\s*)*(?:[-+*]|\d+[.)])\s+\[[ xX>/-]\]\s?/
-
-/** The raw text after the checkbox (content + any `due:`/`!priority` tokens) —
- *  what an inline edit field prefills with so editing is lossless. */
-function taskTail(task: VaultTask): string {
-  const m = task.rawText.match(TASK_PREFIX_RE)
-  return m ? task.rawText.slice(m[0].length) : task.content
-}
-
-function isoWeekStr(d: Date): string {
-  return `${getISOWeekYear(d)}-W${String(getISOWeek(d)).padStart(2, '0')}`
-}
 
 function monthLabel(d: Date): string {
   return d.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })
 }
 
-/** Number of word-count dots for a note (0 = none/unknown), plus a faint flag. */
-function dotsFor(stats: NoteStats | undefined): { count: number; faint: boolean } {
-  if (!stats) return { count: 1, faint: true } // exists but not measured yet
-  if (stats.words === 0) return { count: 1, faint: true }
-  return { count: Math.min(MAX_DOTS, Math.ceil(stats.words / WORDS_PER_DOT)), faint: false }
-}
-
 export function CalendarPanel({
   note,
-  fitWidth
+  fitWidth,
+  onOpen,
+  initialDate,
+  focusAdd
 }: {
-  note: NoteContent
+  /** The note beside the calendar, or null where the calendar stands on its
+   *  own with no note open (the phones' Calendar entry); it then orients on
+   *  today. */
+  note: NoteContent | null
   /** Width to render at when the pane has less room than the width the user
    *  chose; see lib/side-panel-fit. (#805) */
   fitWidth?: number
+  /** Called once the calendar has opened a day, a week or a task's line, even
+   *  a note that was already open, so a host that shows it as a sheet can put
+   *  it away. Beside a note it stays open, so the pane passes none. */
+  onOpen?: () => void
+  /** A `YYYY-MM-DD` day to open on instead of the active note's date or
+   *  today: the phones' home-screen widget opens the calendar on the day it
+   *  shows. Read when the panel mounts; a host that needs another day
+   *  remounts it. */
+  initialDate?: string
+  /** Focus "Add a task for …" on mount, for the widget's add button. */
+  focusAdd?: boolean
 }): JSX.Element {
   const notes = useStore((s) => s.notes)
   const vaultSettings = useStore((s) => s.vaultSettings)
   const vimMode = useStore((s) => s.vimMode)
-  const openDailyNoteForDate = useStore((s) => s.openDailyNoteForDate)
-  const openWeeklyNoteForDate = useStore((s) => s.openWeeklyNoteForDate)
+  const storeOpenDailyNote = useStore((s) => s.openDailyNoteForDate)
+  const storeOpenWeeklyNote = useStore((s) => s.openWeeklyNoteForDate)
   const vaultTasks = useStore((s) => s.vaultTasks)
   const showArchivedTasks = useStore((s) => s.showArchivedTasks)
   const tasksLoading = useStore((s) => s.tasksLoading)
   const refreshTasks = useStore((s) => s.refreshTasks)
   const addTaskForDate = useStore((s) => s.addTaskForDate)
   const toggleTaskFromList = useStore((s) => s.toggleTaskFromList)
-  const openTaskAt = useStore((s) => s.openTaskAt)
+  const storeOpenTask = useStore((s) => s.openTaskAt)
+  const onOpenRef = useRef(onOpen)
+  onOpenRef.current = onOpen
+  const openDailyNoteForDate = useCallback(
+    async (date: Date) => {
+      await storeOpenDailyNote(date)
+      onOpenRef.current?.()
+    },
+    [storeOpenDailyNote]
+  )
+  const openWeeklyNoteForDate = useCallback(
+    async (date: Date) => {
+      await storeOpenWeeklyNote(date)
+      onOpenRef.current?.()
+    },
+    [storeOpenWeeklyNote]
+  )
+  const openTaskAt = useCallback(
+    async (task: VaultTask) => {
+      await storeOpenTask(task)
+      onOpenRef.current?.()
+    },
+    [storeOpenTask]
+  )
   const applyTaskMutation = useStore((s) => s.applyTaskMutation)
   const moveTaskToDate = useStore((s) => s.moveTaskToDate)
   const deleteTaskFromList = useStore((s) => s.deleteTaskFromList)
@@ -152,10 +140,24 @@ export function CalendarPanel({
   )
 
   // The date the active note represents — what the calendar orients around.
-  const active = useMemo(() => classifyDateNote(note, vaultSettings), [note, vaultSettings])
+  const active = useMemo(
+    () => (note ? classifyDateNote(note, vaultSettings) : null),
+    [note, vaultSettings]
+  )
   const refDate = active?.date ?? new Date()
   const activeDayIso = active?.kind === 'daily' ? isoDateStr(active.date) : null
   const activeWeekIso = active?.kind === 'weekly' ? isoWeekStr(active.date) : null
+  // The host's day wins only beside the note the panel mounted with; once the
+  // active note changes the calendar follows it again. Keyed on the path, not
+  // cleared in an effect, so a re-run effect still sees it.
+  const mountedWith = useRef({
+    path: note?.path,
+    iso: initialDate && /^\d{4}-\d{2}-\d{2}$/.test(initialDate) && isoDateStr(parseIsoDate(initialDate)) === initialDate
+      ? initialDate
+      : undefined
+  })
+  const hostIso = mountedWith.current.path === note?.path ? mountedWith.current.iso : undefined
+  const orientDate = hostIso ? parseIsoDate(hostIso) : refDate
 
   const today = useMemo(() => {
     const now = new Date()
@@ -164,14 +166,14 @@ export function CalendarPanel({
   const todayIso = isoDateStr(today)
 
   const [anchor, setAnchor] = useState(
-    () => new Date(refDate.getFullYear(), refDate.getMonth(), 1)
+    () => new Date(orientDate.getFullYear(), orientDate.getMonth(), 1)
   )
 
   // Re-center on the active note whenever it changes.
   useEffect(() => {
-    setAnchor(new Date(refDate.getFullYear(), refDate.getMonth(), 1))
+    setAnchor(new Date(orientDate.getFullYear(), orientDate.getMonth(), 1))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [note.path])
+  }, [note?.path])
 
   // Calendar key -> NoteMeta for the daily/weekly notes that exist on disk.
   const { dailyByDate, weeklyByWeek } = useMemo(
@@ -182,12 +184,17 @@ export function CalendarPanel({
   // The day the user has clicked to inspect (tasks + actions shown below the
   // grid). Defaults to the active daily note's date, else today; follows the
   // active note as it changes.
-  const [selectedIso, setSelectedIso] = useState<string>(() => activeDayIso ?? todayIso)
+  const [selectedIso, setSelectedIso] = useState<string>(() => hostIso ?? activeDayIso ?? todayIso)
   useEffect(() => {
-    setSelectedIso(activeDayIso ?? todayIso)
+    setSelectedIso(hostIso ?? activeDayIso ?? todayIso)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [note.path])
+  }, [note?.path])
   const selectedDate = useMemo(() => parseIsoDate(selectedIso), [selectedIso])
+  // A finger has no double-click, so on a touch screen a second tap on the
+  // selected day opens it, the way a phone's own calendar opens the day it
+  // shows. The first tap still only selects, which keeps that week's tasks
+  // below a tap away; a mouse keeps click to select, double-click to open.
+  const touchPressRef = useRef(false)
   const selectedWeekIso = useMemo(() => isoWeekStr(selectedDate), [selectedDate])
 
   // Tasks scheduled for the selected day. Tasks written in a daily note inherit
@@ -244,6 +251,12 @@ export function CalendarPanel({
   // keys from the editor). Mirrors the big calendar.
   const panelRef = useRef<HTMLElement>(null)
   const addInputRef = useRef<HTMLInputElement>(null)
+  useEffect(() => {
+    if (!focusAdd) return
+    const frame = requestAnimationFrame(() => addInputRef.current?.focus())
+    return () => cancelAnimationFrame(frame)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
   const focusedTaskRef = useRef<HTMLDivElement | null>(null)
   const [activeTaskIndex, setActiveTaskIndex] = useState(0)
   const [grabbedTask, setGrabbedTask] = useState<VaultTask | null>(null)
@@ -311,12 +324,7 @@ export function CalendarPanel({
           }
         }
         if (cancelled) return
-        const openTasks = parseTasksFromBody(body, {
-          path: n.path,
-          title: n.title,
-          folder: n.folder,
-        }).filter(isTaskOpen).length
-        updates.push([n.path, { sig, words: countWords(body), openTasks }])
+        updates.push([n.path, measureNote(n, body)])
       }
       if (!cancelled && updates.length) {
         setStats((prev) => {
@@ -377,7 +385,10 @@ export function CalendarPanel({
   )
 
   // --- Hover preview -------------------------------------------------------
-  const [hover, setHover] = useState<{ meta: NoteMeta; right: number; top: number } | null>(null)
+  const [hover, setHover] = useState<{
+    meta: NoteMeta
+    rect: Pick<DOMRect, 'left' | 'top' | 'right' | 'bottom' | 'width' | 'height'>
+  } | null>(null)
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const clearHover = useCallback(() => {
     if (hoverTimer.current) clearTimeout(hoverTimer.current)
@@ -386,10 +397,14 @@ export function CalendarPanel({
   }, [])
   const armHover = useCallback((el: HTMLElement, meta: NoteMeta | undefined) => {
     if (!meta) return
-    const rect = el.getBoundingClientRect()
+    // The preview opens beside the panel, level with the day, so it never
+    // covers the days and weeks the pointer moves on to next.
+    const day = el.getBoundingClientRect()
+    const edge = el.closest('[data-calendar-panel]')?.getBoundingClientRect().left ?? day.left
+    const rect = { left: edge, right: edge, width: 0, top: day.top, bottom: day.bottom, height: day.height }
     if (hoverTimer.current) clearTimeout(hoverTimer.current)
     hoverTimer.current = setTimeout(() => {
-      setHover({ meta, right: window.innerWidth - rect.left + 8, top: rect.top })
+      setHover({ meta, rect })
     }, HOVER_DELAY_MS)
   }, [])
   useEffect(() => clearHover, [clearHover])
@@ -1012,7 +1027,16 @@ export function CalendarPanel({
                   key={iso}
                   type="button"
                   data-cal-day={iso}
-                  onClick={() => dailyEnabled && setSelectedIso(iso)}
+                  onPointerDown={(e) => {
+                    touchPressRef.current = e.pointerType === 'touch'
+                  }}
+                  onClick={() => {
+                    const touch = touchPressRef.current
+                    touchPressRef.current = false
+                    if (!dailyEnabled) return
+                    if (touch && iso === selectedIso) void openOrCreateDay(day, iso)
+                    else setSelectedIso(iso)
+                  }}
                   onDoubleClick={() => void openOrCreateDay(day, iso)}
                   onContextMenu={(e) => openDayMenu(e, day, iso)}
                   onMouseEnter={(e) => armHover(e.currentTarget, dayMeta)}
@@ -1209,21 +1233,10 @@ export function CalendarPanel({
         </div>
       )}
 
-      {hover && (
-        <div
-          className="fixed z-50 max-w-[260px] rounded-lg border border-paper-300/75 bg-paper-50 p-3 shadow-[0_12px_28px_-18px_rgb(var(--z-shadow)/0.8)]"
-          style={{ right: hover.right, top: Math.min(hover.top, window.innerHeight - 140) }}
-        >
-          <div className="truncate text-xs font-semibold text-ink-900">{hover.meta.title}</div>
-          {hover.meta.excerpt ? (
-            <div className="mt-1 line-clamp-4 text-xs leading-5 text-ink-500">
-              {hover.meta.excerpt}
-            </div>
-          ) : (
-            <div className="mt-1 text-xs italic text-ink-400">Empty note</div>
-          )}
-        </div>
-      )}
+      {/* The day's note drawn as the note, the same preview a link gets. The
+          index excerpt runs every line together, so a day's plan would read
+          as one paragraph. */}
+      {hover && <NoteHoverPreview note={hover.meta} anchorRect={hover.rect} />}
 
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />

@@ -18,7 +18,7 @@ import type {
   WorkflowRunSummary,
   WorkflowUndoResult
 } from '@bridge-contract/workflows'
-import { slugifyTemplateName } from '@shared/template-files'
+import { findTemplate, slugifyTemplateName } from '@shared/template-files'
 import type { Diagnostic, Workflow, WorkflowOp } from '@shared/workflows/types'
 // Type only, so nothing here imports the store at runtime: this file stays the
 // pure half of running a workflow.
@@ -299,10 +299,11 @@ export function collectRunSideEffects(ops: readonly WorkflowOp[]): RunSideEffect
  * Find the template an `apply-template` step names.
  *
  * The reference is whatever the author typed as one token, so matching is
- * forgiving in a fixed order: the template's id (`custom:reading-notes`), its
- * display name ignoring case, then slug equality so `book-review` finds a
- * template named "Book Review". First match wins within each rule, which keeps
- * the answer stable when two templates share a slug.
+ * forgiving in a fixed order: the template's id (`custom:reading-notes`), the
+ * built-in id an edited copy stands in for, its display name ignoring case,
+ * then slug equality so `book-review` finds a template named "Book Review".
+ * First match wins within each rule, which keeps the answer stable when two
+ * templates share a slug.
  */
 export function findTemplateByRef(
   templates: readonly NoteTemplate[],
@@ -314,6 +315,9 @@ export function findTemplateByRef(
   for (const template of templates) {
     if (template.id.toLowerCase() === lower) return template
   }
+  // A built-in's id still names it after it was edited.
+  const byBuiltinId = findTemplate(templates, trimmed)
+  if (byBuiltinId) return byBuiltinId
   for (const template of templates) {
     if (template.name.toLowerCase() === lower) return template
   }

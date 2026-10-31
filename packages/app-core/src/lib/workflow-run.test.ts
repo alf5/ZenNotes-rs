@@ -317,6 +317,11 @@ describe('findTemplateByRef', () => {
     expect(findTemplateByRef(TEMPLATES, 'ADR')?.id).toBe('builtin.adr')
   })
 
+  it("finds an edited built-in by the built-in's id", () => {
+    const edited = template({ id: 'custom:adr', name: 'Decision record', builtinId: 'builtin.adr' })
+    expect(findTemplateByRef([template(), edited], 'builtin.adr')?.id).toBe('custom:adr')
+  })
+
   it('answers null for the unknown and the blank', () => {
     expect(findTemplateByRef(TEMPLATES, 'meeting-notes')).toBeNull()
     expect(findTemplateByRef(TEMPLATES, '  ')).toBeNull()

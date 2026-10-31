@@ -18,10 +18,11 @@ function mount(doc: string, selection?: EditorSelection | { anchor: number }): E
       extensions: [markdown({ base: markdownLanguage }), mathRenderExtension('katex')]
     })
   })
+  // The field rebuilds whenever the syntax tree changes, so finishing the parse
+  // is all a mount needs. Nothing edits the note after it: a note this short
+  // parses from scratch on every edit, under the same 20 ms budget, and a cut
+  // parse can stop before the quote around a $$ block.
   forceParsing(view, doc.length, 5000)
-  // Nudge a rebuild so decorations reflect the fully parsed tree.
-  view.dispatch({ changes: { from: doc.length, insert: ' ' } })
-  view.dispatch({ changes: { from: doc.length, to: doc.length + 1 } })
   return view
 }
 

@@ -102,8 +102,8 @@ export function DatePickerModal({
   }
 
   const hint = vimMode
-    ? 'h j k l or arrows move, t is today. PageUp/PageDown change the month, with Shift the year. Enter inserts.'
-    : 'Arrows move. PageUp/PageDown change the month, with Shift the year. Enter inserts.'
+    ? 'h j k l or arrows move, t is today. PageUp/PageDown change the month, with Shift the year. Enter picks the day.'
+    : 'Arrows move. PageUp/PageDown change the month, with Shift the year. Enter picks the day.'
 
   return (
     <Modal

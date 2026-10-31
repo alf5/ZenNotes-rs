@@ -8,7 +8,7 @@
 import type { AssetMeta, NoteMeta, VaultSettings } from '@shared/ipc'
 import type { FolderEntry } from '@shared/ipc'
 import type { SelectOptionsSource } from '@shared/databases'
-import { isPrimaryNotesAtRoot, noteFolderSubpath } from './vault-layout'
+import { isPrimaryNotesAtRoot, noteFolderLabel } from './vault-layout'
 import { listDatabaseLinkTargets, type DatabaseLinkTarget } from './database-links'
 
 /**
@@ -48,16 +48,16 @@ function stripMdExtension(value: string): string {
   return value.replace(/\.md$/i, '')
 }
 
-/** `folder/` prefix shown beside a note suggestion (empty at a root-mode root). */
+/** `folder/` prefix shown beside a note suggestion, the folder note search and
+ *  the buffer switcher show (`noteFolderLabel`); a note at the top of the
+ *  inbox shows `inbox/`, and nothing at a root-mode vault's root. */
 export function noteSubtitle(
   note: NoteMeta,
   vaultSettings: VaultSettings | null | undefined
 ): string {
-  const subpath = noteFolderSubpath(note, vaultSettings)
-  if (note.folder === 'inbox' && isPrimaryNotesAtRoot(vaultSettings)) {
-    return subpath ? `${subpath}/` : ''
-  }
-  return subpath ? `${subpath}/` : `${note.folder}/`
+  const folder = noteFolderLabel(note, vaultSettings)
+  if (folder) return `${folder}/`
+  return note.folder === 'inbox' && isPrimaryNotesAtRoot(vaultSettings) ? '' : `${note.folder}/`
 }
 
 export function assetSubtitle(asset: AssetMeta): string {

@@ -26,10 +26,19 @@
 export const SELF_KEYED_SURFACES = [
   // Runs its own vim-style motion grid.
   '[data-zen-db-grid]',
+  // The grid's Columns popover: j / k and x with Vim on, the arrows and
+  // Space with it off, and its Escape closes it rather than leaving the grid.
+  '[data-db-columns-menu]',
   '[data-workflow-list-pane]',
   '[data-workflow-canvas]',
   // Owns bracket region navigation before global Vim buffer prefixes.
-  '[data-atlas-view]'
+  '[data-atlas-view]',
+  // The link popover: its editor and its Create button own every key, and
+  // its Escape closes it rather than walking the sidebar.
+  '[data-link-popover]',
+  // A cover being repositioned: the arrows (and j/k with Vim on) move the
+  // image, Enter keeps the position and Escape puts it back.
+  '[data-note-cover-reposition]'
 ].join(', ')
 
 /**

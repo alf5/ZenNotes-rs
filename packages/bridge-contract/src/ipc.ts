@@ -112,6 +112,12 @@ export const IPC = {
   APP_UPDATER_GET_STATE: 'app-updater:get-state',
   APP_UPDATER_CHECK: 'app-updater:check',
   APP_USAGE_COUNT: 'app:usage-count',
+  UNSPLASH_SEARCH: 'unsplash:search',
+  UNSPLASH_TRACK_DOWNLOAD: 'unsplash:track-download',
+  UNSPLASH_KEY_STATUS: 'unsplash:key-status',
+  UNSPLASH_KEY_SAVE: 'unsplash:key-save',
+  UNSPLASH_KEY_TEST: 'unsplash:key-test',
+  UNSPLASH_KEY_CLEAR: 'unsplash:key-clear',
   APP_UPDATER_CHECK_WITH_UI: 'app-updater:check-with-ui',
   APP_UPDATER_DOWNLOAD: 'app-updater:download',
   APP_UPDATER_INSTALL: 'app-updater:install',
@@ -410,9 +416,16 @@ export interface AppUpdateState {
   totalBytes: number | null
   bytesPerSecond: number | null
   message: string
+  /**
+   * The original text of a failed check or download (headers, stack and
+   * all), for a Details disclosure and bug reports. Never part of `message`,
+   * which stays a sentence a person can act on (#1003). Optional because a
+   * host that never updates itself has nothing to put here.
+   */
+  detail?: string | null
 }
 
-export type NoteFolder = 'inbox' | 'quick' | 'archive' | 'trash'
+export type NoteFolder ='inbox' | 'quick' | 'archive' | 'trash'
 
 export type PrimaryNotesLocation = 'inbox' | 'root'
 
@@ -427,6 +440,16 @@ export interface FileLocationSetting {
   folder?: string
 }
 export const DEFAULT_FILE_LOCATION: FileLocationSetting = { mode: 'primary' }
+/** Where a share from the macOS Share menu is filed: `quick` → Quick Notes
+ *  (the default); `primary` → the primary notes location root; `folder` → the
+ *  `folder` subfolder of the primary location. No `active-note`: the app
+ *  files a share with no note in view. */
+export type ShareLocationMode = 'quick' | 'primary' | 'folder'
+export interface ShareLocationSetting {
+  mode: ShareLocationMode
+  /** Vault-relative subfolder used when `mode === 'folder'`, e.g. `Clippings`. */
+  folder?: string
+}
 export type FolderIconId =
   | 'folder'
   | 'bolt'
@@ -583,6 +606,11 @@ export interface VaultSettings {
   /** Where new task files (`#task`-tagged notes) are created; absent means the
    *  default (`primary`, i.e. the inbox). */
   tasksLocation?: FileLocationSetting
+  /** Where shares from the macOS Share menu are filed (share-inbox.ts); absent
+   *  means Quick Notes. A self-hosted server keeps it from 2.79
+   *  (`supportsSharesLocation`); an older one drops it on every save, so a
+   *  vault there files shares in Quick Notes. */
+  sharesLocation?: ShareLocationSetting
   /** Per-vault view overrides (#292); absent/empty means "inherit global". */
   view?: VaultViewSettings
   folderIcons: Record<string, FolderIconId>
@@ -670,6 +698,7 @@ export const DEFAULT_VAULT_SETTINGS: VaultSettings = {
   drawingsLocation: { mode: 'primary' },
   databasesLocation: { mode: 'primary' },
   tasksLocation: { mode: 'primary' },
+  sharesLocation: { mode: 'quick' },
   folderIcons: {},
   folderColors: {},
   favorites: [],
@@ -961,6 +990,11 @@ export interface ServerCapabilities {
    *  before 2.46, which keeps Settings, Templates read-only on the web client
    *  and on a desktop connected to that server (#723). */
   supportsCustomTemplates?: boolean
+  /** vault.json's `sharesLocation` survives the server's settings round
+   *  trip. Absent before 2.79, whose settings save drops it, so the desktop
+   *  keeps Default shares location hidden and the Share sheet says Quick
+   *  Notes for a vault on such a server. */
+  supportsSharesLocation?: boolean
 }
 
 export interface ServerSessionStatus {

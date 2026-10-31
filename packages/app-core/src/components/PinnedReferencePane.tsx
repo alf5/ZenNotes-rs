@@ -26,7 +26,9 @@ import {
   tooltips
 } from '@codemirror/view'
 import { vim } from '@replit/codemirror-vim'
-import { history, historyKeymap, indentWithTab } from '@codemirror/commands'
+import { history, indentWithTab } from '@codemirror/commands'
+import { scrollerClickFocus } from '../lib/cm-scroller-click-focus'
+import { appHistoryKeymap } from '../lib/history-keymap'
 import { vimAwareDefaultKeymap, vimAwareMarkdownKeymap, vimAwareSearchKeymap } from '../lib/cm-vim-default-keymap'
 import { isTouchPrimaryDevice, vimImeGuard } from '../lib/cm-vim-ime-guard'
 import { getKeymapBinding, type KeymapOverrides } from '../lib/keymaps'
@@ -46,6 +48,7 @@ import { autocompletion } from '@codemirror/autocomplete'
 import { useStore } from '../store'
 import type { LineNumberMode } from '../store'
 import { livePreviewPlugin } from '../lib/cm-live-preview'
+import { sourceRevealExtension, sourceRevealForNewNote } from '../lib/cm-source-reveal'
 import { frontmatterStyle, frontmatterTagExtension } from '../lib/cm-frontmatter'
 import { headingFolding } from '../lib/cm-heading-fold'
 import { slashCommandSource, slashCommandRender } from '../lib/cm-slash-commands'
@@ -60,7 +63,9 @@ import { hashtagSource } from '../lib/cm-hashtag-complete'
 import { frontmatterTagSource } from '../lib/cm-frontmatter-tag-complete'
 import { completionKeymapExtension, completionNavKeymap } from '../lib/cm-completion-nav'
 import { classifyLocalAssetHref, hrefFragment, type LocalAssetKind } from '../lib/local-assets'
+import { canShowPdfInline } from '../lib/pdf-inline'
 import { LazyPreview as Preview } from './LazyPreview'
+import { PdfOpenElsewhere } from './PdfOpenElsewhere'
 import { CloseIcon, PanelLeftIcon, PinIcon } from './icons'
 import { editorTabSize } from '../lib/editor-tab-size'
 import { appMarkdownSnippetExtension } from '../lib/markdown-snippets-config'
@@ -71,7 +76,7 @@ export const pinnedRefPaneId = PINNED_REF_PANE_ID
 
 const programmatic = Annotation.define<boolean>()
 
-const paperHighlight = HighlightStyle.define([
+export const paperHighlight = HighlightStyle.define([
   { tag: t.heading1, class: 'tok-heading1' },
   { tag: t.heading2, class: 'tok-heading2' },
   { tag: t.heading3, class: 'tok-heading3' },
@@ -131,7 +136,7 @@ function lineNumberExtension(mode: LineNumberMode): Extension {
   ]
 }
 
-function buildReferenceKeymap(vimMode: boolean, overrides: KeymapOverrides): Extension {
+export function buildReferenceKeymap(vimMode: boolean, overrides: KeymapOverrides): Extension {
   return keymap.of([
     // Note search must precede the find bar only while its binding is set.
     ...keyBindingsFor(getKeymapBinding(overrides, 'global.searchNotesNonVim'), () => {
@@ -142,7 +147,7 @@ function buildReferenceKeymap(vimMode: boolean, overrides: KeymapOverrides): Ext
     }),
     indentWithTab,
     ...vimAwareDefaultKeymap(vimMode),
-    ...historyKeymap,
+    ...appHistoryKeymap,
     ...vimAwareSearchKeymap(vimMode)
   ])
 }
@@ -241,6 +246,7 @@ export function PinnedReferencePane(): JSX.Element | null {
         extensions: [
           noteEditingLockExtension(() => ({ vault: useStore.getState().vault, path: viewPathRef.current })),
           appMarkdownSnippetExtension(),
+          sourceRevealExtension,
           vimCompartment.of(s0.vimMode ? vim() : []),
           // The same input-method guard as the main editor (#84, #464, #921).
           vimImeGuard(
@@ -248,6 +254,7 @@ export function PinnedReferencePane(): JSX.Element | null {
           ),
           vimVisualHighlightExtension,
           history(),
+          scrollerClickFocus,
           drawSelectionCompartment.of(cursorDrawSelection(s0.cursorBlink)),
           tabSizeCompartment.of([
             editorTabSize(s0.editorTabSize),
@@ -330,7 +337,8 @@ export function PinnedReferencePane(): JSX.Element | null {
     view.dispatch({
       changes: { from: 0, to: view.state.doc.length, insert: nextBody },
       annotations: [programmatic.of(true), noteEditingSync.of(true)],
-      selection: pathChanged ? { anchor: 0 } : { anchor: clampedAnchor, head: clampedHead }
+      selection: pathChanged ? { anchor: 0 } : { anchor: clampedAnchor, head: clampedHead },
+      effects: pathChanged ? sourceRevealForNewNote(view) : undefined
     })
     viewPathRef.current = nextPath
   }, [content?.body, content?.path])
@@ -457,7 +465,8 @@ export function PinnedReferencePane(): JSX.Element | null {
   const assetUrlWithFragment = assetUrl ? assetUrl + (pinnedRefFragment ?? '') : null
   const assetKind: LocalAssetKind | null =
     pinnedRefPath && isAsset ? classifyLocalAssetHref(pinnedRefPath) ?? 'file' : null
-  const useAssetIframe = assetKind === 'pdf' || assetKind === 'file'
+  const pdfElsewhere = assetKind === 'pdf' && !canShowPdfInline()
+  const useAssetIframe = (assetKind === 'pdf' && !pdfElsewhere) || assetKind === 'file'
 
   // Track every asset URL the user has pinned this session. One iframe
   // per unique URL stays mounted for the life of the app — show/hide
@@ -623,6 +632,10 @@ export function PinnedReferencePane(): JSX.Element | null {
               <audio src={assetUrl} controls className="w-full" />
             </div>
           </div>
+        )}
+
+        {pinnedRefPath && isAsset && assetUrl && pdfElsewhere && (
+          <PdfOpenElsewhere assetPath={pinnedRefPath} title={title} />
         )}
 
         {/* Asset iframe stack — ALWAYS mounted once any PDF/generic asset has been
