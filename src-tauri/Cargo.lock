@@ -6183,7 +6183,7 @@ dependencies = [
 
 [[package]]
 name = "zennotes-rs"
-version = "2.79.1"
+version = "2.79.2"
 dependencies = [
  "base64 0.22.1",
  "chrono",

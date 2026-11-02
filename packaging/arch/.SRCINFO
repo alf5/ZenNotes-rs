@@ -1,6 +1,6 @@
 pkgbase = zennotes-rs
 	pkgdesc = A calm, file-based markdown notes app (Tauri desktop client)
-	pkgver = 2.79.1
+	pkgver = 2.79.2
 	pkgrel = 1
 	url = https://github.com/alf5/ZenNotes-rs
 	arch = x86_64
@@ -18,7 +18,7 @@ pkgbase = zennotes-rs
 	optdepends = gst-plugins-good: common audio and video formats in notes
 	optdepends = libayatana-appindicator: tray icon for "Keep running in the tray"
 	options = !lto
-	source = zennotes-rs::git+https://github.com/alf5/ZenNotes-rs.git#tag=v2.79.1
+	source = zennotes-rs::git+https://github.com/alf5/ZenNotes-rs.git#tag=v2.79.2
 	source = zennotes-rs.desktop
 	sha256sums = SKIP
 	sha256sums = 29d0643953714a755f9da9aea4236b4630d22a66956ba8bddbc428ebddb2a82d
