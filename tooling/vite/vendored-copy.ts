@@ -210,7 +210,8 @@ hideHelpEntries(
 
 /** `code` with every swap for `file` made. Throws when one no longer matches once. */
 export function applyVendoredCopy(file: string, code: string): string {
-  let next = code
+  // A Windows checkout has CRLF endings, and some swaps span lines.
+  let next = code.replaceAll('\r\n', '\n')
   for (const swap of VENDORED_COPY) {
     if (swap.file !== file) continue
     const found = occurrences(next, swap.find)

@@ -1,4 +1,7 @@
-# ZenNotes-rs 2.79.1: what moving off Electron had left wrong
+# ZenNotes-rs 2.79.1 and 2.79.2: what moving off Electron had left wrong
+
+2.79.2 is 2.79.1 plus a Windows build fix: a Windows checkout has CRLF endings,
+which multi-line wording swaps did not match. 2.79.1 has no Windows installers.
 
 Still mirrors upstream v2.79.0; `packages/` is untouched. A review of every
 place the port leans on something Electron gave for free.
