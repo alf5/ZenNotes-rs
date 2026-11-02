@@ -1,6 +1,6 @@
 # Maintainer: alf5 <alf5@users.noreply.github.com>
 pkgname=zennotes-rs
-pkgver=2.79.0
+pkgver=2.79.1
 pkgrel=1
 pkgdesc="A calm, file-based markdown notes app (Tauri desktop client)"
 arch=('x86_64' 'aarch64')
@@ -10,7 +10,9 @@ license=('MIT')
 depends=('webkit2gtk-4.1' 'gtk3' 'hicolor-icon-theme')
 # "Keep running in the tray" needs an appindicator library at runtime; without
 # one the app simply keeps that setting off (it probes before building a tray).
-optdepends=('libayatana-appindicator: tray icon for "Keep running in the tray"')
+optdepends=('gst-libav: H.264, AAC and other audio and video codecs in notes'
+            'gst-plugins-good: common audio and video formats in notes'
+            'libayatana-appindicator: tray icon for "Keep running in the tray"')
 # Build: Rust toolchain (rust provides cargo), bun to install/run the Vite
 # frontend from the repo's committed bun.lock, nodejs as a fallback for tooling
 # that shells out to `node`, pkgconf to locate webkit2gtk-4.1/gtk3, git for the
