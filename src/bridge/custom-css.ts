@@ -10,7 +10,8 @@
  * the fresh lists out to subscribers (the store expects full lists).
  */
 
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from './ipc'
+import { convertFileSrc } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import {
   parseThemeManifest,
@@ -29,6 +30,18 @@ interface RawThemeEntry {
 // Starter palette for "New theme" (upstream main/custom-themes.ts:97).
 const NEW_THEME_LIGHT: CustomThemePalette = { bg: '#ffffff', text: '#1d1d1f', accent: '#007aff' }
 const NEW_THEME_DARK: CustomThemePalette = { bg: '#1c1c1e', text: '#ffffff', accent: '#0a84ff' }
+
+/**
+ * `zen-theme://<slug>/<file>` is served by src-tauri/src/custom_css.rs. WebView2
+ * only reaches custom schemes as `http://zen-theme.localhost/…`, and themes are
+ * written with the portable form, so the CSS is rewritten for it. Elsewhere
+ * `convertFileSrc` keeps the scheme and nothing changes.
+ */
+export function resolveThemeAssetUrls(css: string): string {
+  const base = convertFileSrc('', 'zen-theme')
+  if (!base.startsWith('http')) return css
+  return css.replace(/zen-theme:\/\//g, base.endsWith('/') ? base : `${base}/`)
+}
 
 function slugify(name: string): string {
   return (
@@ -62,7 +75,7 @@ export async function listCustomThemes(): Promise<CustomTheme[]> {
         version: m.version,
         description: m.description,
         modes: m.modes,
-        css: entry.css,
+        css: resolveThemeAssetUrls(entry.css),
         preview: m.preview
       })
     } else {

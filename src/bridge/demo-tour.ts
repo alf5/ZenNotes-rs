@@ -9,7 +9,7 @@
  * module on demand, keeping the ~60 KB of tour text off the boot path.
  */
 
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from './ipc'
 import type { VaultDemoTourResult } from '@zennotes/bridge-contract/ipc'
 import { DEMO_TOUR_ASSETS, DEMO_TOUR_NOTES } from '@zennotes/shared-domain/demo-tour-data'
 import {

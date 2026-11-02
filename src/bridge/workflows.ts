@@ -40,7 +40,7 @@
  * and never made from what a ledger says. See `restoreEntries`.
  */
 
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from './ipc'
 import type {
   ApplyWorkflowInput,
   WorkflowJournalEntry,

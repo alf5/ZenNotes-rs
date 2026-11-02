@@ -13,7 +13,7 @@
  * `<name>.csv.base.json` sidecars are still read (and migrated on open).
  */
 
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from './ipc'
 import {
   buildDefaultViews,
   inferFields,

@@ -10,6 +10,8 @@
  *    server, so names, descriptions and schemas cannot drift;
  *  - src-tauri/src/mcp/instructions.md: the default server instructions.
  *
+ * All three pass through port-overrides.ts: the port's link scheme, and no TikZ.
+ *
  * Upstream's server runs straight from its TypeScript sources under bun: they
  * are copied to a temp dir (the clone is never touched) and given only the npm
  * packages the MCP entry imports.
@@ -19,6 +21,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symli
 import os from 'node:os'
 import path from 'node:path'
 import { drive, GOLDEN_FILE, HERE } from './drive'
+import { portInstructions, portLinks } from './port-overrides'
 
 const RUST_MCP_DIR = path.join(HERE, '..', '..', 'src-tauri', 'src', 'mcp')
 /** npm packages the MCP entry's import graph reaches. A missing one fails the
@@ -70,10 +73,10 @@ try {
 
   writeFileSync(
     GOLDEN_FILE,
-    JSON.stringify({ steps: transcript.steps, files: transcript.files }, null, 2) + '\n'
+    portLinks(JSON.stringify({ steps: transcript.steps, files: transcript.files }, null, 2)) + '\n'
   )
-  writeFileSync(path.join(RUST_MCP_DIR, 'tools.json'), JSON.stringify(transcript.tools, null, 2) + '\n')
-  writeFileSync(path.join(RUST_MCP_DIR, 'instructions.md'), transcript.instructions)
+  writeFileSync(path.join(RUST_MCP_DIR, 'tools.json'), portLinks(JSON.stringify(transcript.tools, null, 2)) + '\n')
+  writeFileSync(path.join(RUST_MCP_DIR, 'instructions.md'), portInstructions(transcript.instructions))
   const errors = transcript.steps.filter((s) => s.isError).length
   console.log(
     `golden.json: ${transcript.steps.length} steps (${errors} errors), ${Object.keys(transcript.files).length} files; ` +

@@ -144,19 +144,108 @@ pub async fn unsplash_key_clear() {
     let _ = tauri::async_runtime::spawn_blocking(crate::unsplash::key_clear).await;
 }
 
-/// `devtools:toggle` — Settings → Developer tools. Tauri only compiles
-/// devtools into debug builds (or with the `devtools` feature); release
-/// builds no-op, matching the button's best-effort contract.
+/// `devtools:toggle` — Settings → Developer tools. Release builds have the
+/// inspector too (Cargo feature `devtools`), as upstream's do.
 #[tauri::command]
 pub fn devtools_toggle(window: tauri::WebviewWindow) {
-    #[cfg(debug_assertions)]
-    {
-        if window.is_devtools_open() {
-            window.close_devtools();
-        } else {
-            window.open_devtools();
-        }
+    if window.is_devtools_open() {
+        window.close_devtools();
+    } else {
+        window.open_devtools();
     }
-    #[cfg(not(debug_assertions))]
-    let _ = window;
+}
+
+/// Electron's `clipboard.writeText`: works without focus or a user gesture,
+/// which `navigator.clipboard` does not promise.
+#[tauri::command]
+pub fn app_clipboard_write_text(app: AppHandle, text: String) -> Result<(), String> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    app.clipboard().write_text(text).map_err(|e| e.to_string())
+}
+
+/// Which of these dropped paths are folders (they open as a temporary session,
+/// where a file is imported or opened).
+#[tauri::command]
+pub fn app_dropped_folders(paths: Vec<String>) -> Vec<String> {
+    paths.into_iter().filter(|path| std::path::Path::new(path).is_dir()).collect()
+}
+
+fn staged_drops_dir() -> PathBuf {
+    std::env::temp_dir().join("zennotes-rs-drops")
+}
+
+/// Best effort at launch: what a past session staged has long been imported.
+pub fn clear_staged_drops() {
+    let _ = std::fs::remove_dir_all(staged_drops_dir());
+}
+
+/// The last path component only, so a dropped name cannot climb out of its folder.
+fn staged_file_name(raw: &str) -> String {
+    let base = raw.rsplit(['/', '\\']).next().unwrap_or("").trim();
+    if base.is_empty() || base == "." || base == ".." {
+        "dropped-file".to_string()
+    } else {
+        base.to_string()
+    }
+}
+
+fn stage_bytes(dir: &std::path::Path, name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    let folder = dir.join(uuid::Uuid::new_v4().simple().to_string());
+    std::fs::create_dir_all(&folder).map_err(|e| format!("Could not stage the dropped file: {e}"))?;
+    let path = folder.join(staged_file_name(name));
+    std::fs::write(&path, bytes).map_err(|e| format!("Could not stage the dropped file: {e}"))?;
+    Ok(path)
+}
+
+/// macOS and Windows hand a drop to the page as a `File` with no path, and the
+/// importer works on paths. The bytes land in a temp file it can copy from.
+/// Raw body, with the percent-encoded name in the `x-file-name` header.
+#[tauri::command]
+pub fn app_stage_dropped_file(request: tauri::ipc::Request<'_>) -> Result<String, String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("Could not read the dropped file.".to_string());
+    };
+    let name = request
+        .headers()
+        .get("x-file-name")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| urlencoding::decode(value).ok())
+        .map(|value| value.into_owned())
+        .unwrap_or_default();
+    Ok(stage_bytes(&staged_drops_dir(), &name, bytes)?.to_string_lossy().to_string())
+}
+
+/// A link straight at a vault asset opens with its default app (upstream's
+/// `will-navigate`), and only inside the open vault.
+#[tauri::command]
+pub fn app_open_vault_asset_url(app: AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let abs = crate::asset_protocol::vault_path_from_url(&app, &url)
+        .ok_or_else(|| "This file is outside the open vault.".to_string())?;
+    app.opener().open_path(abs, None::<&str>).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod staged_drop_tests {
+    use super::*;
+
+    #[test]
+    fn a_dropped_name_stays_in_its_folder() {
+        assert_eq!(staged_file_name("photo 1.png"), "photo 1.png");
+        assert_eq!(staged_file_name("../../etc/passwd"), "passwd");
+        assert_eq!(staged_file_name("..\\..\\evil.exe"), "evil.exe");
+        assert_eq!(staged_file_name(".."), "dropped-file");
+        assert_eq!(staged_file_name(""), "dropped-file");
+    }
+
+    #[test]
+    fn stages_bytes_under_a_folder_of_its_own() {
+        let dir = std::env::temp_dir().join(format!("zn-stage-{}", uuid::Uuid::new_v4().simple()));
+        let a = stage_bytes(&dir, "a.png", b"one").unwrap();
+        let b = stage_bytes(&dir, "a.png", b"two").unwrap();
+        assert_ne!(a, b);
+        assert_eq!(std::fs::read(&a).unwrap(), b"one");
+        assert_eq!(a.file_name().unwrap(), "a.png");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

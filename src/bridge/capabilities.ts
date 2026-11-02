@@ -1,10 +1,9 @@
 import type { ZenCapabilities } from '@zennotes/bridge-contract/bridge'
 
 /**
- * Feature flags negotiated with the React frontend. Every flag starts
- * `false` and is flipped on as the matching Rust backend milestone lands
- * (see the migration plan). The UI hides affordances whose capability is
- * off, so the app never calls into an unimplemented command on boot.
+ * Feature flags negotiated with the React frontend. The UI hides most
+ * affordances whose capability is off; what it still shows is hidden or
+ * reworded in tooling/vite/vendored-copy.ts.
  *
  *  - supportsLocalFilesystemPickers — M1 (vault open/pick)
  *  - supportsCustomTemplates        — M10 (templates CRUD)
@@ -26,7 +25,7 @@ import type { ZenCapabilities } from '@zennotes/bridge-contract/bridge'
  *  - supportsUndoFile             — on: undo history between launches, kept
  *    under the app's data folder by src-tauri/src/undo_history.rs (#793)
  *  - supportsAgentEditReview      — on: reviews the `.zennotes/agent-edits`
- *    records an assistant leaves through upstream's MCP server; see
+ *    records an assistant leaves through `zennotes-rs mcp`; see
  *    src/bridge/agent-edits.ts
  *  - supportsEncryptedBackupArchive — absent: cloud backups are out of scope
  */

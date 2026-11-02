@@ -158,3 +158,9 @@ WEBKIT_DISABLE_DMABUF_RENDERER=1 bun run tauri:dev
 ```
 
 The same variable works for the packaged binary if it hits the same crash.
+
+## Audio and video in notes
+
+Media plays through the system webview, not a bundled Chromium, so on Linux
+the codecs come from GStreamer. If a video or audio file stays blank, install
+`gst-libav` and `gst-plugins-good` (the Arch package lists them as optional).

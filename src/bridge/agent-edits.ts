@@ -10,7 +10,7 @@
  * `@shared/agent-edits`, and nothing reaches disk that it did not accept.
  */
 
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from './ipc'
 import type { AgentEditRecord, AgentEditSummary } from '@zennotes/bridge-contract/ipc'
 import {
   latestAgentEdit,

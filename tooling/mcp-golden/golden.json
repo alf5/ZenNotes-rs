@@ -31,7 +31,7 @@
       "result": [
         {
           "path": "quick/Scratch.md",
-          "link": "zennotes://open?path=quick/Scratch.md",
+          "link": "zennotes-rs://open?path=quick/Scratch.md",
           "title": "Scratch",
           "folder": "quick",
           "createdAt": "<time>",
@@ -45,7 +45,7 @@
         },
         {
           "path": "inbox/Work/Notes (old).md",
-          "link": "zennotes://open?path=inbox/Work/Notes%20%28old%29.md",
+          "link": "zennotes-rs://open?path=inbox/Work/Notes%20%28old%29.md",
           "title": "Notes (old)",
           "folder": "inbox",
           "createdAt": "<time>",
@@ -57,7 +57,7 @@
         },
         {
           "path": "inbox/Work/Meeting 2026-01-05.md",
-          "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+          "link": "zennotes-rs://open?path=inbox/Work/Meeting%202026-01-05.md",
           "title": "Meeting 2026-01-05",
           "folder": "inbox",
           "createdAt": "<time>",
@@ -74,7 +74,7 @@
         },
         {
           "path": "inbox/Welcome.md",
-          "link": "zennotes://open?path=inbox/Welcome.md",
+          "link": "zennotes-rs://open?path=inbox/Welcome.md",
           "title": "Welcome",
           "folder": "inbox",
           "createdAt": "<time>",
@@ -92,7 +92,7 @@
         },
         {
           "path": "inbox/Project Plan.md",
-          "link": "zennotes://open?path=inbox/Project%20Plan.md",
+          "link": "zennotes-rs://open?path=inbox/Project%20Plan.md",
           "title": "Project Plan",
           "folder": "inbox",
           "createdAt": "<time>",
@@ -108,7 +108,7 @@
         },
         {
           "path": "inbox/Comments Target.md",
-          "link": "zennotes://open?path=inbox/Comments%20Target.md",
+          "link": "zennotes-rs://open?path=inbox/Comments%20Target.md",
           "title": "Comments Target",
           "folder": "inbox",
           "createdAt": "<time>",
@@ -120,7 +120,7 @@
         },
         {
           "path": "archive/Old Idea.md",
-          "link": "zennotes://open?path=archive/Old%20Idea.md",
+          "link": "zennotes-rs://open?path=archive/Old%20Idea.md",
           "title": "Old Idea",
           "folder": "archive",
           "createdAt": "<time>",
@@ -144,7 +144,7 @@
       "result": [
         {
           "path": "inbox/Work/Notes (old).md",
-          "link": "zennotes://open?path=inbox/Work/Notes%20%28old%29.md",
+          "link": "zennotes-rs://open?path=inbox/Work/Notes%20%28old%29.md",
           "title": "Notes (old)",
           "folder": "inbox",
           "createdAt": "<time>",
@@ -156,7 +156,7 @@
         },
         {
           "path": "inbox/Work/Meeting 2026-01-05.md",
-          "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+          "link": "zennotes-rs://open?path=inbox/Work/Meeting%202026-01-05.md",
           "title": "Meeting 2026-01-05",
           "folder": "inbox",
           "createdAt": "<time>",
@@ -182,7 +182,7 @@
       "result": [
         {
           "path": "inbox/Work/Meeting 2026-01-05.md",
-          "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+          "link": "zennotes-rs://open?path=inbox/Work/Meeting%202026-01-05.md",
           "title": "Meeting 2026-01-05",
           "folder": "inbox",
           "createdAt": "<time>",
@@ -199,7 +199,7 @@
         },
         {
           "path": "inbox/Project Plan.md",
-          "link": "zennotes://open?path=inbox/Project%20Plan.md",
+          "link": "zennotes-rs://open?path=inbox/Project%20Plan.md",
           "title": "Project Plan",
           "folder": "inbox",
           "createdAt": "<time>",
@@ -224,7 +224,7 @@
       "result": [
         {
           "path": "inbox/Work/Meeting 2026-01-05.md",
-          "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+          "link": "zennotes-rs://open?path=inbox/Work/Meeting%202026-01-05.md",
           "title": "Meeting 2026-01-05",
           "folder": "inbox",
           "createdAt": "<time>",
@@ -241,7 +241,7 @@
         },
         {
           "path": "inbox/Welcome.md",
-          "link": "zennotes://open?path=inbox/Welcome.md",
+          "link": "zennotes-rs://open?path=inbox/Welcome.md",
           "title": "Welcome",
           "folder": "inbox",
           "createdAt": "<time>",
@@ -268,7 +268,7 @@
       "result": [
         {
           "path": "trash/Deleted.md",
-          "link": "zennotes://open?path=trash/Deleted.md",
+          "link": "zennotes-rs://open?path=trash/Deleted.md",
           "title": "Deleted",
           "folder": "trash",
           "createdAt": "<time>",
@@ -292,7 +292,7 @@
       "result": [
         {
           "path": "quick/Scratch.md",
-          "link": "zennotes://open?path=quick/Scratch.md",
+          "link": "zennotes-rs://open?path=quick/Scratch.md",
           "title": "Scratch",
           "folder": "quick",
           "createdAt": "<time>",
@@ -306,7 +306,7 @@
         },
         {
           "path": "inbox/Work/Notes (old).md",
-          "link": "zennotes://open?path=inbox/Work/Notes%20%28old%29.md",
+          "link": "zennotes-rs://open?path=inbox/Work/Notes%20%28old%29.md",
           "title": "Notes (old)",
           "folder": "inbox",
           "createdAt": "<time>",
@@ -358,7 +358,7 @@
       "isError": false,
       "result": {
         "path": "inbox/Welcome.md",
-        "link": "zennotes://open?path=inbox/Welcome.md",
+        "link": "zennotes-rs://open?path=inbox/Welcome.md",
         "title": "Welcome",
         "folder": "inbox",
         "createdAt": "<time>",
@@ -407,7 +407,7 @@
       "result": [
         {
           "path": "archive/Old Idea.md",
-          "link": "zennotes://open?path=archive/Old%20Idea.md",
+          "link": "zennotes-rs://open?path=archive/Old%20Idea.md",
           "title": "Old Idea",
           "folder": "archive",
           "lineNumber": 3,
@@ -415,7 +415,7 @@
         },
         {
           "path": "inbox/Project Plan.md",
-          "link": "zennotes://open?path=inbox/Project%20Plan.md",
+          "link": "zennotes-rs://open?path=inbox/Project%20Plan.md",
           "title": "Project Plan",
           "folder": "inbox",
           "lineNumber": 1,
@@ -423,7 +423,7 @@
         },
         {
           "path": "inbox/Welcome.md",
-          "link": "zennotes://open?path=inbox/Welcome.md",
+          "link": "zennotes-rs://open?path=inbox/Welcome.md",
           "title": "Welcome",
           "folder": "inbox",
           "lineNumber": 7,
@@ -431,7 +431,7 @@
         },
         {
           "path": "inbox/Welcome.md",
-          "link": "zennotes://open?path=inbox/Welcome.md",
+          "link": "zennotes-rs://open?path=inbox/Welcome.md",
           "title": "Welcome",
           "folder": "inbox",
           "lineNumber": 9,
@@ -439,7 +439,7 @@
         },
         {
           "path": "inbox/Welcome.md",
-          "link": "zennotes://open?path=inbox/Welcome.md",
+          "link": "zennotes-rs://open?path=inbox/Welcome.md",
           "title": "Welcome",
           "folder": "inbox",
           "lineNumber": 13,
@@ -447,7 +447,7 @@
         },
         {
           "path": "inbox/Work/Meeting 2026-01-05.md",
-          "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+          "link": "zennotes-rs://open?path=inbox/Work/Meeting%202026-01-05.md",
           "title": "Meeting 2026-01-05",
           "folder": "inbox",
           "lineNumber": 6,
@@ -455,7 +455,7 @@
         },
         {
           "path": "inbox/Work/Notes (old).md",
-          "link": "zennotes://open?path=inbox/Work/Notes%20%28old%29.md",
+          "link": "zennotes-rs://open?path=inbox/Work/Notes%20%28old%29.md",
           "title": "Notes (old)",
           "folder": "inbox",
           "lineNumber": 1,
@@ -473,7 +473,7 @@
       "result": [
         {
           "path": "inbox/Work/Notes (old).md",
-          "link": "zennotes://open?path=inbox/Work/Notes%20%28old%29.md",
+          "link": "zennotes-rs://open?path=inbox/Work/Notes%20%28old%29.md",
           "title": "Notes (old)",
           "folder": "inbox",
           "lineNumber": 1,
@@ -490,7 +490,7 @@
       "result": [
         {
           "path": "inbox/Work/Meeting 2026-01-05.md",
-          "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+          "link": "zennotes-rs://open?path=inbox/Work/Meeting%202026-01-05.md",
           "title": "Meeting 2026-01-05",
           "folder": "inbox",
           "createdAt": "<time>",
@@ -516,7 +516,7 @@
       "result": [
         {
           "path": "inbox/Work/Meeting 2026-01-05.md",
-          "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+          "link": "zennotes-rs://open?path=inbox/Work/Meeting%202026-01-05.md",
           "title": "Meeting 2026-01-05",
           "folder": "inbox",
           "createdAt": "<time>",
@@ -533,7 +533,7 @@
         },
         {
           "path": "inbox/Project Plan.md",
-          "link": "zennotes://open?path=inbox/Project%20Plan.md",
+          "link": "zennotes-rs://open?path=inbox/Project%20Plan.md",
           "title": "Project Plan",
           "folder": "inbox",
           "createdAt": "<time>",
@@ -585,7 +585,7 @@
       "result": [
         {
           "path": "inbox/Welcome.md",
-          "link": "zennotes://open?path=inbox/Welcome.md",
+          "link": "zennotes-rs://open?path=inbox/Welcome.md",
           "title": "Welcome",
           "folder": "inbox",
           "createdAt": "<time>",
@@ -603,7 +603,7 @@
         },
         {
           "path": "inbox/Work/Meeting 2026-01-05.md",
-          "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+          "link": "zennotes-rs://open?path=inbox/Work/Meeting%202026-01-05.md",
           "title": "Meeting 2026-01-05",
           "folder": "inbox",
           "createdAt": "<time>",
@@ -628,7 +628,7 @@
         {
           "id": "inbox/Project Plan.md#0",
           "sourcePath": "inbox/Project Plan.md",
-          "link": "zennotes://open?path=inbox/Project%20Plan.md",
+          "link": "zennotes-rs://open?path=inbox/Project%20Plan.md",
           "noteTitle": "Project Plan",
           "noteFolder": "inbox",
           "lineNumber": 6,
@@ -647,7 +647,7 @@
         {
           "id": "inbox/Project Plan.md#1",
           "sourcePath": "inbox/Project Plan.md",
-          "link": "zennotes://open?path=inbox/Project%20Plan.md",
+          "link": "zennotes-rs://open?path=inbox/Project%20Plan.md",
           "noteTitle": "Project Plan",
           "noteFolder": "inbox",
           "lineNumber": 7,
@@ -667,7 +667,7 @@
         {
           "id": "inbox/Project Plan.md#4",
           "sourcePath": "inbox/Project Plan.md",
-          "link": "zennotes://open?path=inbox/Project%20Plan.md",
+          "link": "zennotes-rs://open?path=inbox/Project%20Plan.md",
           "noteTitle": "Project Plan",
           "noteFolder": "inbox",
           "lineNumber": 11,
@@ -684,7 +684,7 @@
         {
           "id": "inbox/Welcome.md#0",
           "sourcePath": "inbox/Welcome.md",
-          "link": "zennotes://open?path=inbox/Welcome.md",
+          "link": "zennotes-rs://open?path=inbox/Welcome.md",
           "noteTitle": "Welcome",
           "noteFolder": "inbox",
           "lineNumber": 8,
@@ -706,7 +706,7 @@
         {
           "id": "inbox/Work/Meeting 2026-01-05.md#0",
           "sourcePath": "inbox/Work/Meeting 2026-01-05.md",
-          "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+          "link": "zennotes-rs://open?path=inbox/Work/Meeting%202026-01-05.md",
           "noteTitle": "Meeting 2026-01-05",
           "noteFolder": "inbox",
           "lineNumber": 4,
@@ -726,7 +726,7 @@
         {
           "id": "inbox/Work/Meeting 2026-01-05.md#1",
           "sourcePath": "inbox/Work/Meeting 2026-01-05.md",
-          "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+          "link": "zennotes-rs://open?path=inbox/Work/Meeting%202026-01-05.md",
           "noteTitle": "Meeting 2026-01-05",
           "noteFolder": "inbox",
           "lineNumber": 5,
@@ -753,7 +753,7 @@
         {
           "id": "inbox/Project Plan.md#0",
           "sourcePath": "inbox/Project Plan.md",
-          "link": "zennotes://open?path=inbox/Project%20Plan.md",
+          "link": "zennotes-rs://open?path=inbox/Project%20Plan.md",
           "noteTitle": "Project Plan",
           "noteFolder": "inbox",
           "lineNumber": 6,
@@ -772,7 +772,7 @@
         {
           "id": "inbox/Project Plan.md#1",
           "sourcePath": "inbox/Project Plan.md",
-          "link": "zennotes://open?path=inbox/Project%20Plan.md",
+          "link": "zennotes-rs://open?path=inbox/Project%20Plan.md",
           "noteTitle": "Project Plan",
           "noteFolder": "inbox",
           "lineNumber": 7,
@@ -792,7 +792,7 @@
         {
           "id": "inbox/Project Plan.md#2",
           "sourcePath": "inbox/Project Plan.md",
-          "link": "zennotes://open?path=inbox/Project%20Plan.md",
+          "link": "zennotes-rs://open?path=inbox/Project%20Plan.md",
           "noteTitle": "Project Plan",
           "noteFolder": "inbox",
           "lineNumber": 8,
@@ -809,7 +809,7 @@
         {
           "id": "inbox/Project Plan.md#3",
           "sourcePath": "inbox/Project Plan.md",
-          "link": "zennotes://open?path=inbox/Project%20Plan.md",
+          "link": "zennotes-rs://open?path=inbox/Project%20Plan.md",
           "noteTitle": "Project Plan",
           "noteFolder": "inbox",
           "lineNumber": 9,
@@ -826,7 +826,7 @@
         {
           "id": "inbox/Project Plan.md#4",
           "sourcePath": "inbox/Project Plan.md",
-          "link": "zennotes://open?path=inbox/Project%20Plan.md",
+          "link": "zennotes-rs://open?path=inbox/Project%20Plan.md",
           "noteTitle": "Project Plan",
           "noteFolder": "inbox",
           "lineNumber": 11,
@@ -843,7 +843,7 @@
         {
           "id": "inbox/Welcome.md#0",
           "sourcePath": "inbox/Welcome.md",
-          "link": "zennotes://open?path=inbox/Welcome.md",
+          "link": "zennotes-rs://open?path=inbox/Welcome.md",
           "noteTitle": "Welcome",
           "noteFolder": "inbox",
           "lineNumber": 8,
@@ -865,7 +865,7 @@
         {
           "id": "inbox/Welcome.md#1",
           "sourcePath": "inbox/Welcome.md",
-          "link": "zennotes://open?path=inbox/Welcome.md",
+          "link": "zennotes-rs://open?path=inbox/Welcome.md",
           "noteTitle": "Welcome",
           "noteFolder": "inbox",
           "lineNumber": 9,
@@ -883,7 +883,7 @@
         {
           "id": "inbox/Welcome.md#2",
           "sourcePath": "inbox/Welcome.md",
-          "link": "zennotes://open?path=inbox/Welcome.md",
+          "link": "zennotes-rs://open?path=inbox/Welcome.md",
           "noteTitle": "Welcome",
           "noteFolder": "inbox",
           "lineNumber": 10,
@@ -901,7 +901,7 @@
         {
           "id": "inbox/Work/Meeting 2026-01-05.md#0",
           "sourcePath": "inbox/Work/Meeting 2026-01-05.md",
-          "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+          "link": "zennotes-rs://open?path=inbox/Work/Meeting%202026-01-05.md",
           "noteTitle": "Meeting 2026-01-05",
           "noteFolder": "inbox",
           "lineNumber": 4,
@@ -921,7 +921,7 @@
         {
           "id": "inbox/Work/Meeting 2026-01-05.md#1",
           "sourcePath": "inbox/Work/Meeting 2026-01-05.md",
-          "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+          "link": "zennotes-rs://open?path=inbox/Work/Meeting%202026-01-05.md",
           "noteTitle": "Meeting 2026-01-05",
           "noteFolder": "inbox",
           "lineNumber": 5,
@@ -948,7 +948,7 @@
         {
           "id": "inbox/Welcome.md#1",
           "sourcePath": "inbox/Welcome.md",
-          "link": "zennotes://open?path=inbox/Welcome.md",
+          "link": "zennotes-rs://open?path=inbox/Welcome.md",
           "noteTitle": "Welcome",
           "noteFolder": "inbox",
           "lineNumber": 9,
@@ -975,7 +975,7 @@
         {
           "id": "inbox/Welcome.md#2",
           "sourcePath": "inbox/Welcome.md",
-          "link": "zennotes://open?path=inbox/Welcome.md",
+          "link": "zennotes-rs://open?path=inbox/Welcome.md",
           "noteTitle": "Welcome",
           "noteFolder": "inbox",
           "lineNumber": 10,
@@ -1002,7 +1002,7 @@
         {
           "id": "inbox/Welcome.md#0",
           "sourcePath": "inbox/Welcome.md",
-          "link": "zennotes://open?path=inbox/Welcome.md",
+          "link": "zennotes-rs://open?path=inbox/Welcome.md",
           "noteTitle": "Welcome",
           "noteFolder": "inbox",
           "lineNumber": 8,
@@ -1034,7 +1034,7 @@
         {
           "id": "inbox/Welcome.md#0",
           "sourcePath": "inbox/Welcome.md",
-          "link": "zennotes://open?path=inbox/Welcome.md",
+          "link": "zennotes-rs://open?path=inbox/Welcome.md",
           "noteTitle": "Welcome",
           "noteFolder": "inbox",
           "lineNumber": 8,
@@ -1056,7 +1056,7 @@
         {
           "id": "inbox/Work/Meeting 2026-01-05.md#1",
           "sourcePath": "inbox/Work/Meeting 2026-01-05.md",
-          "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+          "link": "zennotes-rs://open?path=inbox/Work/Meeting%202026-01-05.md",
           "noteTitle": "Meeting 2026-01-05",
           "noteFolder": "inbox",
           "lineNumber": 5,
@@ -1086,7 +1086,7 @@
         {
           "id": "inbox/Project Plan.md#1",
           "sourcePath": "inbox/Project Plan.md",
-          "link": "zennotes://open?path=inbox/Project%20Plan.md",
+          "link": "zennotes-rs://open?path=inbox/Project%20Plan.md",
           "noteTitle": "Project Plan",
           "noteFolder": "inbox",
           "lineNumber": 7,
@@ -1106,7 +1106,7 @@
         {
           "id": "inbox/Work/Meeting 2026-01-05.md#0",
           "sourcePath": "inbox/Work/Meeting 2026-01-05.md",
-          "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+          "link": "zennotes-rs://open?path=inbox/Work/Meeting%202026-01-05.md",
           "noteTitle": "Meeting 2026-01-05",
           "noteFolder": "inbox",
           "lineNumber": 4,
@@ -1399,7 +1399,7 @@
       "isError": false,
       "result": {
         "path": "inbox/Welcome.md",
-        "link": "zennotes://open?path=inbox/Welcome.md",
+        "link": "zennotes-rs://open?path=inbox/Welcome.md",
         "title": "Welcome",
         "folder": "inbox",
         "createdAt": "<time>",
@@ -1425,7 +1425,7 @@
       "isError": false,
       "result": {
         "path": "inbox/Welcome.md",
-        "link": "zennotes://open?path=inbox/Welcome.md",
+        "link": "zennotes-rs://open?path=inbox/Welcome.md",
         "title": "Welcome",
         "folder": "inbox",
         "createdAt": "<time>",
@@ -1452,7 +1452,7 @@
       "isError": false,
       "result": {
         "path": "inbox/Welcome.md",
-        "link": "zennotes://open?path=inbox/Welcome.md",
+        "link": "zennotes-rs://open?path=inbox/Welcome.md",
         "title": "Welcome",
         "folder": "inbox",
         "createdAt": "<time>",
@@ -1489,7 +1489,7 @@
       "result": {
         "meta": {
           "path": "inbox/Welcome.md",
-          "link": "zennotes://open?path=inbox/Welcome.md",
+          "link": "zennotes-rs://open?path=inbox/Welcome.md",
           "title": "Welcome",
           "folder": "inbox",
           "createdAt": "<time>",
@@ -1520,7 +1520,7 @@
       "result": {
         "meta": {
           "path": "inbox/Welcome.md",
-          "link": "zennotes://open?path=inbox/Welcome.md",
+          "link": "zennotes-rs://open?path=inbox/Welcome.md",
           "title": "Welcome",
           "folder": "inbox",
           "createdAt": "<time>",
@@ -1550,7 +1550,7 @@
       "result": {
         "meta": {
           "path": "inbox/Welcome.md",
-          "link": "zennotes://open?path=inbox/Welcome.md",
+          "link": "zennotes-rs://open?path=inbox/Welcome.md",
           "title": "Welcome",
           "folder": "inbox",
           "createdAt": "<time>",
@@ -1578,7 +1578,7 @@
       "isError": false,
       "result": {
         "path": "quick/Scratch.md",
-        "link": "zennotes://open?path=quick/Scratch.md",
+        "link": "zennotes-rs://open?path=quick/Scratch.md",
         "title": "Scratch",
         "folder": "quick",
         "createdAt": "<time>",
@@ -1609,7 +1609,7 @@
         {
           "id": "inbox/Project Plan.md#0",
           "sourcePath": "inbox/Project Plan.md",
-          "link": "zennotes://open?path=inbox/Project%20Plan.md",
+          "link": "zennotes-rs://open?path=inbox/Project%20Plan.md",
           "noteTitle": "Project Plan",
           "noteFolder": "inbox",
           "lineNumber": 6,
@@ -1628,7 +1628,7 @@
         {
           "id": "inbox/Project Plan.md#1",
           "sourcePath": "inbox/Project Plan.md",
-          "link": "zennotes://open?path=inbox/Project%20Plan.md",
+          "link": "zennotes-rs://open?path=inbox/Project%20Plan.md",
           "noteTitle": "Project Plan",
           "noteFolder": "inbox",
           "lineNumber": 7,
@@ -1648,7 +1648,7 @@
         {
           "id": "inbox/Project Plan.md#4",
           "sourcePath": "inbox/Project Plan.md",
-          "link": "zennotes://open?path=inbox/Project%20Plan.md",
+          "link": "zennotes-rs://open?path=inbox/Project%20Plan.md",
           "noteTitle": "Project Plan",
           "noteFolder": "inbox",
           "lineNumber": 11,
@@ -1665,7 +1665,7 @@
         {
           "id": "inbox/Welcome.md#0",
           "sourcePath": "inbox/Welcome.md",
-          "link": "zennotes://open?path=inbox/Welcome.md",
+          "link": "zennotes-rs://open?path=inbox/Welcome.md",
           "noteTitle": "Welcome",
           "noteFolder": "inbox",
           "lineNumber": 11,
@@ -1687,7 +1687,7 @@
         {
           "id": "inbox/Work/Meeting 2026-01-05.md#0",
           "sourcePath": "inbox/Work/Meeting 2026-01-05.md",
-          "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+          "link": "zennotes-rs://open?path=inbox/Work/Meeting%202026-01-05.md",
           "noteTitle": "Meeting 2026-01-05",
           "noteFolder": "inbox",
           "lineNumber": 4,
@@ -1707,7 +1707,7 @@
         {
           "id": "inbox/Work/Meeting 2026-01-05.md#1",
           "sourcePath": "inbox/Work/Meeting 2026-01-05.md",
-          "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+          "link": "zennotes-rs://open?path=inbox/Work/Meeting%202026-01-05.md",
           "noteTitle": "Meeting 2026-01-05",
           "noteFolder": "inbox",
           "lineNumber": 5,
@@ -1733,7 +1733,7 @@
       "result": {
         "id": "inbox/Project Plan.md#0",
         "sourcePath": "inbox/Project Plan.md",
-        "link": "zennotes://open?path=inbox/Project%20Plan.md",
+        "link": "zennotes-rs://open?path=inbox/Project%20Plan.md",
         "noteTitle": "Project Plan",
         "noteFolder": "inbox",
         "lineNumber": 6,
@@ -1774,7 +1774,7 @@
       "isError": false,
       "result": {
         "path": "inbox/Welcome.md",
-        "link": "zennotes://open?path=inbox/Welcome.md",
+        "link": "zennotes-rs://open?path=inbox/Welcome.md",
         "title": "Welcome",
         "folder": "inbox",
         "createdAt": "<time>",
@@ -1802,7 +1802,7 @@
       "isError": false,
       "result": {
         "path": "inbox/Ideas/New Idea.md",
-        "link": "zennotes://open?path=inbox/Ideas/New%20Idea.md",
+        "link": "zennotes-rs://open?path=inbox/Ideas/New%20Idea.md",
         "title": "New Idea",
         "folder": "inbox",
         "createdAt": "<time>",
@@ -1824,7 +1824,7 @@
       "isError": false,
       "result": {
         "path": "inbox/Ideas/New Idea 2.md",
-        "link": "zennotes://open?path=inbox/Ideas/New%20Idea%202.md",
+        "link": "zennotes-rs://open?path=inbox/Ideas/New%20Idea%202.md",
         "title": "New Idea 2",
         "folder": "inbox",
         "createdAt": "<time>",
@@ -1843,7 +1843,7 @@
       "isError": false,
       "result": {
         "path": "quick/Untitled.md",
-        "link": "zennotes://open?path=quick/Untitled.md",
+        "link": "zennotes-rs://open?path=quick/Untitled.md",
         "title": "Untitled",
         "folder": "quick",
         "createdAt": "<time>",
@@ -1863,7 +1863,7 @@
       "isError": false,
       "result": {
         "path": "archive/a-b- c-.md",
-        "link": "zennotes://open?path=archive/a-b-%20c-.md",
+        "link": "zennotes-rs://open?path=archive/a-b-%20c-.md",
         "title": "a-b- c-",
         "folder": "archive",
         "createdAt": "<time>",
@@ -1892,7 +1892,7 @@
       "isError": false,
       "result": {
         "path": "inbox/Project Roadmap.md",
-        "link": "zennotes://open?path=inbox/Project%20Roadmap.md",
+        "link": "zennotes-rs://open?path=inbox/Project%20Roadmap.md",
         "title": "Project Roadmap",
         "folder": "inbox",
         "createdAt": "<time>",
@@ -1934,7 +1934,7 @@
       "isError": false,
       "result": {
         "path": "quick/Later/New Idea.md",
-        "link": "zennotes://open?path=quick/Later/New%20Idea.md",
+        "link": "zennotes-rs://open?path=quick/Later/New%20Idea.md",
         "title": "New Idea",
         "folder": "quick",
         "createdAt": "<time>",
@@ -1964,7 +1964,7 @@
       "isError": false,
       "result": {
         "path": "inbox/Welcome copy.md",
-        "link": "zennotes://open?path=inbox/Welcome%20copy.md",
+        "link": "zennotes-rs://open?path=inbox/Welcome%20copy.md",
         "title": "Welcome copy",
         "folder": "inbox",
         "createdAt": "<time>",
@@ -1989,7 +1989,7 @@
       "isError": false,
       "result": {
         "path": "archive/Work/Meeting 2026-01-05.md",
-        "link": "zennotes://open?path=archive/Work/Meeting%202026-01-05.md",
+        "link": "zennotes-rs://open?path=archive/Work/Meeting%202026-01-05.md",
         "title": "Meeting 2026-01-05",
         "folder": "archive",
         "createdAt": "<time>",
@@ -2013,7 +2013,7 @@
       "isError": false,
       "result": {
         "path": "inbox/Work/Meeting 2026-01-05.md",
-        "link": "zennotes://open?path=inbox/Work/Meeting%202026-01-05.md",
+        "link": "zennotes-rs://open?path=inbox/Work/Meeting%202026-01-05.md",
         "title": "Meeting 2026-01-05",
         "folder": "inbox",
         "createdAt": "<time>",
@@ -2037,7 +2037,7 @@
       "isError": false,
       "result": {
         "path": "trash/Welcome copy.md",
-        "link": "zennotes://open?path=trash/Welcome%20copy.md",
+        "link": "zennotes-rs://open?path=trash/Welcome%20copy.md",
         "title": "Welcome copy",
         "folder": "trash",
         "createdAt": "<time>",
@@ -2062,7 +2062,7 @@
       "isError": false,
       "result": {
         "path": "inbox/Deleted.md",
-        "link": "zennotes://open?path=inbox/Deleted.md",
+        "link": "zennotes-rs://open?path=inbox/Deleted.md",
         "title": "Deleted",
         "folder": "inbox",
         "createdAt": "<time>",
@@ -2145,7 +2145,7 @@
       "isError": false,
       "result": {
         "path": "inbox/Windows.md",
-        "link": "zennotes://open?path=inbox/Windows.md",
+        "link": "zennotes-rs://open?path=inbox/Windows.md",
         "title": "Windows",
         "folder": "inbox",
         "createdAt": "<time>",
@@ -2169,7 +2169,7 @@
       "result": [
         {
           "path": "inbox/Windows.md",
-          "link": "zennotes://open?path=inbox/Windows.md",
+          "link": "zennotes-rs://open?path=inbox/Windows.md",
           "title": "Windows",
           "folder": "inbox",
           "createdAt": "<time>",
@@ -2202,7 +2202,7 @@
       "result": {
         "id": "inbox/Windows.md#1",
         "sourcePath": "inbox/Windows.md",
-        "link": "zennotes://open?path=inbox/Windows.md",
+        "link": "zennotes-rs://open?path=inbox/Windows.md",
         "noteTitle": "Windows",
         "noteFolder": "inbox",
         "lineNumber": 10,
@@ -2225,7 +2225,7 @@
       "isError": false,
       "result": {
         "path": "inbox/Windows.md",
-        "link": "zennotes://open?path=inbox/Windows.md",
+        "link": "zennotes-rs://open?path=inbox/Windows.md",
         "title": "Windows",
         "folder": "inbox",
         "createdAt": "<time>",

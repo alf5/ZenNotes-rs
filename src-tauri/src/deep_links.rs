@@ -7,6 +7,24 @@ use crate::state::AppState;
 
 pub const DEEP_LINK_SCHEME: &str = "zennotes-rs";
 
+pub fn is_deep_link(raw: &str) -> bool {
+    raw.trim().starts_with(&format!("{DEEP_LINK_SCHEME}://"))
+}
+
+/// `--quick-capture` or `zennotes-rs://quick-capture`: toggle the capture panel.
+/// Global hotkeys only work on X11, so on Wayland this is what a compositor
+/// keybind calls.
+pub fn is_quick_capture_request(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed == "--quick-capture" {
+        return true;
+    }
+    trimmed
+        .strip_prefix(DEEP_LINK_SCHEME)
+        .and_then(|rest| rest.strip_prefix("://"))
+        .is_some_and(|rest| rest.trim_end_matches('/') == "quick-capture")
+}
+
 #[derive(Debug, PartialEq)]
 pub enum DeepLinkTarget {
     Tab,
@@ -96,6 +114,9 @@ pub fn open_note_request(app: &AppHandle, req: OpenNoteRequest) {
 /// Route a raw URL/file argument: a `zennotes-rs://` deep link, a `file://` URL,
 /// or a plain path. Returns true when handled.
 pub fn handle_url_or_path(app: &AppHandle, raw: &str) -> bool {
+    if is_quick_capture_request(raw) {
+        return crate::windows::toggle_quick_capture(app, crate::windows::read_pinned(app)).is_ok();
+    }
     if raw.starts_with(&format!("{DEEP_LINK_SCHEME}://")) {
         if let Some(req) = parse_open_note_deep_link(raw) {
             open_note_request(app, req);
@@ -118,6 +139,18 @@ pub fn handle_url_or_path(app: &AppHandle, raw: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognises_quick_capture_requests() {
+        assert!(is_quick_capture_request("--quick-capture"));
+        assert!(is_quick_capture_request("zennotes-rs://quick-capture"));
+        assert!(is_quick_capture_request("zennotes-rs://quick-capture/"));
+        assert!(!is_quick_capture_request("zennotes-rs://open?path=quick-capture"));
+        assert!(!is_quick_capture_request("zennotes://quick-capture"));
+        assert!(!is_quick_capture_request("/home/a/quick-capture.md"));
+        assert!(is_deep_link("zennotes-rs://quick-capture"));
+        assert!(!is_deep_link("--quick-capture"));
+    }
 
     #[test]
     fn parses_open_tab() {

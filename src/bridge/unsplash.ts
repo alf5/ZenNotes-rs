@@ -11,7 +11,7 @@
  * is rebuilt straight after so the real one is not left in memory. The
  * per-minute cap is the client's, so it counts per window here.
  */
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from './ipc'
 import {
   createUnsplashClient,
   type UnsplashClient,
