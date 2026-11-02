@@ -54,6 +54,13 @@ describe('vendored text swaps', () => {
     expect(settings).toEqual([{ title: 'About', items: [{ label: 'App identity' }] }])
   })
 
+  it('matches on a Windows checkout, where lines end in CRLF', () => {
+    for (const file of new Set(VENDORED_COPY.map((swap) => swap.file))) {
+      const source = readFileSync(join(root, file), 'utf8').replaceAll('\n', '\r\n')
+      expect(() => applyVendoredCopy(file, source)).not.toThrow()
+    }
+  })
+
   it('leaves other files alone', () => {
     expect(applyVendoredCopy('packages/app-core/src/lib/other.ts', 'same')).toBe('same')
   })
