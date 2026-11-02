@@ -18,9 +18,10 @@
  * (`vault:on-change`) become Tauri events (`vault://change`).
  */
 
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from './ipc'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { confirm } from '@tauri-apps/plugin-dialog'
 import {
   installZenBridge,
   type ZenAppInfo,
@@ -124,11 +125,13 @@ import * as workflows from './workflows'
 import * as tasks from './tasks'
 import * as agentEdits from './agent-edits'
 import { relocateAssetWithReferences, renameNoteWithLinks } from './link-rewrites'
+import { installFileDrops, pathForDroppedFile } from './file-drops'
+import { installNavigationGuard } from './navigation-guard'
 
 const APP_INFO: ZenAppInfo = {
   name: 'zennotes-rs',
   productName: 'ZenNotes-rs',
-  version: '2.79.0',
+  version: '2.79.1',
   description: 'ZenNotes-rs desktop',
   homepage: 'https://github.com/alf5/ZenNotes-rs',
   runtime: 'desktop',
@@ -141,6 +144,19 @@ const APP_INFO: ZenAppInfo = {
 // bridge is created and merged in when it arrives; `:version` and Settings >
 // About read it long after. A field never answered stays out of the report.
 let installInfo: Pick<ZenAppInfo, 'arch' | 'os' | 'engine' | 'install'> = {}
+
+/**
+ * Upstream opens another vault in a window of its own. This backend has one
+ * active vault per run, so every open window would switch to it: say so first.
+ */
+async function confirmVaultSwitch(root: string): Promise<boolean> {
+  const current = await invoke<VaultInfo | null>('vault_get_current')
+  if (!current || current.root === root) return true
+  return confirm(
+    `ZenNotes-rs keeps one vault open at a time, so every open window will switch to ${root}.`,
+    { title: 'Switch every window to this vault?', kind: 'warning', okLabel: 'Switch', cancelLabel: 'Cancel' }
+  )
+}
 
 function detectPlatform(): ZenPlatform {
   const ua =
@@ -184,7 +200,7 @@ function unsupportedUpdateState(): AppUpdateState {
     transferredBytes: null,
     totalBytes: null,
     bytesPerSecond: null,
-    message: 'Updates are not available in this build yet.'
+    message: 'ZenNotes-rs does not update itself. New versions are on its GitHub Releases page.'
   }
 }
 
@@ -197,7 +213,7 @@ const SESSION_OK: ServerSessionStatus = {
 function unavailableCliStatus(): CliInstallStatus {
   return {
     available: false,
-    reason: 'The ZenNotes-rs CLI is not bundled in this build yet.',
+    reason: 'The zn CLI is not part of ZenNotes-rs.',
     defaultTarget: '',
     requiresSudo: false,
     targetOnPath: false,
@@ -247,7 +263,7 @@ const bridge: ZenBridge = {
   resetAppZoom: (): Promise<number> => invoke('app_zoom_reset'),
   renderTikz: async (): Promise<TikzRenderResponse> => ({
     ok: false,
-    error: 'TikZ rendering is not available in this build yet.'
+    error: 'ZenNotes-rs does not render TikZ. Use a function-plot, JSXGraph, Mermaid or D2 block instead.'
   }), // M16
 
   // ---- Updater (M15) -----------------------------------------------------
@@ -349,7 +365,10 @@ const bridge: ZenBridge = {
     invoke('vault_unarchive_note', { relPath }),
   duplicateNote: (relPath: string): Promise<NoteMeta> =>
     invoke('vault_duplicate_note', { relPath }),
-  exportNotePdf: async (): Promise<string | null> => null, // M16
+  // Upstream prints through Electron's `printToPDF`, which has no webview
+  // equivalent here. The rejection reaches the user as a toast.
+  exportNotePdf: (): Promise<string | null> =>
+    Promise.reject(new Error('PDF export is not available in ZenNotes-rs.')),
   revealNote: (relPath: string): Promise<void> => invoke('vault_reveal_note', { relPath }),
   revealNoteTarget: (relPath: string): Promise<void> =>
     invoke('vault_reveal_note_target', { relPath }),
@@ -396,7 +415,7 @@ const bridge: ZenBridge = {
   revealAssetsDir: (): Promise<void> => invoke('vault_reveal_assets_dir'),
 
   // ---- Sync asset URL + drag-drop ---------------------------------------
-  getPathForFile: (): string | null => null, // M11 (drag-drop event + token map)
+  getPathForFile: pathForDroppedFile,
   resolveLocalAssetUrl,
   resolveVaultAssetUrl,
 
@@ -424,8 +443,10 @@ const bridge: ZenBridge = {
     void getCurrentWindow().close().catch(() => {})
   },
   openNoteWindow: (relPath: string): Promise<void> => invoke('window_open_note', { relPath }),
-  openVaultWindow: (root?: string): Promise<VaultInfo | null> =>
-    invoke('window_open_vault', { root: root ?? null }),
+  openVaultWindow: async (root?: string): Promise<VaultInfo | null> => {
+    if (root && !(await confirmVaultSwitch(root))) return null
+    return invoke('window_open_vault', { root: root ?? null })
+  },
   readExternalFile: (): Promise<ExternalFileContent> => invoke('app_read_external_file'),
   writeExternalFile: (body: string): Promise<void> => invoke('app_write_external_file', { body }),
   moveExternalFileToVault: (): Promise<MoveExternalFileResult> =>
@@ -463,13 +484,11 @@ const bridge: ZenBridge = {
   raycastGetStatus: async (): Promise<RaycastExtensionStatus> => unavailableRaycastStatus(),
   raycastInstall: async (): Promise<RaycastExtensionStatus> => unavailableRaycastStatus(),
 
-  // ---- Clipboard (basic now, plugin at M12) -----------------------------
+  // ---- Clipboard ---------------------------------------------------------
   clipboardWriteText: (text: string): void => {
-    try {
-      void navigator.clipboard?.writeText(text)
-    } catch {
-      /* ignore */
-    }
+    void invoke('app_clipboard_write_text', { text }).catch(() =>
+      navigator.clipboard?.writeText(text).catch(() => {})
+    )
   },
   clipboardReadText: (): string => '', // M12 (sync read is not available in the webview)
 
@@ -650,7 +669,7 @@ const bridge: ZenBridge = {
   // package (apps/desktop/src/main/note-docx.ts); no Rust equivalent yet, so
   // this is the web bridge's honest message rather than a silent no-op.
   exportNoteDocx: (): Promise<string | null> =>
-    Promise.reject(new Error('Word export is not implemented in this build yet.')),
+    Promise.reject(new Error('Word export is not available in ZenNotes-rs.')),
 
   // Open a VAULT asset with the OS default app. The vault is always local
   // here, so this is a path resolve away from the existing opener.
@@ -714,12 +733,12 @@ const bridge: ZenBridge = {
     void invoke('app_quit').catch(() => {})
   }
 
-  // Deliberately absent (all optional in the contract, so app-core hides
-  // what they drive): sendUsageCount (upstream's anonymous install count goes
-  // to zennotes.org and would count this port as upstream), the MCP server
-  // token members (no remote vaults to authenticate to) and the managed-CLI
-  // update members (no CLI ships here),
-  // and the cloud encryption members (cloud sync is out of scope).
+  // Deliberately absent (all optional in the contract): sendUsageCount
+  // (upstream's anonymous install count goes to zennotes.org and would count
+  // this port as upstream), the MCP server token members (no remote vaults to
+  // authenticate to), the managed-CLI update members (no CLI ships here) and
+  // the cloud encryption members (cloud sync is out of scope). The first two
+  // still have Settings rows, which tooling/vite/vendored-copy.ts hides.
 }
 
 /**
@@ -751,6 +770,8 @@ function routeExternalWindowOpens(): void {
 
 export function createTauriBridge(): ZenBridge {
   routeExternalWindowOpens()
+  installNavigationGuard()
+  installFileDrops(detectPlatform())
   void invoke<typeof installInfo>('app_install_info')
     .then((info) => {
       installInfo = info

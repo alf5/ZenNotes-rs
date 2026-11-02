@@ -10,7 +10,7 @@
  * hands over their text, in one round trip each.
  */
 
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from './ipc'
 import type { NoteFolder, VaultSettings } from '@zennotes/bridge-contract/ipc'
 import { parseTaskFile, parseTasksFromBody, type VaultTask } from '@zennotes/shared-domain/tasks'
 import { isPathExcludedFromTasks } from '@zennotes/shared-domain/tasks-excluded-folders'

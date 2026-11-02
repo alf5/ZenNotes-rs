@@ -11,13 +11,14 @@
 //! `overrides://changed`); the frontend re-scans and fans out fresh lists.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
 use notify_debouncer_full::notify::{RecursiveMode, Watcher};
 use notify_debouncer_full::{new_debouncer, DebounceEventResult};
 use serde::Serialize;
+use tauri::http::{Request, Response};
 use tauri::{AppHandle, Emitter};
 
 use crate::app_config::config_dir;
@@ -63,6 +64,57 @@ pub struct OverrideEntry {
     pub css: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// Port of upstream `resolveThemeAssetPath`: a file inside this theme's folder,
+/// symlinks followed before the check, or nothing.
+fn resolve_theme_asset_path(themes: &Path, slug: &str, rel: &str) -> Option<PathBuf> {
+    if !is_safe_slug(slug) || rel.is_empty() {
+        return None;
+    }
+    let decoded = urlencoding::decode(rel).ok()?.replace('\\', "/");
+    let decoded = decoded.trim_start_matches('/');
+    if decoded.is_empty() || decoded.contains('\0') || Path::new(decoded).is_absolute() {
+        return None;
+    }
+    let root = themes.join(slug).canonicalize().ok()?;
+    let real = root.join(decoded).canonicalize().ok()?;
+    (real != root && real.starts_with(&root) && real.is_file()).then_some(real)
+}
+
+/// Slug and file from a theme asset URL's parts: `zen-theme://<slug>/<file>`,
+/// or `http://zen-theme.localhost/<slug>/<file>` where WebView2 serves custom
+/// schemes that way (src/bridge/custom-css.ts rewrites the CSS for it).
+fn theme_asset_parts(host: &str, path: &str) -> Option<(String, String)> {
+    let path = path.trim_start_matches('/');
+    let (slug, rel) = if host.is_empty() || host == "zen-theme.localhost" {
+        path.split_once('/')?
+    } else {
+        (host, path)
+    };
+    Some((urlencoding::decode(slug).ok()?.into_owned(), rel.to_string()))
+}
+
+/// `zen-theme://` — fonts and images referenced by a custom theme's CSS,
+/// sandboxed to that theme's folder (upstream's `protocol.handle`).
+pub fn handle_theme_asset(request: Request<Vec<u8>>) -> Response<Vec<u8>> {
+    let not_found = || Response::builder().status(404).body(Vec::new()).unwrap();
+    let uri = request.uri();
+    let Some((slug, rel)) = theme_asset_parts(uri.host().unwrap_or(""), uri.path()) else {
+        return not_found();
+    };
+    let Some(abs) = resolve_theme_asset_path(&themes_dir(), &slug, &rel) else {
+        return not_found();
+    };
+    match fs::read(&abs) {
+        Ok(bytes) => Response::builder()
+            .header("Content-Type", crate::asset_protocol::mime_type_for_path(&abs.to_string_lossy()))
+            .header("Cache-Control", "no-cache")
+            .header("Access-Control-Allow-Origin", "*")
+            .body(bytes)
+            .unwrap(),
+        Err(_) => not_found(),
+    }
 }
 
 #[tauri::command]
@@ -250,6 +302,49 @@ pub fn spawn_watchers(app: AppHandle) -> Result<Vec<VaultDebouncer>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn theme_asset_urls_split_on_every_platform() {
+        assert_eq!(
+            theme_asset_parts("soft-paper", "/fonts/a%20b.woff2"),
+            Some(("soft-paper".to_string(), "fonts/a%20b.woff2".to_string()))
+        );
+        assert_eq!(
+            theme_asset_parts("zen-theme.localhost", "/soft-paper/a.woff2"),
+            Some(("soft-paper".to_string(), "a.woff2".to_string()))
+        );
+        assert_eq!(theme_asset_parts("zen-theme.localhost", "/soft-paper"), None);
+    }
+
+    #[test]
+    fn theme_assets_stay_inside_their_theme() {
+        let themes = std::env::temp_dir().join(format!("zn-themes-{}", uuid::Uuid::new_v4().simple()));
+        fs::create_dir_all(themes.join("soft/fonts")).unwrap();
+        fs::create_dir_all(themes.join("other")).unwrap();
+        fs::write(themes.join("soft/fonts/a b.woff2"), b"font").unwrap();
+        fs::write(themes.join("other/secret.png"), b"x").unwrap();
+        fs::write(themes.join("outside.png"), b"x").unwrap();
+
+        let found = resolve_theme_asset_path(&themes, "soft", "fonts/a%20b.woff2").unwrap();
+        assert!(found.ends_with("soft/fonts/a b.woff2"));
+        for (slug, rel) in [
+            ("soft", "../other/secret.png"),
+            ("soft", "..%2Fother%2Fsecret.png"),
+            ("soft", "fonts"),
+            ("soft", "missing.png"),
+            ("soft", ""),
+            ("..", "outside.png"),
+            ("a/b", "x"),
+        ] {
+            assert_eq!(resolve_theme_asset_path(&themes, slug, rel), None, "{slug} {rel}");
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(themes.join("outside.png"), themes.join("soft/link.png")).unwrap();
+            assert_eq!(resolve_theme_asset_path(&themes, "soft", "link.png"), None);
+        }
+        fs::remove_dir_all(themes).unwrap();
+    }
 
     #[test]
     fn slug_guards_reject_traversal() {

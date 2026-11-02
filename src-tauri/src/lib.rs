@@ -70,7 +70,19 @@ pub fn run() {
         // single-instance must be registered first; it forwards file/deep-link
         // args from a second launch to the running instance.
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            for arg in argv.iter().skip(1) {
+            let args = || argv.iter().skip(1);
+            // A compositor keybind asking for Quick Capture should not raise the
+            // main window as well (Wayland has no global hotkeys for us to grab).
+            if args().any(|arg| deep_links::is_quick_capture_request(arg)) {
+                // The deep-link plugin below already delivers the URL form.
+                if args().any(|arg| !deep_links::is_deep_link(arg) && deep_links::is_quick_capture_request(arg)) {
+                    let _ = windows::toggle_quick_capture(app, windows::read_pinned(app));
+                }
+                return;
+            }
+            // Deep links reach `on_open_url` through the plugin's own handling
+            // of a second launch; handling them here too would run them twice.
+            for arg in args().filter(|arg| !deep_links::is_deep_link(arg)) {
                 deep_links::handle_url_or_path(app, arg);
             }
             // Focuses the main window, and shows any the tray is holding (#947).
@@ -79,9 +91,21 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
+        // Upstream's `will-navigate`: every navigation in every window.
+        .plugin(
+            tauri::plugin::Builder::<tauri::Wry>::new("navigation-guard")
+                .on_navigation(|webview, url| {
+                    external_urls::guard_navigation(webview.app_handle(), url.as_str())
+                })
+                .build(),
+        )
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .register_uri_scheme_protocol("syn-asset", |ctx, request| {
             asset_protocol::handle(ctx.app_handle(), request)
+        })
+        .register_uri_scheme_protocol("zen-theme", |_ctx, request| {
+            custom_css::handle_theme_asset(request)
         })
         .manage(AppState::default())
         .manage(tray::TrayState::default())
@@ -90,6 +114,8 @@ pub fn run() {
             // Saved undo histories (#793) expire and are capped per vault; off
             // the boot path, so a slow sweep never delays the first window.
             undo_history::spawn_prune(app.handle());
+            // Files a macOS or Windows drop staged during the last session.
+            os_cmds::clear_staged_drops();
             // Put the tray icon back when "Keep running in the tray" was left on.
             tray::restore_at_launch(app.handle());
             // Watch the portable config.toml for external edits (synced
@@ -140,6 +166,10 @@ pub fn run() {
                 {
                     let _ = app.deep_link().register_all();
                 }
+            }
+            // First launch through `zennotes-rs --quick-capture`.
+            if std::env::args().skip(1).any(|arg| deep_links::is_quick_capture_request(&arg)) {
+                let _ = windows::toggle_quick_capture(app.handle(), windows::read_pinned(app.handle()));
             }
             Ok(())
         })
@@ -225,6 +255,10 @@ pub fn run() {
             os_cmds::vault_reveal_file_path,
             os_cmds::vault_open_external_file,
             os_cmds::devtools_toggle,
+            os_cmds::app_clipboard_write_text,
+            os_cmds::app_dropped_folders,
+            os_cmds::app_stage_dropped_file,
+            os_cmds::app_open_vault_asset_url,
             app_config::config_file_path,
             app_config::config_file_read,
             app_config::config_file_write,

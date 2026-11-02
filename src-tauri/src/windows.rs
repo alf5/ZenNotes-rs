@@ -21,6 +21,17 @@ use crate::vault::notes::to_posix;
 
 const QUICK_CAPTURE_LABEL: &str = "quick-capture";
 
+/// Off on macOS and Windows, where the native handler swallows every drag over
+/// the webview, in-app ones too (tabs, sidebar, boards). The main window gets
+/// the same from tauri.conf.json, and src/bridge/file-drops.ts takes OS drops.
+fn with_drop_mode<'a>(
+    builder: WebviewWindowBuilder<'a, tauri::Wry, AppHandle>,
+) -> WebviewWindowBuilder<'a, tauri::Wry, AppHandle> {
+    #[cfg(not(target_os = "linux"))]
+    let builder = builder.disable_drag_drop_handler();
+    builder
+}
+
 fn unique_label(prefix: &str) -> String {
     format!("{prefix}-{}", uuid::Uuid::new_v4().simple())
 }
@@ -35,7 +46,7 @@ pub fn open_note_window(app: &AppHandle, rel_path: &str) -> Result<(), String> {
     // Linux ships frameless (like upstream Electron); the app draws its own titlebar.
     #[cfg(target_os = "linux")]
     let builder = builder.decorations(false);
-    builder
+    with_drop_mode(builder)
         .build()
         .map_err(|e| format!("Failed to open note window: {e}"))?;
     Ok(())
@@ -48,7 +59,7 @@ pub fn open_vault_window(app: &AppHandle, state: &AppState) -> Result<Option<Vau
         .inner_size(1200.0, 800.0);
     #[cfg(target_os = "linux")]
     let builder = builder.decorations(false);
-    builder
+    with_drop_mode(builder)
         .build()
         .map_err(|e| format!("Failed to open vault window: {e}"))?;
     Ok(state.current())
@@ -86,7 +97,7 @@ pub fn toggle_quick_capture(app: &AppHandle, pinned: bool) -> Result<(), String>
     .skip_taskbar(true);
     #[cfg(target_os = "linux")]
     let builder = builder.decorations(false);
-    builder
+    with_drop_mode(builder)
         .build()
         .map_err(|e| format!("Failed to open quick capture: {e}"))?;
     Ok(())
@@ -270,9 +281,10 @@ pub fn open_markdown_file(app: &AppHandle, state: &AppState, abs_path: &str) -> 
     let label = unique_label("external");
     state.set_external_file(&label, PathBuf::from(&abs));
     let name = Path::new(&abs).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-    WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html?externalFile=1".into()))
+    let builder = WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html?externalFile=1".into()))
         .title(&name)
-        .inner_size(820.0, 720.0)
+        .inner_size(820.0, 720.0);
+    with_drop_mode(builder)
         .build()
         .map_err(|e| format!("Failed to open file window: {e}"))?;
     Ok(true)

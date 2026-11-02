@@ -12,7 +12,7 @@
  * rename itself has already happened and must not be reported as failed.
  */
 
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from './ipc'
 import type { AssetMeta, NoteContent, NoteMeta } from '@zennotes/bridge-contract/ipc'
 import {
   resolveWikilinkTarget,

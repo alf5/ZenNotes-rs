@@ -33,6 +33,14 @@ fn is_inside_vault(app: &AppHandle, abs: &str) -> bool {
     abs_norm == root_abs || abs_norm.starts_with(&format!("{root_abs}{sep}"))
 }
 
+/// The vault file a `syn-asset` URL points at, as the webview sees it on each
+/// platform (`syn-asset://localhost/…` or `http://syn-asset.localhost/…`).
+pub fn vault_path_from_url(app: &AppHandle, url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    let abs = decode_asset_path(parsed.path())?;
+    is_inside_vault(app, &abs).then_some(abs)
+}
+
 pub fn handle(app: &AppHandle, request: Request<Vec<u8>>) -> Response<Vec<u8>> {
     let not_found = || Response::builder().status(404).body(Vec::new()).unwrap();
 
@@ -78,6 +86,10 @@ pub fn mime_type_for_path(abs_path: &str) -> &'static str {
         "mov" => "video/quicktime",
         "ogv" => "video/ogg",
         "webm" => "video/webm",
+        "woff2" => "font/woff2",
+        "woff" => "font/woff",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
         _ => "application/octet-stream",
     }
 }

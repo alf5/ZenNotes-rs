@@ -960,7 +960,7 @@ mod tests {
         // Exact upstream JSON, key order included.
         assert_eq!(
             serde_json::to_string(&tasks[3]).unwrap(),
-            r#"{"id":"inbox/States.md#3","sourcePath":"inbox/States.md","link":"zennotes://open?path=inbox/States.md","noteTitle":"States","noteFolder":"inbox","lineNumber":4,"taskIndex":3,"rawText":"- [>] forwarded","content":"forwarded","checked":false,"cancelled":false,"inProgress":false,"forwarded":true,"waiting":false,"tags":[]}"#
+            r#"{"id":"inbox/States.md#3","sourcePath":"inbox/States.md","link":"zennotes-rs://open?path=inbox/States.md","noteTitle":"States","noteFolder":"inbox","lineNumber":4,"taskIndex":3,"rawText":"- [>] forwarded","content":"forwarded","checked":false,"cancelled":false,"inProgress":false,"forwarded":true,"waiting":false,"tags":[]}"#
         );
     }
 
@@ -1076,7 +1076,7 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_string(&tasks[1]).unwrap(),
-            r#"{"id":"inbox/Defaults.md#1","sourcePath":"inbox/Defaults.md","link":"zennotes://open?path=inbox/Defaults.md","noteTitle":"Defaults","noteFolder":"inbox","lineNumber":8,"taskIndex":1,"rawText":"- [ ] own due:2026-04-04 !high @status:Done","content":"own @status:Done","checked":false,"cancelled":false,"inProgress":false,"forwarded":false,"due":"2026-04-04","priority":"high","waiting":false,"status":"done","tags":[]}"#
+            r#"{"id":"inbox/Defaults.md#1","sourcePath":"inbox/Defaults.md","link":"zennotes-rs://open?path=inbox/Defaults.md","noteTitle":"Defaults","noteFolder":"inbox","lineNumber":8,"taskIndex":1,"rawText":"- [ ] own due:2026-04-04 !high @status:Done","content":"own @status:Done","checked":false,"cancelled":false,"inProgress":false,"forwarded":false,"due":"2026-04-04","priority":"high","waiting":false,"status":"done","tags":[]}"#
         );
 
         // Empty status, unknown priority, malformed due: nothing inherited.
@@ -1110,7 +1110,7 @@ mod tests {
         let c = ctx("inbox/Projects/FileTask.md", "FileTask", "inbox");
         assert_eq!(
             serde_json::to_string(&parse_task_file(&body, &c, false).unwrap()).unwrap(),
-            r#"{"id":"inbox/Projects/FileTask.md#task","sourcePath":"inbox/Projects/FileTask.md","link":"zennotes://open?path=inbox/Projects/FileTask.md","noteTitle":"FileTask","noteFolder":"inbox","lineNumber":0,"taskIndex":-1,"rawText":"","content":"Ship it","checked":false,"cancelled":false,"inProgress":true,"due":"2026-05-01","priority":"med","waiting":false,"status":"in-progress","tags":["work","ünï"],"kind":"file","scheduled":"2026-04-20","completedDate":"2026-04-21"}"#
+            r#"{"id":"inbox/Projects/FileTask.md#task","sourcePath":"inbox/Projects/FileTask.md","link":"zennotes-rs://open?path=inbox/Projects/FileTask.md","noteTitle":"FileTask","noteFolder":"inbox","lineNumber":0,"taskIndex":-1,"rawText":"","content":"Ship it","checked":false,"cancelled":false,"inProgress":true,"due":"2026-05-01","priority":"med","waiting":false,"status":"in-progress","tags":["work","ünï"],"kind":"file","scheduled":"2026-04-20","completedDate":"2026-04-21"}"#
         );
         assert_eq!(
             serde_json::to_string(
@@ -1122,7 +1122,7 @@ mod tests {
                 .unwrap()
             )
             .unwrap(),
-            r#"{"id":"archive/Waiting.md#task","sourcePath":"archive/Waiting.md","link":"zennotes://open?path=archive/Waiting.md","noteTitle":"Waiting","noteFolder":"archive","lineNumber":0,"taskIndex":-1,"rawText":"","content":"Waiting","checked":false,"cancelled":false,"inProgress":false,"priority":"high","waiting":true,"status":"waiting","tags":[],"kind":"file"}"#
+            r#"{"id":"archive/Waiting.md#task","sourcePath":"archive/Waiting.md","link":"zennotes-rs://open?path=archive/Waiting.md","noteTitle":"Waiting","noteFolder":"archive","lineNumber":0,"taskIndex":-1,"rawText":"","content":"Waiting","checked":false,"cancelled":false,"inProgress":false,"priority":"high","waiting":true,"status":"waiting","tags":[],"kind":"file"}"#
         );
         let status = |body: &str| parse_task_file(body, &c, false).map(|t| (t.status, t.checked, t.cancelled, t.in_progress));
         assert_eq!(status("---\ntags: \"#task\"\nstatus: canceled\n---\n"), Some((Some("canceled".into()), false, Some(true), Some(false))));
@@ -1198,10 +1198,10 @@ mod tests {
         let done = scan.iter().find(|t| t.id == "quick/Done.md#task").unwrap();
         assert_eq!(
             serde_json::to_string(done).unwrap(),
-            r#"{"id":"quick/Done.md#task","sourcePath":"quick/Done.md","link":"zennotes://open?path=quick/Done.md","noteTitle":"Done","noteFolder":"quick","lineNumber":0,"taskIndex":-1,"rawText":"","content":"Done","checked":true,"cancelled":false,"inProgress":false,"waiting":false,"status":"done","tags":["home"],"kind":"file","completedDate":"2026-01-02"}"#
+            r#"{"id":"quick/Done.md#task","sourcePath":"quick/Done.md","link":"zennotes-rs://open?path=quick/Done.md","noteTitle":"Done","noteFolder":"quick","lineNumber":0,"taskIndex":-1,"rawText":"","content":"Done","checked":true,"cancelled":false,"inProgress":false,"waiting":false,"status":"done","tags":["home"],"kind":"file","completedDate":"2026-01-02"}"#
         );
         let hash = scan.iter().find(|t| t.id == "inbox/C# notes.md#0").unwrap();
-        assert_eq!((hash.link.as_str(), hash.note_title.as_str()), ("zennotes://open?path=inbox/C%23%20notes.md", "C# notes"));
+        assert_eq!((hash.link.as_str(), hash.note_title.as_str()), ("zennotes-rs://open?path=inbox/C%23%20notes.md", "C# notes"));
     }
 
     #[test]
@@ -1283,7 +1283,7 @@ mod tests {
         let reopened = toggle_task(root, "quick/Done.md#task").unwrap().unwrap();
         assert_eq!(
             serde_json::to_string(&reopened).unwrap(),
-            r#"{"id":"quick/Done.md#task","sourcePath":"quick/Done.md","link":"zennotes://open?path=quick/Done.md","noteTitle":"Done","noteFolder":"quick","lineNumber":0,"taskIndex":-1,"rawText":"","content":"Done","checked":false,"cancelled":false,"inProgress":false,"waiting":false,"status":"open","tags":["home"],"kind":"file"}"#
+            r#"{"id":"quick/Done.md#task","sourcePath":"quick/Done.md","link":"zennotes-rs://open?path=quick/Done.md","noteTitle":"Done","noteFolder":"quick","lineNumber":0,"taskIndex":-1,"rawText":"","content":"Done","checked":false,"cancelled":false,"inProgress":false,"waiting":false,"status":"open","tags":["home"],"kind":"file"}"#
         );
         // CRLF comes back LF-normalized, as upstream writes it.
         assert_eq!(read(&dir, "quick/Done.md"), "---\ntags: [task, Home]\nstatus: open\n---\nbody\n- [ ] crlf sub\n");

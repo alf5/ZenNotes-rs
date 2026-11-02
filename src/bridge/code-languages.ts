@@ -16,7 +16,7 @@
  * no equivalent here yet — see the "Grammar vetting" row in GAP-ANALYSIS.md.
  */
 
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from './ipc'
 import { listen } from '@tauri-apps/api/event'
 import {
   RESERVED_CODE_FENCE_TAGS,

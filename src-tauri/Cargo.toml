@@ -1,6 +1,6 @@
 [package]
 name = "zennotes-rs"
-version = "2.79.0"
+version = "2.79.1"
 description = "ZenNotes-rs desktop — a Tauri port of ZenNotes"
 authors = ["ZenNotes-rs"]
 edition = "2021"
@@ -14,7 +14,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["tray-icon", "devtools"] }
+tauri-plugin-clipboard-manager = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-opener = "2"

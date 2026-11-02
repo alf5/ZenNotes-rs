@@ -170,9 +170,76 @@ pub fn app_open_external_url(app: AppHandle, url: String) -> ExternalUrlResult {
     })
 }
 
+#[derive(Debug, PartialEq)]
+enum NavigationDecision {
+    Allow,
+    Refuse,
+    HandToOs,
+}
+
+/// Which navigations stay in the webview. WRY reports iframes here too and does
+/// not say which frame asked, so http(s) has to pass: an embed in a note or the
+/// page's own origin. src/bridge/navigation-guard.ts stops the main frame from
+/// following a link. Schemes this app and WebKit load pages through pass as
+/// well (WebKit draws PDFs through `webkit-pdfjs-viewer`).
+fn decide_navigation(url: &str) -> NavigationDecision {
+    let scheme = url.split(':').next().unwrap_or("").trim().to_ascii_lowercase();
+    match scheme.as_str() {
+        "http" | "https" | "tauri" | "about" | "blob" | "data" | "syn-asset" | "zen-theme" | "ipc" | "asset" => {
+            NavigationDecision::Allow
+        }
+        s if s.starts_with("webkit") => NavigationDecision::Allow,
+        "mailto" | "tel" => NavigationDecision::HandToOs,
+        _ => match classify_application_link(url) {
+            Some((_, false)) => NavigationDecision::HandToOs,
+            _ => NavigationDecision::Refuse,
+        },
+    }
+}
+
+/// Upstream's `will-navigate`: an application link goes through the same gate
+/// as `window.open` (enabled in Settings, or refused), never into the window.
+pub fn guard_navigation<R: tauri::Runtime>(app: &AppHandle<R>, url: &str) -> bool {
+    match decide_navigation(url) {
+        NavigationDecision::Allow => true,
+        NavigationDecision::Refuse => false,
+        NavigationDecision::HandToOs => {
+            open_external_url(url, &enabled_schemes(), |target| {
+                app.opener().open_url(target, None::<&str>).map_err(|e| e.to_string())
+            });
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn navigation_keeps_pages_and_embeds_and_refuses_the_rest() {
+        for url in [
+            "tauri://localhost/index.html",
+            "http://tauri.localhost/index.html",
+            "http://localhost:1420/",
+            "https://www.youtube.com/embed/x",
+            "about:blank",
+            "about:srcdoc",
+            "blob:tauri://localhost/1",
+            "data:text/html,x",
+            "syn-asset://localhost/%2Fv%2Fa.pdf",
+            "zen-theme://soft/a.woff2",
+            "webkit-pdfjs-viewer://pdfjs/web/viewer.html",
+        ] {
+            assert_eq!(decide_navigation(url), NavigationDecision::Allow, "{url}");
+        }
+        for url in ["file:///etc/passwd", "FILE:///etc/passwd", "view-source:x", "javascript:alert(1)", "chrome://x"] {
+            assert_eq!(decide_navigation(url), NavigationDecision::Refuse, "{url}");
+        }
+        for url in ["mailto:a@b.c", "tel:123", "zotero://select/x", "zennotes-rs://open?path=a.md"] {
+            assert_eq!(decide_navigation(url), NavigationDecision::HandToOs, "{url}");
+        }
+    }
 
     fn classify(url: &str) -> Option<(String, bool)> {
         classify_application_link(url)

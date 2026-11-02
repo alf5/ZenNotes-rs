@@ -7,7 +7,13 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { applyVendoredCopy, VENDORED_COPY } from '../../tooling/vite/vendored-copy'
+import { hideHelpEntries } from '../../tooling/vite/help-hide'
+import {
+  applyVendoredCopy,
+  HELP_HIDDEN,
+  staleHelpEntries,
+  VENDORED_COPY
+} from '../../tooling/vite/vendored-copy'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const assets = join(root, 'dist', 'assets')
@@ -26,6 +32,28 @@ describe('vendored text swaps', () => {
     expect(() => applyVendoredCopy(VENDORED_COPY[0]!.file, 'reworded')).toThrow(/Upstream changed/)
   })
 
+  it('hides only Help entries that still exist', () => {
+    const help = readFileSync(join(root, 'packages/app-core/src/lib/help.ts'), 'utf8')
+    expect(staleHelpEntries(help)).toEqual([])
+    expect(staleHelpEntries(help.replace("label: 'Updates and releases'", "label: 'Reworded'"))).toEqual([
+      'Updates and releases'
+    ])
+    expect(() => applyVendoredCopy('packages/app-core/src/lib/help.ts', 'reworded')).toThrow(/Upstream changed/)
+  })
+
+  it('removes hidden Help entries from the lists themselves', () => {
+    const cards = [{ title: 'Search from Raycast on macOS' }, { title: 'Kept' }]
+    const cli = [{ title: 'What the CLI is for' }]
+    const settings = [
+      { title: 'CLI', items: [] },
+      { title: 'About', items: [{ label: 'Updates and releases' }, { label: 'App identity' }] }
+    ]
+    hideHelpEntries({ cards: [cards], settings, clearCards: [cli] }, HELP_HIDDEN)
+    expect(cards).toEqual([{ title: 'Kept' }])
+    expect(cli).toEqual([])
+    expect(settings).toEqual([{ title: 'About', items: [{ label: 'App identity' }] }])
+  })
+
   it('leaves other files alone', () => {
     expect(applyVendoredCopy('packages/app-core/src/lib/other.ts', 'same')).toBe('same')
   })
@@ -36,9 +64,14 @@ describe('vendored text swaps', () => {
       .map((name) => readFileSync(join(assets, name), 'utf8'))
       .join('\n')
     for (const swap of VENDORED_COPY) {
+      // A swap that only adds to the sentence still contains it.
+      if (swap.replace.includes(swap.find)) continue
       expect(bundle).not.toContain(swap.find.replace(/^(title|body): /, ''))
     }
     expect(bundle).toContain('then restart ZenNotes-rs.')
     expect(bundle).toContain('ZenNotes-rs does not have this yet.')
+    expect(bundle).toContain('run as zennotes-rs mcp')
+    expect(bundle).not.toContain('packaged Electron binary')
+    expect(bundle).not.toContain('the Electron or browser engine')
   })
 })

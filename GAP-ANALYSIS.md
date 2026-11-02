@@ -1,3 +1,33 @@
+# ZenNotes-rs 2.79.1: what moving off Electron had left wrong
+
+Still mirrors upstream v2.79.0; `packages/` is untouched. A review of every
+place the port leans on something Electron gave for free.
+
+| Electron gave | Here now | Checked |
+|---|---|---|
+| IPC rejects with an `Error` | `src/bridge/ipc.ts` turns Rust's bare strings into `Error`s; app-core read `.message` off them in 34 places | Live |
+| `webUtils.getPathForFile` | `src/bridge/file-drops.ts`. Linux: Tauri's native drop, delivered as a synthetic DOM `drop` of stand-in `File`s. macOS/Windows: the native handler swallows in-app drags too (read in wry and Tauri's docs), so it is off and the page's drop is used: uri-list paths, else attachments staged to a temp file; a Markdown file or folder with no path is refused, not opened from a temp copy | Live on Linux from Tauri's drop event onward. **Not exercised: a real OS drag** (no way to drive one on this machine), nor anything on macOS or Windows |
+| `GlobalShortcutsPortal` on Wayland | `global-hotkey` is X11-only, so `zennotes-rs --quick-capture` and `zennotes-rs://quick-capture` toggle the panel from a compositor keybind | Live for the triggers; the X11 hotkey itself not re-tested |
+| `will-navigate` | Two halves, because WRY reports iframes to the guard without saying which frame asked: Rust (`external_urls::guard_navigation`) refuses `file:` and hands application schemes to the gate; `src/bridge/navigation-guard.ts` keeps the main frame in place | Live; PDF iframe still renders |
+| `clipboard.writeText` | `tauri-plugin-clipboard-manager`, falling back to `navigator.clipboard` | Live on Wayland |
+| `protocol.handle('zen-theme')` | `custom_css::handle_theme_asset`, sandboxed to the theme folder. WebView2 needs `http://zen-theme.localhost`, so `custom-css.ts` rewrites the CSS there | Live on Linux; the rewrite is unit level |
+| Devtools in production | Cargo feature `devtools` | Live |
+| Per-window vaults | Still one vault per run. `openVaultWindow(root)` now asks first | Dialog seen pending; choosing Switch not driven |
+| `printToPDF`, Word export | Still absent. The commands now say so in a toast instead of doing nothing | Live |
+| Bundled codecs | System GStreamer: `optdepends` and BUILD.md | Packaging only |
+
+MCP: note links are `zennotes-rs://` (upstream's scheme opened upstream's app or
+nothing), and the instructions no longer ask for TikZ. Both come from
+`tooling/mcp-golden/port-overrides.ts`, applied on every re-record, which fails
+if upstream rewords a passage. A second launch's deep links now run once: the
+deep-link plugin and the single-instance callback both delivered them.
+
+Wording swaps and hidden Help entries are in `tooling/vite/vendored-copy.ts`;
+both fail the build when upstream rewords them, so they need attention on a
+re-vendor. Help's CLI section is emptied whole.
+
+---
+
 # Gap analysis: upstream ZenNotes v2.73.0 → v2.79.0
 
 Status of the mirror as of 2026-10-31, released as ZenNotes-rs 2.79.0.
@@ -107,8 +137,7 @@ Port-owned copies (Rust) of upstream logic, all covered by the golden test:
 Not carried over: remote vaults (`--server`, `--token`, the Settings server
 token, `ZENNOTES_SERVER`; this build has no remote workspaces), remapped
 system folders (as everywhere in this port), and the legacy `out/main/mcp.js`
-entry. The vendored Settings page still describes the server as "the packaged
-Electron binary in plain-Node mode" and the Codex row as `[mcp_servers.zennotes]`.
+entry. (Settings' description of the server was reworded in 2.79.1.)
 
 ## Frontend
 
