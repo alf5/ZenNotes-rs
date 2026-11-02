@@ -131,7 +131,7 @@ import { installNavigationGuard } from './navigation-guard'
 const APP_INFO: ZenAppInfo = {
   name: 'zennotes-rs',
   productName: 'ZenNotes-rs',
-  version: '2.79.1',
+  version: '2.79.2',
   description: 'ZenNotes-rs desktop',
   homepage: 'https://github.com/alf5/ZenNotes-rs',
   runtime: 'desktop',
