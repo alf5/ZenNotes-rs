@@ -29,11 +29,21 @@ use crate::vault::sidecars;
 use crate::vault::templates;
 use crate::vault::workflows;
 
-/// Absolute root of the currently open vault, or an error when none is open.
-fn require_root(state: &AppState) -> Result<PathBuf, String> {
-    state
-        .current_root()
-        .ok_or_else(|| "No vault is currently open".to_string())
+/// Said by every local-disk command while a remote session is on. Routing in
+/// the webview sends remote work to the server first; this is the backstop.
+pub(crate) const LOCAL_ONLY_WHILE_REMOTE: &str =
+    "ZenNotes-rs is connected to a remote workspace, so there is no local vault to use for this.";
+
+/// Absolute root of the currently open LOCAL vault, or an error when none is
+/// open (including while a remote workspace is connected).
+pub(crate) fn require_root(state: &AppState) -> Result<PathBuf, String> {
+    state.current_root().ok_or_else(|| {
+        if state.remote_session().is_some() {
+            LOCAL_ONLY_WHILE_REMOTE.to_string()
+        } else {
+            "No vault is currently open".to_string()
+        }
+    })
 }
 
 fn now_ms() -> i64 {
@@ -50,15 +60,20 @@ fn config_dir(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 /// Open `root` as the active local vault: ensure layout, update state, persist.
+/// `origin` is the label of the window that asked, when one did: if this ends
+/// a remote session, every other window reloads onto the local vault.
 fn open_vault(
     app: &AppHandle,
     state: &AppState,
     root: &Path,
     opened_at: i64,
+    origin: Option<&str>,
 ) -> Result<VaultInfo, String> {
     layout::ensure_vault_layout(root).map_err(|e| format!("Failed to prepare vault: {e}"))?;
     let resolved = PathBuf::from(config::resolve_path(&root.to_string_lossy()));
     let vault = settings::describe_vault(&resolved);
+    // A local vault ends any remote session (upstream's setVault).
+    let ended_remote = state.take_over_from_remote();
     state.set_current(Some(vault.clone()));
 
     // (Re)start the filesystem watcher for the newly active vault.
@@ -78,6 +93,9 @@ fn open_vault(
         cfg.local_vaults = config::remember_local_vault(&cfg.local_vaults, &v, opened_at);
     })
     .map_err(|e| format!("Failed to persist config: {e}"))?;
+    if ended_remote {
+        crate::remote::session::notify_workspace_changed(app, origin);
+    }
 
     Ok(vault)
 }
@@ -325,6 +343,7 @@ pub fn vault_write_drawing(
 #[tauri::command]
 pub fn app_open_folder_temporary(
     app: AppHandle,
+    window: tauri::Window,
     state: State<AppState>,
     raw_path: String,
 ) -> Result<(), String> {
@@ -352,6 +371,9 @@ pub fn app_open_folder_temporary(
     }
     let mut vault = settings::describe_vault(&resolved);
     vault.temporary = Some(true);
+    if state.take_over_from_remote() {
+        crate::remote::session::notify_workspace_changed(&app, Some(window.label()));
+    }
     state.set_current(Some(vault));
     match crate::watcher::spawn(app.clone(), resolved.clone()) {
         Ok(debouncer) => state.set_watcher(Some(debouncer)),
@@ -370,25 +392,49 @@ pub(crate) fn open_local_vault_root(
     app: &AppHandle,
     state: &AppState,
     root: &str,
+    origin: Option<&str>,
 ) -> Result<VaultInfo, String> {
-    open_vault(app, state, Path::new(root), now_ms())
+    open_vault(app, state, Path::new(root), now_ms(), origin)
 }
 
+/// `vault:get-current` (upstream's `loadCurrentVaultFromConfig`): the open
+/// workspace's vault, or the configured one opened now. A configured remote
+/// workspace connects here, so this runs off the main thread.
 #[tauri::command]
-pub fn vault_get_current(
+pub async fn vault_get_current(
     app: AppHandle,
-    state: State<AppState>,
-) -> Result<Option<VaultInfo>, String> {
-    if let Some(v) = sync_local_vault_name(&app, &state) {
-        return Ok(Some(v));
+    window: tauri::Window,
+) -> Result<Option<serde_json::Value>, String> {
+    let origin = window.label().to_string();
+    tauri::async_runtime::spawn_blocking(move || load_current_vault(&app, Some(&origin)))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+pub(crate) fn load_current_vault(
+    app: &AppHandle,
+    origin: Option<&str>,
+) -> Result<Option<serde_json::Value>, String> {
+    let state = app.state::<AppState>();
+    let _workspace = state.workspace_lock.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(session) = state.remote_session() {
+        let vault = session.vault();
+        return Ok((!vault.is_null()).then_some(vault));
     }
-    let dir = config_dir(&app)?;
+    let to_value = |v: VaultInfo| serde_json::to_value(v).map_err(|e| e.to_string());
+    if let Some(v) = sync_local_vault_name(app, &state) {
+        return Ok(Some(to_value(v)?));
+    }
+    let dir = config_dir(app)?;
     let cfg = config::load_config(&dir);
+    if cfg.workspace_mode == "remote" && crate::remote::profiles::connection_base_url(&cfg).is_some() {
+        return Ok(crate::remote::session::boot(app, &cfg, origin));
+    }
     let Some(root) = cfg.vault_root else {
         return Ok(None);
     };
-    let vault = open_vault(&app, &state, Path::new(&root), now_ms())?;
-    Ok(Some(vault))
+    let vault = open_vault(app, &state, Path::new(&root), now_ms(), origin)?;
+    Ok(Some(to_value(vault)?))
 }
 
 #[tauri::command]
@@ -422,6 +468,7 @@ pub fn vault_list_local(
 #[tauri::command]
 pub fn vault_open_local(
     app: AppHandle,
+    window: tauri::Window,
     state: State<AppState>,
     root: String,
 ) -> Result<Option<VaultInfo>, String> {
@@ -429,13 +476,14 @@ pub fn vault_open_local(
     if trimmed.is_empty() {
         return Ok(None);
     }
-    let vault = open_vault(&app, &state, Path::new(trimmed), now_ms())?;
+    let vault = open_vault(&app, &state, Path::new(trimmed), now_ms(), Some(window.label()))?;
     Ok(Some(vault))
 }
 
 #[tauri::command]
 pub fn vault_close(
     app: AppHandle,
+    window: tauri::Window,
     state: State<AppState>,
 ) -> Result<Option<VaultInfo>, String> {
     let Some(current) = state.current() else {
@@ -447,7 +495,7 @@ pub fn vault_close(
     let next_root = remaining.first().map(|e| e.root.clone());
 
     let next_vault = match &next_root {
-        Some(root) => Some(open_vault(&app, &state, Path::new(root), now_ms())?),
+        Some(root) => Some(open_vault(&app, &state, Path::new(root), now_ms(), Some(window.label()))?),
         None => {
             state.set_current(None);
             state.set_watcher(None);
@@ -480,6 +528,7 @@ pub fn vault_close(
 #[tauri::command]
 pub async fn vault_pick(
     app: AppHandle,
+    window: tauri::Window,
     state: State<'_, AppState>,
 ) -> Result<Option<VaultInfo>, String> {
     let picked = app
@@ -493,14 +542,26 @@ pub async fn vault_pick(
     let path = file_path
         .into_path()
         .map_err(|e| format!("Invalid folder selection: {e}"))?;
-    let vault = open_vault(&app, &state, &path, now_ms())?;
+    let vault = open_vault(&app, &state, &path, now_ms(), Some(window.label()))?;
     Ok(Some(vault))
 }
 
+/// `vault:select-path`: move a remote workspace to another vault on its
+/// server. A local vault has no server path to select.
 #[tauri::command]
-pub fn vault_select_path(_target_path: String) -> Result<VaultInfo, String> {
-    // Remote-workspace path selection arrives in M14.
-    Err("Remote workspaces are not available in this build yet.".into())
+pub async fn vault_select_path(
+    app: AppHandle,
+    window: tauri::Window,
+    target_path: String,
+) -> Result<serde_json::Value, crate::remote::RemoteError> {
+    let origin = window.label().to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let _workspace = state.workspace_lock.lock().unwrap_or_else(|e| e.into_inner());
+        crate::remote::session::select_vault_path(&app, Some(&origin), &target_path)
+    })
+    .await
+    .map_err(|e| crate::remote::RemoteError::other(e.to_string()))?
 }
 
 // ---- M2: read / list -----------------------------------------------------

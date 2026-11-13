@@ -13,6 +13,12 @@ const HELP = 'packages/app-core/src/lib/help.ts'
 const COMMANDS = 'packages/app-core/src/lib/commands.ts'
 const REPO = 'https://github.com/alf5/ZenNotes-rs'
 
+/** JS that tests whether `variable` (a server address without a scheme) names
+ *  this machine: localhost, *.localhost, 127.x.x.x or [::1], with any port. */
+function LOOPBACK_TEST(variable: string): string {
+  return String.raw`/^(localhost|[^\/:]+\.localhost|127\.\d+\.\d+\.\d+|\[::1\])(:\d+)?(\/|$)/i.test(` + variable + ')'
+}
+
 export const VENDORED_COPY: ReadonlyArray<{ file: string; find: string; replace: string }> = [
   {
     // An Electron flag, which does nothing here.
@@ -128,6 +134,34 @@ export const VENDORED_COPY: ReadonlyArray<{ file: string; find: string; replace:
     replace: 'to remove the main window title and controls on Linux, including tiling desktops such as Hyprland. On macOS and Windows the system title bar stays.'
   },
 
+  // A server address typed without a scheme gets https://, not upstream's
+  // http://, so a server on the internet never receives the token in the clear
+  // (docs/remote-workspace-plan.md, decision 3). A loopback address keeps
+  // http://, where nothing leaves the machine. Rust's normalize_base_url in
+  // src-tauri/src/remote/http.rs follows the same rule.
+  {
+    file: 'packages/app-core/src/store.ts',
+    find: 'const normalized = /^https?:\\/\\//i.test(trimmed) ? trimmed : `http://${trimmed}`',
+    replace: 'const normalized = /^https?:\\/\\//i.test(trimmed) ? trimmed : `${' + LOOPBACK_TEST('trimmed') + " ? 'http' : 'https'}://${trimmed}`"
+  },
+  {
+    file: 'packages/app-core/src/components/RemoteWorkspaceProfileModal.tsx',
+    find: ": `http://${trimmed.replace(/\\/+$/, '')}`",
+    replace: ': `${' + LOOPBACK_TEST('trimmed') + " ? 'http' : 'https'}://${trimmed.replace(/\\/+$/, '')}`"
+  },
+
+  // macOS asks for the Local Network permission in this app's own name.
+  {
+    file: HELP,
+    find: 'macOS asks the first time ZenNotes reaches a local address',
+    replace: 'macOS asks the first time ZenNotes-rs reaches a local address'
+  },
+  {
+    file: HELP,
+    find: 'Turn it back on under System Settings → Privacy & Security → Local Network.',
+    replace: 'Turn it back on for ZenNotes-rs under System Settings → Privacy & Security → Local Network.'
+  },
+
   // TikZ and PDF export are not in this build; config.toml keeps the setting.
   { file: HELP, find: 'five fenced block languages', replace: 'four fenced block languages' },
   {
@@ -152,8 +186,6 @@ export const HELP_HIDDEN: HiddenHelp = {
     'Save a page or text from Safari and other apps (Share → ZenNotes)',
     'Search from Raycast on macOS',
     'Check for updates and install them',
-    'Run the self-hosted web version with Docker',
-    'Connect the desktop app to a self-hosted server',
     'Encrypt a Cloud vault end to end',
     'When Cloud reports a problem',
     'The CLI is the bridge to launchers',
@@ -164,8 +196,7 @@ export const HELP_HIDDEN: HiddenHelp = {
     'Count this copy anonymously',
     'Updates and releases',
     'Use theme for PDF export',
-    'Shares location (macOS)',
-    'Saved Remote Workspaces'
+    'Shares location (macOS)'
   ]
 }
 

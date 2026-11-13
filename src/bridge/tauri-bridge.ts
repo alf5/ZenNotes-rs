@@ -127,6 +127,12 @@ import * as agentEdits from './agent-edits'
 import { relocateAssetWithReferences, renameNoteWithLinks } from './link-rewrites'
 import { installFileDrops, pathForDroppedFile } from './file-drops'
 import { installNavigationGuard } from './navigation-guard'
+import { remoteVault } from './remote/vault'
+import {
+  installWorkspaceFollower,
+  refreshRemoteWorkspaceInfo,
+  remoteConnected
+} from './remote/state'
 
 const APP_INFO: ZenAppInfo = {
   name: 'zennotes-rs',
@@ -181,8 +187,26 @@ function subscribe<T>(event: string, cb: (payload: T) => void): () => void {
   }
 }
 
-function notImplemented(name: string): Promise<never> {
-  return Promise.reject(new Error(`ZenNotes-rs: "${name}" is not implemented yet`))
+/**
+ * A vault member that runs on the server while a remote session is on
+ * (upstream's `if (isRemoteWorkspaceActive())` in each main-process handler),
+ * and locally otherwise. See remote/vault.ts.
+ */
+function routed<A extends unknown[], R>(
+  remote: (...args: A) => R,
+  local: (...args: A) => R
+): (...args: A) => R {
+  return (...args: A) => (remoteConnected() ? remote(...args) : local(...args))
+}
+
+/** A call that can switch the workspace: this window re-reads what it knows
+ *  about the remote workspace afterwards, as upstream's preload does. */
+async function changesWorkspace<T>(call: Promise<T>): Promise<T> {
+  try {
+    return await call
+  } finally {
+    await refreshRemoteWorkspaceInfo()
+  }
 }
 
 function unsupportedUpdateState(): AppUpdateState {
@@ -273,110 +297,141 @@ const bridge: ZenBridge = {
   downloadAppUpdate: async (): Promise<AppUpdateState> => unsupportedUpdateState(),
   installAppUpdate: async (): Promise<void> => {},
 
-  // ---- Remote workspace (M14) -------------------------------------------
-  getServerCapabilities: async (): Promise<ServerCapabilities | null> => null,
+  // ---- Remote workspace ----------------------------------------------------
+  // Rust holds the connection and the token (src-tauri/src/remote); the
+  // webview's server client is remote/client.ts. A desktop host signs in with
+  // the token alone, so the session members report signed in, as upstream's.
+  getServerCapabilities: async (): Promise<ServerCapabilities | null> =>
+    (await refreshRemoteWorkspaceInfo())?.capabilities ?? null,
   getServerSession: async (): Promise<ServerSessionStatus> => SESSION_OK,
   loginServerSession: async (): Promise<ServerSessionStatus> => SESSION_OK,
   logoutServerSession: async (): Promise<ServerSessionStatus> => SESSION_OK,
-  getRemoteWorkspaceInfo: async (): Promise<RemoteWorkspaceInfo | null> => null,
-  connectRemoteWorkspace: (): Promise<{ vault: VaultInfo | null; capabilities: ServerCapabilities }> =>
-    notImplemented('connectRemoteWorkspace'),
-  disconnectRemoteWorkspace: async (): Promise<VaultInfo | null> => null,
-  // Remote-workspace profile persistence is implemented (tokens in the OS
-  // keychain); the live server connection is deferred (supportsRemoteWorkspace
-  // stays off, so the UI keeps these hidden for now).
+  getRemoteWorkspaceInfo: (): Promise<RemoteWorkspaceInfo | null> => refreshRemoteWorkspaceInfo(),
+  connectRemoteWorkspace: (
+    baseUrl: string,
+    authToken?: string | null
+  ): Promise<{ vault: VaultInfo | null; capabilities: ServerCapabilities }> =>
+    changesWorkspace(invoke('workspace_connect_remote', { baseUrl, authToken: authToken ?? null })),
+  disconnectRemoteWorkspace: (): Promise<VaultInfo | null> =>
+    changesWorkspace(invoke('workspace_disconnect_remote')),
   listRemoteWorkspaceProfiles: (): Promise<RemoteWorkspaceProfile[]> =>
     invoke('workspace_list_remote_profiles'),
   saveRemoteWorkspaceProfile: (input: RemoteWorkspaceProfileInput): Promise<RemoteWorkspaceProfile> =>
-    invoke('workspace_save_remote_profile', { input }),
+    changesWorkspace(invoke('workspace_save_remote_profile', { input })),
   deleteRemoteWorkspaceProfile: (id: string): Promise<void> =>
-    invoke('workspace_delete_remote_profile', { id }),
-  connectRemoteWorkspaceProfile: (): Promise<{
-    vault: VaultInfo | null
-    capabilities: ServerCapabilities
-  }> => notImplemented('connectRemoteWorkspaceProfile'),
+    changesWorkspace(invoke('workspace_delete_remote_profile', { id })),
+  connectRemoteWorkspaceProfile: (
+    id: string
+  ): Promise<{ vault: VaultInfo | null; capabilities: ServerCapabilities }> =>
+    changesWorkspace(invoke('workspace_connect_remote_profile', { id })),
 
   // ---- Vault selection (M1) ---------------------------------------------
-  getCurrentVault: (): Promise<VaultInfo | null> => invoke('vault_get_current'),
+  getCurrentVault: (): Promise<VaultInfo | null> => changesWorkspace(invoke('vault_get_current')),
   listLocalVaults: (): Promise<LocalVaultEntry[]> => invoke('vault_list_local'),
   openLocalVault: (root: string): Promise<VaultInfo | null> =>
-    invoke('vault_open_local', { root }),
-  closeVault: (): Promise<VaultInfo | null> => invoke('vault_close'),
-  pickVault: (): Promise<VaultInfo | null> => invoke('vault_pick'),
+    changesWorkspace(invoke('vault_open_local', { root })),
+  closeVault: (): Promise<VaultInfo | null> => changesWorkspace(invoke('vault_close')),
+  pickVault: (): Promise<VaultInfo | null> => changesWorkspace(invoke('vault_pick')),
   selectVaultPath: (targetPath: string): Promise<VaultInfo> =>
-    invoke('vault_select_path', { targetPath }),
-  browseServerDirectories: (_path?: string): Promise<DirectoryBrowseResult> =>
-    notImplemented('browseServerDirectories'), // M14
-  getVaultSettings: (): Promise<VaultSettings> => invoke('vault_get_settings'),
-  setVaultSettings: (next: VaultSettings): Promise<VaultSettings> =>
-    invoke('vault_set_settings', { next }),
+    changesWorkspace(invoke('vault_select_path', { targetPath })),
+  browseServerDirectories: (path?: string): Promise<DirectoryBrowseResult> =>
+    remoteVault.browseServerDirectories(path ?? ''),
+  getVaultSettings: routed(remoteVault.getVaultSettings, (): Promise<VaultSettings> =>
+    invoke('vault_get_settings')),
+  setVaultSettings: routed(remoteVault.setVaultSettings, (next: VaultSettings): Promise<VaultSettings> =>
+    invoke('vault_set_settings', { next })),
 
   // ---- Notes / listing (M2 + M3) ----------------------------------------
-  listNotes: (): Promise<NoteMeta[]> => invoke('vault_list_notes'),
-  listFolders: (): Promise<FolderEntry[]> => invoke('vault_list_folders'),
-  listAssets: (): Promise<AssetMeta[]> => invoke('vault_list_assets'),
-  hasAssetsDir: (): Promise<boolean> => invoke('vault_has_assets_dir'),
+  listNotes: routed(remoteVault.listNotes, (): Promise<NoteMeta[]> => invoke('vault_list_notes')),
+  listFolders: routed(remoteVault.listFolders, (): Promise<FolderEntry[]> =>
+    invoke('vault_list_folders')),
+  listAssets: routed(remoteVault.listAssets, (): Promise<AssetMeta[]> => invoke('vault_list_assets')),
+  hasAssetsDir: routed(remoteVault.hasAssetsDir, (): Promise<boolean> =>
+    invoke('vault_has_assets_dir')),
   // Placed from vendored @shared/demo-tour-data; imported on demand.
-  generateDemoTour: async (): Promise<VaultDemoTourResult> =>
-    (await import('./demo-tour')).generateDemoTour(),
-  removeDemoTour: async (): Promise<VaultDemoTourResult> =>
-    (await import('./demo-tour')).removeDemoTour(),
-  listTemplates: (): Promise<CustomTemplateFile[]> => invoke('vault_list_templates'),
-  readTemplate: (sourcePath: string): Promise<string> =>
-    invoke('vault_read_template', { sourcePath }),
-  writeTemplate: (input: WriteTemplateInput): Promise<CustomTemplateFile> =>
-    invoke('vault_write_template', { input }),
-  deleteTemplate: (sourcePath: string): Promise<void> =>
-    invoke('vault_delete_template', { sourcePath }),
-  getVaultTextSearchCapabilities: (
-    paths: VaultTextSearchToolPaths = {}
-  ): Promise<VaultTextSearchCapabilities> =>
-    invoke('vault_text_search_capabilities', { paths }),
-  searchVaultText: (
-    query: string,
-    backend: VaultTextSearchBackendPreference = 'auto',
-    paths: VaultTextSearchToolPaths = {}
-  ): Promise<VaultTextSearchMatch[]> =>
-    invoke('vault_search_text', { query, backend, paths }),
-  readNote: (relPath: string): Promise<NoteContent> => invoke('vault_read_note', { relPath }), // M2
-  readNoteComments: (relPath: string): Promise<NoteComment[]> =>
-    invoke('vault_read_comments', { relPath }),
-  writeNoteComments: (relPath: string, comments: NoteCommentInput[]): Promise<NoteComment[]> =>
-    invoke('vault_write_comments', { relPath, comments }),
+  generateDemoTour: routed(remoteVault.generateDemoTour, async (): Promise<VaultDemoTourResult> =>
+    (await import('./demo-tour')).generateDemoTour()),
+  removeDemoTour: routed(remoteVault.removeDemoTour, async (): Promise<VaultDemoTourResult> =>
+    (await import('./demo-tour')).removeDemoTour()),
+  listTemplates: routed(remoteVault.listTemplates, (): Promise<CustomTemplateFile[]> =>
+    invoke('vault_list_templates')),
+  readTemplate: routed(remoteVault.readTemplate, (sourcePath: string): Promise<string> =>
+    invoke('vault_read_template', { sourcePath })),
+  writeTemplate: routed(remoteVault.writeTemplate, (input: WriteTemplateInput): Promise<CustomTemplateFile> =>
+    invoke('vault_write_template', { input })),
+  deleteTemplate: routed(remoteVault.deleteTemplate, (sourcePath: string): Promise<void> =>
+    invoke('vault_delete_template', { sourcePath })),
+  getVaultTextSearchCapabilities: routed(
+    remoteVault.getVaultTextSearchCapabilities,
+    (paths: VaultTextSearchToolPaths = {}): Promise<VaultTextSearchCapabilities> =>
+      invoke('vault_text_search_capabilities', { paths })
+  ),
+  searchVaultText: routed(
+    remoteVault.searchVaultText,
+    (
+      query: string,
+      backend: VaultTextSearchBackendPreference = 'auto',
+      paths: VaultTextSearchToolPaths = {}
+    ): Promise<VaultTextSearchMatch[]> => invoke('vault_search_text', { query, backend, paths })
+  ),
+  readNote: routed(remoteVault.readNote, (relPath: string): Promise<NoteContent> =>
+    invoke('vault_read_note', { relPath })),
+  readNoteComments: routed(remoteVault.readNoteComments, (relPath: string): Promise<NoteComment[]> =>
+    invoke('vault_read_comments', { relPath })),
+  writeNoteComments: routed(
+    remoteVault.writeNoteComments,
+    (relPath: string, comments: NoteCommentInput[]): Promise<NoteComment[]> =>
+      invoke('vault_write_comments', { relPath, comments })
+  ),
   // Parsed in the webview through vendored @shared/tasks; see tasks.ts.
-  scanTasks: (): Promise<VaultTask[]> => tasks.scanTasks(),
-  scanTasksForPath: (relPath: string): Promise<VaultTask[]> => tasks.scanTasksForPath(relPath),
-  writeNote: (relPath: string, body: string): Promise<NoteMeta> =>
-    invoke('vault_write_note', { relPath, body }),
-  appendToNote: (relPath: string, body: string, position: 'start' | 'end'): Promise<NoteMeta> =>
-    invoke('vault_append_note', { relPath, body, position }),
-  createNote: (folder: NoteFolder, title?: string, subpath?: string): Promise<NoteMeta> =>
-    invoke('vault_create_note', { folder, title: title ?? null, subpath: subpath ?? null }),
-  // Inbound [[wikilinks]] follow the new name (upstream #111); see link-rewrites.ts.
-  renameNote: (relPath: string, nextTitle: string): Promise<NoteMeta> =>
-    renameNoteWithLinks(relPath, nextTitle),
-  deleteNote: (relPath: string): Promise<void> => invoke('vault_delete_note', { relPath }),
-  moveToTrash: (relPath: string): Promise<NoteMeta> => invoke('vault_move_to_trash', { relPath }),
-  restoreFromTrash: (relPath: string): Promise<NoteMeta> =>
-    invoke('vault_restore_from_trash', { relPath }),
-  emptyTrash: (): Promise<void> => invoke('vault_empty_trash'),
-  archiveNote: (relPath: string): Promise<NoteMeta> => invoke('vault_archive_note', { relPath }),
-  unarchiveNote: (relPath: string): Promise<NoteMeta> =>
-    invoke('vault_unarchive_note', { relPath }),
-  duplicateNote: (relPath: string): Promise<NoteMeta> =>
-    invoke('vault_duplicate_note', { relPath }),
+  scanTasks: routed(remoteVault.scanTasks, (): Promise<VaultTask[]> => tasks.scanTasks()),
+  scanTasksForPath: routed(remoteVault.scanTasksForPath, (relPath: string): Promise<VaultTask[]> =>
+    tasks.scanTasksForPath(relPath)),
+  writeNote: routed(remoteVault.writeNote, (relPath: string, body: string): Promise<NoteMeta> =>
+    invoke('vault_write_note', { relPath, body })),
+  appendToNote: routed(
+    remoteVault.appendToNote,
+    (relPath: string, body: string, position: 'start' | 'end'): Promise<NoteMeta> =>
+      invoke('vault_append_note', { relPath, body, position })
+  ),
+  createNote: routed(remoteVault.createNote, (folder: NoteFolder, title?: string, subpath?: string): Promise<NoteMeta> =>
+    invoke('vault_create_note', { folder, title: title ?? null, subpath: subpath ?? null })),
+  // Inbound [[wikilinks]] follow the new name (upstream #111); see
+  // link-rewrites.ts. A server does its own renaming.
+  renameNote: routed(remoteVault.renameNote, (relPath: string, nextTitle: string): Promise<NoteMeta> =>
+    renameNoteWithLinks(relPath, nextTitle)),
+  deleteNote: routed(remoteVault.deleteNote, (relPath: string): Promise<void> =>
+    invoke('vault_delete_note', { relPath })),
+  moveToTrash: routed(remoteVault.moveToTrash, (relPath: string): Promise<NoteMeta> =>
+    invoke('vault_move_to_trash', { relPath })),
+  restoreFromTrash: routed(remoteVault.restoreFromTrash, (relPath: string): Promise<NoteMeta> =>
+    invoke('vault_restore_from_trash', { relPath })),
+  emptyTrash: routed(remoteVault.emptyTrash, (): Promise<void> => invoke('vault_empty_trash')),
+  archiveNote: routed(remoteVault.archiveNote, (relPath: string): Promise<NoteMeta> =>
+    invoke('vault_archive_note', { relPath })),
+  unarchiveNote: routed(remoteVault.unarchiveNote, (relPath: string): Promise<NoteMeta> =>
+    invoke('vault_unarchive_note', { relPath })),
+  duplicateNote: routed(remoteVault.duplicateNote, (relPath: string): Promise<NoteMeta> =>
+    invoke('vault_duplicate_note', { relPath })),
   // Upstream prints through Electron's `printToPDF`, which has no webview
   // equivalent here. The rejection reaches the user as a toast.
   exportNotePdf: (): Promise<string | null> =>
     Promise.reject(new Error('PDF export is not available in ZenNotes-rs.')),
-  revealNote: (relPath: string): Promise<void> => invoke('vault_reveal_note', { relPath }),
-  revealNoteTarget: (relPath: string): Promise<void> =>
-    invoke('vault_reveal_note_target', { relPath }),
-  moveNote: (relPath: string, targetFolder: NoteFolder, targetSubpath: string): Promise<NoteMeta> =>
-    invoke('vault_move_note', { relPath, targetFolder, targetSubpath }),
-  importFilesToNote: (notePath: string, sourcePaths: string[]): Promise<ImportedAsset[]> =>
-    invoke('vault_import_files', { notePath, sourcePaths }),
-  importPastedImage: (input: PastedImageInput): Promise<ImportedAsset> => {
+  revealNote: routed(remoteVault.revealNote, (relPath: string): Promise<void> =>
+    invoke('vault_reveal_note', { relPath })),
+  revealNoteTarget: routed(remoteVault.revealNoteTarget, (relPath: string): Promise<void> =>
+    invoke('vault_reveal_note_target', { relPath })),
+  moveNote: routed(
+    remoteVault.moveNote,
+    (relPath: string, targetFolder: NoteFolder, targetSubpath: string): Promise<NoteMeta> =>
+      invoke('vault_move_note', { relPath, targetFolder, targetSubpath })
+  ),
+  importFilesToNote: routed(
+    remoteVault.importFilesToNote,
+    (notePath: string, sourcePaths: string[]): Promise<ImportedAsset[]> =>
+      invoke('vault_import_files', { notePath, sourcePaths })
+  ),
+  importPastedImage: routed(remoteVault.importPastedImage, (input: PastedImageInput): Promise<ImportedAsset> => {
     const bytes =
       input.data instanceof ArrayBuffer ? new Uint8Array(input.data) : new Uint8Array(input.data)
     return invoke('vault_import_pasted_image', {
@@ -384,35 +439,39 @@ const bridge: ZenBridge = {
       mimeType: input.mimeType,
       suggestedName: input.suggestedName ?? null
     })
-  },
+  }),
 
   // ---- Assets (M7) ------------------------------------------------------
   // References to the asset follow it (#785); see link-rewrites.ts.
-  renameAsset: (relPath: string, nextName: string): Promise<AssetMeta> =>
-    relocateAssetWithReferences(relPath, () => invoke('vault_rename_asset', { relPath, nextName })),
-  moveAsset: (relPath: string, targetDir: string): Promise<AssetMeta> =>
-    relocateAssetWithReferences(relPath, () => invoke('vault_move_asset', { relPath, targetDir })),
-  duplicateAsset: (relPath: string): Promise<AssetMeta> =>
-    invoke('vault_duplicate_asset', { relPath }),
-  deleteAsset: (relPath: string): Promise<DeletedAsset> =>
-    invoke('vault_delete_asset', { relPath }),
-  restoreDeletedAsset: (asset: DeletedAsset): Promise<AssetMeta> =>
-    invoke('vault_restore_deleted_asset', { asset }),
+  renameAsset: routed(remoteVault.renameAsset, (relPath: string, nextName: string): Promise<AssetMeta> =>
+    relocateAssetWithReferences(relPath, () => invoke('vault_rename_asset', { relPath, nextName }))),
+  moveAsset: routed(remoteVault.moveAsset, (relPath: string, targetDir: string): Promise<AssetMeta> =>
+    relocateAssetWithReferences(relPath, () => invoke('vault_move_asset', { relPath, targetDir }))),
+  duplicateAsset: routed(remoteVault.duplicateAsset, (relPath: string): Promise<AssetMeta> =>
+    invoke('vault_duplicate_asset', { relPath })),
+  deleteAsset: routed(remoteVault.deleteAsset, (relPath: string): Promise<DeletedAsset> =>
+    invoke('vault_delete_asset', { relPath })),
+  restoreDeletedAsset: routed(remoteVault.restoreDeletedAsset, (asset: DeletedAsset): Promise<AssetMeta> =>
+    invoke('vault_restore_deleted_asset', { asset })),
 
   // ---- Folders (M5) -----------------------------------------------------
-  createFolder: (folder: NoteFolder, subpath: string): Promise<void> =>
-    invoke('vault_create_folder', { folder, subpath }),
-  renameFolder: (folder: NoteFolder, oldSubpath: string, newSubpath: string): Promise<string> =>
-    invoke('vault_rename_folder', { folder, oldSubpath, newSubpath }),
-  deleteFolder: (folder: NoteFolder, subpath: string): Promise<void> =>
-    invoke('vault_delete_folder', { folder, subpath }),
-  duplicateFolder: (folder: NoteFolder, subpath: string): Promise<string> =>
-    invoke('vault_duplicate_folder', { folder, subpath }),
-  revealFolder: (folder: NoteFolder, subpath: string): Promise<void> =>
-    invoke('vault_reveal_folder', { folder, subpath }),
-  revealFolderTarget: (folder: NoteFolder, subpath: string): Promise<void> =>
-    invoke('vault_reveal_folder_target', { folder, subpath }),
-  revealAssetsDir: (): Promise<void> => invoke('vault_reveal_assets_dir'),
+  createFolder: routed(remoteVault.createFolder, (folder: NoteFolder, subpath: string): Promise<void> =>
+    invoke('vault_create_folder', { folder, subpath })),
+  renameFolder: routed(
+    remoteVault.renameFolder,
+    (folder: NoteFolder, oldSubpath: string, newSubpath: string): Promise<string> =>
+      invoke('vault_rename_folder', { folder, oldSubpath, newSubpath })
+  ),
+  deleteFolder: routed(remoteVault.deleteFolder, (folder: NoteFolder, subpath: string): Promise<void> =>
+    invoke('vault_delete_folder', { folder, subpath })),
+  duplicateFolder: routed(remoteVault.duplicateFolder, (folder: NoteFolder, subpath: string): Promise<string> =>
+    invoke('vault_duplicate_folder', { folder, subpath })),
+  revealFolder: routed(remoteVault.revealFolder, (folder: NoteFolder, subpath: string): Promise<void> =>
+    invoke('vault_reveal_folder', { folder, subpath })),
+  revealFolderTarget: routed(remoteVault.revealFolderTarget, (folder: NoteFolder, subpath: string): Promise<void> =>
+    invoke('vault_reveal_folder_target', { folder, subpath })),
+  revealAssetsDir: routed(remoteVault.revealAssetsDir, (): Promise<void> =>
+    invoke('vault_reveal_assets_dir')),
 
   // ---- Sync asset URL + drag-drop ---------------------------------------
   getPathForFile: pathForDroppedFile,
@@ -445,7 +504,7 @@ const bridge: ZenBridge = {
   openNoteWindow: (relPath: string): Promise<void> => invoke('window_open_note', { relPath }),
   openVaultWindow: async (root?: string): Promise<VaultInfo | null> => {
     if (root && !(await confirmVaultSwitch(root))) return null
-    return invoke('window_open_vault', { root: root ?? null })
+    return changesWorkspace(invoke('window_open_vault', { root: root ?? null }))
   },
   readExternalFile: (): Promise<ExternalFileContent> => invoke('app_read_external_file'),
   writeExternalFile: (body: string): Promise<void> => invoke('app_write_external_file', { body }),
@@ -466,7 +525,8 @@ const bridge: ZenBridge = {
   // ---- MCP -----------------------------------------------------------------
   // The server is this binary run as `zennotes-rs mcp` (src-tauri/src/mcp);
   // these install it into a client's config and edit the instructions it
-  // sends. The server-token members stay absent: there are no remote vaults.
+  // sends. The server-token members stay absent: the MCP server serves local
+  // vaults only, for now (docs/remote-workspace-plan.md, phase 5).
   mcpGetRuntime: (): Promise<McpServerRuntime> => invoke('mcp_get_runtime'),
   mcpGetStatuses: (): Promise<McpClientStatus[]> => invoke('mcp_get_statuses'),
   mcpInstall: (id: McpClientId): Promise<McpClientStatus> => invoke('mcp_install', { id }),
@@ -499,9 +559,12 @@ const bridge: ZenBridge = {
 
   // Workspace state (<vault>/.zennotes/workspace.json, raw JSON strings —
   // the renderer owns the schema and reconciles newest-wins vs localStorage).
-  readWorkspaceState: (): Promise<string | null> => invoke('workspace_state_read'),
-  writeWorkspaceState: (json: string): Promise<void> => invoke('workspace_state_write', { json }),
-  rootContentHiddenByInboxMode: (): Promise<boolean> => invoke('vault_root_content_hidden'),
+  readWorkspaceState: routed(remoteVault.readWorkspaceState, (): Promise<string | null> =>
+    invoke('workspace_state_read')),
+  writeWorkspaceState: routed(remoteVault.writeWorkspaceState, (json: string): Promise<void> =>
+    invoke('workspace_state_write', { json })),
+  rootContentHiddenByInboxMode: routed(remoteVault.rootContentHiddenByInboxMode, (): Promise<boolean> =>
+    invoke('vault_root_content_hidden')),
 
   // Portable config (~/.config/zennotes/config.toml). The TOML format lives
   // in portable-config.ts (upstream's serializer, verbatim); Rust is the
@@ -523,39 +586,44 @@ const bridge: ZenBridge = {
   // the vendored shared-domain functions; Rust does the vault file IO.
   // listDatabases stays a stub: nothing in app-core ever calls it (upstream
   // only wires it for the web bridge).
-  openDatabase: (relPath: string): Promise<DatabaseDoc | null> => databases.openDatabase(relPath),
-  writeDatabaseRows: (relPath: string, rows: DbRow[]): Promise<DatabaseDoc> =>
-    databases.writeDatabaseRows(relPath, rows),
-  writeDatabaseSchema: (
-    relPath: string,
-    sidecar: DatabaseSidecar,
-    rows: DbRow[]
-  ): Promise<DatabaseDoc> => databases.writeDatabaseSchema(relPath, sidecar, rows),
-  createDatabase: (
-    folder: NoteFolder,
-    subpath: string,
-    title?: string,
-    seed?: DatabaseSeed
-  ): Promise<DatabaseDoc> => databases.createDatabase(folder, subpath, title, seed),
-  renameDatabase: (csvPath: string, newTitle: string): Promise<string> =>
-    databases.renameDatabase(csvPath, newTitle),
-  createRecordPage: (csvPath: string, title: string, body: string): Promise<string> =>
-    databases.createRecordPage(csvPath, title, body),
-  listDatabases: async (): Promise<DatabaseSummary[]> => [],
+  // On a remote workspace the same shared composition runs over the note and
+  // folder endpoints (remote/vault.ts), as on the web and upstream's desktop.
+  openDatabase: routed(remoteVault.openDatabase, (relPath: string): Promise<DatabaseDoc | null> =>
+    databases.openDatabase(relPath)),
+  writeDatabaseRows: routed(remoteVault.writeDatabaseRows, (relPath: string, rows: DbRow[]): Promise<DatabaseDoc> =>
+    databases.writeDatabaseRows(relPath, rows)),
+  writeDatabaseSchema: routed(
+    remoteVault.writeDatabaseSchema,
+    (relPath: string, sidecar: DatabaseSidecar, rows: DbRow[]): Promise<DatabaseDoc> =>
+      databases.writeDatabaseSchema(relPath, sidecar, rows)
+  ),
+  createDatabase: routed(
+    remoteVault.createDatabase,
+    (folder: NoteFolder, subpath: string, title?: string, seed?: DatabaseSeed): Promise<DatabaseDoc> =>
+      databases.createDatabase(folder, subpath, title, seed)
+  ),
+  renameDatabase: routed(remoteVault.renameDatabase, (csvPath: string, newTitle: string): Promise<string> =>
+    databases.renameDatabase(csvPath, newTitle)),
+  createRecordPage: routed(
+    remoteVault.createRecordPage,
+    (csvPath: string, title: string, body: string): Promise<string> =>
+      databases.createRecordPage(csvPath, title, body)
+  ),
+  listDatabases: routed(remoteVault.listDatabases, async (): Promise<DatabaseSummary[]> => []),
 
   // Excalidraw drawings (.excalidraw files; editing goes through the
   // ordinary readNote/writeNote path).
-  createExcalidraw: (folder: NoteFolder, subpath?: string, title?: string): Promise<NoteMeta> =>
+  createExcalidraw: routed(remoteVault.createExcalidraw, (folder: NoteFolder, subpath?: string, title?: string): Promise<NoteMeta> =>
     invoke('vault_create_excalidraw', {
       folder,
       subpath: subpath ?? null,
       title: title ?? null
-    }),
+    })),
   // Obsidian `.excalidraw.md` conversion (upstream vault.ts:3184). The scene
   // extraction (incl. lz-string decompression) is vendored pure TS; Rust
   // writes the deduped sibling `.excalidraw` and returns its meta. The
   // original markdown is left intact.
-  convertObsidianExcalidraw: async (relPath: string): Promise<NoteMeta> => {
+  convertObsidianExcalidraw: routed(remoteVault.convertObsidianExcalidraw, async (relPath: string): Promise<NoteMeta> => {
     const markdown = await invoke<string | null>('db_read_text', { relPath })
     if (markdown === null) throw new Error(`Drawing not found: ${relPath}`)
     if (!isObsidianExcalidrawPath(relPath) && !isObsidianExcalidrawMarkdown(markdown)) {
@@ -574,13 +642,15 @@ const bridge: ZenBridge = {
       baseTitle: base,
       body: JSON.stringify(scene, null, 2)
     })
-  },
+  }),
 
   // Deleted-assets store (.zennotes/deleted-assets/<uuid>/ + sidecar).
-  listDeletedAssets: (): Promise<DeletedAsset[]> => invoke('vault_list_deleted_assets'),
-  purgeDeletedAsset: (undoToken: string): Promise<void> =>
-    invoke('vault_purge_deleted_asset', { undoToken }),
-  emptyDeletedAssets: (): Promise<void> => invoke('vault_empty_deleted_assets'),
+  listDeletedAssets: routed(remoteVault.listDeletedAssets, (): Promise<DeletedAsset[]> =>
+    invoke('vault_list_deleted_assets')),
+  purgeDeletedAsset: routed(remoteVault.purgeDeletedAsset, (undoToken: string): Promise<void> =>
+    invoke('vault_purge_deleted_asset', { undoToken })),
+  emptyDeletedAssets: routed(remoteVault.emptyDeletedAssets, (): Promise<void> =>
+    invoke('vault_empty_deleted_assets')),
 
   // Custom themes + CSS overrides (~/.config/zennotes/{themes,overrides}).
   // Rust scans/watches; parsing + scaffolding run in custom-css.ts through
@@ -626,32 +696,34 @@ const bridge: ZenBridge = {
   // Cloud sync (33 members) — out of scope for this port; see cloud-sync.ts.
   ...cloudSyncSurface,
 
-  // Boot retry. Upstream re-attempts a remote workspace that was unreachable
-  // at launch; this build has no remote workspace (supportsRemoteWorkspace is
-  // false), so the only workspace there is to retry is the local vault and
-  // reporting the current one is both truthful and idempotent.
-  retryWorkspaceBoot: (): Promise<VaultInfo | null> => invoke('vault_get_current'),
+  // Boot retry: re-attempt a remote workspace that was unreachable at launch
+  // (the same path as a launch, so a local vault just reports itself).
+  retryWorkspaceBoot: (): Promise<VaultInfo | null> =>
+    changesWorkspace(invoke('workspace_retry_boot')),
 
-  // Workflows — M18.
-  listWorkflows: (): Promise<WorkflowFile[]> => invoke('vault_list_workflows'),
-  writeWorkflow: (input: WriteWorkflowInput): Promise<WorkflowFile> =>
+  // Workflows — M18. A remote workspace uses the server's journalled API.
+  listWorkflows: routed(remoteVault.listWorkflows, (): Promise<WorkflowFile[]> =>
+    invoke('vault_list_workflows')),
+  writeWorkflow: routed(remoteVault.writeWorkflow, (input: WriteWorkflowInput): Promise<WorkflowFile> =>
     invoke('vault_write_workflow', {
       slug: input.slug,
       raw: input.raw,
       previousSourcePath: input.previousSourcePath ?? null
-    }),
-  deleteWorkflow: (sourcePath: string): Promise<void> =>
-    invoke('vault_delete_workflow', { sourcePath }),
-  exportWorkflow: (input: ExportWorkflowInput): Promise<string | null> =>
-    invoke('vault_export_workflow', { suggestedName: input.suggestedName, raw: input.raw }),
-  importWorkflowFile: (): Promise<ImportedWorkflowFile | null> =>
-    invoke('vault_import_workflow_file'),
-  applyWorkflow: (input: ApplyWorkflowInput): Promise<WorkflowRunReceipt> =>
-    workflows.applyWorkflow(input),
-  undoWorkflowRun: (runId: string): Promise<WorkflowUndoResult> => workflows.undoWorkflowRun(runId),
-  listWorkflowRuns: (): Promise<WorkflowRunSummary[]> => workflows.listWorkflowRuns(),
-  deleteWorkflowRuns: (workflowId: string): Promise<number> =>
-    workflows.deleteWorkflowRuns(workflowId),
+    })),
+  deleteWorkflow: routed(remoteVault.deleteWorkflow, (sourcePath: string): Promise<void> =>
+    invoke('vault_delete_workflow', { sourcePath })),
+  exportWorkflow: routed(remoteVault.exportWorkflow, (input: ExportWorkflowInput): Promise<string | null> =>
+    invoke('vault_export_workflow', { suggestedName: input.suggestedName, raw: input.raw })),
+  importWorkflowFile: routed(remoteVault.importWorkflowFile, (): Promise<ImportedWorkflowFile | null> =>
+    invoke('vault_import_workflow_file')),
+  applyWorkflow: routed(remoteVault.applyWorkflow, (input: ApplyWorkflowInput): Promise<WorkflowRunReceipt> =>
+    workflows.applyWorkflow(input)),
+  undoWorkflowRun: routed(remoteVault.undoWorkflowRun, (runId: string): Promise<WorkflowUndoResult> =>
+    workflows.undoWorkflowRun(runId)),
+  listWorkflowRuns: routed(remoteVault.listWorkflowRuns, (): Promise<WorkflowRunSummary[]> =>
+    workflows.listWorkflowRuns()),
+  deleteWorkflowRuns: routed(remoteVault.deleteWorkflowRuns, (workflowId: string): Promise<number> =>
+    workflows.deleteWorkflowRuns(workflowId)),
 
   // Custom code languages (installed TextMate grammars) — M19.
   listCustomCodeLanguages: (): Promise<CustomCodeLanguage[]> => codeLanguages.list(),
@@ -671,14 +743,14 @@ const bridge: ZenBridge = {
   exportNoteDocx: (): Promise<string | null> =>
     Promise.reject(new Error('Word export is not available in ZenNotes-rs.')),
 
-  // Open a VAULT asset with the OS default app. The vault is always local
-  // here, so this is a path resolve away from the existing opener.
-  openAssetExternally: (relPath: string): Promise<{ ok: boolean; error?: string }> =>
-    invoke('vault_open_asset_externally', { relPath }),
+  // Open a VAULT asset with the OS default app. A local vault's is a path
+  // resolve away from the existing opener; a remote one is downloaded first.
+  openAssetExternally: routed(remoteVault.openAssetExternally, (relPath: string): Promise<{ ok: boolean; error?: string }> =>
+    invoke('vault_open_asset_externally', { relPath })),
 
   // Read a vault asset without handing the renderer a host path.
-  readVaultAssetBase64: (assetPath: string): Promise<string> =>
-    invoke('vault_read_asset_base64', { assetPath }),
+  readVaultAssetBase64: routed(remoteVault.readVaultAssetBase64, (assetPath: string): Promise<string> =>
+    invoke('vault_read_asset_base64', { assetPath })),
 
   // Escape pressed inside a cross-origin subframe. Electron relays it from
   // the main process via a WebContents key handler; WRY exposes no equivalent
@@ -712,11 +784,12 @@ const bridge: ZenBridge = {
 
   // Agent edit records left by an assistant editing through upstream's MCP
   // server, reviewed change by change; see agent-edits.ts.
-  listAgentEdits: (): Promise<AgentEditSummary[]> => agentEdits.listAgentEdits(),
-  readAgentEdit: (relPath: string): Promise<AgentEditRecord | null> =>
-    agentEdits.readAgentEdit(relPath),
-  writeAgentEdit: (relPath: string, record: AgentEditRecord | null): Promise<void> =>
-    agentEdits.writeAgentEdit(relPath, record),
+  listAgentEdits: routed(remoteVault.listAgentEdits, (): Promise<AgentEditSummary[]> =>
+    agentEdits.listAgentEdits()),
+  readAgentEdit: routed(remoteVault.readAgentEdit, (relPath: string): Promise<AgentEditRecord | null> =>
+    agentEdits.readAgentEdit(relPath)),
+  writeAgentEdit: routed(remoteVault.writeAgentEdit, (relPath: string, record: AgentEditRecord | null): Promise<void> =>
+    agentEdits.writeAgentEdit(relPath, record)),
 
   // Close to the tray (#947): closing the last workspace window hides it and
   // the tray icon brings it back, so the Quick capture hotkey keeps working.
@@ -735,8 +808,8 @@ const bridge: ZenBridge = {
 
   // Deliberately absent (all optional in the contract): sendUsageCount
   // (upstream's anonymous install count goes to zennotes.org and would count
-  // this port as upstream), the MCP server token members (no remote vaults to
-  // authenticate to), the managed-CLI update members (no CLI ships here) and
+  // this port as upstream), the MCP server token members (the MCP server
+  // serves local vaults only, for now), the managed-CLI update members (no CLI ships here) and
   // the cloud encryption members (cloud sync is out of scope). The first two
   // still have Settings rows, which tooling/vite/vendored-copy.ts hides.
 }
@@ -771,6 +844,7 @@ function routeExternalWindowOpens(): void {
 export function createTauriBridge(): ZenBridge {
   routeExternalWindowOpens()
   installNavigationGuard()
+  installWorkspaceFollower()
   installFileDrops(detectPlatform())
   void invoke<typeof installInfo>('app_install_info')
     .then((info) => {

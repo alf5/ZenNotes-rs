@@ -10,10 +10,14 @@ import {
   type InvokeArgs,
   type InvokeOptions
 } from '@tauri-apps/api/core'
+import { remoteErrorFrom } from './remote/errors'
 
 export function toError(reason: unknown): Error {
   if (reason instanceof Error) return reason
   if (typeof reason === 'string') return new Error(reason)
+  // A ZenNotes server's answer keeps its kind and status (remote/errors.ts).
+  const remote = remoteErrorFrom(reason)
+  if (remote) return remote
   const message = (reason as { message?: unknown } | null | undefined)?.message
   if (typeof message === 'string') return new Error(message)
   try {

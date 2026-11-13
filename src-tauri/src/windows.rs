@@ -62,7 +62,7 @@ pub fn open_vault_window(app: &AppHandle, state: &AppState) -> Result<Option<Vau
     with_drop_mode(builder)
         .build()
         .map_err(|e| format!("Failed to open vault window: {e}"))?;
-    Ok(state.current())
+    Ok(state.workspace_vault())
 }
 
 fn quick_capture_window(app: &AppHandle) -> Option<WebviewWindow> {

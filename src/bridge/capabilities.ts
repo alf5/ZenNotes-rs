@@ -9,7 +9,8 @@ import type { ZenCapabilities } from '@zennotes/bridge-contract/bridge'
  *  - supportsCustomTemplates        — M10 (templates CRUD)
  *  - supportsFloatingWindows        — M11 (multi-window)
  *  - supportsNativeMenus            — M12 (OS integration)
- *  - supportsRemoteWorkspace        — M14 (remote workspace)
+ *  - supportsRemoteWorkspace        — on: a vault on a ZenNotes server
+ *    (src-tauri/src/remote + src/bridge/remote; docs/remote-workspace-plan.md)
  *  - supportsUpdater                — M15 (auto-updater)
  *
  * The v2.45 additions:
@@ -34,7 +35,7 @@ export const TAURI_CAPABILITIES: ZenCapabilities = {
   supportsNativeMenus: false,
   supportsFloatingWindows: true,
   supportsLocalFilesystemPickers: true,
-  supportsRemoteWorkspace: false,
+  supportsRemoteWorkspace: true,
   supportsCliInstall: false,
   supportsCustomTemplates: true,
   supportsCloudSync: false,

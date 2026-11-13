@@ -33,10 +33,25 @@ describe('toError', () => {
   })
 })
 
+describe('a ZenNotes server error', () => {
+  it('keeps its kind and status', async () => {
+    const { RemoteConnectionError, RemoteRequestError } = await import('../bridge/remote/errors')
+    const refused = toError({ remoteError: 'request', status: 401, message: 'rejected' })
+    expect(refused).toBeInstanceOf(RemoteRequestError)
+    expect((refused as InstanceType<typeof RemoteRequestError>).status).toBe(401)
+    expect(refused.message).toBe('rejected')
+    const down = toError({ remoteError: 'connection', message: 'down' })
+    expect(down).toBeInstanceOf(RemoteConnectionError)
+    const other = toError({ remoteError: 'other', message: 'No remote workspace is connected' })
+    expect(other.constructor).toBe(Error)
+    expect(other.message).toBe('No remote workspace is connected')
+  })
+})
+
 describe('the bridge', () => {
   it('reaches Rust only through ipc.ts, so no rejection stays a string', () => {
     const dir = join(dirname(fileURLToPath(import.meta.url)), '..', 'bridge')
-    const direct = readdirSync(dir)
+    const direct = readdirSync(dir, { recursive: true, encoding: 'utf8' })
       .filter((name) => name.endsWith('.ts') && name !== 'ipc.ts')
       .filter((name) =>
         /import\s*\{[^}]*\binvoke\b[^}]*\}\s*from\s*'@tauri-apps\/api\/core'/.test(

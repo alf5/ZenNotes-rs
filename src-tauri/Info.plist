@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Merged into the macOS bundle's Info.plist by the Tauri CLI.
+  macOS 15+ blocks connections to the local network until the user allows them,
+  and without this key it never asks: a self-hosted ZenNotes server on the LAN
+  then looks exactly like one that is down. Upstream declares the same key
+  (apps/desktop/package.json, extendInfo).
+-->
+<plist version="1.0">
+<dict>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>ZenNotes-rs needs local network access to connect to a self-hosted ZenNotes server on your network.</string>
+</dict>
+</plist>

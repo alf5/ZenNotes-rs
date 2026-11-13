@@ -1,4 +1,5 @@
 import { convertFileSrc } from '@tauri-apps/api/core'
+import { remoteWorkspaceInfo } from './remote/state'
 
 /**
  * Port of the Electron preload's `resolveLocalAssetUrl` /
@@ -89,11 +90,27 @@ function assetUrlForAbsolutePath(absPath: string): string {
   return convertFileSrc(absPath, ASSET_SCHEME)
 }
 
+/** Marks a remote vault-relative path; src-tauri/src/asset_protocol.rs
+ *  serves it from the server. No absolute path on any platform starts so. */
+const REMOTE_ASSET_PREFIX = 'remote:'
+
+/** Upstream's `remoteAssetUrl`: a remote workspace's asset, by its vault path. */
+function remoteAssetUrl(assetPath: string): string | null {
+  if (remoteWorkspaceInfo()?.mode !== 'remote' || !remoteWorkspaceInfo()?.baseUrl) return null
+  const trimmed = assetPath.trim()
+  if (!trimmed) return null
+  return convertFileSrc(`${REMOTE_ASSET_PREFIX}${trimmed}`, ASSET_SCHEME)
+}
+
 export function resolveLocalAssetUrl(
   vaultRoot: string,
   notePath: string,
   href: string
 ): string | null {
+  if (remoteWorkspaceInfo()?.mode === 'remote') {
+    const resolved = resolveVaultRelativeAssetPath(notePath, href)
+    return resolved ? remoteAssetUrl(resolved) : null
+  }
   const trimmed = href.trim()
   if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('//')) return null
   if (/^[a-zA-Z][a-zA-Z\d+.-]*:/.test(trimmed)) return null
@@ -105,5 +122,6 @@ export function resolveLocalAssetUrl(
 export function resolveVaultAssetUrl(vaultRoot: string, assetPath: string): string | null {
   const trimmed = assetPath.trim()
   if (!trimmed) return null
+  if (remoteWorkspaceInfo()?.mode === 'remote') return remoteAssetUrl(trimmed)
   return assetUrlForAbsolutePath(joinVaultPath(vaultRoot, trimmed.split('\\').join('/')))
 }

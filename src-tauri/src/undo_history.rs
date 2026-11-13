@@ -152,12 +152,19 @@ fn base_dir(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 /// Keyed by the vault of the app's state, never by anything the renderer
-/// names: the note path only ever feeds a hash.
+/// names: the note path only ever feeds a hash. A remote vault's root is a
+/// path on its server, so it is keyed apart from any local folder of the same
+/// name, as upstream does: `remote:<profile id>:<root>`.
 fn vault_identity(state: &AppState) -> Result<String, String> {
-    state
-        .current()
-        .map(|v| v.root)
-        .ok_or_else(|| "No vault is currently open".to_string())
+    if let Some(v) = state.current() {
+        return Ok(v.root);
+    }
+    if let Some(session) = state.remote_session() {
+        if let Some(root) = session.vault_root() {
+            return Ok(format!("remote:{}:{root}", session.profile_id().as_deref().unwrap_or("")));
+        }
+    }
+    Err("No vault is currently open".to_string())
 }
 
 #[tauri::command]
