@@ -30,6 +30,13 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 urlencoding = "2"
 url = "2"
 ureq = "2"
+# Remote workspaces: one rustls config for the HTTP client and the change feed,
+# trusting the bundled Mozilla roots and the OS store, as upstream's
+# system-trust.ts does (a homelab server behind a private CA must connect).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-native-certs = "0.8"
+webpki-roots = "1"
+tungstenite = { version = "0.27", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 font-kit = "0.14"
 base64 = "0.22"
 sha2 = "0.10"

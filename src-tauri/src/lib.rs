@@ -101,8 +101,11 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .register_uri_scheme_protocol("syn-asset", |ctx, request| {
-            asset_protocol::handle(ctx.app_handle(), request)
+        .register_asynchronous_uri_scheme_protocol("syn-asset", |ctx, request, responder| {
+            let app = ctx.app_handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                responder.respond(asset_protocol::handle(&app, request));
+            });
         })
         .register_uri_scheme_protocol("zen-theme", |_ctx, request| {
             custom_css::handle_theme_asset(request)
@@ -299,6 +302,15 @@ pub fn run() {
             workspace_cmds::workspace_connect_remote,
             workspace_cmds::workspace_connect_remote_profile,
             workspace_cmds::workspace_browse_server_directories,
+            workspace_cmds::workspace_get_info,
+            workspace_cmds::workspace_disconnect_remote,
+            workspace_cmds::workspace_retry_boot,
+            workspace_cmds::remote_request,
+            workspace_cmds::remote_resync,
+            workspace_cmds::remote_upload_files,
+            workspace_cmds::remote_upload_bytes,
+            workspace_cmds::remote_read_asset_base64,
+            workspace_cmds::remote_open_asset_externally,
             // v2.45 mirror
             vault_cmds::vault_list_workflows,
             vault_cmds::vault_write_workflow,

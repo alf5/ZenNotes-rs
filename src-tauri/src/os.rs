@@ -14,7 +14,13 @@ use crate::vault::notes::resolve_safe;
 const APP_ICON: &[u8] = include_bytes!("../icons/128x128.png");
 
 fn require_root(state: &AppState) -> Result<PathBuf, String> {
-    state.current_root().ok_or_else(|| "No vault is open".to_string())
+    state.current_root().ok_or_else(|| {
+        if state.remote_session().is_some() {
+            crate::ipc::vault_cmds::LOCAL_ONLY_WHILE_REMOTE.to_string()
+        } else {
+            "No vault is open".to_string()
+        }
+    })
 }
 
 fn reveal(app: &AppHandle, path: &Path) -> Result<(), String> {

@@ -216,13 +216,21 @@ pub fn app_stage_dropped_file(request: tauri::ipc::Request<'_>) -> Result<String
 }
 
 /// A link straight at a vault asset opens with its default app (upstream's
-/// `will-navigate`), and only inside the open vault.
+/// `will-navigate`), and only inside the open vault. A remote vault's asset is
+/// downloaded first, so this runs off the main thread.
 #[tauri::command]
-pub fn app_open_vault_asset_url(app: AppHandle, url: String) -> Result<(), String> {
+pub async fn app_open_vault_asset_url(app: AppHandle, url: String) -> Result<(), String> {
+    use crate::asset_protocol::AssetTarget;
     use tauri_plugin_opener::OpenerExt;
-    let abs = crate::asset_protocol::vault_path_from_url(&app, &url)
-        .ok_or_else(|| "This file is outside the open vault.".to_string())?;
-    app.opener().open_path(abs, None::<&str>).map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        match crate::asset_protocol::target_from_url(&app, &url) {
+            Some(AssetTarget::Local(abs)) => app.opener().open_path(abs, None::<&str>).map_err(|e| e.to_string()),
+            Some(AssetTarget::Remote(rel)) => crate::ipc::workspace_cmds::open_remote_asset(&app, &rel),
+            None => Err("This file is outside the open vault.".to_string()),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[cfg(test)]

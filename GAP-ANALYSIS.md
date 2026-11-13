@@ -1,3 +1,57 @@
+# ZenNotes-rs 2.79.3: remote workspaces
+
+The app opens a vault on a ZenNotes server: upstream's `znserver`, or any
+server speaking its `self-hosted-http-v1` protocol (zenserver-multi-rs is one).
+Plan, decisions and deviations: [docs/remote-workspace-plan.md](docs/remote-workspace-plan.md).
+Still mirrors upstream v2.79.0; `packages/` is untouched.
+
+**Shape:** the route table is TypeScript, the transport is Rust.
+
+| Piece | Where | Upstream |
+|---|---|---|
+| Server client, route for route | `src/bridge/remote/client.ts` | `apps/desktop/src/main/remote/server-client.ts` |
+| Remote branch of each vault member, refusals and capability checks included | `src/bridge/remote/vault.ts`, routed by `routed()` in `tauri-bridge.ts` | the `if (isRemoteWorkspaceActive())` branches of the `VAULT_*` handlers in `index.ts` |
+| Connect, boot, disconnect, vault selection, workspace info | `src-tauri/src/remote/session.rs` | `setRemoteWorkspace`, `loadCurrentVaultFromConfig`, `disconnectRemoteWorkspace`, `VAULT_SELECT_PATH` |
+| Saved profiles | `src-tauri/src/remote/profiles.rs` | the profile half of `index.ts` |
+| Transport: token, TLS, route allowlist, uploads, raw assets | `src-tauri/src/remote/http.rs`, `tls.rs` | `fetch` + `system-trust.ts` |
+| Change feed | `src-tauri/src/remote/watch.rs` | `watchVaultChanges` |
+| Remote assets | `syn-asset://…/remote:<path>` in `asset_protocol.rs` and `asset-url.ts` | `zen-asset://remote?path=` |
+
+**Port-owned copies that rot on a re-vendor:** `client.ts` (diff `server-client.ts`;
+`src/__tests__/remote-client.test.ts` holds the route table, update it first),
+`vault.ts` (diff the `VAULT_*` handlers' remote branches), `watch.rs` (diff
+`watchVaultChanges`), `profiles.rs` (diff `saveRemoteWorkspaceProfile` and
+`deriveRemoteWorkspaceProfileName`).
+
+**Safety:** the token never enters the webview (`getRemoteWorkspaceInfo` says only
+whether there is one), and Rust sends a request only to the connected server and only
+under `/api/`. While a session is on, no local vault is open in Rust, so every
+local-disk command refuses; a test fails if a new place opens a local vault without
+ending the session first, and another if a vault bridge member skips routing.
+
+**Different from upstream, on purpose:**
+
+- An address typed without a scheme gets `https://` (upstream: `http://`), except a
+  loopback one. Swapped into `store.ts` and `RemoteWorkspaceProfileModal.tsx` at build
+  time and matched in Rust.
+- Tokens live in the OS keychain only; without one, a token lasts until the app quits
+  (upstream: nothing saved). The pre-2.79.3 base64 file is read and emptied, never
+  written.
+- The feed keeps a base path such as `/notes` (upstream drops it), and requests time
+  out (15 s to connect, 300 s to read).
+- Remote mode is app-wide: the window that switches carries on, and every other
+  window reloads onto the new workspace (upstream keeps a workspace per window).
+- macOS: `src-tauri/Info.plist` declares `NSLocalNetworkUsageDescription`, as
+  upstream's `extendInfo` does; without it macOS 15 never asks and a LAN server looks
+  down. Unverified: macOS builds come from CI only.
+
+**Not carried over:** the MCP server's remote mode (`--server`, `--token`,
+`credentials.toml`, Settings → MCP → Server token) is phase 5 of the plan.
+Upstream's two Electron-only quirks are not copied (a second `RemoteRequestError`
+class; disconnect without a local vault leaving the feed running).
+
+---
+
 # ZenNotes-rs 2.79.1 and 2.79.2: what moving off Electron had left wrong
 
 2.79.2 is 2.79.1 plus a Windows build fix: a Windows checkout has CRLF endings,
@@ -138,7 +192,8 @@ Port-owned copies (Rust) of upstream logic, all covered by the golden test:
 | `src-tauri/src/mcp/integrations.rs` | `apps/desktop/src/main/mcp-integrations.ts` |
 
 Not carried over: remote vaults (`--server`, `--token`, the Settings server
-token, `ZENNOTES_SERVER`; this build has no remote workspaces), remapped
+token, `ZENNOTES_SERVER`; the app connects to servers since 2.79.3, the MCP
+server not yet: docs/remote-workspace-plan.md, phase 5), remapped
 system folders (as everywhere in this port), and the legacy `out/main/mcp.js`
 entry. (Settings' description of the server was reworded in 2.79.1.)
 
@@ -237,7 +292,7 @@ build has no Cloud page to open. Vendored code, so it is left as upstream has it
 | Gap | Why |
 |---|---|
 | `sendUsageCount` | Upstream's anonymous install count goes to zennotes.org; sent from here it would count this port as upstream. Absent, so the Settings switch has no effect. |
-| MCP server token, managed `zn` CLI updates | The MCP server serves local vaults only (no remote workspaces), and no `zn` CLI ships in this build. |
+| MCP server token, managed `zn` CLI updates | The MCP server serves local vaults only (remote vaults are phase 5 of docs/remote-workspace-plan.md), and no `zn` CLI ships in this build. |
 | Cloud end-to-end encryption, backup paging | Cloud sync remains out of scope (see below). |
 | `--new-window` (#815) | Single-vault backend; a second workspace window is "Open Vault in New Window". |
 | macOS title-bar toggle | Upstream hides the traffic lights; this build is verified on Linux only, where windows are frameless and the app draws its own controls. |
@@ -377,7 +432,7 @@ not a porting defect. It is also in dead-for-this-port code (cloud sync).
 | `followExternalFileLink` | `src-tauri/src/standalone_links.rs` | Full port of upstream's `standalone-links.ts` (#626), incl. the bounded wikilink search (depth 4, 5000 entries, skips `node_modules`/dotdirs) and the scheme/anchor rules. 11 tests. |
 | `openFileDialog` | `ipc/window_cmds.rs` | Native picker into the existing vault-aware `open_markdown_file` (#449). |
 | `openAssetExternally`, `readVaultAssetBase64` | `ipc/vault_cmds.rs` | Both go through `notes::resolve_safe`, so neither can address outside the vault. |
-| `retryWorkspaceBoot` | `tauri-bridge.ts` | This build has no remote workspace, so the only workspace to retry is the local vault; reporting the current one is truthful and idempotent. |
+| `retryWorkspaceBoot` | `tauri-bridge.ts` | Was the local vault only. Since 2.79.3 it re-attempts a remote workspace that was unreachable at launch (`workspace_retry_boot`). |
 | `AppUpdateState.installable` | `tauri-bridge.ts` | `false` — no in-app updater, and on Arch the AUR package owns the install, which is exactly the case the field names. |
 
 New Rust file primitives backing the applier: `db_list_dir`, `db_file_size`,
@@ -399,8 +454,8 @@ target for good.
 
 Still open from the previous mirror, unchanged: theme-dir first-run seeding, a
 `zen-theme://` asset protocol, per-window vault sessions, and `listDatabases`
-(dead code upstream). The remote-workspace and auto-updater clusters remain out
-of scope, as does `supportsCliInstall`.
+(dead code upstream). The auto-updater cluster remains out of scope, as does
+`supportsCliInstall`; remote workspaces arrived in 2.79.3.
 
 ---
 
