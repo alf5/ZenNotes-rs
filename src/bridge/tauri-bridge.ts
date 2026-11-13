@@ -137,7 +137,7 @@ import {
 const APP_INFO: ZenAppInfo = {
   name: 'zennotes-rs',
   productName: 'ZenNotes-rs',
-  version: '2.79.2',
+  version: '2.79.3',
   description: 'ZenNotes-rs desktop',
   homepage: 'https://github.com/alf5/ZenNotes-rs',
   runtime: 'desktop',
