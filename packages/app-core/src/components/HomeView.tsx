@@ -1,8 +1,10 @@
+import { getKeymapDisplay } from '../lib/keymaps'
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import type { NoteMeta } from '@shared/ipc'
 import { filterTasksForDisplay, inferDailyTaskDueDates, type VaultTask } from '@shared/tasks'
 import { useStore } from '../store'
 import { computeTasksRender } from '../lib/tasks-filter'
+import { withoutEmptyTasks } from '../lib/empty-tasks'
 import { focusEditorNormalMode } from '../lib/editor-focus'
 import { InlineMarkdown } from '../lib/inline-markdown'
 import { getSystemFolderLabel } from '../lib/system-folder-labels'
@@ -73,8 +75,13 @@ export function HomeView({
 }): JSX.Element {
   const notes = useStore((s) => s.notes)
   const folders = useStore((s) => s.folders)
+  const sidebarKey = getKeymapDisplay(
+    useStore((s) => s.keymapOverrides),
+    'global.toggleSidebar'
+  )
   const vaultTasks = useStore((s) => s.vaultTasks)
   const showArchivedTasks = useStore((s) => s.showArchivedTasks)
+  const hideEmptyTasks = useStore((s) => s.hideEmptyTasks)
   const tasksLoading = useStore((s) => s.tasksLoading)
   const vimMode = useStore((s) => s.vimMode)
   const selectNote = useStore((s) => s.selectNote)
@@ -224,17 +231,20 @@ export function HomeView({
 
   // Today is what is due today or overdue, as in the Tasks list: a task in a
   // daily note takes the note's date there, and an undated one waits under No
-  // due date instead (#990), so Home applies the same daily-note dates.
+  // due date instead (#990), so Home applies the same daily-note dates. Empty
+  // tasks stay out on the Tasks views' switch (#1026), from the rows, the
+  // overdue badge and the "+N more" alike.
   const { today, overdueCount } = useMemo(() => {
     const dueByPath = buildDailyNoteDateByPath(notes, vaultSettings)
+    const shown = filterTasksForDisplay(vaultTasks, showArchivedTasks)
     const render = computeTasksRender(
-      inferDailyTaskDueDates(filterTasksForDisplay(vaultTasks, showArchivedTasks), dueByPath),
+      inferDailyTaskDueDates(hideEmptyTasks ? withoutEmptyTasks(shown).shown : shown, dueByPath),
       '',
       new Date(now),
       NO_COLLAPSE
     )
     return { today: render.groups.today, overdueCount: render.groups.overdueCount }
-  }, [vaultTasks, showArchivedTasks, now, notes, vaultSettings])
+  }, [vaultTasks, showArchivedTasks, hideEmptyTasks, now, notes, vaultSettings])
 
   const visibleTasks = today.slice(0, MAX_TASKS)
   const hiddenTaskCount = today.length - visibleTasks.length
@@ -296,7 +306,7 @@ export function HomeView({
             >
               <PanelLeftIcon width={14} height={14} />
               <span>Sidebar</span>
-              <span className="font-mono text-ink-400">⌘1</span>
+              {sidebarKey && <span className="font-mono text-ink-400">{sidebarKey}</span>}
             </button>
           )}
         </header>
@@ -316,7 +326,9 @@ export function HomeView({
         </div>
 
         <section className="mb-9" data-home-section="recent">
-          <SectionLabel icon={<ZapIcon width={13} height={13} />} text="Recent" />
+          {recent.length > 0 && (
+            <SectionLabel icon={<ZapIcon width={13} height={13} />} text="Recent" />
+          )}
           {recent.length > 0 ? (
             <ul className="mt-1.5 space-y-0.5">
               {recent.map((note) => (

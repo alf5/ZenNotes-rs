@@ -481,21 +481,33 @@ pub fn search_vault_text(
     }
     let (rg_ok, fzf_ok) = capabilities(paths);
     let backend = resolve_backend(preferred, rg_ok, fzf_ok);
+    // Template notes (#1024) are placeholders nobody is searching for. They
+    // are dropped before ranking so the limit is spent on real notes.
+    let template_folder = crate::vault::settings::resolve_template_folder(&crate::vault::settings::get_vault_settings(root));
+    let searchable = |candidates: Vec<Candidate>| -> Vec<Candidate> {
+        match template_folder.as_deref() {
+            Some(folder) => candidates
+                .into_iter()
+                .filter(|c| !crate::vault::settings::is_path_in_template_folder(&c.path, Some(folder)))
+                .collect(),
+            None => candidates,
+        }
+    };
 
     let ranked: Vec<Candidate> = match backend {
-        Backend::Builtin => rank(trimmed, &collect_builtin(root)),
+        Backend::Builtin => rank(trimmed, &searchable(collect_builtin(root))),
         Backend::Ripgrep => {
             let rg = search_executable(Backend::Ripgrep, paths).unwrap();
-            rank(trimmed, &collect_ripgrep(root, &rg))
+            rank(trimmed, &searchable(collect_ripgrep(root, &rg)))
         }
         Backend::Fzf => {
             // fzf filters over rg (preferred) or builtin candidates.
-            let candidates = if rg_ok {
+            let candidates = searchable(if rg_ok {
                 let rg = search_executable(Backend::Ripgrep, paths).unwrap();
                 collect_ripgrep(root, &rg)
             } else {
                 collect_builtin(root)
-            };
+            });
             let fzf = search_executable(Backend::Fzf, paths).unwrap();
             match run_fzf(trimmed, &fzf, &candidates) {
                 Some(m) if !m.is_empty() => m,
@@ -522,6 +534,21 @@ mod tests {
         assert!(score_match("foo", "foo") > score_match("foo", "foobar"));
         assert!(score_match("foo", "a foo b") > score_match("foo", "xfoox"));
         assert_eq!(score_match("zzz", "abc"), 0.0);
+    }
+
+    #[test]
+    fn template_folder_notes_stay_out_of_search() {
+        let v = vault();
+        crud::write_note(v.path(), "inbox/Real.md", "qzxvneedle in a note", false).unwrap();
+        crud::write_note(v.path(), "inbox/Templates/Standup.md", "qzxvneedle in a template", false).unwrap();
+        crate::vault::settings::set_vault_settings(
+            v.path(),
+            &serde_json::json!({ "primaryNotesLocation": "inbox", "templates": { "folder": "inbox/Templates" } }),
+        )
+        .unwrap();
+        let found = search_vault_text(v.path(), "qzxvneedle", "builtin", &ToolPaths { ripgrep: None, fzf: None });
+        let paths: Vec<_> = found.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(paths, vec!["inbox/Real.md"]);
     }
 
     #[test]

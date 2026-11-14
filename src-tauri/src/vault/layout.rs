@@ -96,15 +96,22 @@ fn vault_settings_path(root: &Path) -> PathBuf {
 
 /// Returns `"root"` or `"inbox"` (the default). Full vault-settings handling
 /// lands in M10; this focused reader is all `ensureVaultLayout` needs.
+/// The primary notes location in effect, as `getVaultSettings` reads it: what
+/// vault.json states, else the inference from what sits at the root. Reading
+/// only the stated value sent a new note, and the layout's `inbox/`, into an
+/// `inbox` folder of a vault that shows its notes at the root (a flat Obsidian
+/// vault, or a seeded one with folders copied in).
 pub fn read_primary_notes_location(root: &Path) -> String {
     if let Ok(raw) = fs::read_to_string(vault_settings_path(root)) {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
-            if value.get("primaryNotesLocation").and_then(|v| v.as_str()) == Some("root") {
-                return "root".into();
+            match value.get("primaryNotesLocation").and_then(|v| v.as_str()) {
+                Some("root") => return "root".into(),
+                Some(_) => return "inbox".into(),
+                None => {}
             }
         }
     }
-    "inbox".into()
+    crate::vault::settings::infer_primary_notes_location(root)
 }
 
 /// The vault root, where primary notes live (`inbox/` or the root itself).
@@ -151,6 +158,9 @@ pub fn ensure_vault_layout(root: &Path) -> std::io::Result<()> {
             fs::write(&welcome_path, WELCOME_NOTE)?;
         }
     } else {
+        // A vault seeded empty that has since had folders copied in turns to
+        // root mode; its untouched Welcome-only inbox goes (upstream v2.84).
+        crate::vault::seeded_inbox::settle_seeded_inbox(root);
         // One-time and idempotent: loose root attachments and the legacy
         // attachment dirs move into `assets/` (upstream `migrateLooseAssets`).
         crate::vault::assets::migrate_loose_assets(root);
@@ -184,6 +194,19 @@ mod tests {
         ensure_vault_layout(dir.path()).unwrap();
         assert!(!dir.path().join("inbox").exists());
         assert!(dir.path().join("Welcome.md").is_file());
+    }
+
+    #[test]
+    fn a_flat_vault_gets_no_inbox_and_its_notes_go_to_the_root() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("Projects")).unwrap();
+        ensure_vault_layout(dir.path()).unwrap();
+        assert!(!dir.path().join("inbox").exists());
+        assert_eq!(folder_root(dir.path(), "inbox"), dir.path());
+        // A vault that states inbox mode keeps it, whatever is at its root.
+        fs::create_dir_all(dir.path().join(INTERNAL_VAULT_DIR)).unwrap();
+        fs::write(dir.path().join(INTERNAL_VAULT_DIR).join(VAULT_SETTINGS_FILE), r#"{"primaryNotesLocation":"inbox"}"#).unwrap();
+        assert_eq!(folder_root(dir.path(), "inbox"), dir.path().join("inbox"));
     }
 
     #[test]

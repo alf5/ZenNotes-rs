@@ -67,6 +67,9 @@ import { forwardOnCheckboxArrow } from '../lib/cm-forward-task'
 import { markerHopCommands } from '../lib/cm-marker-hop'
 import { isInMarkdownCode } from '../lib/cm-auto-pairs'
 import { toggleCheckbox } from '../lib/cm-toggle-checkbox'
+import { editorRecurrenceContext } from '../lib/cm-task-recurrence'
+import { taskFieldSource } from '../lib/cm-task-field-complete'
+import { dailyDueForNote } from '../lib/task-check-off'
 import { completionKeymapExtension, completionNavKeymap } from '../lib/cm-completion-nav'
 import { vimAwareDefaultKeymap, vimAwareMarkdownKeymap, vimAwareSearchKeymap } from '../lib/cm-vim-default-keymap'
 import { isVimAwaitingArgument } from '../lib/vim-nav'
@@ -339,7 +342,10 @@ import {
   type PaneModesByPath
 } from '../lib/pane-mode'
 import { resolveCommentAnchor, selectionToCommentAnchor } from '../lib/comments'
-import { ZEN_OPEN_EDITOR_CONTEXT_MENU_EVENT } from '../lib/keyboard-context-menu'
+import {
+  ZEN_OPEN_EDITOR_CONTEXT_MENU_EVENT,
+  editorOpensKeyboardContextMenu
+} from '../lib/keyboard-context-menu'
 import {
   calloutRefusalMessage,
   editorCalloutTarget,
@@ -356,6 +362,7 @@ import {
 import { useToastStore } from '../lib/toast'
 import { armMiddleClickPasteGuard } from '../lib/middle-click-paste-guard'
 import { isWorkspaceVirtualTabPath } from '../lib/workspace-tabs'
+import { sidebarRestoreSlot } from '../lib/sidebar-restore'
 import {
   followPathRewritesInNoteUndoHistories,
   noteUndoHistoryFor,
@@ -399,6 +406,7 @@ import {
   formatKeyToken,
   getKeymapBinding,
   getKeymapDisplay,
+  isMacPlatform,
   labelWithShortcut,
   type KeymapId,
   type KeymapOverrides
@@ -1479,7 +1487,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
       }
       items.push({
         label: pick.label,
-        hint: pick.hint,
+        mark: pick.hint,
         keywords: pick.keywords,
         checked: pick.checked,
         onSelect: () => {
@@ -2391,6 +2399,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
           editorImagePaste.of((files, view) => {
             void importPastedImagesRef.current?.(files, view)
           }),
+          editorRecurrenceContext.of(() => ({ dailyDue: dailyDueForNote(viewPathRef.current) })),
           commentDecorationField,
           agentReviewCompartment.of([]),
           noteCoverCompartment.of(noteCoverEditorExtension(s0.noteCoverPlacement, noteCoverSlotSink)),
@@ -2429,6 +2438,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
             override: [
               slashCommandSource,
               calloutTypeSource,
+              taskFieldSource,
               dateShortcutSource,
               latexCommandSource,
               typstCommandSource,
@@ -2578,6 +2588,12 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
             },
             keydown: (event, view) => {
               const state = useStore.getState()
+              if (editorOpensKeyboardContextMenu(event, { vimMode: state.vimMode, mac: isMacPlatform() })) {
+                event.preventDefault()
+                event.stopPropagation()
+                openEditorContextMenu()
+                return true
+              }
               if (
                 event.key === 'm' &&
                 !event.metaKey &&
@@ -4116,7 +4132,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
                 'flex h-4 w-4 shrink-0 items-center justify-center rounded-sm transition',
                 active
                   ? 'text-ink-500 hover:bg-paper-200 hover:text-ink-900'
-                  : 'opacity-0 hover:bg-paper-300/70 group-hover:opacity-100 focus-visible:opacity-100'
+                  : 'zn-hover-reveal opacity-0 hover:bg-paper-300/70 group-hover:opacity-100 focus-visible:opacity-100'
               ].join(' ')}
             >
               <CloseIcon width={12} height={12} />
@@ -4278,7 +4294,13 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
             >
               <TimelineIcon />
             </IconBtn>
-            <IconBtn title="Export as PDF (⇧⌘E)" onClick={() => void exportActiveNotePdf()}>
+            <IconBtn
+              title={labelWithShortcut(
+                'Export as PDF',
+                getKeymapDisplay(tabNavOverrides, 'global.exportNotePdf')
+              )}
+              onClick={() => void exportActiveNotePdf()}
+            >
               <FileDownIcon />
             </IconBtn>
           </>
@@ -4299,11 +4321,19 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
         {folder === 'trash' ? (
           // A trashed note cannot be trashed again; here the bin icon means the
           // only thing left that it can mean (#712).
-          <IconBtn title="Delete permanently" onClick={() => void deleteActivePermanently()}>
+          <IconBtn
+            title="Delete permanently"
+            onClick={() => void deleteActivePermanently()}
+            tooltipAlign="right"
+          >
             <TrashIcon />
           </IconBtn>
         ) : (
-          <IconBtn title={`Move to ${folderLabels.trash.toLowerCase()}`} onClick={() => void trashActive()}>
+          <IconBtn
+            title={`Move to ${folderLabels.trash.toLowerCase()}`}
+            onClick={() => void trashActive()}
+            tooltipAlign="right"
+          >
             <TrashIcon />
           </IconBtn>
         )}
@@ -4338,6 +4368,13 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
   const showPreview = !!content && mode !== 'edit'
   const splitMode = mode === 'split'
   const hasTabs = !zenMode && tabsEnabled && tabs.length > 0
+  const sidebarSlot = sidebarRestoreSlot({
+    sidebarOpen,
+    zenMode,
+    hasTabs,
+    hasNote: content != null,
+    hasVirtualTab: activeTab != null && isWorkspaceVirtualTabPath(activeTab)
+  })
   const tabStripMeasureKey = useMemo(
     () =>
       tabItems
@@ -4697,7 +4734,10 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
           <div className="flex shrink-0 items-center gap-0.5 self-center">
             {!sidebarOpen && (
               <IconBtn
-                title="Show sidebar (⌘1)"
+                title={labelWithShortcut(
+                  'Show sidebar',
+                  getKeymapDisplay(tabNavOverrides, 'global.toggleSidebar')
+                )}
                 onClick={toggleSidebar}
                 tooltipAlign="left"
               >
@@ -4755,7 +4795,23 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
           </div>
         </div>
       )}
-      {dragsWindow && !hasTabs && !content && !zenMode && (
+      {sidebarSlot === 'pane-strip' && (
+        <div data-sidebar-restore className={tabStripHeaderClass}>
+          <div className="flex shrink-0 items-center self-center">
+            <IconBtn
+              title={labelWithShortcut(
+                'Show sidebar',
+                getKeymapDisplay(tabNavOverrides, 'global.toggleSidebar')
+              )}
+              onClick={toggleSidebar}
+              tooltipAlign="left"
+            >
+              <PanelLeftIcon width={16} height={16} />
+            </IconBtn>
+          </div>
+        </div>
+      )}
+      {dragsWindow && !hasTabs && !content && !zenMode && sidebarSlot !== 'pane-strip' && (
         // No tab strip and no header: keep something to move the window by.
         <div aria-hidden className="drag-region h-8 shrink-0" />
       )}
@@ -4766,6 +4822,20 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
           }`}
         >
           <div className="flex min-w-0 flex-1 items-center gap-1">
+            {sidebarSlot === 'note-header' && (
+              <div data-sidebar-restore className="-ml-2 mr-1 shrink-0">
+                <IconBtn
+              title={labelWithShortcut(
+                'Show sidebar',
+                getKeymapDisplay(tabNavOverrides, 'global.toggleSidebar')
+              )}
+              onClick={toggleSidebar}
+              tooltipAlign="left"
+            >
+                  <PanelLeftIcon width={16} height={16} />
+                </IconBtn>
+              </div>
+            )}
             <Breadcrumb
               note={content}
               autoFocus={isActive && pendingTitleFocusPath === content.path}
@@ -4827,7 +4897,11 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
             <GalleryView key={activeTab} tabPath={activeTab} isActive={isActive} />
           ) : activeTab && isAssetTabPath(activeTab) ? (
             isDatabaseCsvPath(assetPathFromTab(activeTab) ?? '') ? (
+              // Keyed like GalleryView: another database opened in this pane
+              // starts fresh instead of inheriting this one's scroll, raw-CSV
+              // mode and open menus.
               <DatabaseView
+                key={activeTab}
                 tabPath={databaseTabPath(assetPathFromTab(activeTab) as string)}
                 isActive={isActive}
               />
@@ -4837,7 +4911,7 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
           ) : activeTab && isDiagramTabPath(activeTab) ? (
             <LazyDiagramTabView diagram={diagramFromTabPath(activeTab)} />
           ) : activeTab && isDatabaseTabPath(activeTab) ? (
-            <DatabaseView tabPath={activeTab} isActive={isActive} />
+            <DatabaseView key={activeTab} tabPath={activeTab} isActive={isActive} />
           ) : activeTab && isExcalidrawPath(activeTab) ? (
             <LazyExcalidrawView path={activeTab} />
           ) : activeTab &&
@@ -5100,14 +5174,16 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
               (entry): ContextMenuItem => ({
                 label: entry.label,
                 disabled: entry.disabled,
-                hint: entry.reason ?? (entry.action === 'remove' ? undefined : calloutChordHint),
+                mark: entry.reason,
+                hint: entry.action === 'remove' ? undefined : calloutChordHint,
                 onSelect: () => {
                   const view = viewRef.current
                   if (!view) return
                   const { calloutRange, callout } = editorMenu
                   if (entry.action === 'remove') {
                     removeCalloutIn(view, calloutRange)
-                    view.focus()
+                    // A phone that opened the note to read keeps its keyboard down.
+                    if (!hostOpensNotesToRead()) view.focus()
                     return
                   }
                   setCalloutMenu({
@@ -5142,7 +5218,8 @@ export function EditorPane({ pane }: { pane: PaneLeaf }): JSX.Element {
                 const view = viewRef.current
                 if (!view) return
                 setCalloutType(view, calloutMenu.range, choice.type)
-                view.focus()
+                // A phone that opened the note to read keeps its keyboard down.
+                if (!hostOpensNotesToRead()) view.focus()
               }
             })
           )}
@@ -5408,6 +5485,9 @@ function EmptyPaneState({
   zenMode: boolean
   onShowSidebar: () => void
 }): JSX.Element {
+  const overrides = useStore((s) => s.keymapOverrides)
+  const zenKey = getKeymapDisplay(overrides, 'global.toggleZenMode')
+  const sidebarKey = getKeymapDisplay(overrides, 'global.toggleSidebar')
   return (
     <div className="flex min-h-0 flex-1 items-center justify-center px-6">
       <div className="max-w-md rounded-3xl border border-paper-300/70 bg-paper-50/35 px-6 py-6 text-center shadow-[0_18px_48px_rgba(15,23,42,0.08)] backdrop-blur-sm">
@@ -5419,7 +5499,7 @@ function EmptyPaneState({
         </h2>
         <p className="mt-2 text-sm leading-6 text-ink-500">
           {zenMode
-            ? 'Leave Zen mode with ⌘. to bring the rest of the app chrome back.'
+            ? `Leave Zen mode${zenKey ? ` with ${zenKey}` : ''} to bring the rest of the app chrome back.`
             : sidebarOpen
             ? 'Select a note from the sidebar, or create a new one to start writing.'
             : 'Bring the sidebar back to browse your notes, folders, and shortcuts.'}
@@ -5433,9 +5513,11 @@ function EmptyPaneState({
             >
               <PanelLeftIcon width={16} height={16} />
               <span>Show sidebar</span>
-              <span className="rounded-md border border-paper-300/80 bg-paper-50/80 px-1.5 py-0.5 font-mono text-xs text-ink-500">
-                ⌘1
-              </span>
+              {sidebarKey && (
+                <span className="rounded-md border border-paper-300/80 bg-paper-50/80 px-1.5 py-0.5 font-mono text-xs text-ink-500">
+                  {sidebarKey}
+                </span>
+              )}
             </button>
           </div>
         )}
@@ -5511,9 +5593,10 @@ function IconBtn({
   title: string
   active?: boolean
   disabled?: boolean
-  /** 'left' anchors the tooltip to the button's left edge so it never spills
-   *  off the left of the window (used by the leftmost toolbar buttons). */
-  tooltipAlign?: 'center' | 'left'
+  /** 'left' / 'right' anchor the tooltip to that edge of the button so it
+   *  never spills off that side of the window: the leftmost toolbar buttons
+   *  use 'left', the last one 'right' (#1020). */
+  tooltipAlign?: 'center' | 'left' | 'right'
 }): JSX.Element {
   return (
     <button
@@ -5523,7 +5606,7 @@ function IconBtn({
       aria-label={title}
       aria-pressed={active}
       className={[
-        'group relative flex h-7 w-7 items-center justify-center rounded-md transition-colors',
+        'group relative flex h-7 w-7 items-center justify-center rounded-md',
         disabled
           ? 'cursor-default text-ink-500/40'
           : active
@@ -5535,7 +5618,11 @@ function IconBtn({
       <span
         className={[
           'pointer-events-none absolute top-full z-30 mt-1.5 hidden whitespace-nowrap rounded-md border border-paper-300 bg-paper-50 px-2 py-1 text-xs font-medium text-ink-800 shadow-panel group-hover:block group-focus-visible:block',
-          tooltipAlign === 'left' ? 'left-0' : 'left-1/2 -translate-x-1/2'
+          tooltipAlign === 'left'
+            ? 'left-0'
+            : tooltipAlign === 'right'
+              ? 'right-0'
+              : 'left-1/2 -translate-x-1/2'
         ].join(' ')}
       >
         {title}

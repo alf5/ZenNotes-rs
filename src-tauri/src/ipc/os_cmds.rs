@@ -77,6 +77,11 @@ pub fn vault_reveal_assets_dir(app: AppHandle, state: State<AppState>) -> Result
     os::reveal_assets_dir(&app, &state)
 }
 
+#[tauri::command]
+pub fn vault_open_in_file_manager(app: AppHandle, state: State<AppState>, root: String) -> Result<(), String> {
+    os::open_vault_in_file_manager(&app, &state, &root)
+}
+
 // ---- v2.15 phase A --------------------------------------------------------
 
 #[tauri::command]

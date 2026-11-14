@@ -19,8 +19,19 @@ import {
   folderColumns,
   noteLocationOf,
   orderCards,
-  FOLDER_OTHER_LABEL
+  FOLDER_OTHER_LABEL,
+  columnWipLoads,
+  hideEmptyCards,
+  kanbanCardStep,
+  parseWipLimitInput,
+  wipState,
+  laneDefsFor,
+  splitIntoLanes,
+  cursorAfterLaneMove,
+  applyTaskMutationsForBoard,
+  type Lane
 } from './TasksKanban'
+import { foldSubtasks } from '../lib/kanban-subtasks'
 
 function col(id: string): Column {
   return { id, label: id, tasks: [] }
@@ -626,5 +637,238 @@ describe('card order by due date (#889)', () => {
     const out = orderCards('field:status', built, 'due', new Map())
     expect(texts(out, 0)).toEqual(['Soon', 'Late', 'Someday'])
     expect(texts(built, 0)).toEqual(['Someday', 'Late', 'Soon'])
+  })
+})
+
+describe('empty tasks stay off the board (#1026)', () => {
+  // Yesterday's daily note left its template placeholders behind: overdue,
+  // empty, and in the Today column beside the real work.
+  const placeholder = (taskIndex: number): VaultTask =>
+    card({ content: '', taskIndex, sourcePath: 'Daily/2026-08-24.md', due: '2026-08-24' })
+  const real = card({
+    content: 'Call the bank',
+    taskIndex: 3,
+    sourcePath: 'Daily/2026-08-24.md',
+    due: '2026-08-24'
+  })
+  const built = (): Column[] =>
+    statusColumns(
+      [placeholder(0), placeholder(1), real, card({ content: '  ', taskIndex: 4 })],
+      TODAY
+    )
+
+  it('leaves empty cards off every column and counts them', () => {
+    const { columns: shown, hidden } = hideEmptyCards(built(), TODAY)
+    expect(hidden).toBe(3)
+    expect(columnIds(shown, 'today')).toEqual(['Call the bank'])
+    expect(columnIds(shown, 'undated')).toEqual([])
+  })
+
+  it('keeps every column, even one the hiding emptied', () => {
+    const board = built()
+    expect(hideEmptyCards(board, TODAY).columns.map((c) => c.id)).toEqual(board.map((c) => c.id))
+  })
+
+  it('stops counting a hidden placeholder as overdue', () => {
+    const board = built()
+    expect(board.find((c) => c.id === 'today')!.badge).toEqual({ kind: 'overdue', value: 3 })
+    const { columns: shown } = hideEmptyCards(board, TODAY)
+    expect(shown.find((c) => c.id === 'today')!.badge).toEqual({ kind: 'overdue', value: 1 })
+  })
+
+  it('hands back the same columns when nothing is empty', () => {
+    const board = statusColumns([real], TODAY)
+    const result = hideEmptyCards(board, TODAY)
+    expect(result.hidden).toBe(0)
+    expect(result.columns[0]).toBe(board[0])
+  })
+})
+
+describe('WIP limits (#1025)', () => {
+  it('reads a limit as a whole number from 1 to 999, and empty as no limit', () => {
+    expect(parseWipLimitInput('3')).toEqual({ ok: true, limit: 3 })
+    expect(parseWipLimitInput(' 12 ')).toEqual({ ok: true, limit: 12 })
+    expect(parseWipLimitInput('999')).toEqual({ ok: true, limit: 999 })
+    expect(parseWipLimitInput('')).toEqual({ ok: true, limit: null })
+    expect(parseWipLimitInput('   ')).toEqual({ ok: true, limit: null })
+    for (const bad of ['0', '-1', '2.5', 'three', '1000', '3 cards']) {
+      expect(parseWipLimitInput(bad).ok, bad).toBe(false)
+    }
+  })
+
+  it('is over only past the limit, not at it', () => {
+    expect(wipState(4, undefined)).toBeNull()
+    expect(wipState(2, 3)).toEqual({ load: 2, limit: 3, over: false })
+    expect(wipState(3, 3)).toEqual({ load: 3, limit: 3, over: false })
+    expect(wipState(4, 3)).toEqual({ load: 4, limit: 3, over: true })
+  })
+
+  it('counts every card a column holds, whatever the filter narrows it to', () => {
+    // The loads come from the board before the filter, so a column holding
+    // four cards reads 4 / 3 even while the filter shows one of them.
+    const full = [
+      colWith('in-progress', [
+        card({ content: 'a' }),
+        card({ content: 'b', taskIndex: 1 }),
+        card({ content: '', taskIndex: 2 })
+      ])
+    ]
+    expect(columnWipLoads(full, false).get('in-progress')).toBe(3)
+    // A placeholder the board hides is not work in progress either.
+    expect(columnWipLoads(full, true).get('in-progress')).toBe(2)
+  })
+})
+
+describe('the cursor climbs onto the column header (#1025)', () => {
+  it('goes from the first card up to the header, and stays there', () => {
+    expect(kanbanCardStep(0, -1, 3)).toBe(-1)
+    expect(kanbanCardStep(-1, -1, 3)).toBe(-1)
+    expect(kanbanCardStep(2, -1, 3)).toBe(1)
+  })
+
+  it('comes back down to the first card, and stops at the last', () => {
+    expect(kanbanCardStep(-1, 1, 3)).toBe(0)
+    expect(kanbanCardStep(2, 1, 3)).toBe(2)
+  })
+
+  it('keeps an empty column on its header', () => {
+    expect(kanbanCardStep(-1, 1, 0)).toBe(-1)
+    expect(kanbanCardStep(0, -1, 0)).toBe(-1)
+  })
+})
+
+describe('swimlanes (#1027)', () => {
+  const layout = { folderRoot: '', systemFolderPaths: null, systemFolderLabels: null }
+  const opts = { statuses: [] as string[], folderLayout: layout }
+  const t = (content: string, taskIndex: number, over: Partial<VaultTask> = {}): VaultTask =>
+    card({ content, taskIndex, id: `inbox/board.md#${taskIndex}`, noteFolder: 'inbox', tags: [], ...over })
+  const laneIds = (lanes: Lane[]): string[] => lanes.map((lane) => lane.id)
+  const cell = (lanes: Lane[], laneId: string, columnId: string): string[] =>
+    lanes.find((lane) => lane.id === laneId)!.columns.find((c) => c.id === columnId)!.tasks.map((x) => x.content)
+
+  const tasks = [
+    t('ship', 0, { priority: 'high', tags: ['work'] }),
+    t('call', 1, { priority: 'low', tags: ['home', 'work'] }),
+    t('read', 2, { tags: [] }),
+    t('fix', 3, { priority: 'high', due: '2026-09-01', tags: ['work'] }),
+    t('done', 4, { priority: 'med', checked: true, tags: ['home'] })
+  ]
+
+  it('splits a Status board into priority lanes, High to No priority, each a row of the same columns', () => {
+    const columns = statusColumns(tasks, TODAY)
+    const { defs, laneOf } = laneDefsFor('priority', tasks, opts)
+    const lanes = splitIntoLanes(columns, defs, laneOf)
+    expect(laneIds(lanes)).toEqual(['high', 'med', 'low', 'none'])
+    expect(lanes.map((lane) => lane.label)).toEqual(['High', 'Medium', 'Low', 'No priority'])
+    for (const lane of lanes) expect(lane.columns.map((c) => c.id)).toEqual(columns.map((c) => c.id))
+    expect(cell(lanes, 'high', 'undated')).toEqual(['ship'])
+    expect(cell(lanes, 'high', 'upcoming')).toEqual(['fix'])
+    expect(cell(lanes, 'med', 'done')).toEqual(['done'])
+    expect(cell(lanes, 'none', 'undated')).toEqual(['read'])
+    expect(lanes.map((lane) => lane.count)).toEqual([2, 1, 1, 1])
+  })
+
+  it('puts every card in exactly one lane, so a column keeps its whole count across lanes', () => {
+    const columns = statusColumns(tasks, TODAY)
+    for (const laneBy of ['priority', 'tag', 'folder', 'field:sprint'] as const) {
+      const { defs, laneOf } = laneDefsFor(laneBy, tasks, opts)
+      const lanes = splitIntoLanes(columns, defs, laneOf)
+      columns.forEach((column, ci) => {
+        const across = lanes.flatMap((lane) => lane.columns[ci].tasks.map((x) => x.id))
+        expect(across.sort(), `${laneBy} ${column.id}`).toEqual(column.tasks.map((x) => x.id).sort())
+      })
+    }
+  })
+
+  it('keeps each column\'s card order inside every lane', () => {
+    const column: Column = { id: 'c', label: 'C', tasks: [tasks[3], tasks[2], tasks[0]] }
+    const { defs, laneOf } = laneDefsFor('priority', tasks, opts)
+    expect(cell(splitIntoLanes([column], defs, laneOf), 'high', 'c')).toEqual(['fix', 'ship'])
+  })
+
+  it('lanes a card by its first tag, sorted, with No tag last', () => {
+    const { defs, laneOf } = laneDefsFor('tag', tasks, opts)
+    expect(defs).toEqual([
+      { id: 'home', label: '#home' },
+      { id: 'work', label: '#work' },
+      { id: NO_VALUE_COLUMN_ID, label: 'No tag' }
+    ])
+    expect(laneOf(tasks[1])).toBe('home')
+    expect(laneOf(tasks[2])).toBe(NO_VALUE_COLUMN_ID)
+  })
+
+  it('orders field lanes like field columns: configured values, found ones, then No <field>', () => {
+    const fielded = [
+      t('a', 0, { fields: { status: 'review' } }),
+      t('b', 1, { fields: { status: 'blocked' } }),
+      t('c', 2)
+    ]
+    const { defs } = laneDefsFor('field:status', fielded, { ...opts, statuses: ['backlog', 'review'] })
+    expect(defs.map((d) => d.id)).toEqual(['backlog', 'review', 'blocked', NO_VALUE_COLUMN_ID])
+    expect(defs.map((d) => d.label)).toEqual(['Backlog', 'Review', 'Blocked', 'No status'])
+  })
+
+  it('orders folder lanes like folder columns, Other folders only when something is outside', () => {
+    const foldered = [
+      t('x', 0, { sourcePath: 'inbox/Projects/beta/x.md', id: 'x' }),
+      t('y', 1, { sourcePath: 'inbox/Projects/alpha/y.md', id: 'y' }),
+      t('z', 2, { sourcePath: 'inbox/z.md', id: 'z' })
+    ]
+    const { defs } = laneDefsFor('folder', foldered, opts)
+    expect(defs.map((d) => d.label)).toEqual(['Inbox', 'Projects/alpha', 'Projects/beta'])
+    const rooted = laneDefsFor('folder', foldered, { ...opts, folderLayout: { ...layout, folderRoot: 'Projects' } })
+    expect(rooted.defs.map((d) => d.label)).toEqual(['alpha', 'beta', 'Other folders'])
+  })
+
+  it('places a card by its own fields, not by a subtask\'s', () => {
+    const parent = t('parent', 0)
+    const child = t('child', 1, { priority: 'high', parentId: parent.id })
+    const folded = foldSubtasks([parent, child])
+    const { defs, laneOf } = laneDefsFor('priority', folded.cards, opts)
+    const lanes = splitIntoLanes(statusColumns(folded.cards, TODAY), defs, laneOf)
+    expect(cell(lanes, 'none', 'undated')).toEqual(['parent'])
+    expect(lanes.find((lane) => lane.id === 'high')!.count).toBe(0)
+  })
+
+  it('splits the columns it is given, so hidden empty cards stay out of every lane', () => {
+    const withBlank = [...tasks, t('', 5, { priority: 'high' })]
+    const { columns: shown } = hideEmptyCards(statusColumns(withBlank, TODAY), TODAY)
+    const { defs, laneOf } = laneDefsFor('priority', withBlank, opts)
+    expect(cell(splitIntoLanes(shown, defs, laneOf), 'high', 'undated')).toEqual(['ship'])
+  })
+
+  it('puts the cursor on a card that moved lanes, wherever its lane put it', () => {
+    const columns = statusColumns(tasks, TODAY)
+    const { defs, laneOf } = laneDefsFor('priority', tasks, opts)
+    const lanes = splitIntoLanes(columns, defs, laneOf)
+    expect(cursorAfterLaneMove(lanes, 'upcoming', taskIdentityKey(tasks[3]))).toEqual({
+      laneIdx: 0,
+      colIdx: 1,
+      cardIdx: 0
+    })
+    expect(cursorAfterLaneMove(lanes, 'undated', taskIdentityKey(tasks[2]))).toEqual({
+      laneIdx: 3,
+      colIdx: 2,
+      cardIdx: 0
+    })
+  })
+})
+
+describe('the board moves a card before its note is written (#677, #1027)', () => {
+  it('sends a card to In progress at once, so the cursor can follow it there', () => {
+    const before = card({ content: 'draft', taskIndex: 0, id: 'a' })
+    const moved = applyTaskMutationsForBoard(before, dropMutationsFor('status', IN_PROGRESS_COLUMN_ID, before, TODAY)!)
+    expect(moved.inProgress).toBe(true)
+    const columns = statusColumns([moved, card({ content: 'other', taskIndex: 1, inProgress: true, id: 'b' })], TODAY)
+    const at = cursorAfterCardMove(columns, IN_PROGRESS_COLUMN_ID, taskIdentityKey(moved))
+    expect(columns[at.colIdx].id).toBe(IN_PROGRESS_COLUMN_ID)
+    expect(columns[at.colIdx].tasks[at.cardIdx].content).toBe('draft')
+  })
+
+  it('retags a card for a tag lane, text and tags alike', () => {
+    const before = card({ content: 'Call Sam #work #urgent', taskIndex: 0, tags: ['work', 'urgent'] })
+    const moved = applyTaskMutationsForBoard(before, [{ kind: 'set-tag', tag: 'home' }])
+    expect(moved.tags).toEqual(['home', 'urgent'])
+    expect(moved.content).toBe('Call Sam #home #urgent')
   })
 })

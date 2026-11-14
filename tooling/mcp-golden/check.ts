@@ -11,11 +11,12 @@
 
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
-import { drive, GOLDEN_FILE, HERE } from './drive'
+import { drive, GOLDEN_FILE, HERE, type StepRecord } from './drive'
 
-/** Where upstream and this port knowingly part ways, by step index: what the
- *  port answers instead and why. Keep this list short and explained. */
-const KNOWN_DIVERGENCES: Record<number, string> = {}
+/** Where upstream and this port knowingly part ways, by step (`<index>` in the
+ *  main session, `session <n> (<label>) <index>` in another): what the port
+ *  answers instead and why. Keep this list short and explained. */
+const KNOWN_DIVERGENCES: Record<string, string> = {}
 
 function binary(): string {
   if (process.env.ZENNOTES_RS_BIN) return process.env.ZENNOTES_RS_BIN
@@ -54,28 +55,55 @@ const golden = JSON.parse(readFileSync(GOLDEN_FILE, 'utf8')) as Awaited<ReturnTy
 const actual = await drive([bin, 'mcp'])
 
 let failures = 0
-golden.steps.forEach((expected, i) => {
-  const got = actual.steps[i]
-  const problems: string[] = []
-  if (got.isError !== expected.isError) problems.push(`isError ${got.isError}, expected ${expected.isError}`)
-  diff(expected.result, got.result, 'result', problems)
-  if (problems.length === 0) return
-  if (KNOWN_DIVERGENCES[i]) {
-    console.log(`~ step ${i} ${expected.tool}: known divergence (${KNOWN_DIVERGENCES[i]})`)
-    return
-  }
-  failures++
-  console.log(`✗ step ${i} ${expected.tool} ${JSON.stringify(expected.args)}`)
-  for (const p of problems) console.log(`    ${p}`)
-})
 
-const fileProblems: string[] = []
-diff(golden.files, actual.files, 'files', fileProblems)
-if (fileProblems.length > 0) {
-  failures++
-  console.log('✗ vault contents after the scenario')
-  for (const p of fileProblems) console.log(`    ${p}`)
+function compareSteps(where: string, expectedSteps: StepRecord[], actualSteps: StepRecord[]): void {
+  expectedSteps.forEach((expected, i) => {
+    const got = actualSteps[i]
+    const problems: string[] = []
+    if (!got) problems.push('missing')
+    else {
+      if (got.isError !== expected.isError) problems.push(`isError ${got.isError}, expected ${expected.isError}`)
+      diff(expected.result, got.result, 'result', problems)
+    }
+    if (problems.length === 0) return
+    const key = `${where}${i}`
+    if (KNOWN_DIVERGENCES[key]) {
+      console.log(`~ ${where}step ${i} ${expected.tool}: known divergence (${KNOWN_DIVERGENCES[key]})`)
+      return
+    }
+    failures++
+    console.log(`✗ ${where}step ${i} ${expected.tool} ${JSON.stringify(expected.args)}`)
+    for (const p of problems) console.log(`    ${p}`)
+  })
 }
+
+function compare(where: string, label: string, expected: unknown, actual: unknown): void {
+  const problems: string[] = []
+  diff(expected, actual, label, problems)
+  if (problems.length === 0) return
+  failures++
+  console.log(`✗ ${where}${label}`)
+  for (const p of problems) console.log(`    ${p}`)
+}
+
+compareSteps('', golden.steps, actual.steps)
+compare('', 'vault contents after the scenario', golden.files, actual.files)
+
+const goldenSessions = golden.sessions ?? []
+if (goldenSessions.length !== actual.sessions.length) {
+  failures++
+  console.log(`✗ ${actual.sessions.length} sessions, expected ${goldenSessions.length}`)
+}
+goldenSessions.forEach((expected, i) => {
+  const got = actual.sessions[i]
+  if (!got) return
+  const where = `session ${i} (${expected.label}) `
+  compare(where, 'exit', expected.exit ?? null, got.exit ?? null)
+  compare(where, 'instructions', expected.instructionsSuffix, got.instructionsSuffix)
+  compare(where, 'tools', expected.tools, got.tools)
+  compareSteps(where, expected.steps, got.steps)
+  compare(where, 'vault contents', expected.files, got.files)
+})
 
 const tools = JSON.parse(readFileSync(path.join(HERE, '..', '..', 'src-tauri', 'src', 'mcp', 'tools.json'), 'utf8'))
 const toolProblems: string[] = []
@@ -86,5 +114,10 @@ if (toolProblems.length > 0) {
   for (const p of toolProblems) console.log(`    ${p}`)
 }
 
-console.log(failures === 0 ? `✓ ${golden.steps.length} steps match upstream` : `${failures} mismatches`)
+const stepCount = golden.steps.length + goldenSessions.reduce((n, x) => n + x.steps.length, 0)
+console.log(
+  failures === 0
+    ? `✓ ${stepCount} steps in ${goldenSessions.length + 1} sessions match upstream`
+    : `${failures} mismatches`
+)
 process.exit(failures === 0 ? 0 : 1)

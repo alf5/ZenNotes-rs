@@ -9,6 +9,7 @@ import {
   useStore
 } from '../store'
 import { openContextGallery } from '../lib/folder-gallery-open'
+import { newContextKanban } from '../lib/kanban-create'
 import { HintOverlay } from './HintOverlay'
 import { WhichKeyOverlay, type WhichKeyItem } from './WhichKeyOverlay'
 import {
@@ -24,6 +25,13 @@ import {
   shouldYieldToHomeNav
 } from '../lib/vim-nav'
 import { isCalendarToggleAvailable } from '../lib/vault-layout'
+import {
+  canDownloadCurrentVault,
+  canOpenCurrentVaultFolder,
+  downloadVaultArchive,
+  fileManagerName,
+  openVaultFolder
+} from '../lib/vault-folder'
 import { focusPanel, focusPaneInDirection } from '../lib/pane-nav'
 import {
   findPositionByIndex,
@@ -265,6 +273,8 @@ export function VimNav(): JSX.Element | null {
     window.zen.getAppInfo().runtime === 'desktop' &&
     (window.zen.getCapabilities().supportsLocalFilesystemPickers ||
       window.zen.getCapabilities().supportsRemoteWorkspace)
+  const canOpenFolder = useStore(canOpenCurrentVaultFolder)
+  const canDownloadVault = useStore(canDownloadCurrentVault)
   const resetLeader = useCallback(() => {
     leaderPending.current = null
     commandLeaderPrefix.current = []
@@ -422,12 +432,35 @@ export function VimNav(): JSX.Element | null {
         label: 'Folder gallery',
         detail: 'This folder’s notes as cards, led by their covers.'
       },
+      {
+        keyLabel: getKeymapDisplay(keymapOverrides, 'vim.leaderNewKanban'),
+        label: 'New Kanban',
+        detail: 'A board of its own: To do, Doing, Done.'
+      },
       ...(canSwitchVaults
         ? [
             {
               keyLabel: getKeymapDisplay(keymapOverrides, 'vim.leaderSwitchVault'),
               label: 'Switch vault',
               detail: 'Open the command palette vault switcher for local and remote vaults.'
+            }
+          ]
+        : []),
+      ...(canOpenFolder
+        ? [
+            {
+              keyLabel: getKeymapDisplay(keymapOverrides, 'vim.leaderOpenVaultFolder'),
+              label: 'Open vault folder',
+              detail: `Open this vault’s folder in ${fileManagerName()}.`
+            }
+          ]
+        : []),
+      ...(canDownloadVault && !canOpenFolder
+        ? [
+            {
+              keyLabel: getKeymapDisplay(keymapOverrides, 'vim.leaderOpenVaultFolder'),
+              label: 'Download vault',
+              detail: 'Save this vault as a folder of plain files (a zip).'
             }
           ]
         : []),
@@ -1091,6 +1124,16 @@ export function VimNav(): JSX.Element | null {
           void state.openAtlasView()
           return
         }
+        if (
+          window.zen.getCapabilities().supportsImport === true &&
+          matchesSequenceToken(e, overrides, 'vim.leaderImport')
+        ) {
+          e.preventDefault()
+          e.stopImmediatePropagation()
+          resetLeader()
+          state.setImportDialog('choose')
+          return
+        }
         if (state.workflowsEnabled && matchesSequenceToken(e, overrides, 'vim.leaderWorkflows')) {
           e.preventDefault()
           e.stopImmediatePropagation()
@@ -1152,11 +1195,38 @@ export function VimNav(): JSX.Element | null {
           void openContextGallery()
           return
         }
+        if (matchesSequenceToken(e, overrides, 'vim.leaderNewKanban')) {
+          e.preventDefault()
+          e.stopImmediatePropagation()
+          resetLeader()
+          void newContextKanban()
+          return
+        }
         if (canSwitchVaults && matchesSequenceToken(e, overrides, 'vim.leaderSwitchVault')) {
           e.preventDefault()
           e.stopImmediatePropagation()
           resetLeader()
           state.setCommandPaletteOpen(true, 'vault')
+          return
+        }
+        if (
+          canOpenCurrentVaultFolder(state) &&
+          matchesSequenceToken(e, overrides, 'vim.leaderOpenVaultFolder')
+        ) {
+          e.preventDefault()
+          e.stopImmediatePropagation()
+          resetLeader()
+          void openVaultFolder(state.vault!.root)
+          return
+        }
+        if (
+          canDownloadCurrentVault(state) &&
+          matchesSequenceToken(e, overrides, 'vim.leaderOpenVaultFolder')
+        ) {
+          e.preventDefault()
+          e.stopImmediatePropagation()
+          resetLeader()
+          void downloadVaultArchive()
           return
         }
         if (matchesSequenceToken(e, overrides, 'vim.leaderNoteActions') && editorNormalMode) {

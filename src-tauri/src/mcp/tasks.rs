@@ -30,10 +30,11 @@ use fancy_regex::Regex;
 use serde::Serialize;
 
 use super::links::open_note_link;
+use super::ops::{abs_root, resolve_note};
 use crate::vault::atomic::write_file_atomic;
 use crate::vault::layout::{INTERNAL_VAULT_DIR, VAULT_SETTINGS_FILE};
-use crate::vault::notes::{resolve_safe, title_from_path};
-use crate::vault::sidecars::{prepare_note_creation, rel_of};
+use crate::vault::notes::title_from_path;
+use crate::vault::sidecars::prepare_note_creation;
 
 /// One task as the MCP tools return it. Field order is the key order of the
 /// object literals upstream builds (`parseTasksFromBody` puts `inProgress`
@@ -620,7 +621,7 @@ fn set_frontmatter_scalar(body: &str, key: &str, value: Option<&str>) -> String 
 }
 
 /// `todayIsoLocal`: today as a local `YYYY-MM-DD`.
-fn today_iso_local() -> String {
+pub fn today_iso_local() -> String {
     chrono::Local::now().format("%Y-%m-%d").to_string()
 }
 
@@ -662,7 +663,7 @@ fn normalize_tasks_folder(value: &serde_json::Value) -> Option<String> {
 
 /// `normalizeTasksExcludedFolders`: invalid entries drop, duplicates
 /// collapse, order is kept; anything but an array is `[]`.
-fn normalize_tasks_folders(value: Option<&serde_json::Value>) -> Vec<String> {
+pub fn normalize_tasks_folders(value: Option<&serde_json::Value>) -> Vec<String> {
     let Some(entries) = value.and_then(|v| v.as_array()) else {
         return Vec::new();
     };
@@ -691,10 +692,12 @@ fn is_path_excluded_from_tasks(rel: &str, excluded: &[String], included: &[Strin
     is_inside_any_folder(rel, excluded)
 }
 
-/// `readTasksFolderLists`: `tasks.excludedFolders` / `tasks.includedFolders`
-/// off `.zennotes/vault.json`; a missing or malformed file means no lists.
+/// `readTasksFolderLists` (`tasksFolderListsForSettings`):
+/// `tasks.excludedFolders` / `tasks.includedFolders` off
+/// `.zennotes/vault.json`, with the template folder (#1024) left out as
+/// well; a missing or malformed file means no lists.
 fn read_tasks_folder_lists(root: &Path) -> (Vec<String>, Vec<String>) {
-    let settings = root.join(INTERNAL_VAULT_DIR).join(VAULT_SETTINGS_FILE);
+    let settings = abs_root(root).join(INTERNAL_VAULT_DIR).join(VAULT_SETTINGS_FILE);
     let Ok(bytes) = fs::read(settings) else {
         return (Vec::new(), Vec::new());
     };
@@ -702,13 +705,18 @@ fn read_tasks_folder_lists(root: &Path) -> (Vec<String>, Vec<String>) {
     else {
         return (Vec::new(), Vec::new());
     };
-    match raw.get("tasks").filter(|t| t.is_object() || t.is_array()) {
-        Some(tasks) => (
-            normalize_tasks_folders(tasks.get("excludedFolders")),
-            normalize_tasks_folders(tasks.get("includedFolders")),
-        ),
-        None => (Vec::new(), Vec::new()),
+    if !raw.is_object() {
+        return (Vec::new(), Vec::new());
     }
+    let tasks = raw.get("tasks").filter(|t| t.is_object() || t.is_array());
+    let mut excluded = normalize_tasks_folders(tasks.and_then(|t| t.get("excludedFolders")));
+    let included = normalize_tasks_folders(tasks.and_then(|t| t.get("includedFolders")));
+    if let Some(template_folder) = super::ops::resolve_template_folder(&raw) {
+        if !excluded.contains(&template_folder) {
+            excluded.push(template_folder);
+        }
+    }
+    (excluded, included)
 }
 
 /// The note text as Node's `readFile(…, 'utf8')` hands it over: invalid UTF-8
@@ -731,7 +739,7 @@ pub fn scan_all_tasks(root: &Path, include_excluded: bool) -> Vec<VaultTask> {
     };
     let mut out = Vec::new();
     for (abs, folder) in super::ops::list_note_files(root) {
-        let rel = rel_of(root, &abs);
+        let rel = super::ops::rel_path(root, &abs);
         if folder == "trash" || is_path_excluded_from_tasks(&rel, &excluded, &included) {
             continue;
         }
@@ -745,6 +753,19 @@ pub fn scan_all_tasks(root: &Path, include_excluded: bool) -> Vec<VaultTask> {
         out.extend(parse_tasks_from_body(&body, &ctx, include_excluded));
     }
     out
+}
+
+/// `scanTasksForPath`: one note's tasks, numbered exactly as
+/// `scan_all_tasks` numbers them.
+pub fn scan_tasks_for_path(root: &Path, rel: &str, include_excluded: bool) -> Result<Vec<VaultTask>, String> {
+    let (abs, folder) = resolve_note(root, rel)?;
+    let body = read_note_text(&abs).map_err(|e| node_read_error(&e, &abs))?;
+    let note_rel = super::ops::rel_path(root, &abs);
+    let title = title_from_path(&abs);
+    let ctx = TaskContext { path: &note_rel, title: &title, folder: &folder };
+    let mut out: Vec<VaultTask> = parse_task_file(&body, &ctx, include_excluded).into_iter().collect();
+    out.extend(parse_tasks_from_body(&body, &ctx, include_excluded));
+    Ok(out)
 }
 
 /* ---------- Toggle ---------------------------------------------------- */
@@ -836,47 +857,55 @@ fn node_read_error(error: &std::io::Error, abs: &Path) -> String {
     }
 }
 
+/// `toggleTaskBody`: toggle the task at `target_index` the way the app does,
+/// recurring tasks included: checking off an open `@repeat:` task writes its
+/// next occurrence above it (#1036), and the index then points at the
+/// finished task, which moved down past it. None when the body holds no task
+/// at that index.
+pub fn toggle_task_body(body: &str, target_index: usize, today: &str) -> Option<(String, usize)> {
+    if let Some(recurring) = super::task_edits::complete_recurring_task_at_index(body, target_index, today) {
+        return Some((recurring.body, target_index + recurring.inserted_tasks));
+    }
+    toggle_task_in_body(body, target_index).map(|toggled| (toggled, target_index))
+}
+
 /// `toggleTask`: flip the task `"<path>#<index>"` names and return it as it
 /// now reads, or `None` when the id no longer matches a task. A `#task` id
 /// flips a file task's frontmatter `status` (and `completedDate`). Explicit
 /// ids are exclusion-blind: they only circulate via `list_tasks`, including
-/// its includeExcluded listing. Like upstream, a toggle writes the note back
-/// `\n`-normalized.
+/// its includeExcluded listing. The note is classified before anything is
+/// written, like every other edit.
 pub fn toggle_task(root: &Path, task_id: &str) -> Result<Option<VaultTask>, String> {
     let (rel, index_str) = split_task_id(task_id)?;
 
     if index_str == "task" {
-        let abs = resolve_safe(root, &rel)?;
+        let (abs, folder) = resolve_note(root, &rel)?;
         let body = read_note_text(&abs).map_err(|e| node_read_error(&e, &abs))?;
-        let note_rel = rel_of(root, &abs);
-        let folder = super::ops::folder_of(root, &abs).ok_or_else(|| format!("Note not in a known folder: {rel}"))?;
+        let note_rel = super::ops::rel_path(root, &abs);
         let title = title_from_path(&abs);
         let ctx = TaskContext { path: &note_rel, title: &title, folder: &folder };
         let Some(current) = parse_task_file(&body, &ctx, true) else {
             return Ok(None);
         };
         let next = toggle_file_task_in_body(&body, current.checked);
-        prepare_note_creation(root, &note_rel)?;
+        prepare_note_creation(&abs_root(root), &note_rel)?;
         write_file_atomic(&abs, &next)?;
         return Ok(parse_task_file(&next, &ctx, true));
     }
 
     let target_index = parse_task_index(task_id, &index_str)?;
-    let abs = resolve_safe(root, &rel)?;
+    let (abs, folder) = resolve_note(root, &rel)?;
     let body = read_note_text(&abs).map_err(|e| node_read_error(&e, &abs))?;
-    let Some(new_body) = toggle_task_in_body(&body, target_index) else {
+    let Some((new_body, index)) = toggle_task_body(&body, target_index, &today_iso_local()) else {
         return Ok(None);
     };
-    let note_rel = rel_of(root, &abs);
-    prepare_note_creation(root, &note_rel)?;
+    let note_rel = super::ops::rel_path(root, &abs);
+    prepare_note_creation(&abs_root(root), &note_rel)?;
     write_file_atomic(&abs, &new_body)?;
-    // Upstream checks the folder only after the write; the order is kept so a
-    // stray id fails the same way (written, then reported).
-    let folder = super::ops::folder_of(root, &abs).ok_or_else(|| format!("Note not in a known folder: {rel}"))?;
     let title = title_from_path(&abs);
     let ctx = TaskContext { path: &note_rel, title: &title, folder: &folder };
     // The toggle already landed; the re-parse must see past a `tasks:` opt-out.
-    Ok(parse_tasks_from_body(&new_body, &ctx, true).into_iter().nth(target_index))
+    Ok(parse_tasks_from_body(&new_body, &ctx, true).into_iter().nth(index))
 }
 
 // Expected values below are what upstream's vault-ops.ts produced for the same
@@ -1170,11 +1199,13 @@ mod tests {
     fn scan_honours_folder_lists_and_skips_non_notes() {
         let dir = fixture_a();
         let scan = scan_all_tasks(dir.path(), false);
+        // A database's record pages are notes to an assistant (upstream's
+        // `treatRecordPagesAsNotes`), so their tasks are listed too.
         assert_eq!(
             ids(&scan),
             [
                 "archive/Waiting.md#task", "inbox/.dotnote.md#0", "inbox/C# notes.md#0",
-                "inbox/Draw.excalidraw.md#0", "inbox/Excluded2.md#0", "inbox/Plain.md#0",
+                "inbox/DB.base/rec.md#0", "inbox/Draw.excalidraw.md#0", "inbox/Excluded2.md#0", "inbox/Plain.md#0",
                 "inbox/Projects/FileTask.md#0", "inbox/Projects/FileTask.md#1",
                 "inbox/Projects/FileTask.md#task", "inbox/README.MD#0", "quick/CRLF.md#0",
                 "quick/CRLF.md#1", "quick/Done.md#0", "quick/Done.md#task",
@@ -1243,8 +1274,8 @@ mod tests {
         assert_eq!(folder("assets/a.md#0"), Err("Note not in a known folder: assets/a.md".into()));
         assert_eq!(read(&dir, "Root.md"), "- [x] at root\n");
         assert_eq!(read(&dir, "quick/q.md"), "- [ ] quick\n");
-        // Like upstream, the folder check comes after the write.
-        assert_eq!(read(&dir, "assets/a.md"), "- [x] asset\n");
+        // Classified before the write, as upstream now does.
+        assert_eq!(read(&dir, "assets/a.md"), "- [ ] asset\n");
     }
 
     #[test]

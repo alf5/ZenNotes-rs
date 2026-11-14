@@ -11,6 +11,9 @@
  *  - src-tauri/src/mcp/instructions.md: the default server instructions.
  *
  * All three pass through port-overrides.ts: the port's link scheme, and no TikZ.
+ * scenario.json's `sessions` each start a server with extra flags (the scope
+ * flags) on a fresh vault; golden.json holds their tool lists, the
+ * instructions they add, their replies and the vault each leaves behind.
  *
  * Upstream's server runs straight from its TypeScript sources under bun: they
  * are copied to a temp dir (the clone is never touched) and given only the npm
@@ -27,6 +30,9 @@ const RUST_MCP_DIR = path.join(HERE, '..', '..', 'src-tauri', 'src', 'mcp')
 /** npm packages the MCP entry's import graph reaches. A missing one fails the
  *  run with "Cannot find package"; add it here. */
 const PACKAGES = ['@modelcontextprotocol/sdk', 'smol-toml', 'lz-string']
+/** Upstream's own packages the MCP entry reaches (app-core since v2.83, for
+ *  its vault layout and template rendering). */
+const WORKSPACE_PACKAGES = ['shared-domain', 'bridge-contract', 'app-core']
 
 const upstream = process.argv[2]
 if (!upstream || !existsSync(path.join(upstream, 'apps/desktop/src/mcp/index.ts'))) {
@@ -51,7 +57,7 @@ try {
   for (const rel of ['apps/desktop/src', 'apps/desktop/tsconfig.node.json', 'tsconfig.base.json']) {
     cpSync(path.join(upstream, rel), path.join(snapshot, rel), { recursive: true })
   }
-  for (const pkg of ['shared-domain', 'bridge-contract']) {
+  for (const pkg of WORKSPACE_PACKAGES) {
     for (const rel of ['src', 'package.json']) {
       cpSync(path.join(upstream, 'packages', pkg, rel), path.join(snapshot, 'packages', pkg, rel), { recursive: true })
     }
@@ -66,6 +72,12 @@ try {
     stderr: 'inherit'
   })
   if (install.exitCode !== 0) throw new Error('bun add failed')
+  // The packages import each other by name (`@zennotes/bridge-contract/ipc`),
+  // as an npm workspace would resolve them.
+  mkdirSync(path.join(deps, 'node_modules', '@zennotes'), { recursive: true })
+  for (const pkg of WORKSPACE_PACKAGES) {
+    symlinkSync(path.join(snapshot, 'packages', pkg), path.join(deps, 'node_modules', '@zennotes', pkg))
+  }
   symlinkSync(path.join(deps, 'node_modules'), path.join(snapshot, 'node_modules'))
 
   const desktop = path.join(snapshot, 'apps/desktop')
@@ -73,14 +85,17 @@ try {
 
   writeFileSync(
     GOLDEN_FILE,
-    portLinks(JSON.stringify({ steps: transcript.steps, files: transcript.files }, null, 2)) + '\n'
+    portLinks(
+      JSON.stringify({ steps: transcript.steps, files: transcript.files, sessions: transcript.sessions }, null, 2)
+    ) + '\n'
   )
   writeFileSync(path.join(RUST_MCP_DIR, 'tools.json'), portLinks(JSON.stringify(transcript.tools, null, 2)) + '\n')
   writeFileSync(path.join(RUST_MCP_DIR, 'instructions.md'), portInstructions(transcript.instructions))
-  const errors = transcript.steps.filter((s) => s.isError).length
+  const all = [...transcript.steps, ...transcript.sessions.flatMap((x) => x.steps)]
+  const errors = all.filter((s) => s.isError).length
   console.log(
-    `golden.json: ${transcript.steps.length} steps (${errors} errors), ${Object.keys(transcript.files).length} files; ` +
-      `tools.json: ${transcript.tools.length} tools`
+    `golden.json: ${all.length} steps (${errors} errors) in ${transcript.sessions.length + 1} sessions, ` +
+      `${Object.keys(transcript.files).length} files; tools.json: ${transcript.tools.length} tools`
   )
 } finally {
   rmSync(snapshot, { recursive: true, force: true })

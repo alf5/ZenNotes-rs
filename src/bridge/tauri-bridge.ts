@@ -21,6 +21,7 @@
 import { invoke } from './ipc'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { onClipNotice, onClipRequested, startClipLinks } from './clip-links'
 import { confirm } from '@tauri-apps/plugin-dialog'
 import {
   installZenBridge,
@@ -30,6 +31,7 @@ import {
 } from '@zennotes/bridge-contract/bridge'
 import type { ZenPlatform } from '@zennotes/bridge-contract/platform'
 import { unsplash } from './unsplash'
+import { importMembers } from './imports'
 import type { ExternalUrlResult } from '@zennotes/bridge-contract/application-links'
 import {
   DEFAULT_VAULT_SETTINGS,
@@ -102,6 +104,7 @@ import type {
 } from '@zennotes/shared-domain/custom-code-languages'
 import type { Override } from '@zennotes/shared-domain/overrides'
 import type { VaultTask } from '@zennotes/shared-domain/tasks'
+import type { TaskReminder, TaskReminderTarget } from '@zennotes/bridge-contract/tasks'
 import type {
   McpClientId,
   McpClientStatus,
@@ -137,7 +140,7 @@ import {
 const APP_INFO: ZenAppInfo = {
   name: 'zennotes-rs',
   productName: 'ZenNotes-rs',
-  version: '2.79.3',
+  version: '2.85.0',
   description: 'ZenNotes-rs desktop',
   homepage: 'https://github.com/alf5/ZenNotes-rs',
   runtime: 'desktop',
@@ -472,6 +475,10 @@ const bridge: ZenBridge = {
     invoke('vault_reveal_folder_target', { folder, subpath })),
   revealAssetsDir: routed(remoteVault.revealAssetsDir, (): Promise<void> =>
     invoke('vault_reveal_assets_dir')),
+  // Any listed local vault, from the switcher too while a server is open:
+  // Rust refuses a root it does not already know (upstream v2.82).
+  openVaultInFileManager: (root: string): Promise<void> =>
+    invoke('vault_open_in_file_manager', { root }),
 
   // ---- Sync asset URL + drag-drop ---------------------------------------
   getPathForFile: pathForDroppedFile,
@@ -485,6 +492,10 @@ const bridge: ZenBridge = {
     subscribe<unknown>('app://open-settings', () => cb()),
   onOpenNoteRequested: (cb: (relPath: string) => void): (() => void) =>
     subscribe<string>('app://open-note', cb),
+  // `zennotes-rs://new` / `daily` (upstream's web-clipper links, #620): the
+  // main window checks and routes them (clip-links.ts); app-core writes them.
+  onClipRequested,
+  onClipNotice,
   onAppUpdateState: (cb: (state: AppUpdateState) => void): (() => void) =>
     subscribe<AppUpdateState>('app://update-state', cb),
   notifyRendererReady: (): void => {
@@ -682,6 +693,8 @@ const bridge: ZenBridge = {
   saveUnsplashKey: (key: string) => unsplash.save(key),
   testUnsplashKey: () => unsplash.test(),
   clearUnsplashKey: () => unsplash.clear(),
+  // Obsidian, Logseq and Notion imports; see imports/index.ts.
+  ...importMembers,
   openFolderTemporary: (absPath: string): Promise<void> =>
     invoke('app_open_folder_temporary', { rawPath: absPath }),
   toggleDevTools: (): Promise<void> => invoke('devtools_toggle'),
@@ -804,7 +817,16 @@ const bridge: ZenBridge = {
   },
   quitApp: (): void => {
     void invoke('app_quit').catch(() => {})
-  }
+  },
+
+  // Task reminders (#1036): the app computes the whole schedule, Rust times
+  // it (src-tauri/src/task_reminders.rs) and shows system notifications, the
+  // window hidden in the tray included. A clicked one comes back here.
+  setTaskReminders: (reminders: TaskReminder[]): void => {
+    void invoke('task_reminders_set', { reminders }).catch(() => {})
+  },
+  onTaskReminderOpen: (cb: (target: TaskReminderTarget) => void): (() => void) =>
+    subscribe<TaskReminderTarget>('tasks://reminder-open', cb)
 
   // Deliberately absent (all optional in the contract): sendUsageCount
   // (upstream's anonymous install count goes to zennotes.org and would count
@@ -846,6 +868,7 @@ export function createTauriBridge(): ZenBridge {
   installNavigationGuard()
   installWorkspaceFollower()
   installFileDrops(detectPlatform())
+  startClipLinks()
   void invoke<typeof installInfo>('app_install_info')
     .then((info) => {
       installInfo = info

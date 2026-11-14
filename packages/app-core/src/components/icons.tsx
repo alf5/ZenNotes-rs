@@ -22,6 +22,24 @@ function I(props: IconProps & { children: React.ReactNode }): JSX.Element {
   )
 }
 
+/** Two arrows chasing each other round: a task that repeats (#1036). */
+export const RepeatIcon = (p: IconProps): JSX.Element => (
+  <I {...p}>
+    <path d="m17 2 4 4-4 4" />
+    <path d="M3 11v-1a4 4 0 0 1 4-4h14" />
+    <path d="m7 22-4-4 4-4" />
+    <path d="M21 13v1a4 4 0 0 1-4 4H3" />
+  </I>
+)
+
+/** A bell: a task with a reminder (#1036). */
+export const BellIcon = (p: IconProps): JSX.Element => (
+  <I {...p}>
+    <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
+    <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
+  </I>
+)
+
 export const SearchIcon = (p: IconProps): JSX.Element => (
   <I {...p}>
     <circle cx="11" cy="11" r="7" />
@@ -359,6 +377,42 @@ export const PinIcon = (p: IconProps): JSX.Element => (
   <I {...p}>
     <path d="M12 17v5" />
     <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1Z" />
+  </I>
+)
+
+/** View options: the Tasks views' View menu. */
+export const SlidersIcon = (p: IconProps): JSX.Element => (
+  <I {...p}>
+    <path d="M4 6h10" />
+    <path d="M18 6h2" />
+    <circle cx="16" cy="6" r="2" />
+    <path d="M4 12h4" />
+    <path d="M12 12h8" />
+    <circle cx="10" cy="12" r="2" />
+    <path d="M4 18h12" />
+    <path d="M20 18h0" />
+    <circle cx="18" cy="18" r="2" />
+  </I>
+)
+
+/** Keyboard shortcuts: the Tasks views' Keys button. */
+export const KeyboardIcon = (p: IconProps): JSX.Element => (
+  <I {...p}>
+    <rect x="2.5" y="6" width="19" height="12" rx="2" />
+    <path d="M6.5 10h.01" />
+    <path d="M10 10h.01" />
+    <path d="M13.5 10h.01" />
+    <path d="M17 10h.01" />
+    <path d="M8 14h8" />
+  </I>
+)
+
+/** A warning: a Kanban column holding more cards than its WIP limit. */
+export const AlertTriangleIcon = (p: IconProps): JSX.Element => (
+  <I {...p}>
+    <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" />
+    <path d="M12 9v4" />
+    <path d="M12 17h.01" />
   </I>
 )
 

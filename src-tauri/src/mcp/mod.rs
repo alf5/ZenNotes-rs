@@ -5,17 +5,33 @@
 //! `--vault <path or name>`, else `$ZENNOTES_VAULT`, else the vault the app
 //! last had open, asked again before every tool call.
 //!
-//! Only local vaults: this build has no remote workspaces, so upstream's
-//! `--server` / `--token` and the server-token settings have nothing to
-//! reach.
+//! `--allow-path`, `--deny-path`, `--read-only` and `--access` narrow what the
+//! client may see and change (ZenNotes/tui#21, scope.rs); the server enforces
+//! them on every tool. A bad entry is the one flag that stops the server
+//! before it serves: starting anyway would share more than the user asked
+//! for.
+//!
+//! Only local vaults: upstream's `--server` / `--token` (a vault on a
+//! ZenNotes server) are not ported to the MCP server yet.
 
 pub mod agent_edits;
+pub mod asset_links;
+pub mod assets;
+pub mod backend;
 pub mod comments;
 pub mod integrations;
 pub mod links;
 pub mod ops;
+pub mod periodic;
+pub mod scope;
+pub mod scoped;
+#[cfg(test)]
+mod scope_contract;
+pub mod sections;
 pub mod server;
+pub mod task_edits;
 pub mod tasks;
+pub mod work;
 
 use std::path::{Path, PathBuf};
 
@@ -145,34 +161,105 @@ pub fn resolve_vault(selector: Option<&str>) -> Result<PathBuf, String> {
 
 /* ---------- Entry ------------------------------------------------------ */
 
-const USAGE: &str = "usage: zennotes-rs mcp [--vault <path or name>]
+const USAGE: &str = "usage: zennotes-rs mcp [--vault <path or name>] [--allow-path <path>]... [--deny-path <path>]...
+                       [--read-only] [--access read|comment|write]
 
 Runs the ZenNotes MCP server on stdin/stdout for an MCP client (Claude Code,
 Claude Desktop, Codex, OpenCode). Without --vault it uses $ZENNOTES_VAULT, or
-else the vault ZenNotes-rs has open. Settings -> MCP installs it into a client.";
+else the vault ZenNotes-rs has open. Settings -> MCP installs it into a client.
+
+--allow-path shows the client only the vault-relative folders and notes named
+(repeatable), --deny-path hides some (repeatable), --read-only or --access
+read|comment|write limits what it may change.";
+
+/// The SDK default (16 MiB) drops a legal upload_asset of about 12 MiB of
+/// file; upstream's server allows 128 MiB so an oversized file gets its
+/// refusal rather than a dropped connection.
+const STDIO_MAX_MESSAGE_BYTES: usize = 128 * 1024 * 1024;
+
+/// Flags that are switches, never `--flag <value>` (upstream's cli/args.ts
+/// `VALUELESS_FLAGS`, as far as this command reads them).
+const VALUELESS_FLAGS: [&str; 2] = ["read-only", "help"];
+
+/// The command line as `zn`'s parser reads it: `--flag value`, `--flag=value`,
+/// a flag followed by another flag (or nothing) is `true`, repeats collect.
+fn parse_flags(args: &[String]) -> (Vec<(String, String)>, Vec<String>) {
+    let mut flags = Vec::new();
+    let mut positionals = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let token = &args[i];
+        if token == "--" {
+            positionals.extend(args[i + 1..].iter().cloned());
+            break;
+        }
+        if let Some(body) = token.strip_prefix("--") {
+            if let Some((name, value)) = body.split_once('=') {
+                flags.push((name.to_string(), value.to_string()));
+            } else {
+                let next = args.get(i + 1).filter(|n| !n.starts_with("--"));
+                match next {
+                    Some(value) if !VALUELESS_FLAGS.contains(&body) => {
+                        flags.push((body.to_string(), value.clone()));
+                        i += 1;
+                    }
+                    _ => flags.push((body.to_string(), "true".into())),
+                }
+            }
+        } else if token.len() > 1 && token.starts_with('-') && token[1..].chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+            flags.push((token[1..].to_string(), "true".into()));
+        } else {
+            positionals.push(token.clone());
+        }
+        i += 1;
+    }
+    (flags, positionals)
+}
+
+/// The scope the flags ask for (`mcpScopeFromArgs`); None when none were
+/// given, full access.
+pub fn scope_from_args(flags: &[(String, String)]) -> Result<Option<scope::Scope>, String> {
+    let many = |name: &str| -> Vec<String> { flags.iter().filter(|(n, _)| n == name).map(|(_, v)| v.clone()).collect() };
+    let last = |name: &str| flags.iter().rev().find(|(n, _)| n == name).map(|(_, v)| v.clone());
+    scope::scope_from_flags(&scope::ScopeFlags {
+        allow: many("allow-path"),
+        deny: many("deny-path"),
+        access: last("access"),
+        read_only: last("read-only").is_some_and(|v| v == "true" || v == "1" || v == "yes"),
+    })
+}
 
 /// `zennotes-rs mcp …`: serve until the client closes stdin. Returns the
 /// process exit code.
 pub fn run(args: &[String]) -> i32 {
+    let (flags, positionals) = parse_flags(args);
     let mut vault: Option<String> = None;
-    let mut iter = args.iter();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "-h" | "--help" => {
+    for (name, value) in &flags {
+        match name.as_str() {
+            "help" | "h" => {
                 println!("{USAGE}");
                 return 0;
             }
-            "--vault" => vault = iter.next().cloned(),
-            other if other.starts_with("--vault=") => vault = Some(other["--vault=".len()..].to_string()),
+            "vault" => vault = Some(value.clone()),
+            "allow-path" | "deny-path" | "read-only" | "access" => {}
             // stdout is the protocol channel: everything else goes to stderr,
             // which MCP clients keep in their server logs.
-            "--server" | "--token" => {
-                iter.next();
-                eprintln!("[zennotes-mcp] {arg} is not supported: this build serves local vaults only.");
+            "server" | "token" => {
+                eprintln!("[zennotes-mcp] --{name} is not supported: this build serves local vaults only.")
             }
-            other => eprintln!("[zennotes-mcp] ignoring unknown argument {other}"),
+            other => eprintln!("[zennotes-mcp] ignoring unknown argument --{other}"),
         }
     }
+    for other in positionals {
+        eprintln!("[zennotes-mcp] ignoring unknown argument {other}");
+    }
+    let scope = match scope_from_args(&flags) {
+        Ok(scope) => scope,
+        Err(message) => {
+            eprintln!("[zennotes-mcp] {message}");
+            return 1;
+        }
+    };
 
     // Try at startup and say so when it fails: waiting for the first tool
     // call hid a `--vault` typo in a client config until the assistant
@@ -180,8 +267,9 @@ pub fn run(args: &[String]) -> i32 {
     if let Err(message) = resolve_vault(vault.as_deref()) {
         eprintln!("[zennotes-mcp] {message} The MCP server is running anyway; every tool call returns this error until a vault resolves.");
     }
-    let session = server::VaultSession::new(move || resolve_vault(vault.as_deref()));
-    let handler = server::ZenNotesServer::new(session, resolve_instructions());
+    let scoped = scope::is_active(scope.as_ref());
+    let session = server::VaultSession::new(move || resolve_vault(vault.as_deref()), scoped);
+    let handler = server::ZenNotesServer::new(session, resolve_instructions(), scope);
 
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(rt) => rt,
@@ -192,7 +280,10 @@ pub fn run(args: &[String]) -> i32 {
     };
     runtime.block_on(async move {
         use rmcp::ServiceExt;
-        let service = match handler.serve(rmcp::transport::stdio()).await {
+        let transport =
+            rmcp::transport::async_rw::AsyncRwTransport::new_server(tokio::io::stdin(), tokio::io::stdout())
+                .with_max_line_length(STDIO_MAX_MESSAGE_BYTES);
+        let service = match handler.serve(transport).await {
             Ok(service) => service,
             Err(e) => {
                 eprintln!("[zennotes-mcp] fatal: {e}");
@@ -207,4 +298,30 @@ pub fn run(args: &[String]) -> i32 {
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn argv(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn flags_parse_like_zn() {
+        let (flags, _) = parse_flags(&argv(&["--allow-path", "Projects", "--read-only", "Notes", "--deny-path=a/b", "--access"]));
+        let scope = scope_from_args(&flags);
+        assert_eq!(scope, Err("--access must be read, comment or write, not \"true\"".into()));
+        let (flags, positionals) = parse_flags(&argv(&["--allow-path", "Projects", "--read-only", "Notes", "--deny-path=Projects/x"]));
+        assert_eq!(positionals, vec!["Notes"]);
+        let scope = scope_from_args(&flags).unwrap().unwrap();
+        assert_eq!(scope.access, scope::Access::Read);
+        assert_eq!(scope.allow, vec!["Projects"]);
+        assert_eq!(scope.deny, vec!["Projects/x"]);
+        let (flags, _) = parse_flags(&argv(&["--vault", "/v"]));
+        assert_eq!(scope_from_args(&flags), Ok(None));
+        let (flags, _) = parse_flags(&argv(&["--allow-path", "../x"]));
+        assert!(scope_from_args(&flags).unwrap_err().contains(". and .. are not allowed"));
+    }
 }

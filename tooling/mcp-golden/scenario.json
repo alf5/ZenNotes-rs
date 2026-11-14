@@ -586,5 +586,1811 @@
       "sortBy": "folder,subpath",
       "sortAt": "subfolders"
     }
+  ],
+  "sessions": [
+    {
+      "label": "assets",
+      "files": {
+        "inbox/Gallery.md": "# Gallery\n\n![[diagram.png]]\n![[assets/diagram.png|300]]\n![chart](../assets/diagram.png)\n[readme](<../assets/notes.txt>)\n| [[assets/diagram.png\\|small]] |\n\n`![[diagram.png]]` stays in code\n",
+        "assets/notes.txt": "hello from a text file\n",
+        "assets/doc one.pdf": "%PDF-1.4 not really a pdf\n",
+        "assets/beep.mp3": {
+          "base64": "SUQzAwAAAAAAAP/7"
+        },
+        "assets/blob.bin": {
+          "base64": "AAECYmluYXJ5"
+        },
+        "Data/t.csv": "id,name\n1,a\n",
+        "Data/t.csv.base.json": "{\"columns\":[]}\n"
+      },
+      "steps": [
+        {
+          "tool": "list_assets",
+          "args": {},
+          "sortBy": "path"
+        },
+        {
+          "tool": "read_asset",
+          "args": {
+            "path": "assets/diagram.png"
+          }
+        },
+        {
+          "tool": "read_asset",
+          "args": {
+            "path": "assets/notes.txt"
+          }
+        },
+        {
+          "tool": "read_asset",
+          "args": {
+            "path": "assets/doc one.pdf"
+          }
+        },
+        {
+          "tool": "read_asset",
+          "args": {
+            "path": "assets/beep.mp3"
+          }
+        },
+        {
+          "tool": "read_asset",
+          "args": {
+            "path": "assets/blob.bin"
+          }
+        },
+        {
+          "tool": "read_asset",
+          "args": {
+            "path": "ASSETS/NOTES.TXT"
+          }
+        },
+        {
+          "tool": "read_asset",
+          "args": {
+            "path": "assets/missing.png"
+          }
+        },
+        {
+          "tool": "read_asset",
+          "args": {
+            "path": "inbox/Welcome.md"
+          }
+        },
+        {
+          "tool": "read_asset",
+          "args": {
+            "path": "../outside.png"
+          }
+        },
+        {
+          "tool": "read_asset",
+          "args": {}
+        },
+        {
+          "tool": "upload_asset",
+          "args": {
+            "filename": "plot.png",
+            "content_base64": "iVBORw0KGgo="
+          }
+        },
+        {
+          "tool": "upload_asset",
+          "args": {
+            "filename": "plot.png",
+            "content_base64": "iVBORw0KGgo="
+          }
+        },
+        {
+          "tool": "upload_asset",
+          "args": {
+            "filename": "report?.txt",
+            "content_base64": "aGVsbG8="
+          }
+        },
+        {
+          "tool": "upload_asset",
+          "args": {
+            "filename": "data url.png",
+            "content_base64": "data:image/png;base64,aGk="
+          }
+        },
+        {
+          "tool": "upload_asset",
+          "args": {
+            "filename": "con.txt",
+            "content_base64": "aGk="
+          }
+        },
+        {
+          "tool": "upload_asset",
+          "args": {
+            "filename": "wrapped.txt",
+            "content_base64": "aGVs\nbG8_-w"
+          }
+        },
+        {
+          "tool": "upload_asset",
+          "args": {
+            "filename": "a.md",
+            "content_base64": "aGk="
+          }
+        },
+        {
+          "tool": "upload_asset",
+          "args": {
+            "filename": ".hidden.png",
+            "content_base64": "aGk="
+          }
+        },
+        {
+          "tool": "upload_asset",
+          "args": {
+            "filename": "dir/x.png",
+            "content_base64": "aGk="
+          }
+        },
+        {
+          "tool": "upload_asset",
+          "args": {
+            "filename": "x.excalidraw",
+            "content_base64": "aGk="
+          }
+        },
+        {
+          "tool": "upload_asset",
+          "args": {
+            "filename": "x.png",
+            "content_base64": "!!!"
+          }
+        },
+        {
+          "tool": "upload_asset",
+          "args": {
+            "filename": "x.png",
+            "content_base64": "a"
+          }
+        },
+        {
+          "tool": "upload_asset",
+          "args": {
+            "filename": "x.png",
+            "content_base64": "===="
+          }
+        },
+        {
+          "tool": "upload_asset",
+          "args": {
+            "filename": "x.png",
+            "content_base64": "data:text/plain,hi"
+          }
+        },
+        {
+          "tool": "upload_asset",
+          "args": {
+            "filename": "x.png"
+          }
+        },
+        {
+          "tool": "rename_asset",
+          "args": {
+            "path": "assets/diagram.png",
+            "name": "chart.png"
+          }
+        },
+        {
+          "tool": "read_note",
+          "args": {
+            "path": "inbox/Gallery.md"
+          }
+        },
+        {
+          "tool": "rename_asset",
+          "args": {
+            "path": "assets/notes.txt",
+            "name": "a#b.txt"
+          }
+        },
+        {
+          "tool": "rename_asset",
+          "args": {
+            "path": "assets/notes.txt",
+            "name": "notes.txt."
+          }
+        },
+        {
+          "tool": "rename_asset",
+          "args": {
+            "path": "assets/chart.png",
+            "name": "plot.png"
+          }
+        },
+        {
+          "tool": "rename_asset",
+          "args": {
+            "path": "assets/chart.png",
+            "name": "NUL.png"
+          }
+        },
+        {
+          "tool": "rename_asset",
+          "args": {
+            "path": "assets/chart.png",
+            "name": "b.md"
+          }
+        },
+        {
+          "tool": "rename_asset",
+          "args": {
+            "path": "assets/gone.png",
+            "name": "x.png"
+          }
+        },
+        {
+          "tool": "rename_asset",
+          "args": {
+            "path": "Data/t.csv",
+            "name": "u.csv"
+          }
+        },
+        {
+          "tool": "move_asset",
+          "args": {
+            "path": "assets/chart.png",
+            "targetDir": "assets/plots"
+          }
+        },
+        {
+          "tool": "read_note",
+          "args": {
+            "path": "inbox/Gallery.md"
+          }
+        },
+        {
+          "tool": "move_asset",
+          "args": {
+            "path": "assets/plots/chart.png",
+            "targetDir": "trash"
+          }
+        },
+        {
+          "tool": "move_asset",
+          "args": {
+            "path": "assets/plots/chart.png",
+            "targetDir": " assets"
+          }
+        },
+        {
+          "tool": "move_asset",
+          "args": {
+            "path": "assets/plots/chart.png",
+            "targetDir": "Things.base"
+          }
+        },
+        {
+          "tool": "move_asset",
+          "args": {
+            "path": "assets/plots/chart.png",
+            "targetDir": ".zennotes"
+          }
+        },
+        {
+          "tool": "move_asset",
+          "args": {
+            "path": "assets/plots/chart.png",
+            "targetDir": "ASSETS/PLOTS"
+          }
+        },
+        {
+          "tool": "move_asset",
+          "args": {
+            "path": "assets/plots/chart.png",
+            "targetDir": "Assets"
+          }
+        },
+        {
+          "tool": "move_asset",
+          "args": {
+            "path": "Data/t.csv",
+            "targetDir": "assets"
+          }
+        },
+        {
+          "tool": "duplicate_asset",
+          "args": {
+            "path": "assets/notes.txt"
+          }
+        },
+        {
+          "tool": "duplicate_asset",
+          "args": {
+            "path": "assets/notes.txt"
+          }
+        },
+        {
+          "tool": "delete_asset",
+          "args": {
+            "path": "assets/notes copy.txt"
+          },
+          "label": "deleted"
+        },
+        {
+          "tool": "delete_asset",
+          "args": {
+            "path": "Data/t.csv.base.json"
+          }
+        },
+        {
+          "tool": "delete_asset",
+          "args": {
+            "path": "assets/notes copy.txt"
+          }
+        },
+        {
+          "tool": "list_assets",
+          "args": {
+            "deleted": true
+          }
+        },
+        {
+          "tool": "restore_asset",
+          "args": {
+            "undoToken": {
+              "$ref": "deleted",
+              "at": "undoToken"
+            }
+          }
+        },
+        {
+          "tool": "restore_asset",
+          "args": {
+            "undoToken": "00000000-0000-4000-8000-000000000000"
+          }
+        },
+        {
+          "tool": "restore_asset",
+          "args": {}
+        },
+        {
+          "tool": "delete_asset",
+          "args": {
+            "path": "assets/doc one.pdf"
+          }
+        },
+        {
+          "tool": "list_assets",
+          "args": {
+            "deleted": "yes"
+          }
+        },
+        {
+          "tool": "list_assets",
+          "args": {},
+          "sortBy": "path"
+        }
+      ]
+    },
+    {
+      "label": "work tools",
+      "files": {
+        "inbox/Tasks.md": "# Tasks\n\n- [ ] write report due:2026-03-01 !high\n- [ ] call bob @waiting\n- [x] done thing\n- [ ] water plants due:2030-02-10 @repeat:weekly\n- [ ] review @status:todo\n  - [ ] sub item\n- [ ] drop this\n",
+        "inbox/Task Note.md": "---\ntags: [task]\nstatus: open\npriority: normal\ndue: 2026-04-01\n---\n# Task Note\n",
+        "inbox/Crlf.md": "# Crlf\r\n\r\n- [ ] windows task\r\n",
+        "inbox/Long.md": "---\ntitle: Long\n---\n# Long\n\nIntro text.\n\n## Action Items\n\n- [ ] first\n\n### Details\n\nDeep text.\n\n## Notes\n\nSome notes.\n\n## Notes\n\nSecond notes.\n",
+        "inbox/Habits.md": "# Habits\n\n- [ ] stretch due:2030-01-10 @repeat:daily\n"
+      },
+      "steps": [
+        {
+          "tool": "list_tasks",
+          "args": {
+            "folder": "inbox"
+          },
+          "sortBy": "id"
+        },
+        {
+          "tool": "update_task",
+          "args": {
+            "id": "inbox/Tasks.md#0",
+            "due": "2026-03-05",
+            "priority": "med"
+          }
+        },
+        {
+          "tool": "update_task",
+          "args": {
+            "id": "inbox/Tasks.md#0",
+            "expectedText": "something else",
+            "state": "done"
+          }
+        },
+        {
+          "tool": "update_task",
+          "args": {
+            "id": "inbox/Tasks.md#1",
+            "waiting": false,
+            "status": "doing"
+          }
+        },
+        {
+          "tool": "update_task",
+          "args": {
+            "id": "inbox/Tasks.md#2",
+            "state": "open"
+          }
+        },
+        {
+          "tool": "update_task",
+          "args": {
+            "id": "inbox/Tasks.md#3",
+            "state": "done",
+            "expectedText": "water plants @repeat:weekly"
+          }
+        },
+        {
+          "tool": "update_task",
+          "args": {
+            "id": "inbox/Tasks.md#5",
+            "text": "review the draft",
+            "state": "in-progress"
+          }
+        },
+        {
+          "tool": "update_task",
+          "args": {
+            "id": "inbox/Tasks.md#7",
+            "state": "cancelled"
+          }
+        },
+        {
+          "tool": "update_task",
+          "args": {
+            "id": "inbox/Tasks.md#99",
+            "state": "done"
+          }
+        },
+        {
+          "tool": "update_task",
+          "args": {
+            "id": "inbox/Tasks.md#0"
+          }
+        },
+        {
+          "tool": "update_task",
+          "args": {
+            "id": "inbox/Tasks.md#0",
+            "due": "2026-02-30"
+          }
+        },
+        {
+          "tool": "update_task",
+          "args": {
+            "id": "inbox/Tasks.md#0",
+            "priority": "urgent"
+          }
+        },
+        {
+          "tool": "update_task",
+          "args": {
+            "id": "inbox/Tasks.md#0",
+            "state": "later"
+          }
+        },
+        {
+          "tool": "update_task",
+          "args": {
+            "id": "inbox/Tasks.md#0",
+            "status": "two words"
+          }
+        },
+        {
+          "tool": "update_task",
+          "args": {
+            "id": "inbox/Tasks.md#0",
+            "text": "a\nb"
+          }
+        },
+        {
+          "tool": "update_task",
+          "args": {
+            "id": "inbox/Tasks.md#0",
+            "waiting": "yes"
+          }
+        },
+        {
+          "tool": "update_task",
+          "args": {
+            "id": "inbox/Tasks.md#0",
+            "due": "",
+            "priority": ""
+          }
+        },
+        {
+          "tool": "update_task",
+          "args": {
+            "id": "inbox/Crlf.md#0",
+            "state": "done",
+            "due": "2026-06-01"
+          }
+        },
+        {
+          "tool": "update_task",
+          "args": {
+            "id": "inbox/Task Note.md#task",
+            "state": "done"
+          }
+        },
+        {
+          "tool": "update_task",
+          "args": {
+            "id": "inbox/Task Note.md#task",
+            "state": "open",
+            "status": "x"
+          }
+        },
+        {
+          "tool": "update_task",
+          "args": {
+            "id": "inbox/Task Note.md#task",
+            "text": "x"
+          }
+        },
+        {
+          "tool": "update_task",
+          "args": {
+            "id": "inbox/Task Note.md#task",
+            "priority": "low",
+            "due": "2026-05-01"
+          }
+        },
+        {
+          "tool": "update_task",
+          "args": {
+            "id": "inbox/Task Note.md#task",
+            "waiting": true
+          }
+        },
+        {
+          "tool": "update_task",
+          "args": {
+            "id": "no-hash",
+            "state": "done"
+          }
+        },
+        {
+          "tool": "update_task",
+          "args": {
+            "id": "inbox/Missing.md#0",
+            "state": "done"
+          }
+        },
+        {
+          "tool": "read_note",
+          "args": {
+            "path": "inbox/Tasks.md"
+          }
+        },
+        {
+          "tool": "read_note",
+          "args": {
+            "path": "inbox/Task Note.md"
+          }
+        },
+        {
+          "tool": "read_note",
+          "args": {
+            "path": "inbox/Crlf.md"
+          }
+        },
+        {
+          "tool": "toggle_task",
+          "args": {
+            "id": "inbox/Habits.md#0"
+          }
+        },
+        {
+          "tool": "read_note",
+          "args": {
+            "path": "inbox/Habits.md"
+          }
+        },
+        {
+          "tool": "note_sections",
+          "args": {
+            "path": "inbox/Long.md"
+          }
+        },
+        {
+          "tool": "note_sections",
+          "args": {
+            "path": "inbox/Long.md",
+            "heading": "action items"
+          }
+        },
+        {
+          "tool": "note_sections",
+          "args": {
+            "path": "inbox/Long.md",
+            "heading": "## Notes"
+          }
+        },
+        {
+          "tool": "note_sections",
+          "args": {
+            "path": "inbox/Long.md",
+            "heading": "Notes",
+            "lineNumber": 19
+          }
+        },
+        {
+          "tool": "note_sections",
+          "args": {
+            "path": "inbox/Long.md",
+            "heading": "Nope"
+          }
+        },
+        {
+          "tool": "note_sections",
+          "args": {
+            "path": "quick/Scratch.md",
+            "heading": "Anything"
+          }
+        },
+        {
+          "tool": "note_sections",
+          "args": {
+            "path": "inbox/Missing.md"
+          }
+        },
+        {
+          "tool": "note_sections",
+          "args": {
+            "path": "inbox/Long.md",
+            "lineNumber": "3"
+          }
+        },
+        {
+          "tool": "edit_section",
+          "args": {
+            "path": "inbox/Long.md",
+            "heading": "Action Items",
+            "mode": "append",
+            "text": "- [ ] second"
+          }
+        },
+        {
+          "tool": "edit_section",
+          "args": {
+            "path": "inbox/Long.md",
+            "heading": "action items",
+            "mode": "prepend",
+            "text": "Lead paragraph."
+          }
+        },
+        {
+          "tool": "edit_section",
+          "args": {
+            "path": "inbox/Long.md",
+            "heading": "Details",
+            "mode": "replace",
+            "text": ""
+          }
+        },
+        {
+          "tool": "edit_section",
+          "args": {
+            "path": "inbox/Long.md",
+            "heading": "Notes",
+            "mode": "append",
+            "text": "x",
+            "lineNumber": 20
+          }
+        },
+        {
+          "tool": "edit_section",
+          "args": {
+            "path": "inbox/Long.md",
+            "heading": "Long",
+            "mode": "append",
+            "text": "  "
+          }
+        },
+        {
+          "tool": "edit_section",
+          "args": {
+            "path": "inbox/Long.md",
+            "heading": "Long",
+            "mode": "rewrite",
+            "text": "x"
+          }
+        },
+        {
+          "tool": "edit_section",
+          "args": {
+            "path": "inbox/Long.md",
+            "heading": "Notes",
+            "mode": "append",
+            "text": "x"
+          }
+        },
+        {
+          "tool": "edit_section",
+          "args": {
+            "path": "inbox/Long.md",
+            "heading": "Long",
+            "mode": "append"
+          }
+        },
+        {
+          "tool": "edit_section",
+          "args": {
+            "path": "inbox/Crlf.md",
+            "heading": "crlf",
+            "mode": "append",
+            "text": "- [ ] another"
+          }
+        },
+        {
+          "tool": "read_note",
+          "args": {
+            "path": "inbox/Long.md"
+          }
+        },
+        {
+          "tool": "read_note",
+          "args": {
+            "path": "inbox/Crlf.md"
+          }
+        },
+        {
+          "tool": "daily_note",
+          "args": {
+            "date": "2026-01-05"
+          },
+          "label": "daily"
+        },
+        {
+          "tool": "daily_note",
+          "args": {
+            "kind": "weekly",
+            "date": "2026-01-05"
+          }
+        },
+        {
+          "tool": "daily_note",
+          "args": {
+            "kind": "monthly",
+            "date": "2026-01-05"
+          }
+        },
+        {
+          "tool": "daily_note",
+          "args": {
+            "kind": "weekly",
+            "date": "2027-01-01"
+          }
+        },
+        {
+          "tool": "daily_note",
+          "args": {
+            "kind": "yearly"
+          }
+        },
+        {
+          "tool": "daily_note",
+          "args": {
+            "date": "2026-13-01"
+          }
+        },
+        {
+          "tool": "daily_note",
+          "args": {
+            "date": "next week"
+          }
+        },
+        {
+          "tool": "create_note",
+          "args": {
+            "folder": {
+              "$ref": "daily",
+              "at": "createWith.folder"
+            },
+            "subpath": {
+              "$ref": "daily",
+              "at": "createWith.subpath"
+            },
+            "title": {
+              "$ref": "daily",
+              "at": "createWith.title"
+            },
+            "body": {
+              "$ref": "daily",
+              "at": "createWith.body"
+            }
+          }
+        },
+        {
+          "tool": "daily_note",
+          "args": {
+            "date": "2026-01-05"
+          }
+        },
+        {
+          "tool": "daily_note",
+          "args": {}
+        },
+        {
+          "tool": "daily_note",
+          "args": {
+            "date": "Today"
+          }
+        }
+      ]
+    },
+    {
+      "label": "periodic settings",
+      "files": {
+        ".zennotes/vault.json": "{\"primaryNotesLocation\": \"inbox\", \"dailyNotes\": {\"enabled\": true, \"directory\": \"Journal/yyyy\", \"titlePattern\": \"yyyy-MM-dd EEE\", \"templateId\": \"custom:standup\", \"legacyPatterns\": [{\"directory\": \"Old Daily\", \"titlePattern\": \"dd.MM.yyyy\"}]}, \"weeklyNotes\": {\"enabled\": true, \"directory\": \"Weeks\", \"titlePattern\": \"yyyy-'W'ww\", \"templateId\": \"builtin.weekly\"}, \"monthlyNotes\": {\"enabled\": false, \"directory\": \"Months\", \"titlePattern\": \"MMMM yyyy\", \"templateId\": \"builtin.daily\"}}",
+        ".zennotes/templates/standup.md": "---\nname: Standup\n---\n# {{title}}\n\nDate: {{date}}\n\n- [ ] \n",
+        "inbox/Old Daily/06.01.2026.md": "# Old style daily\n"
+      },
+      "steps": [
+        {
+          "tool": "daily_note",
+          "args": {
+            "date": "2026-01-05"
+          }
+        },
+        {
+          "tool": "daily_note",
+          "args": {
+            "date": "2026-01-06"
+          }
+        },
+        {
+          "tool": "daily_note",
+          "args": {
+            "kind": "weekly",
+            "date": "2026-02-11"
+          }
+        },
+        {
+          "tool": "daily_note",
+          "args": {
+            "kind": "monthly",
+            "date": "2026-03-31"
+          }
+        }
+      ]
+    },
+    {
+      "label": "periodic root mode",
+      "files": {
+        ".zennotes/vault.json": "{\"primaryNotesLocation\":\"root\",\"dailyNotes\":{\"enabled\":true,\"templateId\":\"builtin.daily\"}}"
+      },
+      "steps": [
+        {
+          "tool": "vault_info",
+          "args": {},
+          "sortAt": "subfolders",
+          "sortBy": "folder,subpath"
+        },
+        {
+          "tool": "daily_note",
+          "args": {
+            "date": "2026-02-03"
+          },
+          "label": "daily"
+        },
+        {
+          "tool": "create_note",
+          "args": {
+            "folder": {
+              "$ref": "daily",
+              "at": "createWith.folder"
+            },
+            "subpath": {
+              "$ref": "daily",
+              "at": "createWith.subpath"
+            },
+            "title": {
+              "$ref": "daily",
+              "at": "createWith.title"
+            },
+            "body": {
+              "$ref": "daily",
+              "at": "createWith.body"
+            }
+          }
+        },
+        {
+          "tool": "daily_note",
+          "args": {
+            "date": "2026-02-03"
+          }
+        },
+        {
+          "tool": "daily_note",
+          "args": {
+            "kind": "weekly",
+            "date": "2026-02-03"
+          }
+        }
+      ]
+    },
+    {
+      "label": "path safety and v2.85 fixes",
+      "files": {
+        ".zennotes/vault.json": "{\"primaryNotesLocation\":\"inbox\",\"templates\":{\"folder\":\"inbox/Templates\"},\"tasks\":{\"excludedFolders\":[\"inbox/Work/Archive\"]},\"folderIcons\":{\"inbox:Work\":\"star\",\"inbox:Other\":\"x\"},\"folderColors\":{\"inbox:Work/Sub\":\"red\"}}",
+        "inbox/.hidden/x.md": "# hidden\n",
+        "inbox/code.ts": "export const x = 1\n",
+        "inbox/Templates/Meeting Template.md": "# {{title}}\n\n#tpl needle\n- [ ] template task\n",
+        "inbox/Db.base/data.csv": "id\n1\n",
+        "inbox/Db.base/pages/Row One.md": "# Row One\n\n- [ ] row task\n",
+        "inbox/Table.md": "| a | b |\n|---|---|\n| [[Welcome\\|w]] | [[\\|x]] |\n"
+      },
+      "steps": [
+        {
+          "tool": "read_note",
+          "args": {
+            "path": "inbox/.hidden/x.md"
+          }
+        },
+        {
+          "tool": "read_note",
+          "args": {
+            "path": ".zennotes/vault.json"
+          }
+        },
+        {
+          "tool": "read_note",
+          "args": {
+            "path": "inbox/code.ts"
+          }
+        },
+        {
+          "tool": "write_note",
+          "args": {
+            "path": ".zennotes/planted.md",
+            "body": "x"
+          }
+        },
+        {
+          "tool": "append_to_note",
+          "args": {
+            "path": "inbox/.hidden/x.md",
+            "text": "x"
+          }
+        },
+        {
+          "tool": "move_note",
+          "args": {
+            "path": ".zennotes/vault.json",
+            "targetFolder": "inbox"
+          }
+        },
+        {
+          "tool": "delete_note",
+          "args": {
+            "path": ".zennotes/vault.json",
+            "confirm": true
+          }
+        },
+        {
+          "tool": "toggle_task",
+          "args": {
+            "id": ".zennotes/vault.json#0"
+          }
+        },
+        {
+          "tool": "create_note",
+          "args": {
+            "title": "Escape",
+            "subpath": "../quick"
+          }
+        },
+        {
+          "tool": "create_note",
+          "args": {
+            "title": "Hidden",
+            "subpath": "Ideas/.secret"
+          }
+        },
+        {
+          "tool": "create_note",
+          "args": {
+            "title": "Attach",
+            "folder": "quick",
+            "subpath": "../assets"
+          }
+        },
+        {
+          "tool": "create_folder",
+          "args": {
+            "folder": "inbox",
+            "subpath": "/"
+          }
+        },
+        {
+          "tool": "create_folder",
+          "args": {
+            "folder": "inbox",
+            "subpath": "a/.."
+          }
+        },
+        {
+          "tool": "delete_folder",
+          "args": {
+            "folder": "inbox",
+            "subpath": "x/..",
+            "confirm": true
+          }
+        },
+        {
+          "tool": "rename_folder",
+          "args": {
+            "folder": "inbox",
+            "oldSubpath": "Gone",
+            "newSubpath": "Here"
+          }
+        },
+        {
+          "tool": "rename_folder",
+          "args": {
+            "folder": "inbox",
+            "oldSubpath": "Work",
+            "newSubpath": "../quick/Work"
+          }
+        },
+        {
+          "tool": "create_note",
+          "args": {
+            "title": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx ééééééééé"
+          }
+        },
+        {
+          "tool": "create_note",
+          "args": {
+            "title": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyé"
+          },
+          "label": "long"
+        },
+        {
+          "tool": "duplicate_note",
+          "args": {
+            "path": {
+              "$ref": "long",
+              "at": "path"
+            }
+          }
+        },
+        {
+          "tool": "list_notes",
+          "args": {},
+          "sortBy": "path"
+        },
+        {
+          "tool": "list_folders",
+          "args": {},
+          "sortBy": "folder,subpath"
+        },
+        {
+          "tool": "list_notes",
+          "args": {
+            "tag": "tpl"
+          }
+        },
+        {
+          "tool": "search_by_tag",
+          "args": {
+            "tag": "tpl"
+          }
+        },
+        {
+          "tool": "list_tags",
+          "args": {}
+        },
+        {
+          "tool": "search_text",
+          "args": {
+            "query": "needle"
+          }
+        },
+        {
+          "tool": "list_tasks",
+          "args": {
+            "status": "all"
+          },
+          "sortBy": "id"
+        },
+        {
+          "tool": "list_tasks",
+          "args": {
+            "status": "all",
+            "includeExcluded": true
+          },
+          "sortBy": "id"
+        },
+        {
+          "tool": "backlinks",
+          "args": {
+            "path": "inbox/Welcome.md"
+          },
+          "sortBy": "path"
+        },
+        {
+          "tool": "list_assets",
+          "args": {},
+          "sortBy": "path"
+        },
+        {
+          "tool": "toggle_task",
+          "args": {
+            "id": "inbox/Db.base/pages/Row One.md#0"
+          }
+        },
+        {
+          "tool": "rename_folder",
+          "args": {
+            "folder": "inbox",
+            "oldSubpath": "Work",
+            "newSubpath": "Office"
+          }
+        },
+        {
+          "tool": "read_note",
+          "args": {
+            "path": "inbox/Office/Notes (old).md"
+          }
+        }
+      ]
+    },
+    {
+      "label": "read-only",
+      "args": [
+        "--read-only"
+      ],
+      "steps": [
+        {
+          "tool": "vault_info",
+          "args": {},
+          "sortAt": "subfolders",
+          "sortBy": "folder,subpath"
+        },
+        {
+          "tool": "read_note",
+          "args": {
+            "path": "inbox/Welcome.md"
+          }
+        },
+        {
+          "tool": "write_note",
+          "args": {
+            "path": "inbox/Welcome.md",
+            "body": "x"
+          }
+        },
+        {
+          "tool": "add_comment",
+          "args": {
+            "path": "inbox/Welcome.md",
+            "body": "hi"
+          }
+        },
+        {
+          "tool": "empty_trash",
+          "args": {
+            "confirm": true
+          }
+        },
+        {
+          "tool": "list_comments",
+          "args": {
+            "path": "inbox/Comments Target.md"
+          },
+          "sortBy": "body"
+        },
+        {
+          "tool": "daily_note",
+          "args": {
+            "date": "2026-01-05"
+          }
+        },
+        {
+          "tool": "list_assets",
+          "args": {}
+        }
+      ]
+    },
+    {
+      "label": "comment access on one folder",
+      "args": [
+        "--access",
+        "comment",
+        "--allow-path",
+        "inbox/work"
+      ],
+      "steps": [
+        {
+          "tool": "vault_info",
+          "args": {},
+          "sortAt": "subfolders",
+          "sortBy": "folder,subpath"
+        },
+        {
+          "tool": "list_notes",
+          "args": {},
+          "sortBy": "path"
+        },
+        {
+          "tool": "list_folders",
+          "args": {},
+          "sortBy": "folder,subpath"
+        },
+        {
+          "tool": "add_comment",
+          "args": {
+            "path": "inbox/Work/Meeting 2026-01-05.md",
+            "body": "Who takes the notes?",
+            "anchor_text": "Send notes"
+          }
+        },
+        {
+          "tool": "add_comment",
+          "args": {
+            "path": "inbox/Welcome.md",
+            "body": "hidden"
+          }
+        },
+        {
+          "tool": "list_comments",
+          "args": {
+            "path": "inbox/Work/Meeting 2026-01-05.md"
+          }
+        },
+        {
+          "tool": "read_note",
+          "args": {
+            "path": "inbox/Welcome.md"
+          }
+        },
+        {
+          "tool": "toggle_task",
+          "args": {
+            "id": "inbox/Work/Meeting 2026-01-05.md#0"
+          }
+        },
+        {
+          "tool": "search_text",
+          "args": {
+            "query": "plan"
+          },
+          "sortBy": "path,lineNumber"
+        },
+        {
+          "tool": "list_tasks",
+          "args": {
+            "status": "all"
+          },
+          "sortBy": "id"
+        },
+        {
+          "tool": "list_tags",
+          "args": {}
+        },
+        {
+          "tool": "backlinks",
+          "args": {
+            "path": "inbox/Project Plan.md"
+          }
+        },
+        {
+          "tool": "backlinks",
+          "args": {
+            "path": "inbox/Work/Meeting 2026-01-05.md"
+          }
+        },
+        {
+          "tool": "daily_note",
+          "args": {
+            "date": "2026-01-05"
+          }
+        }
+      ]
+    },
+    {
+      "label": "write access inside allow entries",
+      "args": [
+        "--allow-path",
+        "inbox/Work",
+        "--allow-path",
+        "assets",
+        "--deny-path",
+        "inbox/Work/Notes (old).md"
+      ],
+      "steps": [
+        {
+          "tool": "vault_info",
+          "args": {},
+          "sortAt": "subfolders",
+          "sortBy": "folder,subpath"
+        },
+        {
+          "tool": "list_notes",
+          "args": {},
+          "sortBy": "path"
+        },
+        {
+          "tool": "read_note",
+          "args": {
+            "path": "inbox/Work/Notes (old).md"
+          }
+        },
+        {
+          "tool": "read_note",
+          "args": {
+            "path": "INBOX/WORK/meeting 2026-01-05.md"
+          }
+        },
+        {
+          "tool": "read_note",
+          "args": {
+            "path": "inbox/Welcome.md"
+          }
+        },
+        {
+          "tool": "create_note",
+          "args": {
+            "subpath": "Work",
+            "title": "Scoped"
+          }
+        },
+        {
+          "tool": "create_note",
+          "args": {
+            "title": "Outside"
+          }
+        },
+        {
+          "tool": "create_note",
+          "args": {
+            "folder": "quick",
+            "subpath": "Work",
+            "title": "Quick"
+          }
+        },
+        {
+          "tool": "create_note",
+          "args": {
+            "subpath": "work/New",
+            "title": "Deeper"
+          }
+        },
+        {
+          "tool": "create_note",
+          "args": {
+            "subpath": "Work",
+            "title": "Notes (old)"
+          }
+        },
+        {
+          "tool": "rename_note",
+          "args": {
+            "path": "inbox/Work/Scoped.md",
+            "newTitle": "Notes (old)"
+          }
+        },
+        {
+          "tool": "rename_note",
+          "args": {
+            "path": "inbox/Work/Scoped.md",
+            "newTitle": "Scoped Renamed"
+          }
+        },
+        {
+          "tool": "rename_folder",
+          "args": {
+            "folder": "inbox",
+            "oldSubpath": "Work",
+            "newSubpath": "Office"
+          }
+        },
+        {
+          "tool": "delete_folder",
+          "args": {
+            "folder": "inbox",
+            "subpath": "Work",
+            "confirm": true
+          }
+        },
+        {
+          "tool": "create_folder",
+          "args": {
+            "folder": "inbox",
+            "subpath": "Work/Sub"
+          }
+        },
+        {
+          "tool": "rename_folder",
+          "args": {
+            "folder": "inbox",
+            "oldSubpath": "Work/Sub",
+            "newSubpath": "Work/Sub2"
+          }
+        },
+        {
+          "tool": "delete_folder",
+          "args": {
+            "folder": "inbox",
+            "subpath": "Work/Sub2",
+            "confirm": true
+          }
+        },
+        {
+          "tool": "delete_folder",
+          "args": {
+            "folder": "inbox",
+            "subpath": "Elsewhere",
+            "confirm": true
+          }
+        },
+        {
+          "tool": "move_note",
+          "args": {
+            "path": "inbox/Work/Scoped Renamed.md",
+            "targetFolder": "inbox"
+          }
+        },
+        {
+          "tool": "move_note",
+          "args": {
+            "path": "inbox/Work/Scoped Renamed.md",
+            "targetFolder": "inbox",
+            "targetSubpath": "Work/New"
+          }
+        },
+        {
+          "tool": "archive_note",
+          "args": {
+            "path": "inbox/Work/New/Scoped Renamed.md"
+          }
+        },
+        {
+          "tool": "read_note",
+          "args": {
+            "path": "archive/Work/New/Scoped Renamed.md"
+          }
+        },
+        {
+          "tool": "unarchive_note",
+          "args": {
+            "path": "archive/Work/New/Scoped Renamed.md"
+          }
+        },
+        {
+          "tool": "duplicate_note",
+          "args": {
+            "path": "inbox/Work/Meeting 2026-01-05.md"
+          }
+        },
+        {
+          "tool": "move_to_trash",
+          "args": {
+            "path": "inbox/Work/Meeting 2026-01-05 copy.md"
+          }
+        },
+        {
+          "tool": "restore_from_trash",
+          "args": {
+            "path": "trash/Work/Meeting 2026-01-05 copy.md"
+          }
+        },
+        {
+          "tool": "empty_trash",
+          "args": {
+            "confirm": true
+          }
+        },
+        {
+          "tool": "list_assets",
+          "args": {},
+          "sortBy": "path"
+        },
+        {
+          "tool": "read_asset",
+          "args": {
+            "path": "assets/diagram.png"
+          }
+        },
+        {
+          "tool": "upload_asset",
+          "args": {
+            "filename": "scoped.txt",
+            "content_base64": "aGk="
+          }
+        },
+        {
+          "tool": "move_asset",
+          "args": {
+            "path": "assets/diagram.png",
+            "targetDir": "inbox"
+          }
+        },
+        {
+          "tool": "move_asset",
+          "args": {
+            "path": "assets/diagram.png",
+            "targetDir": "inbox/Work"
+          }
+        },
+        {
+          "tool": "list_tasks",
+          "args": {
+            "status": "all"
+          },
+          "sortBy": "id"
+        },
+        {
+          "tool": "update_task",
+          "args": {
+            "id": "inbox/Work/Meeting 2026-01-05.md#1",
+            "due": "2026-01-12"
+          }
+        },
+        {
+          "tool": "update_task",
+          "args": {
+            "id": "inbox/Welcome.md#0",
+            "state": "done"
+          }
+        },
+        {
+          "tool": "toggle_task",
+          "args": {
+            "id": "inbox/Welcome.md#0"
+          }
+        },
+        {
+          "tool": "toggle_task",
+          "args": {
+            "id": "#0"
+          }
+        },
+        {
+          "tool": "search_text",
+          "args": {
+            "query": "notes"
+          },
+          "sortBy": "path,lineNumber"
+        },
+        {
+          "tool": "search_text",
+          "args": {
+            "query": "a",
+            "limit": 0
+          },
+          "sortBy": "path,lineNumber"
+        },
+        {
+          "tool": "note_sections",
+          "args": {
+            "path": "inbox/Work/Meeting 2026-01-05.md"
+          }
+        },
+        {
+          "tool": "edit_section",
+          "args": {
+            "path": "inbox/Welcome.md",
+            "heading": "Welcome",
+            "mode": "append",
+            "text": "x"
+          }
+        },
+        {
+          "tool": "daily_note",
+          "args": {
+            "date": "2026-01-05"
+          }
+        },
+        {
+          "tool": "list_comments",
+          "args": {
+            "path": "inbox/Comments Target.md"
+          }
+        },
+        {
+          "tool": "backlinks",
+          "args": {
+            "path": "inbox/Project Plan.md"
+          }
+        },
+        {
+          "tool": "list_folders",
+          "args": {},
+          "sortBy": "folder,subpath"
+        }
+      ]
+    },
+    {
+      "label": "deny-only",
+      "args": [
+        "--deny-path",
+        "inbox/Work",
+        "--deny-path",
+        "Archive/old idea.md"
+      ],
+      "steps": [
+        {
+          "tool": "list_notes",
+          "args": {
+            "folder": "archive"
+          }
+        },
+        {
+          "tool": "list_notes",
+          "args": {},
+          "sortBy": "path"
+        },
+        {
+          "tool": "create_note",
+          "args": {
+            "subpath": "Work",
+            "title": "Nope"
+          }
+        },
+        {
+          "tool": "create_note",
+          "args": {
+            "subpath": "Elsewhere",
+            "title": "Fine"
+          }
+        },
+        {
+          "tool": "archive_note",
+          "args": {
+            "path": "inbox/Welcome.md"
+          }
+        },
+        {
+          "tool": "unarchive_note",
+          "args": {
+            "path": "archive/Welcome.md"
+          }
+        },
+        {
+          "tool": "restore_from_trash",
+          "args": {
+            "path": "trash/Deleted.md"
+          }
+        },
+        {
+          "tool": "empty_trash",
+          "args": {
+            "confirm": true
+          }
+        },
+        {
+          "tool": "vault_info",
+          "args": {},
+          "sortAt": "subfolders",
+          "sortBy": "folder,subpath"
+        }
+      ]
+    },
+    {
+      "label": "stale deny entry",
+      "args": [
+        "--access",
+        "read",
+        "--deny-path",
+        "Nowhere"
+      ],
+      "steps": [
+        {
+          "tool": "vault_info",
+          "args": {}
+        },
+        {
+          "tool": "list_notes",
+          "args": {}
+        },
+        {
+          "tool": "read_note",
+          "args": {
+            "path": "inbox/Welcome.md"
+          }
+        }
+      ]
+    },
+    {
+      "label": "linked folder",
+      "args": [
+        "--deny-path",
+        "quick"
+      ],
+      "symlinks": {
+        "inbox/Linked": "../quick"
+      },
+      "steps": [
+        {
+          "tool": "list_notes",
+          "args": {},
+          "sortBy": "path"
+        },
+        {
+          "tool": "read_note",
+          "args": {
+            "path": "inbox/Linked/Scratch.md"
+          }
+        },
+        {
+          "tool": "create_note",
+          "args": {
+            "subpath": "Linked",
+            "title": "Through"
+          }
+        },
+        {
+          "tool": "list_folders",
+          "args": {},
+          "sortBy": "folder,subpath"
+        }
+      ]
+    },
+    {
+      "label": "unscoped link inside the vault",
+      "symlinks": {
+        "inbox/Linked": "../quick",
+        "inbox/Out": "/"
+      },
+      "steps": [
+        {
+          "tool": "read_note",
+          "args": {
+            "path": "inbox/Linked/Scratch.md"
+          }
+        },
+        {
+          "tool": "read_note",
+          "args": {
+            "path": "inbox/Out/etc/hostname"
+          }
+        }
+      ]
+    },
+    {
+      "label": "bad allow entry",
+      "args": [
+        "--allow-path",
+        "../x"
+      ],
+      "expectExit": true,
+      "steps": []
+    },
+    {
+      "label": "bad access",
+      "args": [
+        "--access",
+        "admin"
+      ],
+      "expectExit": true,
+      "steps": []
+    },
+    {
+      "label": "hidden deny entry",
+      "args": [
+        "--deny-path",
+        ".zennotes"
+      ],
+      "expectExit": true,
+      "steps": []
+    },
+    {
+      "label": "empty allow entry",
+      "args": [
+        "--allow-path=/"
+      ],
+      "expectExit": true,
+      "steps": []
+    }
   ]
 }

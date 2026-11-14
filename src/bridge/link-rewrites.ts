@@ -99,7 +99,10 @@ export async function relocateAssetWithReferences(
         assetsBefore,
         candidate.path,
         relPath,
-        meta.path
+        meta.path,
+        // A note wins over a file of the same name, as it does when the link
+        // is followed, so that link is left alone (upstream v2.83).
+        { notes: notesBefore.filter((note) => note.folder !== 'trash') }
       )
       if (changed > 0) await writeNote(candidate.path, body)
     } catch (err) {

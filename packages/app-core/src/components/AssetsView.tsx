@@ -197,7 +197,9 @@ export function AssetsView(): JSX.Element {
   const menuItems = (asset: AssetMeta): ContextMenuItem[] => [
     { label: 'Open', onSelect: () => void openNoteInTab(assetTabPath(asset.path)) },
     { label: 'Copy embed', onSelect: () => copyEmbed(asset) },
-    { label: 'Reveal in file manager', onSelect: () => void window.zen.revealNote(asset.path) },
+    ...(window.zen.getAppInfo().runtime === 'desktop' && useStore.getState().workspaceMode !== 'remote'
+      ? [{ label: 'Reveal in file manager', onSelect: () => void window.zen.revealNote(asset.path) }]
+      : []),
     { label: 'Rename…', onSelect: () => void renameAsset(asset) },
     {
       label: 'Move to Trash',
@@ -337,7 +339,7 @@ export function AssetsView(): JSX.Element {
                           e.stopPropagation()
                           if (await confirmMoveToTrash(asset.name)) await deleteAsset(asset.path)
                         }}
-                        className="flex h-6 w-6 items-center justify-center justify-self-end rounded text-ink-400 opacity-0 transition hover:bg-paper-300/60 hover:text-danger group-hover:opacity-100"
+                        className="zn-hover-reveal flex h-6 w-6 items-center justify-center justify-self-end rounded text-ink-400 opacity-0 transition hover:bg-paper-300/60 hover:text-danger group-hover:opacity-100"
                       >
                         <TrashIcon width={14} height={14} />
                       </button>

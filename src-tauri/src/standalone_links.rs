@@ -153,10 +153,12 @@ fn existing_file(candidate: &Path) -> Option<PathBuf> {
 
 fn resolve_wikilink(note_dir: &Path, raw_target: &str) -> Option<PathBuf> {
     // `[[Doc|alias]]`, `[[Doc#Heading]]` and `[[Doc^block]]` all name Doc.
+    // A table writes the separator as `\|`; the backslash is not the target's.
     let target = raw_target
         .split('|')
         .next()
         .unwrap_or(raw_target)
+        .trim_end_matches('\\')
         .split(['#', '^'])
         .next()
         .unwrap_or("")

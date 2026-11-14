@@ -20,8 +20,9 @@ import {
   type AreaLabels,
   type SearchCreateDraft
 } from '../lib/search-create'
-import { resolveSystemFolderLabels } from '../lib/system-folder-labels'
+import { noteAreaLabel, resolveSystemFolderLabels } from '../lib/system-folder-labels'
 import { isPrimaryNotesAtRoot, noteFolderLabel } from '../lib/vault-layout'
+import { isPathInTemplateFolder, resolveTemplateFolder } from '@shared/template-folder'
 import { useToastStore } from '../lib/toast'
 import { openTaggedBlock, useTagBlockIndex } from '../lib/tag-block-index'
 import { buildSearchPaletteRows, type SearchPaletteRow } from '../lib/search-palette-rows'
@@ -66,9 +67,13 @@ export function SearchPalette(): JSX.Element {
   // free text) still work — in that case we just list matching notes.
   const { freeText, tagTokens } = useMemo(() => parseNoteSearchQuery(query), [query])
 
+  // Notes in the template folder are placeholders (#1024): out of the results
+  // unless the query starts with the folder's path.
+  const templateFolder = useMemo(() => resolveTemplateFolder(vaultSettings), [vaultSettings])
+
   const results = useMemo(() => {
-    return searchNoteIndex(searchIndex, query, { limit: RESULT_LIMIT })
-  }, [query, searchIndex])
+    return searchNoteIndex(searchIndex, query, { limit: RESULT_LIMIT, templateFolder })
+  }, [query, searchIndex, templateFolder])
 
   // Tagged blocks under the notes (#837), only for a query with a #tag and
   // the setting on. Free text can match a block anywhere in a tagged note, so
@@ -80,9 +85,10 @@ export function SearchPalette(): JSX.Element {
     return notes.filter(
       (n) =>
         n.folder !== 'trash' &&
+        !isPathInTemplateFolder(n.path, templateFolder) &&
         tagTokens.every((tag) => n.tags.some((t) => t.toLowerCase() === tag))
     )
-  }, [showBlocks, notes, tagTokens])
+  }, [showBlocks, notes, tagTokens, templateFolder])
   const tagBlocks = useTagBlockIndex(showBlocks ? (freeText ? taggedNotes : results) : NO_NOTES)
   const rows = useMemo(
     () =>
@@ -328,6 +334,11 @@ export function SearchPalette(): JSX.Element {
               }
               const n = row.note
               const dir = noteFolderLabel(n, vaultSettings)
+              const area = noteAreaLabel(
+                n.folder,
+                isPrimaryNotesAtRoot(vaultSettings),
+                systemFolderLabels
+              )
               return (
                 <button
                   key={row.key}
@@ -358,11 +369,11 @@ export function SearchPalette(): JSX.Element {
                     >
                       {`\u202A${dir}\u202C`}
                     </span>
-                  ) : (
+                  ) : area ? (
                     <span className="ml-auto shrink-0 text-xs uppercase tracking-wide text-ink-400">
-                      {n.folder}
+                      {area}
                     </span>
-                  )}
+                  ) : null}
                 </button>
               )
             })

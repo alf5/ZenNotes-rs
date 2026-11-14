@@ -20,6 +20,8 @@ const bridgeMocks = vi.hoisted(() => ({
   saveCloudConflictDraft: vi.fn(),
   resolveCloudConflict: vi.fn(),
   syncCloudVault: vi.fn(),
+  logoutCloudAccount: vi.fn(async () => ({ state: "disconnected" })),
+  getCloudAccountStatus: vi.fn(async () => ({ state: "connecting" })),
 }));
 
 vi.mock("@zennotes/bridge-contract/bridge", () => ({
@@ -102,6 +104,78 @@ describe("cloud sync status time", () => {
     host.remove();
   });
 
+  it("offers a way out of a sign-in waiting on the browser", async () => {
+    useCloudSyncStatusStore.setState({
+      phase: "connecting",
+      vaultName: null,
+      lastSyncedAt: null,
+      error: null,
+    });
+    bridgeMocks.logoutCloudAccount.mockClear();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    act(() => root.render(createElement(StatusBar, { note: null })));
+
+    const button = host.querySelector<HTMLButtonElement>("[data-cloud-sync-action]");
+    expect(button?.textContent).toBe("Cancel");
+    expect(button?.getAttribute("aria-label")).toBe("Cancel sign-in");
+    expect(host.textContent).toContain("Connecting to Cloud");
+    await act(async () => button?.click());
+    expect(bridgeMocks.logoutCloudAccount).toHaveBeenCalledTimes(1);
+    expect(useCloudSyncStatusStore.getState().phase).toBe("disconnected");
+    expect(useCloudSyncStatusStore.getState().error).toBeNull();
+    expect(
+      host.querySelector<HTMLButtonElement>("[data-cloud-sync-action]")?.textContent,
+    ).toBe("Connect");
+
+    act(() => root.unmount());
+    host.remove();
+  });
+
+  it("does not sign out an account that connected while Cancel was on its way", async () => {
+    useCloudSyncStatusStore.setState({
+      phase: "connecting",
+      vaultName: null,
+      lastSyncedAt: null,
+      error: null,
+    });
+    bridgeMocks.logoutCloudAccount.mockClear();
+    bridgeMocks.getCloudAccountStatus.mockResolvedValueOnce({ state: "connected" });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    act(() => root.render(createElement(StatusBar, { note: null })));
+    await act(async () =>
+      host.querySelector<HTMLButtonElement>("[data-cloud-sync-action]")?.click(),
+    );
+    expect(bridgeMocks.logoutCloudAccount).not.toHaveBeenCalled();
+
+    act(() => root.unmount());
+    host.remove();
+  });
+
+  it("still offers nothing while a sync runs", () => {
+    useCloudSyncStatusStore.setState({
+      phase: "syncing",
+      vaultName: "Notes",
+      lastSyncedAt: null,
+      error: null,
+    });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    act(() => root.render(createElement(StatusBar, { note: null })));
+
+    expect(host.querySelector("[data-cloud-sync-action]")).toBeNull();
+
+    act(() => root.unmount());
+    host.remove();
+  });
+
   it("names a file-size stop on the status row, where a phone cannot hover for the reason", () => {
     useCloudSyncStatusStore.setState({
       phase: "attention",
@@ -130,6 +204,59 @@ describe("cloud sync status time", () => {
     expect(
       host.querySelector<HTMLButtonElement>("[data-cloud-sync-action]")?.textContent,
     ).toBe("Review");
+
+    act(() => root.unmount());
+    host.remove();
+  });
+
+  it("reads synced after a run that only set a file aside, and says so on hover (#1004)", () => {
+    useCloudSyncStatusStore.setState({
+      phase: "ready",
+      vaultName: "Notes",
+      lastSyncedAt: Date.now(),
+      error: null,
+      lastSummary: {
+        cursor: 1, pulled: 0, pushed: 2, bootstrap_conflicts: [], local_conflicts: [], conflicts: [],
+        refused_paths: [{ path: ".zennotes/agent-edits/inbox/Note.md.json", detail: "HTTP 422" }],
+      },
+    });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    act(() => root.render(createElement(StatusBar, { note: null })));
+
+    const status = host.querySelector<HTMLElement>("[data-cloud-sync-status]");
+    expect(status?.textContent).toContain("Synced");
+    expect(status?.className).toContain("text-success");
+    expect(status?.title).toBe(
+      "Notes is connected. 1 file stays on this device: Settings → Cloud lists it. Click to sync now.",
+    );
+
+    act(() => root.unmount());
+    host.remove();
+  });
+
+  it("names a held note of the person's own in the status row until it is renamed", () => {
+    useCloudSyncStatusStore.setState({
+      phase: "attention",
+      vaultName: "Notes",
+      lastSyncedAt: Date.now(),
+      error: "Plan.md stays on this device because its path is too long.",
+      lastSummary: {
+        cursor: 1, pulled: 0, pushed: 2, bootstrap_conflicts: [], local_conflicts: [], conflicts: [],
+        refused_paths: [{ path: `${"Projects/".repeat(120)}Plan.md`, detail: "" }],
+      },
+    });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    act(() => root.render(createElement(StatusBar, { note: null })));
+
+    const status = host.querySelector<HTMLElement>("[data-cloud-sync-status]");
+    expect(status?.textContent).toContain("1 file stays on this device");
+    expect(status?.className).not.toContain("text-success");
 
     act(() => root.unmount());
     host.remove();

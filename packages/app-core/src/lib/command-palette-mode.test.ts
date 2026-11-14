@@ -36,6 +36,7 @@ describe('shouldRefocusEditorAfterCommand', () => {
     embedDrawingPaletteOpen: false,
     whatsNewOpen: false,
     noteCoverPickerPath: null,
+    importDialog: null,
     noteCoverReposition: null
   }
 

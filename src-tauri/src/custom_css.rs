@@ -289,12 +289,20 @@ pub fn spawn_watchers(app: AppHandle) -> Result<Vec<VaultDebouncer>, String> {
             },
         )
         .map_err(|e| format!("Failed to create watcher: {e}"))?;
-        debouncer
-            .watcher()
-            .watch(&dir, recursive)
-            .map_err(|e| format!("Failed to watch {}: {e}", dir.display()))?;
-        debouncer.cache().add_root(&dir, recursive);
-        out.push(debouncer);
+        // One folder that cannot be watched costs that folder, not the other.
+        let watched = if recursive == RecursiveMode::Recursive {
+            crate::watcher::watch_config_dir(&mut debouncer, &dir)
+        } else {
+            debouncer
+                .watcher()
+                .watch(&dir, recursive)
+                .map(|()| debouncer.cache().add_root(&dir, recursive))
+                .map_err(|e| format!("Failed to watch {}: {e}", dir.display()))
+        };
+        match watched {
+            Ok(()) => out.push(debouncer),
+            Err(error) => eprintln!("{error}"),
+        }
     }
     Ok(out)
 }

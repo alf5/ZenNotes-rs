@@ -1,6 +1,6 @@
 [package]
 name = "zennotes-rs"
-version = "2.79.3"
+version = "2.85.0"
 description = "ZenNotes-rs desktop — a Tauri port of ZenNotes"
 authors = ["ZenNotes-rs"]
 edition = "2021"
@@ -25,6 +25,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 fancy-regex = "0.14"
 notify-debouncer-full = "0.3"
+# Task reminders (#1036): system notifications that report a click back.
+notify-rust = "4.18"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 urlencoding = "2"
@@ -45,6 +47,9 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "sync-s
 rmcp = { version = "3.8", default-features = false, features = ["server", "transport-io"] }
 tokio = { version = "1", features = ["rt", "io-std", "macros", "sync"] }
 dirs = "6"
+# NFD/NFC for the MCP scope's case and accent folding (mcp/scope.rs); already
+# in the build through url/idna.
+icu_normalizer = { version = "2", default-features = false, features = ["compiled_data"] }
 
 # Probes for the appindicator library before building a tray icon, which
 # would otherwise panic (and, with panic = "abort", exit) without one.

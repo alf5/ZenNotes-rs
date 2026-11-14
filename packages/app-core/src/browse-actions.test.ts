@@ -20,6 +20,7 @@ async function setup() {
   const rename = vi.fn(async () => {})
   const remove = vi.fn(async () => {})
   const createDatabase = vi.fn(async () => undefined)
+  const createKanban = vi.fn(async () => {})
   const renameDatabase = vi.fn(async () => {})
   const refreshAssets = vi.fn(async () => {})
   const createAndOpen = vi.fn(async () => {})
@@ -34,6 +35,7 @@ async function setup() {
     renameFolder: rename,
     deleteFolder: remove,
     createDatabase,
+    createKanban,
     renameDatabase,
     refreshAssets,
     createAndOpen
@@ -58,6 +60,7 @@ async function setup() {
     rename,
     remove,
     createDatabase,
+    createKanban,
     renameDatabase,
     refreshAssets,
     createAndOpen,
@@ -255,6 +258,25 @@ describe('public Browse actions', () => {
     expect(s.getPromptRequest()).toBeNull()
     expect(await s.createBrowseDatabase(s.host, 'People.base')).toBe('unavailable')
     expect(await s.createBrowseDatabase(s.host, 'Missing')).toBe('unavailable')
+  })
+
+  it('creates a Kanban in a Browse folder or where new databases go, as a folder menu does (#1038)', async () => {
+    const s = await setup()
+    expect(await s.createBrowseKanban(s.host, 'Work')).toBe('completed')
+    expect(s.createKanban).toHaveBeenLastCalledWith('inbox', 'Work', expect.any(Function))
+    expect(s.getPromptRequest()).toBeNull()
+    s.useStore.setState({
+      vaultSettings: {
+        ...s.useStore.getState().vaultSettings,
+        databasesLocation: { mode: 'folder', folder: 'Databases' }
+      }
+    })
+    expect(await s.createBrowseKanban(s.host)).toBe('completed')
+    expect(s.createKanban).toHaveBeenLastCalledWith('inbox', 'Databases', expect.any(Function))
+    expect(await s.createBrowseKanban(s.host, 'People.base')).toBe('unavailable')
+    expect(await s.createBrowseKanban(s.host, 'Missing')).toBe('unavailable')
+    expect(s.createKanban).toHaveBeenCalledTimes(2)
+    expect(s.createDatabase).not.toHaveBeenCalled()
   })
 
   it.each([false, true])('renames a database with primary root mode %s', async (root) => {
@@ -489,6 +511,61 @@ describe('public Browse actions', () => {
       expect(s.rename).not.toHaveBeenCalled()
     }
   )
+
+  it('opens a folder or the notes root as a Gallery tab through the public entry', async () => {
+    const s = await setup()
+    const browse = await import('./browse')
+    const { galleryTabPath } = await import('./lib/folder-gallery')
+    const { findLeaf } = await import('./lib/pane-layout')
+    const activeTab = () => {
+      const state = s.useStore.getState()
+      return findLeaf(state.paneLayout, state.activePaneId)?.activeTab
+    }
+    expect(await browse.openBrowseFolderGallery(s.host, 'Work/Nested')).toBe('completed')
+    expect(activeTab()).toBe(galleryTabPath('inbox', 'Work/Nested'))
+    expect(s.refreshAssets).toHaveBeenCalled()
+    expect(await browse.openBrowseFolderGallery(s.host)).toBe('completed')
+    expect(activeTab()).toBe(galleryTabPath('inbox', ''))
+  })
+
+  it('has no Gallery for databases, their internals, or missing folders', async () => {
+    const s = await setup()
+    const openFolderGallery = vi.fn(async () => {})
+    s.useStore.setState({ openFolderGallery })
+    for (const directory of ['People.base', 'People.base/pages', 'Missing'])
+      expect(await s.openBrowseFolderGallery(s.host, directory)).toBe('unavailable')
+    expect(openFolderGallery).not.toHaveBeenCalled()
+  })
+
+  it('opens nothing when the context changes while the file list is read', async () => {
+    const s = await setup()
+    const openFolderGallery = vi.fn(async () => {})
+    let current = true
+    s.refreshAssets.mockImplementationOnce(async () => {
+      current = false
+    })
+    s.useStore.setState({ openFolderGallery })
+    expect(await s.openBrowseFolderGallery({ isCurrent: () => current }, 'Work')).toBe('stale')
+    expect(openFolderGallery).not.toHaveBeenCalled()
+    // Read once, the list is not read again.
+    current = true
+    s.useStore.setState({ assetFilesListed: true })
+    s.refreshAssets.mockClear()
+    expect(await s.openBrowseFolderGallery(s.host, 'Work')).toBe('completed')
+    expect(s.refreshAssets).not.toHaveBeenCalled()
+    expect(openFolderGallery).toHaveBeenCalledWith('inbox', 'Work')
+  })
+
+  it('does not open a Gallery behind an open dialog', async () => {
+    const s = await setup()
+    const openFolderGallery = vi.fn(async () => {})
+    s.useStore.setState({ openFolderGallery })
+    const rename = s.requestRenameBrowseFolder(s.host, 'Work')
+    expect(await s.openBrowseFolderGallery(s.host, 'Work')).toBe('unavailable')
+    s.answer(null)
+    expect(await rename).toBe('cancelled')
+    expect(openFolderGallery).not.toHaveBeenCalled()
+  })
 
   it('rejects a host refusal to move and releases the pending action', async () => {
     const s = await setup()

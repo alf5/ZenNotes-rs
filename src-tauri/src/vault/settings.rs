@@ -187,7 +187,7 @@ pub fn normalize_vault_settings(value: Option<&Value>, fallback_primary: &str) -
     for (key, value) in obj {
         if !matches!(
             key.as_str(),
-            "primaryNotesLocation" | "dailyNotes" | "weeklyNotes" | "folderIcons" | "displayName"
+            "primaryNotesLocation" | "dailyNotes" | "weeklyNotes" | "folderIcons" | "displayName" | "templates"
         ) {
             extra.insert(key.clone(), value.clone());
         }
@@ -197,6 +197,11 @@ pub fn normalize_vault_settings(value: Option<&Value>, fallback_primary: &str) -
     if let Some(name) = normalize_vault_display_name(obj.get("displayName")) {
         extra.insert("displayName".into(), Value::String(name));
     }
+    // The template folder (#1024): left out unless a usable path is set, so an
+    // untouched vault.json never grows the key.
+    if let Some(folder) = obj.get("templates").and_then(|t| t.get("folder")).and_then(normalize_template_folder) {
+        extra.insert("templates".into(), serde_json::json!({ "folder": folder }));
+    }
 
     VaultSettings {
         primary_notes_location: primary.to_string(),
@@ -204,6 +209,65 @@ pub fn normalize_vault_settings(value: Option<&Value>, fallback_primary: &str) -
         weekly_notes: normalize_periodic(obj.get("weeklyNotes"), DEFAULT_WEEKLY_NOTES_DIRECTORY),
         folder_icons,
         extra,
+    }
+}
+
+// ---- the template folder (#1024) -------------------------------------------
+// Ports of shared-domain template-folder.ts. The rules must stay byte-
+// compatible with it (and with the Go server's template_folder.go).
+
+/// Port of `MAX_TEMPLATE_FOLDER_LENGTH`, in UTF-16 code units.
+const MAX_TEMPLATE_FOLDER_LENGTH: usize = 512;
+
+/// Port of `normalizeTemplateFolder`: forward slashes, empty segments dropped,
+/// no traversal and no hidden segment (`.`, `..`, `.zennotes` all start with a
+/// dot). None when the value is unusable.
+pub fn normalize_template_folder(value: &Value) -> Option<String> {
+    let text = value.as_str()?.replace('\\', "/");
+    let mut parts = Vec::new();
+    for segment in text.split('/') {
+        let segment = segment.trim();
+        if segment.is_empty() {
+            continue;
+        }
+        if segment.starts_with('.') {
+            return None;
+        }
+        parts.push(segment);
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    let joined = parts.join("/");
+    (joined.encode_utf16().count() <= MAX_TEMPLATE_FOLDER_LENGTH).then_some(joined)
+}
+
+/// Port of `resolveTemplateFolder`: the template folder these settings name.
+pub fn resolve_template_folder(settings: &VaultSettings) -> Option<String> {
+    settings.extra.get("templates").and_then(|t| t.get("folder")).and_then(normalize_template_folder)
+}
+
+/// Port of `isPathInTemplateFolder`: a whole-segment, case-sensitive prefix.
+pub fn is_path_in_template_folder(rel_path: &str, folder: Option<&str>) -> bool {
+    match folder {
+        Some(folder) if !folder.is_empty() => {
+            rel_path == folder || rel_path.strip_prefix(folder).is_some_and(|rest| rest.starts_with('/'))
+        }
+        _ => false,
+    }
+}
+
+/// Port of `rewriteTemplateFolderForRename`: a template folder named by the
+/// renamed folder, or inside it, follows it.
+fn rewrite_template_folder_for_rename(value: &mut Value, old_rel: &str, new_rel: &str) {
+    let Some(templates) = value.get_mut("templates").and_then(Value::as_object_mut) else { return };
+    let Some(folder) = templates.get("folder").and_then(Value::as_str).map(str::to_string) else { return };
+    if folder != old_rel && !folder.starts_with(&format!("{old_rel}/")) {
+        return;
+    }
+    let moved = format!("{new_rel}{}", &folder[old_rel.len()..]);
+    if let Some(moved) = normalize_template_folder(&Value::String(moved)) {
+        templates.insert("folder".into(), Value::String(moved));
     }
 }
 
@@ -241,6 +305,7 @@ pub fn get_vault_settings(root: &Path) -> VaultSettings {
 }
 
 pub fn set_vault_settings(root: &Path, next: &Value) -> Result<VaultSettings, String> {
+    let previous_primary = get_vault_settings(root).primary_notes_location;
     let fallback = infer_primary_notes_location(root);
     let normalized = normalize_vault_settings(Some(next), &fallback);
     let path = settings_path(root);
@@ -251,6 +316,10 @@ pub fn set_vault_settings(root: &Path, next: &Value) -> Result<VaultSettings, St
     fs::write(&path, body).map_err(|e| format!("write failed: {e}"))?;
     if normalized.primary_notes_location == "inbox" {
         let _ = fs::create_dir_all(root.join("inbox"));
+    } else if previous_primary == "inbox" && !crate::vault::seeded_inbox::inbox_is_remapped(next) {
+        // Switching to root mode takes away an inbox holding only what the
+        // app put there (upstream v2.84 `removeSeedOnlyInbox`, explicit).
+        crate::vault::seeded_inbox::remove_seed_only_inbox(root, true);
     }
     Ok(normalized)
 }
@@ -361,6 +430,8 @@ pub fn after_folder_rename(mut value: Value, folder: &str, old_sub: &str, new_su
                 }
             }
         }
+        // So does the template folder (#1024).
+        rewrite_template_folder_for_rename(&mut value, old_rel, new_rel);
     }
     value
 }
@@ -408,6 +479,43 @@ mod tests {
 
     fn name(raw: &str) -> Option<String> {
         normalize_vault_display_name(Some(&Value::String(raw.into())))
+    }
+
+    fn folder(raw: &str) -> Option<String> {
+        normalize_template_folder(&Value::String(raw.into()))
+    }
+
+    /// The cases of shared-domain template-folder.test.ts.
+    #[test]
+    fn template_folder_matches_shared_domain_rules() {
+        assert_eq!(folder("Templates").as_deref(), Some("Templates"));
+        assert_eq!(folder(" Work \\ Templates/ ").as_deref(), Some("Work/Templates"));
+        assert_eq!(folder("a//b").as_deref(), Some("a/b"));
+        assert_eq!(folder("../x"), None);
+        assert_eq!(folder(".zennotes/templates"), None);
+        assert_eq!(folder("   "), None);
+        assert_eq!(folder(&"a".repeat(513)), None);
+        assert_eq!(normalize_template_folder(&Value::Bool(true)), None);
+        assert!(is_path_in_template_folder("Templates/a.md", Some("Templates")));
+        assert!(is_path_in_template_folder("Templates", Some("Templates")));
+        assert!(!is_path_in_template_folder("Templates Old/c.md", Some("Templates")));
+        assert!(!is_path_in_template_folder("templates/a.md", Some("Templates")));
+        assert!(!is_path_in_template_folder("a.md", None));
+    }
+
+    #[test]
+    fn template_folder_is_normalized_on_save_and_follows_a_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let saved = set_vault_settings(dir.path(), &serde_json::json!({ "templates": { "folder": " Tpl/ ", "other": 1 } })).unwrap();
+        assert_eq!(saved.extra.get("templates"), Some(&serde_json::json!({ "folder": "Tpl" })));
+        let dropped = set_vault_settings(dir.path(), &serde_json::json!({ "templates": { "folder": ".hidden" } })).unwrap();
+        assert!(!dropped.extra.contains_key("templates"));
+
+        let value = serde_json::json!({ "templates": { "folder": "Work/Tpl" } });
+        let moved = after_folder_rename(value.clone(), "inbox", "Work", "Jobs", "Work", "Jobs");
+        assert_eq!(moved["templates"]["folder"], "Jobs/Tpl");
+        let untouched = after_folder_rename(value, "inbox", "Workshop", "Jobs", "Workshop", "Jobs");
+        assert_eq!(untouched["templates"]["folder"], "Work/Tpl");
     }
 
     /// The cases of shared-domain vault-display-name.test.ts, which the rules

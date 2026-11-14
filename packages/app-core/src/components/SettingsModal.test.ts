@@ -36,6 +36,17 @@ const mocks = vi.hoisted(() => {
       calendarShowWeekNumbers: true,
       calendarWeekStart: "monday",
       customTemplates: [],
+      // The template folder picker (#1024) lists the vault's folders.
+      folders: [
+        { folder: "inbox", subpath: "", siblingOrder: 0 },
+        { folder: "inbox", subpath: "Templates", siblingOrder: 1 },
+        { folder: "inbox", subpath: "Templates/Work", siblingOrder: 2 },
+        { folder: "archive", subpath: "Old", siblingOrder: 0 },
+        { folder: "trash", subpath: "Gone", siblingOrder: 0 },
+      ],
+      folderTemplates: [],
+      setTemplateFolder: vi.fn(),
+      toggleTasksIncludedFolder: vi.fn(),
       externalApplicationSchemes: [],
       setExternalApplicationSchemes: vi.fn(),
       darkSidebar: false,
@@ -52,6 +63,9 @@ const mocks = vi.hoisted(() => {
       interfaceFont: null,
       // The Tasks pane: "due date" finds its Kanban card order row first.
       kanbanCardSort: "manual",
+      kanbanLanes: "none",
+      setKanbanLanes: vi.fn(),
+      hideEmptyTasks: true,
       kanbanFolderRoot: "",
       kanbanStatuses: [] as string[],
       keymapOverrides: {} as Record<string, string>,
@@ -308,6 +322,24 @@ describe("SettingsModal date note directories", () => {
     expect(mocks.state.setShowStatusBar).toHaveBeenCalledWith(false);
   });
 
+  it("names the sub-tab a search result opens, so a phone can hide the ones it hides", async () => {
+    await act(async () => root.render(createElement(SettingsModal)));
+    const search = host.querySelector<HTMLInputElement>('input[placeholder="Search settings…"]')!;
+    await act(async () => changeInput(search, "vault name"));
+    const results = [...host.querySelectorAll<HTMLButtonElement>("aside nav button[data-settings-result-category]")];
+    const vaultName = results.find((button) => button.textContent?.includes("Vault name"));
+    expect(vaultName?.dataset.settingsResultCategory).toBe("vault");
+    expect(vaultName?.dataset.settingsResultTab).toBe("location");
+    // The sub-tab's own button carries the same id.
+    await act(async () => vaultName!.click());
+    expect(host.querySelector('[role="tab"][data-settings-tab="location"]')).toBeTruthy();
+    // A setting in a category without sub-tabs names none.
+    await act(async () => changeInput(search, "hyprland"));
+    const titleBar = host.querySelector<HTMLButtonElement>("aside nav button[data-settings-result-category]");
+    expect(titleBar).toBeTruthy();
+    expect(titleBar!.hasAttribute("data-settings-result-tab")).toBe(false);
+  });
+
   it("finds the new-file location rows by the words people search for", async () => {
     await act(async () => root.render(createElement(SettingsModal)));
     const search = host.querySelector<HTMLInputElement>('input[placeholder="Search settings…"]')!;
@@ -374,6 +406,177 @@ describe("SettingsModal date note directories", () => {
     expect(await sharesRowFound()).toBe(false);
     mocks.state.remoteWorkspaceInfo = serverWith({ supportsSharesLocation: true });
     expect(await sharesRowFound()).toBe(true);
+  });
+
+  it("shows the reminder settings only where the host fires reminders", async () => {
+    const openTasksPage = async () => {
+      await act(async () => root.render(createElement(SettingsModal)));
+      const search = host.querySelector<HTMLInputElement>('input[placeholder="Search settings…"]')!;
+      await act(async () => changeInput(search, "reminder"));
+      const found = [...host.querySelectorAll<HTMLButtonElement>("aside nav button")].some(
+        (button) => button.textContent?.includes("Task reminders"),
+      );
+      await act(async () => changeInput(search, "hide empty tasks"));
+      const emptyTasks = [...host.querySelectorAll<HTMLButtonElement>("aside nav button")].find(
+        (button) => button.textContent?.includes("Hide empty tasks"),
+      );
+      await act(async () => emptyTasks!.click());
+      return {
+        found,
+        rows: host.querySelectorAll(
+          '[data-settings-search-id="task-reminders"], [data-settings-search-id="task-reminder-time"]',
+        ).length,
+      };
+    };
+    // A phone or the web app: no schedule to hand reminders to.
+    expect(await openTasksPage()).toEqual({ found: false, rows: 0 });
+    act(() => root.unmount());
+    root = createRoot(host);
+    Object.assign(window.zen, { setTaskReminders: vi.fn() });
+    expect(await openTasksPage()).toEqual({ found: true, rows: 2 });
+  });
+
+  it("finds the template folder and picks it from the vault's folders (#1024)", async () => {
+    await act(async () => root.render(createElement(SettingsModal)));
+    const search = host.querySelector<HTMLInputElement>('input[placeholder="Search settings…"]')!;
+    await act(async () => changeInput(search, "template folder"));
+    const result = [...host.querySelectorAll<HTMLButtonElement>("aside nav button")].find(
+      (button) => button.textContent?.includes("Template folder"),
+    );
+    expect(result).toBeTruthy();
+    await act(async () => result!.click());
+    const row = host.querySelector('[data-settings-search-id="templates-folder"]');
+    expect(row?.textContent).toContain("stay out of Tasks");
+    const picker = row!.querySelector<HTMLInputElement>("[data-template-folder-picker]")!;
+    expect(picker.value).toBe("");
+    expect(picker.placeholder).toBe("None");
+    await act(async () => picker.focus());
+    // Folders inside an area, by their path on disk: never an area itself,
+    // never the Trash. The folder picker (#1033) lists them on focus.
+    const options = [...document.querySelectorAll<HTMLButtonElement>("[data-folder-picker-option]")];
+    expect(options.map((o) => o.dataset.folderPickerOption)).toEqual([
+      "inbox/Templates",
+      "inbox/Templates/Work",
+      "archive/Old",
+    ]);
+    await act(async () => options[0].click());
+    expect(mocks.state.setTemplateFolder).toHaveBeenCalledWith("inbox/Templates");
+  });
+
+  it("picks a Task folder from the vault's folders, by keys alone (#1033)", async () => {
+    await act(async () => root.render(createElement(SettingsModal)));
+    const search = host.querySelector<HTMLInputElement>('input[placeholder="Search settings…"]')!;
+    await act(async () => changeInput(search, "task folders"));
+    const result = [...host.querySelectorAll<HTMLButtonElement>("aside nav button")].find(
+      (button) => button.textContent?.includes("Task folders"),
+    );
+    await act(async () => result!.click());
+    const field = host.querySelector<HTMLInputElement>('[data-tasks-folder-picker="includedFolders"]')!;
+    expect(field).toBeTruthy();
+    const options = (): string[] =>
+      [...document.querySelectorAll<HTMLElement>("[data-folder-picker-option]")].map(
+        (o) => o.dataset.folderPickerOption ?? "",
+      );
+    const highlighted = (): string | null =>
+      document.querySelector<HTMLElement>('[data-folder-picker-option][aria-selected="true"]')
+        ?.dataset.folderPickerOption ?? null;
+    const press = async (key: string, init: KeyboardEventInit = {}): Promise<void> => {
+      await act(async () => {
+        field.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...init }));
+      });
+    };
+
+    // Focus lists every folder by its vault path, the areas too; never the Trash.
+    await act(async () => field.focus());
+    expect(options()).toEqual([
+      "inbox",
+      "inbox/Templates",
+      "inbox/Templates/Work",
+      "quick",
+      "archive",
+      "archive/Old",
+    ]);
+    expect(highlighted()).toBeNull();
+
+    // Typing narrows and highlights the first match; Ctrl+N moves on.
+    await act(async () => changeInput(field, "temp"));
+    expect(options()).toEqual(["inbox/Templates", "inbox/Templates/Work"]);
+    expect(highlighted()).toBe("inbox/Templates");
+    await press("n", { ctrlKey: true });
+    expect(highlighted()).toBe("inbox/Templates/Work");
+
+    // Escape closes the list and leaves Settings open.
+    await press("Escape");
+    expect(options()).toEqual([]);
+    expect(mocks.setSettingsOpen).not.toHaveBeenCalled();
+
+    // ArrowDown opens it again; Enter adds the highlighted folder.
+    await press("ArrowDown");
+    expect(highlighted()).toBe("inbox/Templates");
+    await press("Enter");
+    expect(mocks.state.toggleTasksIncludedFolder).toHaveBeenCalledWith("inbox/Templates");
+    expect(field.value).toBe("");
+  });
+
+  it("offers the primary area's folders for a specific drawings folder and saves a pick", async () => {
+    const original = mocks.state.vaultSettings;
+    try {
+      mocks.state.vaultSettings = {
+        ...original,
+        drawingsLocation: { mode: "folder", folder: "Drawings" },
+      } as typeof original;
+      await act(async () => root.render(createElement(SettingsModal)));
+      const search = host.querySelector<HTMLInputElement>('input[placeholder="Search settings…"]')!;
+      await act(async () => changeInput(search, "drawings folder"));
+      const result = [...host.querySelectorAll<HTMLButtonElement>("aside nav button")].find(
+        (button) => button.textContent?.includes("Default drawings location"),
+      );
+      await act(async () => result!.click());
+      const row = host.querySelector('[data-settings-search-id="drawings-folder"]')!;
+      expect(row.textContent).toContain("New drawings go to `inbox/Drawings/`.");
+      const field = row.querySelector<HTMLInputElement>('input[role="combobox"]')!;
+      expect(field.value).toBe("Drawings");
+      await act(async () => field.focus());
+      // Inbox subpaths, the form the setting stores: no area, no `inbox/`.
+      const options = [...document.querySelectorAll<HTMLButtonElement>("[data-folder-picker-option]")];
+      expect(options.map((o) => o.dataset.folderPickerOption)).toEqual([
+        "Templates",
+        "Templates/Work",
+      ]);
+      await act(async () => options[1].click());
+      expect(mocks.setVaultSettings).toHaveBeenCalledWith(
+        expect.objectContaining({
+          drawingsLocation: { mode: "folder", folder: "Templates/Work" },
+        }),
+      );
+      expect(field.value).toBe("Templates/Work");
+    } finally {
+      mocks.state.vaultSettings = original;
+    }
+  });
+
+  it("offers the template folder on a server vault only when the server keeps it", async () => {
+    mocks.state.workspaceMode = "remote";
+    const serverWith = (capabilities: Record<string, unknown>) => ({
+      mode: "remote",
+      baseUrl: "http://localhost:7878",
+      authConfigured: true,
+      capabilities,
+      profileId: null,
+      bootError: null,
+    });
+    const rowFound = async () => {
+      await act(async () => root.render(createElement(SettingsModal)));
+      const search = host.querySelector<HTMLInputElement>('input[placeholder="Search settings…"]')!;
+      await act(async () => changeInput(search, "template folder"));
+      return [...host.querySelectorAll<HTMLButtonElement>("aside nav button")].some(
+        (button) => button.textContent?.includes("Template folder"),
+      );
+    };
+    mocks.state.remoteWorkspaceInfo = serverWith({ supportsCustomTemplates: true });
+    expect(await rowFound()).toBe(false);
+    mocks.state.remoteWorkspaceInfo = serverWith({ supportsTemplateFolder: true });
+    expect(await rowFound()).toBe(true);
   });
 
   it("names the Unsplash key in the Covers section only where the key row exists", async () => {
@@ -457,6 +660,7 @@ describe("SettingsModal date note directories", () => {
     };
     Object.assign(window.zen, {
       getCapabilities: () => ({ supportsHarper: true }),
+      setTaskReminders: vi.fn(),
     });
     await act(async () => root.render(createElement(SettingsModal)));
     return vi.mocked(getSettingsSearchResults).mock
@@ -553,6 +757,8 @@ describe("SettingsModal date note directories", () => {
       ["due date", "Tasks are due on the note's date", "daily-notes-tasks-due-on-date"],
       ["due date", "Kanban card order", "kanban-card-sort"],
       ["card order", "Kanban card order", "kanban-card-sort"],
+      ["empty task", "Hide empty tasks", "hide-empty-tasks"],
+      ["placeholder", "Hide empty tasks", "hide-empty-tasks"],
       ["rollover", "Roll over unfinished tasks to today", "daily-notes-rollover"],
       ["tutorial", "Guided tutorial", "workflow-tutorial"],
       ["recipe gallery", "Built-in recipes", "workflow-hidden-recipes"],

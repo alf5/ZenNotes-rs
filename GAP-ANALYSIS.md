@@ -1,3 +1,108 @@
+# ZenNotes-rs 2.85.0: upstream v2.79.0 → v2.85.0
+
+`packages/{app-core,bridge-contract,shared-domain}` are byte-identical to upstream v2.85.0
+(214 upstream commits). Two upstream docs are vendored too, because a vendored test reads the
+fixtures: `docs/web-clipper-link.md` and `docs/web-clipper-link.fixtures.json`.
+
+**New in the bridge and the backend**
+
+| Upstream | Here | Notes |
+|---|---|---|
+| config.toml keeps what only zn writes (429defec) | `src/bridge/portable-config.ts`: field tables and serializer spliced wholesale again; the write path reads the file just before writing, as upstream's `currentlyCarried` | `src/__tests__/portable-config-carried.test.ts` |
+| Template folder (#1024) | `vault/settings.rs` normalizes `templates.folder` and moves it with a folder rename; `search.rs` and `src/bridge/tasks.ts` leave its notes out; `supportsTemplateFolder: true` | Tag surfaces are app-core's |
+| Seeded inbox settle (v2.84) | `vault/seeded_inbox.rs`, run on open, after a burst of root-level changes (400 ms) and on a switch to root mode | The port's own Welcome texts are in the hash list beside upstream's |
+| Watcher: handles run out, folders that cannot report (#1023, 9c27db1b) | `watcher.rs`: `VaultWatch` retries after exhaustion (30 s doubling to 10 min) with a resync; a folder notify cannot watch is re-read every 30 s and on window focus (`vault_fingerprint`) | On Linux this also covers one unreadable subfolder, which makes notify's recursive watch fail outright; chokidar only skips that folder. Theme and language-pack watchers fall back to one level deep |
+| Open a vault in the file manager | `vault_open_in_file_manager`; the root must be one the app already knows | |
+| Task reminders (#1036) | `src-tauri/src/task_reminders.rs` ports `task-reminders.ts`: the ledger in the app data dir, notifications through `notify-rust` | A thread looks at the wall clock at least every 30 s instead of power events. A click opens the task on Linux (freedesktop actions); macOS and Windows are wired the same way, untested |
+| Clip links `zennotes://new`, `daily` (#620) | `zennotes-rs://new` and `zennotes-rs://daily`: `src-tauri/src/clip_links.rs` hands the link to the main window and checks the clipboard hash; `src/bridge/clip-links.ts` ports `clip-links.ts` | A clip naming another vault is refused with a sentence saying which (upstream writes it into a vault no window shows; this build keeps one vault open). The browser extension opens `zennotes://`, the original app's scheme, so its help card is hidden |
+| Escaped wikilink pipe in tables (#1052) | `vault/metadata.rs`, `standalone_links.rs`; renames and asset moves through shared-domain | |
+| Asset moves leave a link a note answers alone (v2.83) | `src/bridge/link-rewrites.ts` passes the notes | |
+| Note creation dates survive a locked file (Windows) | `sidecars.rs` renames with retry | |
+| (port bug, found by the live test) | `layout::read_primary_notes_location` now infers root mode when vault.json states none, as `getVaultSettings` does | Before, a vault showing its notes at the root (a flat Obsidian vault, a seeded one with folders copied in) got an `inbox/` folder on open and every new note went into it |
+
+**MCP server (`zennotes-rs mcp`):** all 45 of upstream's tools (new: `read_asset`, `upload_asset`,
+`rename_asset`, `move_asset`, `duplicate_asset`, `delete_asset`, `restore_asset`, `update_task`,
+`daily_note`, `note_sections`, `edit_section`), and the scope flags `--allow-path`, `--deny-path`,
+`--read-only`, `--access`, enforced on every tool (`src-tauri/src/mcp/scope.rs`, `scoped.rs`, every
+tool behind `backend.rs`). `delete_asset` uses the app's own deleted-assets store, so the app's
+Trash shows it. The golden harness now runs sessions with their own flags, setup files and
+symlinks: 328 steps in 17 sessions, identical to upstream's server. `scope_contract.rs` runs
+upstream's `fixtures/mcp-scope.json` through the real handlers. Not ported: remote mode
+(`--server`, `--token`) and its scope branches (a later release); remapped system folders (4
+contract cases skipped, as in the rest of the port). Month and weekday names in periodic notes
+are en-US; upstream follows the locale. A lone UTF-16 surrogate in a tool argument is a parse error
+here (upstream substitutes U+FFFD).
+
+**Port-owned copies added this round (re-mirror on every re-vendor):** `src/bridge/clip-links.ts`
+← `apps/desktop/src/main/clip-links.ts`; `src-tauri/src/task_reminders.rs` ←
+`task-reminders.ts`; `src-tauri/src/vault/seeded_inbox.rs` ← `settleSeededInbox` and friends in
+`vault.ts` (its hash list holds every Welcome the port and upstream have seeded); `vault_fingerprint`
+in `watcher.rs` ← `vault-fingerprint.ts`.
+
+**Not carried over:** `downloadVaultArchive` (the browser build's), Cloud's refused paths (no
+Cloud here), the macOS dev-build deep-link fix (Electron's), the Excalidraw font fallback rewrite
+(this webview runs without a CSP, so nothing is logged).
+
+## Imports
+
+Obsidian vault, Logseq graph and Notion workspace (integration token, or Sign in with Notion)
+into the local vault (upstream v2.80–v2.85); `supportsImport: true`. The run, and the vendored
+conversion it drives, stays in the webview (`src/bridge/imports/`); Rust (`src-tauri/src/imports/`)
+keeps only what a webview can't do or shouldn't hold:
+
+- the folder dialog and the folder it picked; the webview names files only by virtual path
+  (`/<kind>/{picked,source,staging,vault}/…`) and Rust resolves each one (`paths.rs`, `files.rs`).
+  The picked folder is read only and never read through a link that leaves it. In the vault an
+  import only creates (`wx`), makes folders, moves its staged folder in under a free name, appends
+  to its own report inside that folder and writes created-date sidecars: it never overwrites,
+  deletes or renames anything that was there, and refuses to write through a link;
+- requests to Notion, only to `https://api.notion.com/v1/…` (GET/POST) and
+  `POST https://mcp.notion.com/mcp`, with the credential attached by Rust and no redirects
+  (`notion_http.rs`); page file downloads go straight into staging, https only, never to a private
+  address (the host name, every redirect hop and the address it resolves to are each checked);
+- Sign in with Notion (`notion_auth.rs`): PKCE, dynamic client registration, 127.0.0.1 loopback
+  redirect, refresh shared between concurrent calls. The token and session live only in the OS
+  keychain (`notion:token`, `notion:session`); without one they are kept in memory for the run.
+  Neither ever reaches the webview: its clients hold a stand-in and Rust swaps in the real one.
+
+Status, progress and Stop are shared through Rust (`import_status`, `import_report`,
+`import://<kind>-progress`, `import://stop`), so every window sees one run, a Stop from any
+window reaches it, and a finished result survives a reload until dismissed. Remote mode refuses
+start with upstream's "Imports write to a local vault."
+
+**Port-owned copies (re-diff each against upstream on every re-vendor):**
+
+| Here | Upstream (`apps/desktop/src/main/`) |
+|---|---|
+| `src/bridge/imports/obsidian-import-run.ts` | `obsidian-import-run.ts`: verbatim except the `fs`/`path` imports |
+| `src/bridge/imports/logseq-import-run.ts` | `logseq-import-run.ts`: verbatim except the `fs`/`path` imports |
+| `src/bridge/imports/notion-import-run.ts` | `notion-import-run.ts`: downloads go through the host (`FileFetch` writes into staging), `hashKey` is WebCrypto (async), `moveIntoVault` is one host call |
+| `src/bridge/imports/{obsidian,logseq,notion}-import.ts` | `{obsidian,logseq,notion}-import.ts` (the controllers) |
+| `src/bridge/imports/notion-host.ts` | the `net.fetch`/token wiring in `notion-import.ts` |
+| `src/bridge/imports/index.ts` | the import members of `preload/index.ts` |
+| `src-tauri/src/imports/commands.rs` | the `OBSIDIAN_IMPORT_*`, `LOGSEQ_IMPORT_*`, `NOTION_IMPORT_*` handlers in `index.ts` |
+| `src-tauri/src/imports/notion_auth.rs` | `notion-sign-in.ts` and the Notion half of `secret-store.ts` |
+| `src-tauri/src/imports/files.rs` (`move_into_vault`, `write_note_created_at`) | `moveIntoVault` (`notion-import-run.ts`), `writeNoteCreatedAt` (`note-creation-metadata.ts`) |
+| `src/__tests__/{obsidian,logseq,notion}-import-run.test.ts`, tests in `notion_auth.rs` | the same-named `*.test.ts`, `notion-sign-in.test.ts` |
+
+**Deviations:** a run lives in the page that started it, so reloading or closing that window
+ends it as a Stop would (a Notion import stays resumable); upstream's survives in its main process.
+Without a keychain a sign-in or token is kept for the run instead of refused (the port's standing
+rule: never a file). Sign-in also refuses OAuth endpoints off mcp.notion.com's origin, and the
+registration names the client "ZenNotes-rs". A folder in the vault that is a symlink, on the way
+to the import folder, is refused rather than followed. The folder dialog has a title but no
+button label or message (Tauri's dialog has neither). PKCE randomness comes from the OS through
+`uuid` v4 rather than a new crate.
+
+Upstream's `notifyIfAway` (a Notion import that ends while no window has focus says so) goes
+through `notify-rust`, as task reminders do.
+
+**Not ported:** nothing in the import feature; the stand-in overrides for a test run
+(`ZENNOTES_NOTION_API_URL`, `ZENNOTES_NOTION_MCP_URL`) are honored as upstream honors them (a dev
+build, or `ZEN_PERF=1`).
+
+---
+
 # ZenNotes-rs 2.79.3: remote workspaces
 
 The app opens a vault on a ZenNotes server: upstream's `znserver`, or any

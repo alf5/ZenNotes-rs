@@ -50,6 +50,7 @@ export function DatabaseView({
   const locked = useSyncExternalStore(subscribeNoteEditingLocks, () => isNoteEditingLocked(vault, csvPath))
   const deletingRows = useStore((s) => !!(csvPath && s.databasesDeletingRows[csvPath]))
   const loading = useStore((s) => (csvPath ? !!s.databasesLoading[csvPath] : false))
+  const loadError = useStore((s) => (csvPath ? s.databasesLoadError[csvPath] : undefined))
   const loadDatabase = useStore((s) => s.loadDatabase)
   const updateDatabaseRows = useStore((s) => s.updateDatabaseRows)
   const updateDatabaseSchema = useStore((s) => s.updateDatabaseSchema)
@@ -76,9 +77,12 @@ export function DatabaseView({
   const canRenameTitle = !!csvPath && !!formDirFromCsvPath(csvPath)
 
   const transitioning = useStore(s => s.workspaceTransitioning)
+  // A load that failed stays failed until Try again: retrying on every
+  // render toasted the same error without end (1,089 times on the Android
+  // walk of 2.81.0, for a database deleted outside the app).
   useEffect(() => {
-    if (csvPath && !doc && !loading && !transitioning) void loadDatabase(csvPath)
-  }, [csvPath, doc, loading, loadDatabase, transitioning])
+    if (csvPath && !doc && !loading && !transitioning && !loadError) void loadDatabase(csvPath)
+  }, [csvPath, doc, loading, loadDatabase, transitioning, loadError])
 
   const activeViewId = doc ? (doc.views.find((v) => v.id === doc.activeViewId) ?? doc.views[0])?.id : undefined
   const activeViewType = doc?.views.find((v) => v.id === activeViewId)?.type
@@ -138,8 +142,19 @@ export function DatabaseView({
   }
   if (!doc) {
     return (
-      <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-ink-500">
-        {loading ? 'Loading database…' : 'Opening…'}
+      <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 text-sm text-ink-500">
+        {loading ? (
+          'Loading database…'
+        ) : loadError ? (
+          <>
+            <span>Could not open this database.</span>
+            <Button variant="secondary" size="sm" onClick={() => csvPath && void loadDatabase(csvPath)}>
+              Try again
+            </Button>
+          </>
+        ) : (
+          'Opening…'
+        )}
       </div>
     )
   }
@@ -178,7 +193,9 @@ export function DatabaseView({
 
   return (
     <div ref={rootRef} {...((deletingRows || locked) ? { inert: '' } : {})} aria-busy={deletingRows || locked} className="flex min-h-0 flex-1 flex-col bg-paper-100 text-ink-900">
-      <header className="glass-header flex h-12 shrink-0 items-center gap-2 px-4">
+      {/* Wraps like GalleryView's header: in a narrow pane the tools drop to a
+          second line whole, rather than squeezing the title to nothing. */}
+      <header className="glass-header flex min-h-12 shrink-0 flex-wrap items-center gap-x-2 gap-y-2 px-4 py-1.5">
         <DatabaseIcon className="h-4 w-4 shrink-0 text-ink-500" />
         {editingTitle && canRenameTitle ? (
           <input
@@ -273,7 +290,7 @@ export function DatabaseView({
           </IconButton>
         </div>
 
-        <div className="ml-auto flex items-center gap-1.5">
+        <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-1.5">
           <Button
             variant={rawMode ? 'secondary' : 'ghost'}
             size="sm"
@@ -370,7 +387,7 @@ export function DatabaseView({
             onOpenColumns={() => openColumnsFor(activeView.id)}
           />
         ) : (
-          <DatabaseBoardView csvPath={csvPath} doc={doc} view={activeView} />
+          <DatabaseBoardView csvPath={csvPath} doc={doc} view={activeView} isActive={isActive} />
         )}
       </div>
 

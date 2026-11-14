@@ -151,6 +151,82 @@ describe('database row lifecycle', () => {
     expect(s.files.has(TWO)).toBe(false)
     expect(flushed).toBe(true)
   })
+  it('asks before a plain row goes when the caller asks for a confirm, and a Cancel keeps it', async () => {
+    const s = await setup()
+    const plain = { ...s.doc, pages: {}, pageHasContent: {} }
+    s.useStore.setState({ databases: { [CSV]: plain } })
+    const cancelled = s.useStore.getState().deleteDatabaseRows(CSV, ['one'], { confirm: true })
+    const request = s.prompts.getConfirmRequest()!
+    expect(request.options).toMatchObject({ title: 'Delete this row?', description: 'This cannot be undone.', confirmLabel: 'Delete row', danger: true })
+    s.prompts.settleConfirmRequest(request, false)
+    await cancelled
+    expect(s.useStore.getState().databases[CSV].rows.map(row => row.id)).toEqual(['one', 'two'])
+    expect(s.bridge.writeDatabaseSchema).not.toHaveBeenCalled()
+
+    const confirmed = s.useStore.getState().deleteDatabaseRows(CSV, ['one', 'two'], { confirm: true })
+    expect(s.prompts.getConfirmRequest()!.options.title).toBe('Delete 2 rows?')
+    s.prompts.settleConfirmRequest(s.prompts.getConfirmRequest()!, true)
+    await confirmed
+    expect(s.disk().rows).toEqual([])
+    // Without the option a plain row still goes at once (dd, the menus).
+    s.useStore.setState({ databases: { [CSV]: plain } })
+    const direct = s.useStore.getState().deleteDatabaseRows(CSV, ['one'])
+    expect(s.prompts.getConfirmRequest()).toBeNull()
+    await direct
+    expect(s.disk().rows.map(row => row.id)).toEqual(['two'])
+  })
+  it('deletes what is left when a plain row went while the confirm was open, without blaming the linked pages', async () => {
+    const s = await setup()
+    const { useToastStore } = await import('./lib/toast')
+    const plain = { ...s.doc, pages: {}, pageHasContent: {} }
+    s.useStore.setState({ databases: { [CSV]: plain } })
+    const pending = s.useStore.getState().deleteDatabaseRows(CSV, ['one', 'two'], { confirm: true })
+    // Row one goes elsewhere (another window, a sync) while the question is open.
+    s.useStore.setState({ databases: { [CSV]: { ...plain, rows: plain.rows.filter((row) => row.id !== 'one') } } })
+    s.prompts.settleConfirmRequest(s.prompts.getConfirmRequest()!, true)
+    await pending
+    expect(useToastStore.getState().toasts.map((toast) => toast.message)).toEqual([])
+    expect(s.disk().rows).toEqual([])
+
+    // All of them gone: nothing to delete, and it says so.
+    s.useStore.setState({ databases: { [CSV]: plain } })
+    const gone = s.useStore.getState().deleteDatabaseRows(CSV, ['one'], { confirm: true })
+    s.useStore.setState({ databases: { [CSV]: { ...plain, rows: plain.rows.filter((row) => row.id !== 'one') } } })
+    s.prompts.settleConfirmRequest(s.prompts.getConfirmRequest()!, true)
+    await gone
+    expect(useToastStore.getState().toasts.map((toast) => toast.message)).toEqual(['That row was already deleted.'])
+  })
+  it('still stops when a linked page changed while the confirm was open', async () => {
+    const s = await setup()
+    const { useToastStore } = await import('./lib/toast')
+    const pending = s.useStore.getState().deleteDatabaseRows(CSV, ['one'], { confirm: true })
+    s.useStore.setState({ databases: { [CSV]: { ...s.doc, pages: { ...s.doc.pages, one: 'Projects.base/pages/Other.md' } } } })
+    s.prompts.settleConfirmRequest(s.prompts.getConfirmRequest()!, true)
+    await vi.waitFor(() => expect(s.prompts.getConfirmRequest()).not.toBeNull())
+    s.prompts.settleConfirmRequest(s.prompts.getConfirmRequest()!, false)
+    await pending
+    expect(useToastStore.getState().toasts.map((toast) => toast.message)).toEqual([
+      'The linked pages changed. Review the rows before deleting them.'
+    ])
+    expect(s.bridge.writeDatabaseSchema).not.toHaveBeenCalled()
+  })
+  it('asks about the rows first, then what happens to their notes', async () => {
+    const s = await setup()
+    const declined = s.useStore.getState().deleteDatabaseRows(CSV, ['one', 'two'], { confirm: true })
+    expect(s.prompts.getConfirmRequest()!.options.description).toBe('This cannot be undone. You choose what happens to the linked page notes next.')
+    s.prompts.settleConfirmRequest(s.prompts.getConfirmRequest()!, false)
+    await declined
+    expect(s.prompts.getConfirmRequest()).toBeNull()
+    expect(s.bridge.writeDatabaseSchema).not.toHaveBeenCalled()
+
+    const pending = s.useStore.getState().deleteDatabaseRows(CSV, ['one', 'two'], { confirm: true })
+    s.prompts.settleConfirmRequest(s.prompts.getConfirmRequest()!, true)
+    await vi.waitFor(() => expect(s.prompts.getConfirmRequest()?.options.title).toBe('Delete 2 rows and their notes?'))
+    s.prompts.settleConfirmRequest(s.prompts.getConfirmRequest()!, false)
+    await pending
+    expect(s.disk().rows).toEqual([])
+    expect(s.bridge.moveToTrash).not.toHaveBeenCalled()
+  })
   it('does not replace the first row confirmation when deletion is dispatched twice', async () => {
     const s = await setup()
     const first = s.useStore.getState().deleteDatabaseRows(CSV, ['one'])

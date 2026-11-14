@@ -221,10 +221,12 @@ host's stable vault token.
 ### Folder and database actions
 
 - `createBrowseDatabase(host, directory?)` creates and opens an untitled database. Omitting the directory uses the configured database location, including the active note's folder. Explicit `''` selects the primary root; any other explicit directory must be an existing ordinary Browse folder.
+- `createBrowseKanban(host, directory?)` is New Kanban: it creates and opens a database that opens on its Board, with To do, Doing and Done columns, placed exactly as `createBrowseDatabase` places one. With a directory it is the desktop folder menu's New Kanban.
 - `requestRenameBrowseDatabase(host, directory)` prompts for a database title and preserves host collision numbering. Names starting with a dot are rejected because vault scanners hide those directories. Case-only renames retain existing host behavior and can receive a numbered suffix on case-insensitive filesystems.
 - `requestCreateBrowseFolder(host, directory = '')` prompts for a child folder.
 - `requestCreateBrowseNote(host, directory = '')` creates a note in an ordinary Browse folder (`''` is the primary root) and opens it with its title focused, without a prompt. A missing folder or a database is refused with `unavailable`.
 - `requestRenameBrowseFolder(host, directory)` prompts for an ordinary folder's leaf name.
+- `openBrowseFolderGallery(host, directory = '')` opens an ordinary Browse folder (`''` is the primary root) as a Gallery, the desktop folder menu's Open as Gallery, with no prompt. It reads the file index first when it has not been read, since cards draw vault covers from it, and opens nothing if the context changed during that read (`stale`). A missing folder, a database, or a database internal is refused with `unavailable`.
 - `requestMoveBrowseDirectory(host, directory)` prompts for a new parent for an ordinary folder or an entire database, using the move-note prompt's `inbox[/path]` values. Only existing notes-area folders are offered, never the directory itself, its descendants, or a database. The leaf name, and so a database's `.base` suffix, is kept. A destination that already holds that name is blocked in the prompt, and the host still refuses to overwrite. The store carries open tabs (database tabs included), folder icons and colors, favorites, and manual order to the new path. Pins are host-owned: a host that pins folders re-keys them after `completed`.
 - `requestDeleteBrowseDirectory(host, directory)` confirms permanent deletion of an ordinary folder or an entire database, with the appropriate warning.
 
@@ -353,6 +355,24 @@ Format Markdown, Reflow Paragraph) keep focusing the editor; every other
 command (a toggle, a view, a theme), and closing any of those palettes or the
 template or drawing palette without a pick, leaves the focus where it was.
 Absent, false or throwing, the editor takes the focus as on desktop.
+
+The same answer keeps the keyboard down in the places core hands the editor
+the focus as a desktop habit rather than for typing: a card picked in a folder
+Gallery opens its note to be read, a pick in the Callout type menu and Remove
+callout leave the caret in the note without focusing it, the database Columns
+menu opens without focusing its find field (a tap into the field still does),
+and closing the sidebar while it held the keyboard does not focus the editor
+(the editor's panel still takes the keys, so a hardware keyboard does not
+drive the hidden sidebar).
+The focus heal, which refocuses the editor when the app comes back to the
+front, runs on such a host only when the editor held the focus as the app was
+left: someone typing gets the keyboard back, someone reading does not, and a
+fresh page counts as reading.
+
+Settings search results carry `data-settings-result-category` (the section)
+and, for a setting on a sub-tab, `data-settings-result-tab` (the sub-tab's id,
+which the sub-tab's own button carries as `data-settings-tab`), so a host that
+hides a section or a sub-tab can hide the results that would open it.
 
 Live preview reveals a line's Markdown source (a heading's `#`, `**`, `[[ ]]`)
 only on lines the user is editing: once an editor has taken the focus since its

@@ -169,6 +169,7 @@ describe('tauri-bridge.ts', () => {
     'selectVaultPath',
     'revealConfigFile',
     'revealFilePath',
+    'openVaultInFileManager',
     'openExternalFile',
     'fetchLinkMetadata'
   ])

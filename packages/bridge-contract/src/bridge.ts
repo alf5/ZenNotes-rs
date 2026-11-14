@@ -1,4 +1,5 @@
 import type { ZenPlatform } from './platform.js'
+import type { ClipApplyRequest, ClipNotice } from './clip.js'
 import type {
   AppUpdateState,
   AssetMeta,
@@ -42,6 +43,16 @@ import type {
   VaultTextSearchMatch,
   VaultTextSearchToolPaths
 } from './ipc.js'
+import type {
+  NotionImportProgress,
+  NotionImportStatus,
+  NotionImportTokenResult,
+  NotionImportTree,
+  LogseqImportScan,
+  LogseqImportStartOptions,
+  NotionTreeItem,
+  ObsidianImportScan
+} from './notion-import.js'
 import type { CustomTemplateFile, WriteTemplateInput } from './templates.js'
 import type {
   UnsplashKeyCheck,
@@ -87,7 +98,7 @@ import type {
   WorkflowUndoResult,
   WriteWorkflowInput
 } from './workflows.js'
-import type { VaultTask } from './tasks.js'
+import type { TaskReminder, TaskReminderTarget, VaultTask } from './tasks.js'
 import type {
   DatabaseDoc,
   DatabaseSeed,
@@ -119,9 +130,17 @@ export interface ZenCapabilities {
   supportsLocalFilesystemPickers: boolean
   supportsRemoteWorkspace: boolean
   supportsCloudSync?: boolean
+  /** Importing Notion or Obsidian into a local vault. Desktop only: a run
+   *  needs a main process to reach Notion, read a folder and write the vault. */
+  supportsImport?: boolean
   supportsCliInstall: boolean
   /** Custom templates require local-filesystem CRUD; false on web/remote. */
   supportsCustomTemplates: boolean
+  /** The host keeps vault.json's `templates.folder` (#1024) through a
+   *  settings save. The web client says what its server says (2.80 and
+   *  later); a host that leaves it out keeps unknown vault.json keys, as the
+   *  phones do, and shows the setting. Only an explicit false hides it. */
+  supportsTemplateFolder?: boolean
   supportsCustomCodeLanguages?: boolean
   /** Local desktop support, or a web client paired with a server that owns
    *  workflow files and journalled apply/undo. */
@@ -188,6 +207,31 @@ export interface ZenBridge {
   /** Unsplash photo search for the cover picker, sent straight to
    *  api.unsplash.com with the person's own access key. A host without it
    *  shows no Unsplash tab. Never rejects: a failure comes back as its reason. */
+  obsidianImportStatus?(): Promise<{ running: boolean; progress: NotionImportProgress | null }>
+  /** Opens the system's folder dialog. Null when the person cancels. */
+  obsidianImportPick?(): Promise<ObsidianImportScan | null>
+  obsidianImportStart?(options: { includeTasks: boolean; excluded: string[] }): Promise<void>
+  obsidianImportStop?(): Promise<void>
+  obsidianImportDismiss?(): Promise<void>
+  onObsidianImportProgress?(cb: (progress: NotionImportProgress) => void): () => void
+  logseqImportStatus?(): Promise<{ running: boolean; progress: NotionImportProgress | null }>
+  /** Opens the system's folder dialog for a Logseq graph. Null when the person cancels. */
+  logseqImportPick?(): Promise<LogseqImportScan | null>
+  logseqImportStart?(options: LogseqImportStartOptions): Promise<void>
+  logseqImportStop?(): Promise<void>
+  logseqImportDismiss?(): Promise<void>
+  onLogseqImportProgress?(cb: (progress: NotionImportProgress) => void): () => void
+  notionImportStatus?(): Promise<NotionImportStatus>
+  notionImportSaveToken?(token: string): Promise<NotionImportTokenResult>
+  notionImportSignIn?(): Promise<void>
+  notionImportCancelSignIn?(): Promise<void>
+  notionImportSignOut?(): Promise<void>
+  notionImportTree?(): Promise<NotionImportTree>
+  notionImportTreeChildren?(pageId: string): Promise<NotionTreeItem[]>
+  notionImportStart?(options: { includeTasks: boolean; excluded: string[] }): Promise<void>
+  notionImportStop?(): Promise<void>
+  notionImportDiscard?(): Promise<void>
+  onNotionImportProgress?(cb: (progress: NotionImportProgress) => void): () => void
   searchUnsplash?(query: string, page: number): Promise<UnsplashSearchResult>
   /** Unsplash's download tracking: a photo became a cover. Fire and forget. */
   trackUnsplashDownload?(downloadLocation: string): Promise<void>
@@ -474,6 +518,15 @@ export interface ZenBridge {
   /** Open the original target directory of a symlinked folder in the OS file manager. */
   revealFolderTarget(folder: NoteFolder, subpath: string): Promise<void>
   revealAssetsDir(): Promise<void>
+  /** Open a local vault's folder in the OS file manager. `root` only names
+   *  which vault: the host refuses anything but a vault it already knows.
+   *  Desktop-only, a host without local folders leaves it out. */
+  openVaultInFileManager?(root: string): Promise<void>
+  /** Save the open vault as a zip of its plain files (a folder once
+   *  unzipped). A host whose vault has no folder the user can reach (the
+   *  browser, where it lives in the origin's private storage) offers this in
+   *  place of openVaultInFileManager; others leave it out. */
+  downloadVaultArchive?(): Promise<void>
   getPathForFile(file: File): string | null
   /** Open a folder as a temporary session (drag a folder onto the app to read
    *  it without turning it into a vault). Desktop-only. */
@@ -484,6 +537,13 @@ export interface ZenBridge {
   onVaultChange(cb: (ev: VaultChangeEvent) => void): () => void
   onOpenSettings(cb: () => void): () => void
   onOpenNoteRequested(cb: (relPath: string) => void): () => void
+  /** A `zennotes://new` or `zennotes://daily` clip for this window's vault,
+   *  already validated by the host. Desktop-only: the phones read their own
+   *  links, and the web build has no link handler. */
+  onClipRequested?(cb: (request: ClipApplyRequest) => void): () => void
+  /** A clip outcome the host reports itself (a refused link, a missing vault,
+   *  a note it wrote while no window showed that vault). Desktop-only. */
+  onClipNotice?(cb: (notice: ClipNotice) => void): () => void
   /** Escape was pressed while a subframe (an embedded video player) owned the
    *  keyboard. Keys inside a cross-origin frame never reach the page, so the
    *  desktop main process relays this one; the app hands focus back to the
@@ -546,6 +606,12 @@ export interface ZenBridge {
   hideWindowToTray?(): Promise<boolean>
   /** This window's Cloud sync state for the tray; null when there is none. */
   reportTraySyncStatus?(status: TraySyncStatus | null): void
+  /** The task reminders to fire (#1036), the whole schedule each time.
+   *  Desktop-only: the main process shows them as system notifications, the
+   *  window hidden in the tray included. */
+  setTaskReminders?(reminders: TaskReminder[]): void
+  /** A reminder notification was clicked. Desktop-only. */
+  onTaskReminderOpen?(cb: (target: TaskReminderTarget) => void): () => void
   /** Quit the app for real. Linux and Windows have no app menu, so with the
    *  tray holding the window this is the way out besides the icon's menu. */
   quitApp?(): void

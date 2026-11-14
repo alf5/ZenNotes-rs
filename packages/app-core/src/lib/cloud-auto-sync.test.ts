@@ -39,6 +39,7 @@ import {
   useCloudSyncStatusStore,
 } from "./cloud-auto-sync";
 import { useToastStore } from "./toast";
+import { traySyncStatusFor } from "./tray-runtime";
 
 function setup(
   initialStatus: CloudAccountStatus = {
@@ -812,6 +813,141 @@ describe("cloudSyncAttentionItems (Discord: name the file, not the count)", () =
       ],
     });
     expect(items.map((item) => item.path)).toEqual(["inbox/Old.md", "A file"]);
+  });
+
+  it("names a file Cloud refused, calmly, with Cloud's answer under Details (#1004)", async () => {
+    const record = ".zennotes/agent-edits/inbox/Note.md.json";
+    const detail = "HTTP 422 · VALIDATION_FAILED · This path is not eligible for vault sync.";
+    const summary: CloudSyncRunSummary = {
+      ...base,
+      pushed: 3,
+      refused_paths: [{ path: record, detail }],
+    };
+    expect(cloudSyncAttentionItems(summary)).toEqual([
+      {
+        kind: "refused",
+        path: record,
+        detail:
+          "A file ZenNotes keeps for itself. Cloud didn't accept it, so it stays on this device, and sync offers it again once a day. There is nothing to change.",
+        conflictCopyPath: null,
+        technical: detail,
+      },
+    ]);
+    expect(cloudSyncAttentionMessage(summary)).toMatch(
+      /^ZenNotes Cloud didn't accept “Note\.md\.json”, a file ZenNotes keeps for itself, so it stays on this device while the rest of the vault keeps syncing\./,
+    );
+    // A note of the person's is theirs to rename, and its row says how.
+    const note = `${"Projects/".repeat(120)}Plan.md`;
+    const noteRows = cloudSyncAttentionItems({ ...summary, refused_paths: [{ path: note, detail: "" }] });
+    expect(noteRows[0].detail).toMatch(/^Its path is longer than the 1,024 characters Cloud takes/);
+    expect(noteRows[0].technical).toBeNull();
+    expect(cloudSyncAttentionLabel(summary)).toBe("1 file stays on this device");
+    // Anything else wrong in the same run keeps its own words.
+    expect(
+      cloudSyncAttentionLabel({
+        ...summary,
+        conflicts: [{ operation_id: "op", item_id: "i", code: "REVISION_CONFLICT", current_revision: 2, current_path: null }],
+      }),
+    ).toBeNull();
+
+    clearCloudSyncStatus();
+  });
+
+  it("counts a run whose only news is a file set aside as synced, and keeps it in Settings", async () => {
+    const record = ".zennotes/agent-edits/inbox/Note.md.json";
+    const summary: CloudSyncRunSummary = {
+      ...base,
+      pushed: 3,
+      refused_paths: [{ path: record, detail: "HTTP 422 · VALIDATION_FAILED · refused" }],
+    };
+    clearCloudSyncStatus();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-10-29T12:00:00Z"));
+      await syncCloudVaultWithStatus({ syncCloudVault: async () => summary }, "Notes");
+      const first = useCloudSyncStatusStore.getState();
+      expect(first.phase).toBe("ready");
+      expect(first.error).toBeNull();
+      expect(first.lastSyncedAt).toBe(Date.parse("2026-10-29T12:00:00Z"));
+      // Not forced back into a status bar that was turned off, and the tray
+      // stays idle.
+      expect(cloudSyncNeedsUser()).toBe(false);
+      expect(traySyncStatusFor(first)?.state).toBe("idle");
+      // Settings still reads the file from the summary.
+      expect(first.lastSummary?.refused_paths?.map((row) => row.path)).toEqual([record]);
+      expect(cloudSyncAttentionItems(first.lastSummary!).map((item) => item.kind)).toEqual(["refused"]);
+
+      // Every later run that still holds it keeps the clock moving.
+      vi.setSystemTime(new Date("2026-10-29T12:05:00Z"));
+      await syncCloudVaultWithStatus({ syncCloudVault: async () => summary }, "Notes");
+      expect(useCloudSyncStatusStore.getState().lastSyncedAt).toBe(Date.parse("2026-10-29T12:05:00Z"));
+
+      // Anything else in the same run still needs the person.
+      await syncCloudVaultWithStatus(
+        {
+          syncCloudVault: async () => ({
+            ...summary,
+            conflicts: [{ operation_id: "op", item_id: "i", code: "REVISION_CONFLICT", current_revision: 2, current_path: null }],
+          }),
+        },
+        "Notes",
+      );
+      expect(useCloudSyncStatusStore.getState().phase).toBe("attention");
+      expect(cloudSyncNeedsUser()).toBe(true);
+    } finally {
+      clearCloudSyncStatus();
+      vi.useRealTimers();
+    }
+  });
+
+  it("still needs the person while a note of theirs is held, until they rename it", async () => {
+    const record = ".zennotes/agent-edits/inbox/Note.md.json";
+    const note = `${"Projects/".repeat(120)}Plan.md`;
+    const own: CloudSyncRunSummary = {
+      ...base,
+      pushed: 3,
+      refused_paths: [{ path: note, detail: "" }],
+    };
+    clearCloudSyncStatus();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-10-29T12:00:00Z"));
+      await syncCloudVaultWithStatus({ syncCloudVault: async () => ({ ...base, pushed: 1 }) }, "Notes");
+      vi.setSystemTime(new Date("2026-10-29T12:05:00Z"));
+      await syncCloudVaultWithStatus({ syncCloudVault: async () => own }, "Notes");
+      const held = useCloudSyncStatusStore.getState();
+      expect(held.phase).toBe("attention");
+      expect(held.error).toBe(cloudSyncAttentionMessage(own));
+      // Only the person can fix it, so a status bar turned off comes back and
+      // the tray says so; the words stay calm.
+      expect(cloudSyncNeedsUser()).toBe(true);
+      expect(traySyncStatusFor(held)?.state).not.toBe("idle");
+      expect(cloudSyncAttentionLabel(own)).toBe("1 file stays on this device");
+      // The last time everything synced, not this run.
+      expect(held.lastSyncedAt).toBe(Date.parse("2026-10-29T12:00:00Z"));
+
+      // Held beside a file ZenNotes keeps for itself, the note still counts.
+      await syncCloudVaultWithStatus(
+        {
+          syncCloudVault: async () => ({
+            ...own,
+            refused_paths: [{ path: record, detail: "" }, { path: note, detail: "" }],
+          }),
+        },
+        "Notes",
+      );
+      expect(useCloudSyncStatusStore.getState().phase).toBe("attention");
+
+      // Renamed and synced: back to synced.
+      vi.setSystemTime(new Date("2026-10-29T12:10:00Z"));
+      await syncCloudVaultWithStatus({ syncCloudVault: async () => ({ ...base, pushed: 1 }) }, "Notes");
+      expect(useCloudSyncStatusStore.getState().phase).toBe("ready");
+      expect(useCloudSyncStatusStore.getState().lastSyncedAt).toBe(Date.parse("2026-10-29T12:10:00Z"));
+      expect(cloudSyncNeedsUser()).toBe(false);
+    } finally {
+      clearCloudSyncStatus();
+      vi.useRealTimers();
+    }
   });
 
   it("remembers the last run summary so Review can show it without another sync", async () => {

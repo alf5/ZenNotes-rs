@@ -17,8 +17,8 @@ This Electron → Tauri conversion was performed by **AI: Anthropic's Claude** r
 ported the vault/file/search/tasks backend to Rust, authored the Tauri bridge that implements the
 existing `ZenBridge` contract, set up the GitHub Actions release pipeline, and produced the Arch
 Linux packaging, iterating against real builds and tests at each step. Each later catch-up with
-upstream was done the same way: v2.15 by Claude Fable 5, v2.45 by Claude Opus 5, and v2.73 and v2.79 by
-Claude Opus 5.5.
+upstream was done the same way: v2.15 by Claude Fable 5, v2.45 by Claude Opus 5, and v2.73, v2.79 and
+v2.85 by Claude Opus 5.5.
 
 ## What's different from upstream ZenNotes
 
@@ -33,9 +33,12 @@ Claude Opus 5.5.
 - **Quick Capture on Wayland:** the global hotkey is X11-only. Bind a compositor key to `zennotes-rs --quick-capture` (or `zennotes-rs://quick-capture`) instead.
 - **Dropping files on macOS and Windows:** the webview hides a dropped file's path, so attachments are imported from a temporary copy, and a Markdown file or folder asks you to use Open File or open it as a vault. Linux has no such limit.
 - **One vault per run:** opening another vault in a new window switches every open window to it, and the app asks first.
-- **MCP:** the binary is its own MCP server: `zennotes-rs mcp [--vault <path or name>]` serves the original's 34 vault tools over stdio, on local vaults, and Settings → MCP installs it into Claude Code, Claude Desktop, Codex or OpenCode (as `zennotes-rs`, so it can sit beside the original's `zennotes` entry). Its replies are checked against the original's server, apart from its `zennotes-rs://` links and no TikZ in its instructions; see [GAP-ANALYSIS.md](GAP-ANALYSIS.md).
+- **MCP:** the binary is its own MCP server: `zennotes-rs mcp [--vault <path or name>]` serves the original's 45 vault tools over stdio, on local vaults (attachments, task edits, daily notes and sections included), takes its `--allow-path`, `--deny-path`, `--read-only` and `--access` limits, and Settings → MCP installs it into Claude Code, Claude Desktop, Codex or OpenCode (as `zennotes-rs`, so it can sit beside the original's `zennotes` entry). Its replies are checked against the original's server, apart from its `zennotes-rs://` links and no TikZ in its instructions; see [GAP-ANALYSIS.md](GAP-ANALYSIS.md).
+- **Imports:** Import from Obsidian, Logseq and Notion work as in the original. A Notion token or sign-in stays in the OS keychain (in memory until the app quits without one), and an import runs in the window that started it, so reloading that window stops it.
+- **Clip links:** the original's web-clipper links work as `zennotes-rs://new` and `zennotes-rs://daily` (same parameters as its `docs/web-clipper-link.md`), from a script or a launcher, into the vault that is open. The browser extension itself opens `zennotes://` links, which belong to the original app.
+- **Task reminders:** `@remind:` tasks show a system notification, the window hidden in the tray included. Clicking one opens its task on Linux; on macOS and Windows the click is wired the same way but untested.
 - **Identity:** application id `com.zennotes-rs.app`, deep-link scheme `zennotes-rs://`.
-- **Upstream parity:** mirrored to ZenNotes **v2.79.0**. See [GAP-ANALYSIS.md](GAP-ANALYSIS.md) for what is and is not carried over.
+- **Upstream parity:** mirrored to ZenNotes **v2.85.0**. See [GAP-ANALYSIS.md](GAP-ANALYSIS.md) for what is and is not carried over.
 
 ### Sharing a vault and settings with upstream ZenNotes
 
@@ -62,7 +65,7 @@ Licensed **MIT** (see [LICENSE](LICENSE)), the same as the upstream project.
 
 ---
 
-> The remainder of this document is the **original ZenNotes README** (as of upstream v2.79.0),
+> The remainder of this document is the **original ZenNotes README** (as of upstream v2.85.0),
 > reproduced verbatim for reference and attribution. Paths, commands, and links below refer to
 > the upstream Electron monorepo, not to this Tauri port.
 
@@ -378,7 +381,7 @@ Read [docs/monorepo-architecture.md](docs/monorepo-architecture.md) for the arch
 
 ### Requirements
 
-- Node.js 22+
+- Node.js 22.22 or newer
 - npm
 - Go 1.22+ for the server build path
 - Docker optional, for self-hosting

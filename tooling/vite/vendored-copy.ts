@@ -37,6 +37,14 @@ export const VENDORED_COPY: ReadonlyArray<{ file: string; find: string; replace:
     find: "body: 'Choose Share, ZenNotes in Safari or any app to save a page or the text you selected as a note. Each vault picks where shares land.'",
     replace: "body: 'The original ZenNotes can now save a page or selected text from the macOS Share menu. ZenNotes-rs does not have this yet.'"
   },
+  {
+    // The browser extension opens `zennotes://` links, which belong to the
+    // original app; this build takes the same links as zennotes-rs://
+    // (src/bridge/clip-links.ts).
+    file: 'packages/app-core/src/lib/whats-new.ts',
+    find: "body: 'Clip a page, a selection or your highlights from Chrome, Edge, Firefox or Safari into a clean Markdown note. The extension hands the note to ZenNotes, with no account and no server in between.'",
+    replace: "body: 'The original ZenNotes takes clips from its browser extension through zennotes:// links. ZenNotes-rs takes the same links as zennotes-rs://new and zennotes-rs://daily, from a script or a launcher; the extension itself opens the original app.'"
+  },
 
   // Settings → MCP describes upstream's server: Electron running a compiled script.
   {
@@ -189,7 +197,9 @@ export const HELP_HIDDEN: HiddenHelp = {
     'Encrypt a Cloud vault end to end',
     'When Cloud reports a problem',
     'The CLI is the bridge to launchers',
-    'Updates are release-driven'
+    'Updates are release-driven',
+    // The extension opens zennotes:// links, the original app's scheme.
+    'Clip web pages into notes with the ZenNotes Web Clipper'
   ],
   settingsSections: ['CLI'],
   settingsRows: [

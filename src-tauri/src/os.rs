@@ -33,6 +33,46 @@ fn canonical_or_self(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// Port of `resolveKnownVaultRoot` (upstream v2.82): the vault root a
+/// renderer asked for, if this app already knows it. The renderer is
+/// untrusted and the opener launches whatever it is given, so the argument
+/// only ever picks from main's own list, and main's copy is what comes back.
+pub fn resolve_known_vault_root(requested: &str, known: &[String]) -> Option<PathBuf> {
+    if requested.trim().is_empty() {
+        return None;
+    }
+    let wanted = crate::vault::config::resolve_path(requested);
+    known
+        .iter()
+        .map(|root| crate::vault::config::resolve_path(root))
+        .find(|root| *root == wanted)
+        .map(PathBuf::from)
+}
+
+/// Port of `knownLocalVaultRoots`: what the window has open (a temporary
+/// folder session included) and what the switcher lists.
+fn known_local_vault_roots(app: &AppHandle, state: &AppState) -> Vec<String> {
+    let mut roots: Vec<String> = state.current().map(|vault| vault.root).into_iter().collect();
+    if let Ok(dir) = app.path().app_config_dir() {
+        let cfg = crate::vault::config::load_config(&dir);
+        roots.extend(cfg.local_vaults.into_iter().map(|entry| entry.root));
+        roots.extend(cfg.vault_root);
+    }
+    roots
+}
+
+/// `vault:open-in-file-manager` (upstream v2.82): open any listed local
+/// vault's folder, not only this window's, so no remote check: a remote
+/// workspace can still open a local vault from its switcher.
+pub fn open_vault_in_file_manager(app: &AppHandle, state: &AppState, requested: &str) -> Result<(), String> {
+    let root = resolve_known_vault_root(requested, &known_local_vault_roots(app, state))
+        .ok_or_else(|| "That folder is not one of your vaults.".to_string())?;
+    if !root.is_dir() {
+        return Err(format!("This vault's folder is missing: {}", root.display()));
+    }
+    app.opener().open_path(root.to_string_lossy().to_string(), None::<&str>).map_err(|e| e.to_string())
+}
+
 /// v2.15 `revealFilePath` — reveal an arbitrary absolute path (upstream
 /// index.ts:2599: no validation, straight to the file manager).
 pub fn reveal_file_path(app: &AppHandle, abs_path: &str) -> Result<(), String> {
@@ -127,4 +167,18 @@ fn baseline_fonts() -> Vec<String> {
 pub fn icon_data_url() -> String {
     let b64 = base64::engine::general_purpose::STANDARD.encode(APP_ICON);
     format!("data:image/png;base64,{b64}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_known_vault_root_opens() {
+        let known = vec!["/home/me/Notes".to_string(), "/home/me/Work/".to_string()];
+        assert_eq!(resolve_known_vault_root("/home/me/Notes/", &known), Some(PathBuf::from("/home/me/Notes")));
+        assert_eq!(resolve_known_vault_root("/home/me/Work/../Work", &known), Some(PathBuf::from("/home/me/Work")));
+        assert_eq!(resolve_known_vault_root("/home/me/Notes/evil.sh", &known), None);
+        assert_eq!(resolve_known_vault_root("  ", &known), None);
+    }
 }

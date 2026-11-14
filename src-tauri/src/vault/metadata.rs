@@ -25,10 +25,12 @@ static TAG_RE: LazyLock<Regex> =
 static LINK_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(!?)\[[^\]]*\]\((<[^>]+>|[^)\s]+)(?:\s+"[^"]*")?\)"#).unwrap()
 });
+// `\\?\|`: a table writes the label separator as `\|` to keep the pipe in its
+// cell (upstream #1052); the backslash is not part of the target.
 static EMBED_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"!\[\[([^\]|]+?)(?:\|[^\]]+)?\]\]").unwrap());
+    LazyLock::new(|| Regex::new(r"!\[\[([^\]|]+?)(?:\\?\|[^\]]+)?\]\]").unwrap());
 static WIKILINK_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(!?)\[\[([^\]|]+?)(?:\|[^\]]+)?\]\]").unwrap());
+    LazyLock::new(|| Regex::new(r"(!?)\[\[([^\]|]+?)(?:\\?\|[^\]]+)?\]\]").unwrap());
 static FRONTMATTER_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^---\n[\s\S]*?\n---\n").unwrap());
 static MD_IMAGE_RE: LazyLock<Regex> =
@@ -185,7 +187,7 @@ pub fn extract_wikilinks(body: &str) -> Vec<String> {
     for caps in WIKILINK_RE.captures_iter(&stripped).flatten() {
         let bang = caps.get(1).map(|m| m.as_str()).unwrap_or("");
         let target = caps.get(2).map(|m| m.as_str().trim()).unwrap_or("");
-        if target.is_empty() {
+        if target.is_empty() || target == "\\" {
             continue;
         }
         if bang == "!" && local_asset_target_kind(target).is_some() {
@@ -331,6 +333,13 @@ pub fn build_excerpt(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tables_escaped_pipe_still_names_the_target() {
+        let body = "| a | [[Doc\\|Label]] |\n| b | ![[pic.png\\|200]] |\n[[\\|x]]";
+        assert_eq!(extract_wikilinks(body), vec!["Doc".to_string()]);
+        assert_eq!(extract_asset_embeds(body), vec!["pic.png".to_string()]);
+    }
 
     #[test]
     fn fenced_code_in_a_crlf_note_is_not_scanned() {

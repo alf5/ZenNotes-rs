@@ -9,6 +9,7 @@ import {
   splitMultiSelect,
   joinMultiSelect,
   splitNoteLinks,
+  noteLinkTitle,
   joinNoteLinks,
   isCheckboxTrue
 } from '@shared/database-transforms'
@@ -22,13 +23,15 @@ import type {
   SelectOptionsSource
 } from '@shared/databases'
 
-export { splitMultiSelect, joinMultiSelect, splitNoteLinks, joinNoteLinks, isCheckboxTrue }
+export { splitMultiSelect, joinMultiSelect, splitNoteLinks, noteLinkTitle, joinNoteLinks, isCheckboxTrue }
 // Record-level pure ops moved to shared-domain so the zn CLI shares them (#556).
 export {
   addRow,
+  addRowInView,
   composePageBody,
   deleteRow,
   ensureSelectOption,
+  setSelectOptionColor,
   fieldsById,
   planRecordPages,
   recordPageToAdopt,
@@ -36,7 +39,6 @@ export {
   setCell
 } from '@shared/database-records'
 export type { RecordPagePlan } from '@shared/database-records'
-import { addRow as addRowDoc } from '@shared/database-records'
 
 const genId = defaultGenId
 
@@ -399,25 +401,4 @@ export function removeFromViewPicks(
   const drop = new Set(rowIds)
   const kept = new Set(view.pickedRowIds.filter((id) => !drop.has(id)))
   return setViewPicks(doc, viewId, kept)
-}
-
-/**
- * Add an empty row while `viewId` is the view on screen. In a view with
- * picks the new row joins them, or it would vanish the moment it was made;
- * `picksChanged` then tells the caller the schema changed too (rows-only
- * writes leave schema.json alone).
- */
-export function addRowInView(
-  doc: DatabaseDoc,
-  viewId: string
-): { doc: DatabaseDoc; rowId: string; picksChanged: boolean } {
-  const next = addRowDoc(doc)
-  const rowId = next.rows[next.rows.length - 1].id
-  const view = doc.views.find((v) => v.id === viewId)
-  if (!view || !view.pickedRowIds) return { doc: next, rowId, picksChanged: false }
-  return {
-    doc: updateView(next, viewId, { pickedRowIds: [...view.pickedRowIds, rowId] }),
-    rowId,
-    picksChanged: true
-  }
 }

@@ -77,13 +77,7 @@ fn open_vault(
     state.set_current(Some(vault.clone()));
 
     // (Re)start the filesystem watcher for the newly active vault.
-    match crate::watcher::spawn(app.clone(), resolved.clone()) {
-        Ok(debouncer) => state.set_watcher(Some(debouncer)),
-        Err(err) => {
-            eprintln!("vault watcher failed to start: {err}");
-            state.set_watcher(None);
-        }
-    }
+    state.set_watcher(Some(crate::watcher::spawn(app.clone(), resolved.clone(), true)));
 
     let dir = config_dir(app)?;
     let v = vault.clone();
@@ -375,13 +369,8 @@ pub fn app_open_folder_temporary(
         crate::remote::session::notify_workspace_changed(&app, Some(window.label()));
     }
     state.set_current(Some(vault));
-    match crate::watcher::spawn(app.clone(), resolved.clone()) {
-        Ok(debouncer) => state.set_watcher(Some(debouncer)),
-        Err(err) => {
-            eprintln!("vault watcher failed to start: {err}");
-            state.set_watcher(None);
-        }
-    }
+    // A folder the user only dropped in to read: never settled or changed.
+    state.set_watcher(Some(crate::watcher::spawn(app.clone(), resolved.clone(), false)));
     crate::windows::open_vault_window(&app, &state)?;
     Ok(())
 }

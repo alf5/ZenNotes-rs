@@ -12,6 +12,7 @@ mod code_languages;
 mod custom_css;
 mod deep_links;
 mod external_urls;
+mod imports;
 mod ipc;
 mod link_metadata;
 mod mcp;
@@ -22,6 +23,8 @@ mod secrets;
 mod standalone_links;
 mod state;
 mod tray;
+mod task_reminders;
+mod clip_links;
 mod undo_history;
 mod unsplash;
 mod vault;
@@ -56,6 +59,9 @@ fn app_renderer_ready(app: tauri::AppHandle, state: tauri::State<AppState>) {
         for rel in state.drain_pending_open_notes() {
             let _ = main.emit("app://open-note", rel);
         }
+        for raw in state.drain_pending_clip_links() {
+            let _ = main.emit("app://clip-link", raw);
+        }
     }
 }
 
@@ -85,6 +91,11 @@ pub fn run() {
             for arg in args().filter(|arg| !deep_links::is_deep_link(arg)) {
                 deep_links::handle_url_or_path(app, arg);
             }
+            // A clip raises the window it lands in itself, and a silent one
+            // raises nothing (upstream's second-instance early return).
+            if args().any(|arg| clip_links::is_clip_link(arg)) {
+                return;
+            }
             // Focuses the main window, and shows any the tray is holding (#947).
             tray::on_reopen(app);
         }))
@@ -112,8 +123,18 @@ pub fn run() {
         })
         .manage(AppState::default())
         .manage(tray::TrayState::default())
-        .on_window_event(tray::on_window_event)
+        .on_window_event(|window, event| {
+            tray::on_window_event(window, event);
+            // A window gaining focus is when a person expects to see what
+            // arrived: re-read a vault whose folder cannot report changes.
+            if let tauri::WindowEvent::Focused(true) = event {
+                window.state::<AppState>().rescan_unwatched_vault();
+            }
+        })
         .setup(|app| {
+            // Task reminders (#1036): timed here, so a window hidden in the
+            // tray still reminds.
+            app.manage(task_reminders::start(app.handle()));
             // Saved undo histories (#793) expire and are capped per vault; off
             // the boot path, so a slow sweep never delays the first window.
             undo_history::spawn_prune(app.handle());
@@ -255,6 +276,7 @@ pub fn run() {
             os_cmds::vault_reveal_folder,
             os_cmds::vault_reveal_folder_target,
             os_cmds::vault_reveal_assets_dir,
+            os_cmds::vault_open_in_file_manager,
             os_cmds::vault_reveal_file_path,
             os_cmds::vault_open_external_file,
             os_cmds::devtools_toggle,
@@ -353,7 +375,44 @@ pub fn run() {
             tray::app_set_keep_running_in_tray,
             tray::window_hide_to_tray,
             tray::app_quit,
+            task_reminders::task_reminders_set,
+            clip_links::clip_verified_clipboard_text,
+            clip_links::clip_raise_window,
             tray::app_tray_sync_status,
+            // Imports (Obsidian, Logseq, Notion): src-tauri/src/imports
+            imports::commands::import_status,
+            imports::commands::import_pick,
+            imports::commands::import_adopt,
+            imports::commands::import_begin,
+            imports::commands::import_end,
+            imports::commands::import_report,
+            imports::commands::import_stop,
+            imports::commands::import_dismiss,
+            imports::commands::import_fs_read_dir,
+            imports::commands::import_fs_read_text,
+            imports::commands::import_fs_stat,
+            imports::commands::import_fs_write_text,
+            imports::commands::import_fs_append_text,
+            imports::commands::import_fs_mkdir,
+            imports::commands::import_fs_copy,
+            imports::commands::import_fs_utimes,
+            imports::commands::import_fs_rm,
+            imports::commands::import_fs_rename,
+            imports::commands::import_fs_move_into_vault,
+            imports::commands::import_write_note_created_at,
+            imports::commands::import_notion_download,
+            imports::commands::notion_import_status,
+            imports::commands::notion_import_discard,
+            imports::commands::notion_credentials,
+            imports::commands::notion_token_set,
+            imports::commands::notion_sign_out,
+            imports::commands::notion_sign_in,
+            imports::commands::notion_sign_in_cancel,
+            imports::commands::notion_sign_in_refresh,
+            imports::commands::notion_api_request,
+            imports::commands::notion_mcp_request,
+            imports::commands::notion_import_stand_in,
+            imports::commands::import_notify_if_away,
         ])
         .build(tauri::generate_context!())
         .expect("error while building ZenNotes-rs")

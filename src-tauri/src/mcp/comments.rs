@@ -8,13 +8,12 @@
 //! Anchor offsets are JavaScript string indices (UTF-16 code units), the
 //! unit the app stores them in, so they are converted at the edges here.
 
-use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use super::ops;
+use super::backend::Backend;
 use crate::ipc::types::NoteComment;
 
 #[derive(Debug, Serialize)]
@@ -128,9 +127,9 @@ fn line_of_offset(doc: &[u16], offset: usize) -> usize {
     1 + doc[..offset.min(doc.len())].iter().filter(|u| **u == 10).count()
 }
 
-pub fn list_threads(root: &Path, rel: &str, include_resolved: bool) -> Result<Vec<CommentThreadView>, String> {
-    let note = ops::read_note(root, rel)?;
-    let comments = ops::read_note_comments(root, rel);
+pub fn list_threads(backend: &dyn Backend, rel: &str, include_resolved: bool) -> Result<Vec<CommentThreadView>, String> {
+    let note = backend.read_note(rel)?;
+    let comments = backend.list_comments(rel)?;
     let doc = utf16(&note.body);
     Ok(threads(&comments)
         .into_iter()
@@ -177,15 +176,15 @@ fn as_values(comments: &[NoteComment]) -> Vec<Value> {
     comments.iter().map(|c| serde_json::to_value(c).unwrap_or(Value::Null)).collect()
 }
 
-fn thread_by_id(root: &Path, rel: &str, id: &str, what: &str) -> Result<CommentThreadView, String> {
-    list_threads(root, rel, true)?
+fn thread_by_id(backend: &dyn Backend, rel: &str, id: &str, what: &str) -> Result<CommentThreadView, String> {
+    list_threads(backend, rel, true)?
         .into_iter()
         .find(|t| t.comment.id == id)
         .ok_or_else(|| format!("Thread {id} vanished while {what}"))
 }
 
 pub fn add_comment(
-    root: &Path,
+    backend: &dyn Backend,
     rel: &str,
     body: &str,
     anchor_text: Option<&str>,
@@ -195,22 +194,22 @@ pub fn add_comment(
     if body.is_empty() {
         return Err("body must not be empty".into());
     }
-    let note = ops::read_note(root, rel)?;
+    let note = backend.read_note(rel)?;
     let (start, end, text) = anchor_for_text(&note.body, anchor_text)?;
     let now = now_ms();
-    let mut list = as_values(&ops::read_note_comments(root, rel));
+    let mut list = as_values(&backend.list_comments(rel)?);
     list.push(json!({
         "notePath": rel, "anchorStart": start, "anchorEnd": end, "anchorText": text,
         "body": body, "author": author, "createdAt": now, "updatedAt": now, "resolvedAt": null
     }));
-    let written = ops::write_note_comments(root, rel, &list)?;
+    let written = backend.write_comments(rel, &list)?;
     let created = written
         .iter()
         .find(|c| c.created_at == now && c.body == body)
         .or(written.last())
         .map(|c| c.id.clone())
         .unwrap_or_default();
-    let mut all = list_threads(root, rel, true)?;
+    let mut all = list_threads(backend, rel, true)?;
     match all.iter().position(|t| t.comment.id == created) {
         Some(i) => Ok(all.swap_remove(i)),
         None => all.pop().ok_or_else(|| "The comment was not saved".to_string()),
@@ -221,12 +220,12 @@ fn no_comment(id: &str, rel: &str) -> String {
     format!("No comment with id {id} on {rel}. Use list_comments to find ids.")
 }
 
-pub fn reply_to_comment(root: &Path, rel: &str, id: &str, body: &str, author: &str) -> Result<CommentThreadView, String> {
+pub fn reply_to_comment(backend: &dyn Backend, rel: &str, id: &str, body: &str, author: &str) -> Result<CommentThreadView, String> {
     let body = body.trim();
     if body.is_empty() {
         return Err("body must not be empty".into());
     }
-    let current = ops::read_note_comments(root, rel);
+    let current = backend.list_comments(rel)?;
     let thread_root = thread_root_of(&current, id).ok_or_else(|| no_comment(id, rel))?;
     let now = now_ms();
     let mut list = as_values(&current);
@@ -236,12 +235,12 @@ pub fn reply_to_comment(root: &Path, rel: &str, id: &str, body: &str, author: &s
         "parentId": thread_root.id, "createdAt": now, "updatedAt": now, "resolvedAt": null
     }));
     let root_id = thread_root.id.clone();
-    ops::write_note_comments(root, rel, &list)?;
-    thread_by_id(root, rel, &root_id, "replying")
+    backend.write_comments(rel, &list)?;
+    thread_by_id(backend, rel, &root_id, "replying")
 }
 
-pub fn resolve_comment(root: &Path, rel: &str, id: &str, resolved: bool) -> Result<CommentThreadView, String> {
-    let current = ops::read_note_comments(root, rel);
+pub fn resolve_comment(backend: &dyn Backend, rel: &str, id: &str, resolved: bool) -> Result<CommentThreadView, String> {
+    let current = backend.list_comments(rel)?;
     let root_id = thread_root_of(&current, id).ok_or_else(|| no_comment(id, rel))?.id.clone();
     let now = now_ms();
     let list: Vec<Value> = current
@@ -255,8 +254,8 @@ pub fn resolve_comment(root: &Path, rel: &str, id: &str, resolved: bool) -> Resu
             v
         })
         .collect();
-    ops::write_note_comments(root, rel, &list)?;
-    thread_by_id(root, rel, &root_id, "resolving")
+    backend.write_comments(rel, &list)?;
+    thread_by_id(backend, rel, &root_id, "resolving")
 }
 
 #[cfg(test)]
