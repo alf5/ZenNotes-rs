@@ -19,11 +19,13 @@
  * stands down for this panel except for Ctrl+W and the leader.
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useKeyboardCursor } from '../lib/keyboard-cursor'
 import type { NoteMeta } from '@shared/ipc'
 import { filterTasksForDisplay, inferDailyTaskDueDates, type VaultTask } from '@shared/tasks'
 import { useStore } from '../store'
 import { buildDailyNoteDateByPath } from '../lib/vault-layout'
 import { filterTasks, noteTagsByPath } from '../lib/tasks-filter'
+import { withoutEmptyTasks } from '../lib/empty-tasks'
 import {
   buildTimelineRail,
   timelineDayLabel,
@@ -112,10 +114,12 @@ export function TimelinePanel({
   fitWidth?: number
 }): JSX.Element {
   const notes = useStore((s) => s.notes)
+  const keyCursor = useKeyboardCursor()
   const vaultSettings = useStore((s) => s.vaultSettings)
   const vaultTasks = useStore((s) => s.vaultTasks)
   const tasksLoading = useStore((s) => s.tasksLoading)
   const showArchivedTasks = useStore((s) => s.showArchivedTasks)
+  const hideEmptyTasks = useStore((s) => s.hideEmptyTasks)
   const vimMode = useStore((s) => s.vimMode)
   const keymapOverrides = useStore((s) => s.keymapOverrides)
   const focusedPanel = useStore((s) => s.focusedPanel)
@@ -134,16 +138,18 @@ export function TimelinePanel({
   const today = useToday()
 
   // The same task list every Tasks surface starts from: archived notes out
-  // unless asked for, and a daily note's undated tasks due on its date,
-  // exactly as the calendar panel infers them.
+  // unless asked for, empty tasks out while Hide empty tasks is on (#1026),
+  // and a daily note's undated tasks due on its date, exactly as the
+  // calendar panel infers them. Dropped before the rail is built, so every
+  // count, late day, quiet stretch and milestone tally leaves them out too.
   const dueByPath = useMemo(
     () => buildDailyNoteDateByPath(notes, vaultSettings),
     [notes, vaultSettings]
   )
-  const tasks = useMemo(
-    () => inferDailyTaskDueDates(filterTasksForDisplay(vaultTasks, showArchivedTasks), dueByPath),
-    [vaultTasks, showArchivedTasks, dueByPath]
-  )
+  const tasks = useMemo(() => {
+    const shown = filterTasksForDisplay(vaultTasks, showArchivedTasks)
+    return inferDailyTaskDueDates(hideEmptyTasks ? withoutEmptyTasks(shown).shown : shown, dueByPath)
+  }, [vaultTasks, showArchivedTasks, hideEmptyTasks, dueByPath])
   // A file task also matches the tags written in its note's body (#1008).
   const noteTags = useMemo(() => noteTagsByPath(notes), [notes])
   const filtered = useMemo(() => filterTasks(tasks, filter, noteTags), [tasks, filter, noteTags])
@@ -154,8 +160,8 @@ export function TimelinePanel({
   const notesByPath = useMemo(() => new Map(notes.map((n) => [n.path, n])), [notes])
 
   // The watcher keeps the task list fresh only while a task surface is on
-  // screen (this panel is one), so a panel that has been closed for a while
-  // reads the vault again as it opens.
+  // screen (this panel is one) or reminders need it, so a panel that has been
+  // closed for a while reads the vault again as it opens.
   useEffect(() => {
     const s = useStore.getState()
     const fresh = Date.now() - lastShownAt < RESCAN_AFTER_MS
@@ -426,7 +432,7 @@ export function TimelinePanel({
         </div>
       )
     }
-    const isCursor = panelFocused && index === cursorIdx
+    const isCursor = keyCursor && panelFocused && index === cursorIdx
     return (
       <div
         key={task.id}

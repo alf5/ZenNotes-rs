@@ -72,6 +72,30 @@ export interface CloudSyncState {
   items: Record<string, CloudSyncTrackedItem>
   /** Optional for backward compatibility with state written before v2.44. */
   pending_conflicts?: Record<string, CloudSyncStoredConflict>
+  /** Paths Cloud refused, by path key, set aside so the rest of the vault
+   *  syncs (#1004). Absent in state written before v2.80. */
+  refused_paths?: Record<string, CloudSyncStoredRefusedPath>
+}
+
+/** A path Cloud would not take. Sync offers it again once the retry window
+ *  has passed, since Cloud may have learned to take it. */
+export interface CloudSyncStoredRefusedPath {
+  path: string
+  /** When Cloud last refused it, in milliseconds since the epoch. */
+  refused_at: number
+  /** Cloud's answer, for Details. */
+  detail: string
+  /** The content of the file at the path when its holds were last weighed,
+   *  so a later run can tell whether it is still that file. */
+  sha256?: string
+  /**
+   * Notes Cloud keeps while this path waits, by item id, with the path Cloud
+   * has each at: the note a refused move or upload carried, and for a
+   * refused new file the notes deleted alongside it, any of which it may
+   * have been renamed from. Their deletes wait with the path, so a refusal
+   * never leaves Cloud with neither copy.
+   */
+  kept_items?: Record<string, string>
 }
 
 export interface CloudSyncIdSource {

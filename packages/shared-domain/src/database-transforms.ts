@@ -24,17 +24,25 @@ export function isCheckboxTrue(cell: string): boolean {
   return TRUE_VALUES.has(cell.trim().toLowerCase())
 }
 
+/** What a note link is called on screen: a target may be a whole path, which
+ *  a Board card has no room for. */
+export function noteLinkTitle(target: string): string {
+  const leaf = target.slice(target.lastIndexOf('/') + 1)
+  return leaf.replace(/\.md$/i, '') || target
+}
+
 /**
  * Extract the `[[wikilink]]` targets of a note / noteMulti cell, in order.
  * Bracket-delimited on purpose: unlike multiSelect's comma joins, a target
  * (a note title or path) may itself contain commas. Text outside brackets is
- * ignored, so a hand-edited cell degrades to "whatever links it contains".
+ * ignored, so a hand-edited cell degrades to "whatever links it contains". A
+ * cell pasted from a Markdown table writes the separator as `\|`.
  */
 export function splitNoteLinks(cell: string): string[] {
   const out: string[] = []
-  for (const m of cell.matchAll(/\[\[([^\]|]+)(?:\|[^\]]*)?\]\]/g)) {
+  for (const m of cell.matchAll(/\[\[([^\]|]+?)(?:\\?\|[^\]]*)?\]\]/g)) {
     const target = m[1].trim()
-    if (target) out.push(target)
+    if (target && target !== '\\') out.push(target)
   }
   return out
 }

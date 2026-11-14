@@ -10,7 +10,10 @@ import {
 import { createPortal } from 'react-dom'
 import type { DatabaseDoc, DbField, DbRow, DbView, FieldType, SelectOptionsSource } from '@shared/databases'
 import { viewRows } from '@shared/database-transforms'
+import { useKeyboardCursor } from '../lib/keyboard-cursor'
+import { resolveTemplateFolder } from '@shared/template-folder'
 import { useStore } from '../store'
+import { tagSourceSuggestions } from '../lib/link-candidates'
 import {
   addRowInView,
   setCell,
@@ -48,6 +51,7 @@ import { isOverlayOrDialogOpen } from '../lib/overlay-open'
 import { databaseGridKeyAction } from '../lib/database-grid-keys'
 import { useDatabaseViewCommand } from '../lib/database-view-commands'
 import { useToastStore } from '../lib/toast'
+import { selectOptionChipStyle, selectOptionColor } from '../lib/kanban-column-colors'
 import { resolveWikilinkTarget } from '../lib/wikilinks'
 import { followLinkTarget } from '../lib/follow-link'
 import { NoteSuggestRows, stepSuggestIndex, useNoteSuggestions } from './DatabaseNoteSuggest'
@@ -76,6 +80,7 @@ interface Props {
 
 export function DatabaseTableView({ csvPath, doc, view, isActive, onOpenColumns }: Props): JSX.Element {
   const updateDatabaseRows = useStore((s) => s.updateDatabaseRows)
+  const keyCursor = useKeyboardCursor()
   const updateDatabaseSchema = useStore((s) => s.updateDatabaseSchema)
   const deleteDatabaseRows = useStore((s) => s.deleteDatabaseRows)
   const openRecordPage = useStore((s) => s.openRecordPage)
@@ -106,8 +111,8 @@ export function DatabaseTableView({ csvPath, doc, view, isActive, onOpenColumns 
       )
       return [...dirs].sort().map((value) => ({ value }))
     }
-    const tags = new Set(notes.flatMap((n) => n.tags.map((t) => t.toLowerCase())))
-    return [...tags].sort().map((value) => ({ value }))
+    const templateFolder = resolveTemplateFolder(useStore.getState().vaultSettings)
+    return tagSourceSuggestions(notes, templateFolder).map((value) => ({ value }))
   }, [sourcePrompt])
   const [selected, setSelected] = useState<Set<string>>(new Set())
   // Edit picks: every row shows, the picked ones selected, and the selection
@@ -256,8 +261,12 @@ export function DatabaseTableView({ csvPath, doc, view, isActive, onOpenColumns 
     }))
   }, [rows.length, columns.length])
 
-  // Scroll the active cell into view as it moves.
+  // Scroll the active cell into view as it moves, and only then: on opening, a
+  // first cell wider than a narrow pane would push the select column out of sight.
+  const scrolledTo = useRef(active)
   useEffect(() => {
+    if (scrolledTo.current.row === active.row && scrolledTo.current.col === active.col) return
+    scrolledTo.current = active
     const el = gridRef.current?.querySelector('[data-active-cell="true"]') as HTMLElement | null
     el?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
   }, [active])
@@ -305,6 +314,18 @@ export function DatabaseTableView({ csvPath, doc, view, isActive, onOpenColumns 
       window.removeEventListener('focus', claimFocus)
     }
   }, [isActive, csvPath, focusedPanel])
+
+  /** After a delete from the keyboard (dd, Delete, Backspace): drop rows that
+   *  went from the selection, and give the grid the keyboard back. The view
+   *  is inert while rows are deleted, which drops the grid's focus to the
+   *  body, and the next key would otherwise go nowhere. */
+  const afterRowsDeleted = (): void => {
+    const live = new Set(useStore.getState().databases[csvPath]?.rows.map((row) => row.id))
+    setSelected((prev) => new Set([...prev].filter((id) => live.has(id))))
+    requestAnimationFrame(() => {
+      if (document.activeElement === document.body) gridRef.current?.focus({ preventScroll: true })
+    })
+  }
 
   const onGridKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>): void => {
     if (editing) return // the cell's own input owns keys while editing
@@ -387,7 +408,7 @@ export function DatabaseTableView({ csvPath, doc, view, isActive, onOpenColumns 
         }
         dPending.current = false
         const c = cell()
-        if (c) void deleteDatabaseRows(csvPath, [c.row.id])
+        if (c) void deleteDatabaseRows(csvPath, [c.row.id]).then(afterRowsDeleted)
         return
       }
       case 'edit': {
@@ -462,6 +483,20 @@ export function DatabaseTableView({ csvPath, doc, view, isActive, onOpenColumns 
         e.preventDefault()
         addRowHere()
         setActive((s) => ({ row: rows.length, col: s.col }))
+        return
+      }
+      case 'delete': {
+        // The selected rows, else the one at the cursor, and only after the
+        // confirm: unlike dd, these keys work with Vim mode off and sit next
+        // to text editing. A cancelled confirm keeps the selection. Never
+        // behind a menu or a dialog, and never while editing picks, where the
+        // selection is the view's picks and not rows to delete.
+        if (editingPicks || isOverlayOrDialogOpen()) return
+        const c = cell()
+        const ids = selected.size > 0 ? [...selected] : c ? [c.row.id] : []
+        if (ids.length === 0) return
+        e.preventDefault()
+        void deleteDatabaseRows(csvPath, ids, { confirm: true }).then(afterRowsDeleted)
         return
       }
       case 'escape':
@@ -549,7 +584,7 @@ export function DatabaseTableView({ csvPath, doc, view, isActive, onOpenColumns 
     { label: 'Rename field', onSelect: () => setRenamingField(field.id) },
     ...(Object.keys(FIELD_TYPE_LABELS) as FieldType[]).map((t) => ({
       label: `Type: ${FIELD_TYPE_LABELS[t]}`,
-      hint: field.type === t ? '●' : undefined,
+      mark: field.type === t ? '●' : undefined,
       onSelect: () => updateDatabaseSchema(csvPath, retypeField(doc, field.id, t))
     })),
     // Where a select field's popover discovers options beyond the hand-added
@@ -559,13 +594,13 @@ export function DatabaseTableView({ csvPath, doc, view, isActive, onOpenColumns 
           { kind: 'separator' },
           {
             label: 'Options: manual only',
-            hint: !field.optionsSource ? '●' : undefined,
+            mark: !field.optionsSource ? '●' : undefined,
             onSelect: () =>
               updateDatabaseSchema(csvPath, setFieldOptionsSource(doc, field.id, null))
           },
           {
             label: 'Options: all notes',
-            hint: field.optionsSource?.kind === 'notes' ? '●' : undefined,
+            mark: field.optionsSource?.kind === 'notes' ? '●' : undefined,
             onSelect: () =>
               updateDatabaseSchema(
                 csvPath,
@@ -574,12 +609,12 @@ export function DatabaseTableView({ csvPath, doc, view, isActive, onOpenColumns 
           },
           {
             label: 'Options: notes in folder…',
-            hint: field.optionsSource?.kind === 'folder' ? '●' : undefined,
+            mark: field.optionsSource?.kind === 'folder' ? '●' : undefined,
             onSelect: () => setSourcePrompt({ fieldId: field.id, kind: 'folder' })
           },
           {
             label: 'Options: notes with tag…',
-            hint: field.optionsSource?.kind === 'tag' ? '●' : undefined,
+            mark: field.optionsSource?.kind === 'tag' ? '●' : undefined,
             onSelect: () => setSourcePrompt({ fieldId: field.id, kind: 'tag' })
           }
         ] as ContextMenuItem[])
@@ -677,11 +712,11 @@ export function DatabaseTableView({ csvPath, doc, view, isActive, onOpenColumns 
         <table className="w-full border-collapse text-sm">
           <thead className="sticky top-0 z-10 bg-paper-100">
             <tr className="border-b border-paper-300/70">
-              <th className="group/sa w-10 border-r border-paper-300/40 align-middle">
+              <th className="group/sa w-10 min-w-10 border-r border-paper-300/40 align-middle">
                 <div
                   className={[
                     'flex items-center justify-center',
-                    anySelected ? '' : 'opacity-0 group-hover/sa:opacity-100'
+                    anySelected ? '' : 'zn-hover-reveal opacity-0 group-hover/sa:opacity-100'
                   ].join(' ')}
                 >
                   <DbCheckbox checked={allSelected} onChange={toggleAll} title="Select all" />
@@ -724,7 +759,7 @@ export function DatabaseTableView({ csvPath, doc, view, isActive, onOpenColumns 
                 }}
                 className={[
                   'group/h min-w-32 max-w-[420px] border-r border-paper-300/40 px-2.5 py-2 text-left text-2xs font-medium uppercase tracking-wide text-ink-500',
-                  active.row < 0 && active.col === colIndex ? 'ring-2 ring-inset ring-accent' : '',
+                  keyCursor && active.row < 0 && active.col === colIndex ? 'ring-2 ring-inset ring-accent' : '',
                   // Drop indicator: the dragged column lands *before* this one.
                   dragOverFieldId === field.id ? 'border-l-2 border-l-accent bg-accent/5' : ''
                 ].join(' ')}
@@ -761,7 +796,7 @@ export function DatabaseTableView({ csvPath, doc, view, isActive, onOpenColumns 
                     </button>
                     <IconButton
                       size="sm"
-                      className="opacity-0 group-hover/h:opacity-100"
+                      className="zn-hover-reveal opacity-0 group-hover/h:opacity-100"
                       title="Field options"
                       onClick={(e) => {
                         const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
@@ -793,11 +828,11 @@ export function DatabaseTableView({ csvPath, doc, view, isActive, onOpenColumns 
                   isSel ? 'bg-accent/8' : 'hover:bg-paper-200/30'
                 ].join(' ')}
               >
-                <td className="w-10 border-r border-paper-300/40 align-middle">
+                <td className="w-10 min-w-10 border-r border-paper-300/40 align-middle">
                   <div
                     className={[
                       'flex items-center justify-center',
-                      isSel || anySelected ? '' : 'opacity-0 group-hover/row:opacity-100'
+                      isSel || anySelected ? '' : 'zn-hover-reveal opacity-0 group-hover/row:opacity-100'
                     ].join(' ')}
                   >
                     <DbCheckbox checked={isSel} onChange={() => toggleRow(row.id)} title="Select row" />
@@ -809,7 +844,7 @@ export function DatabaseTableView({ csvPath, doc, view, isActive, onOpenColumns 
                     // #335: cap the column so a long Text value truncates instead
                     // of stretching the column to fill the table.
                     'relative max-w-[420px] border-r border-paper-300/40 p-0 align-top',
-                    isActive ? 'ring-2 ring-inset ring-accent' : ''
+                    isActive && keyCursor ? 'ring-2 ring-inset ring-accent' : ''
                   ].join(' ')
                   // Keep keyboard focus on the grid container (not the inner
                   // button) so vim motions keep working; sync active to the click.
@@ -879,7 +914,7 @@ export function DatabaseTableView({ csvPath, doc, view, isActive, onOpenColumns 
                           openPage(row.id)
                         }}
                         title="Open page"
-                        className="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-1 rounded-md border border-paper-300 bg-paper-100 px-2 py-1 text-2xs font-medium text-ink-600 opacity-0 shadow-sm transition hover:border-paper-400 hover:text-ink-900 group-hover/row:opacity-100"
+                        className="zn-hover-only absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-1 rounded-md border border-paper-300 bg-paper-100 px-2 py-1 text-2xs font-medium text-ink-600 opacity-0 shadow-sm transition hover:border-paper-400 hover:text-ink-900 group-hover/row:opacity-100"
                       >
                         <ArrowUpRightIcon className="h-3 w-3" /> Open
                       </button>
@@ -1180,14 +1215,21 @@ function SelectCell({ field, value, editing, onStartEdit, onEndEdit, onCommit }:
       {selected.length === 0 ? (
         <span className="text-ink-400">None</span>
       ) : (
-        selected.map((v) => (
-          <span
-            key={v}
-            className="rounded-full bg-accent/15 px-2 py-0.5 text-2xs font-medium text-accent ring-1 ring-accent/30"
-          >
-            {optionLabel(field, v)}
-          </span>
-        ))
+        selected.map((v) => {
+          const color = selectOptionColor(field, v)
+          return (
+            <span
+              key={v}
+              style={color ? (selectOptionChipStyle(color) as React.CSSProperties) : undefined}
+              className={[
+                'rounded-full px-2 py-0.5 text-2xs font-medium ring-1',
+                color ? '' : 'bg-accent/15 text-accent ring-accent/30'
+              ].join(' ')}
+            >
+              {optionLabel(field, v)}
+            </span>
+          )
+        })
       )}
     </div>
   )

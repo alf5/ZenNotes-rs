@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useKeyboardCursor } from '../lib/keyboard-cursor'
 import { isTagsViewActive, useStore } from '../store'
 import type { NoteMeta } from '@shared/ipc'
 import type { TagBlock } from '@shared/tag-blocks'
@@ -11,6 +12,7 @@ import {
   type TagViewRow
 } from '../lib/tag-view-rows'
 import { resolveTypstPreambleFolder } from '../lib/typst-preamble'
+import { resolveTemplateFolder } from '@shared/template-folder'
 import { TagIcon, CloseIcon, DocumentIcon } from './icons'
 import { ContextMenu, type ContextMenuItem } from './ContextMenu'
 import { TaggedBlockText } from './TaggedBlockText'
@@ -21,9 +23,11 @@ import {
   listViewSequencesLive,
   listViewYieldsKey
 } from '../lib/list-view-keys'
+import { noteAreaLabel } from '../lib/system-folder-labels'
 import { isPrimaryNotesAtRoot, noteFolderSubpath } from '../lib/vault-layout'
 import { isImeComposing } from '../lib/ime'
 import { isAppOverlayOpen } from '../lib/overlay-open'
+import { excerptBesideTitle } from '../lib/note-excerpt'
 
 // Every action this view answers, so a chord bound to one reaches it.
 const TAG_VIEW_ACTIONS: readonly KeymapId[] = [
@@ -50,20 +54,22 @@ function formatDate(ms: number): string {
 }
 
 function folderLabel(note: NoteMeta): string {
-  const vaultSettings = useStore.getState().vaultSettings
+  const { vaultSettings, systemFolderLabels } = useStore.getState()
   const subpath = noteFolderSubpath(note, vaultSettings)
-  if (note.folder === 'inbox' && isPrimaryNotesAtRoot(vaultSettings)) {
-    return subpath
-  }
-  return subpath ? `${note.folder} › ${subpath}` : note.folder
+  const area = noteAreaLabel(note.folder, isPrimaryNotesAtRoot(vaultSettings), systemFolderLabels)
+  if (!area) return subpath
+  return subpath ? `${area} › ${subpath}` : area
 }
 
 export function TagView(): JSX.Element {
   const notes = useStore((s) => s.notes)
+  const keyCursor = useKeyboardCursor()
   const activeNote = useStore((s) => s.activeNote)
   const preambleFolder = useStore((s) =>
     resolveTypstPreambleFolder(s.vaultSettings?.typstPreambles?.folder)
   )
+  // Template notes give the Tags view nothing (#1024), as they give search.
+  const templateFolder = useStore((s) => resolveTemplateFolder(s.vaultSettings))
   const selectedTags = useStore((s) => s.selectedTags)
   const tagMatchMode = useStore((s) => s.tagMatchMode)
   const setTagMatchMode = useStore((s) => s.setTagMatchMode)
@@ -112,12 +118,12 @@ export function TagView(): JSX.Element {
     const counter = new Map<string, number>()
     for (const note of notes) {
       if (note.folder === 'trash') continue
-      for (const t of noteTagsForCount(note, activeNote, preambleFolder)) {
+      for (const t of noteTagsForCount(note, activeNote, preambleFolder, templateFolder)) {
         counter.set(t, (counter.get(t) ?? 0) + 1)
       }
     }
     return [...counter.entries()].sort((a, b) => a[0].localeCompare(b[0]))
-  }, [notes, activeNote, preambleFolder])
+  }, [notes, activeNote, preambleFolder, templateFolder])
 
   // Nested-tag tree (#439). Shares the collapsed-node set with the sidebar so
   // expand/collapse stays in sync across both surfaces.
@@ -137,11 +143,11 @@ export function TagView(): JSX.Element {
     return notes
       .filter((n) => {
         if (n.folder === 'trash') return false
-        const tags = noteTagsForCount(n, activeNote, preambleFolder)
+        const tags = noteTagsForCount(n, activeNote, preambleFolder, templateFolder)
         return matchesSelectedTags(tags, selectedTags, tagMatchMode)
       })
       .sort((a, b) => b.updatedAt - a.updatedAt)
-  }, [notes, activeNote, selectedTags, tagMatchMode, preambleFolder])
+  }, [notes, activeNote, selectedTags, tagMatchMode, preambleFolder, templateFolder])
 
   // Block-level results (#837): the blocks inside each matching note that
   // carry a selected tag, read on demand for the listed notes only.
@@ -504,7 +510,7 @@ export function TagView(): JSX.Element {
           <input
             ref={filterRef}
             type="text"
-            placeholder="Filter…  /  to focus"
+            placeholder={vimMode ? 'Filter…  /  to focus' : 'Filter…'}
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
             onKeyDown={(e) => {
@@ -679,7 +685,7 @@ export function TagView(): JSX.Element {
           </div>
         ) : (
           rows.map((row, i) => {
-            const isCursor = i === cursorIndex
+            const isCursor = keyCursor && i === cursorIndex
             if (row.kind === 'block') {
               const { note, block } = row
               return (
@@ -732,14 +738,16 @@ export function TagView(): JSX.Element {
                   <div className="truncate text-sm text-current/90">
                     {note.title || '(untitled)'}
                   </div>
-                  <div className="mt-0.5 truncate text-xs text-current/50">
-                    {folderLabel(note) || note.folder}
-                  </div>
+                  {folderLabel(note) && (
+                    <div className="mt-0.5 truncate text-xs text-current/50">
+                      {folderLabel(note)}
+                    </div>
+                  )}
                   {/* The tagged blocks listed below say more than the opening
                       of the note, so the excerpt only shows without them. */}
-                  {note.excerpt && row.blockCount === 0 && (
+                  {excerptBesideTitle(note.title, note.excerpt) && row.blockCount === 0 && (
                     <div className="mt-0.5 truncate text-xs text-current/40">
-                      {note.excerpt}
+                      {excerptBesideTitle(note.title, note.excerpt)}
                     </div>
                   )}
                 </div>

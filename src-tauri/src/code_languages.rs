@@ -16,7 +16,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use notify_debouncer_full::notify::{RecursiveMode, Watcher};
 use notify_debouncer_full::{new_debouncer, DebounceEventResult};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
@@ -206,11 +205,7 @@ pub fn spawn_watcher(app: AppHandle) -> Result<Vec<VaultDebouncer>, String> {
         },
     )
     .map_err(|e| format!("Failed to create watcher: {e}"))?;
-    debouncer
-        .watcher()
-        .watch(&dir, RecursiveMode::Recursive)
-        .map_err(|e| format!("Failed to watch {}: {e}", dir.display()))?;
-    debouncer.cache().add_root(&dir, RecursiveMode::Recursive);
+    crate::watcher::watch_config_dir(&mut debouncer, &dir)?;
     Ok(vec![debouncer])
 }
 

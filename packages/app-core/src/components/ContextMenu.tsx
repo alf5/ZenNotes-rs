@@ -2,14 +2,19 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useStore } from '../store'
 import { CheckIcon, SearchIcon } from './icons'
+import { IconButton } from './ui/Button'
 
 export interface ContextMenuItem {
   kind?: 'item' | 'separator'
   label?: string
   /** Optional SVG icon to the left of the label. */
   icon?: JSX.Element
-  /** Right-aligned hint, e.g. a keyboard shortcut. */
+  /** Right-aligned keyboard shortcut. A touch-first device (a phone) has no
+   *  keyboard to press it on, so the menu leaves it out there. */
   hint?: string
+  /** Right-aligned text that is not a key, shown on every device: the dot
+   *  beside the current choice, a date, why an item is unavailable. */
+  mark?: string
   /** Displayed in muted red (used for destructive actions). */
   danger?: boolean
   disabled?: boolean
@@ -19,6 +24,16 @@ export interface ContextMenuItem {
   /** More words the filter finds the item by (aliases), besides its label. */
   keywords?: string[]
   onSelect?: () => void | Promise<void>
+  /** A second thing to do with this row, without picking it: a small button at
+   *  its end that shows on hover and under the cursor, and Shift+Enter. It works
+   *  on a disabled row too, whose own action is what is unavailable. */
+  rowAction?: {
+    label: string
+    icon: JSX.Element
+    /** The key that runs it, drawn on the cursor's row. */
+    hint?: string
+    onSelect: () => void | Promise<void>
+  }
 }
 
 interface Props {
@@ -82,6 +97,7 @@ export function ContextMenu({ x, y, items, title, findPlaceholder, anchorTop, on
   const [activeIdx, setActiveIdx] = useState<number>(0)
   const [query, setQuery] = useState('')
   const vimMode = useStore((s) => s.vimMode)
+  const keyHints = !coarsePointer()
 
   // Build the filtered list. Each entry knows its original index so
   // reorder / filter doesn't lose the onSelect wiring.
@@ -140,7 +156,9 @@ export function ContextMenu({ x, y, items, title, findPlaceholder, anchorTop, on
   // Take the keyboard as the menu mounts, so a key pressed before the next
   // frame cannot reach whatever held focus (the calendar panel, after a
   // keyboard drop), and again on that frame in case the event that opened the
-  // menu moves focus after mount (#850). Closing hands focus back.
+  // menu moves focus after mount (#850). That frame only takes focus back from
+  // outside: a `/` pressed before it has already moved to the find field.
+  // Closing hands focus back.
   //
   // A menu with a find field gives it the keyboard when letters are text,
   // that is with Vim off; with Vim on the list keeps it, where j and k move
@@ -151,6 +169,7 @@ export function ContextMenu({ x, y, items, title, findPlaceholder, anchorTop, on
       findPlaceholder && !useStore.getState().vimMode && !coarsePointer() ? findRef.current : ref.current
     target()?.focus({ preventScroll: true })
     const id = requestAnimationFrame(() => {
+      if (ref.current?.contains(document.activeElement)) return
       target()?.focus({ preventScroll: true })
     })
     return () => {
@@ -234,6 +253,11 @@ export function ContextMenu({ x, y, items, title, findPlaceholder, anchorTop, on
       e.preventDefault()
       e.stopPropagation()
       const entry = visible[visibleActive]
+      if (e.shiftKey && entry?.item.rowAction) {
+        onClose()
+        void Promise.resolve(entry.item.rowAction.onSelect())
+        return
+      }
       if (entry && entry.item.kind !== 'separator' && !entry.item.disabled) {
         onClose()
         void Promise.resolve(entry.item.onSelect?.())
@@ -320,7 +344,14 @@ export function ContextMenu({ x, y, items, title, findPlaceholder, anchorTop, on
             )
           }
           const active = i === visibleActive
-          return (
+          // The cursor's highlight is for the keyboard, like the key hints: a
+          // phone opened every menu with its first row lit. The cursor itself
+          // stays, so a keyboard attached later still starts there.
+          const lit = active && keyHints
+          const rowAction = item.rowAction
+          const rightText =
+            item.mark ?? (keyHints ? item.hint ?? (lit ? rowAction?.hint : undefined) : undefined)
+          const row = (
             <button
               key={`${originalIdx}-${item.label}`}
               role={item.checked === undefined ? 'menuitem' : 'menuitemradio'}
@@ -334,14 +365,15 @@ export function ContextMenu({ x, y, items, title, findPlaceholder, anchorTop, on
                 void Promise.resolve(item.onSelect?.())
               }}
               className={[
-                'flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-sm transition-colors',
+                'flex w-full items-center gap-2 rounded-md py-1.5 pl-2.5 text-left text-sm transition-colors',
+                rowAction ? 'pr-9' : 'pr-2.5',
                 item.disabled
                   ? 'cursor-default text-ink-400'
                   : item.danger
-                    ? active
+                    ? lit
                       ? 'bg-red-500/90 text-white'
                       : 'text-[rgb(var(--z-red))] hover:bg-red-500/10'
-                    : active
+                    : lit
                       ? 'bg-paper-200 text-ink-900'
                       : 'text-ink-800 hover:bg-paper-200/70'
               ].join(' ')}
@@ -350,20 +382,49 @@ export function ContextMenu({ x, y, items, title, findPlaceholder, anchorTop, on
               <span className="flex-1 truncate">
                 {highlightMatch(item.label ?? '', query)}
               </span>
-              {item.hint && (
+              {rightText && (
                 <span
                   className={[
                     'shrink-0 text-xs',
-                    active && !item.danger ? 'text-ink-600' : 'text-ink-400'
+                    lit && !item.danger ? 'text-ink-600' : 'text-ink-400'
                   ].join(' ')}
                 >
-                  {item.hint}
+                  {rightText}
                 </span>
               )}
               {item.checked && (
                 <CheckIcon width={14} height={14} className="shrink-0 text-ink-600" />
               )}
             </button>
+          )
+          if (!rowAction) return row
+          // Beside the row, not in it: a button cannot hold a button. The hover
+          // lives here because a disabled row sends no mouse events of its own.
+          return (
+            <div
+              key={`${originalIdx}-${item.label}`}
+              className="group relative"
+              onMouseEnter={() => setVisibleActive(i)}
+            >
+              {row}
+              <IconButton
+                size="sm"
+                aria-label={rowAction.label}
+                title={rowAction.hint ? `${rowAction.label} (${rowAction.hint})` : rowAction.label}
+                onClick={() => {
+                  onClose()
+                  void Promise.resolve(rowAction.onSelect())
+                }}
+                className={[
+                  'absolute right-0.5 top-1/2 -translate-y-1/2',
+                  lit || !keyHints
+                    ? ''
+                    : 'opacity-0 focus-visible:opacity-100 group-hover:opacity-100'
+                ].join(' ')}
+              >
+                {rowAction.icon}
+              </IconButton>
+            </div>
           )
         })
       )}

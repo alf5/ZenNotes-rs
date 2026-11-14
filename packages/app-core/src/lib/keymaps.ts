@@ -56,6 +56,7 @@ export type KeymapId =
   | "vim.leaderPrefix"
   | "vim.leaderOpenBuffers"
   | "vim.leaderWorkflows"
+  | "vim.leaderImport"
   | "vim.leaderCloudConflicts"
   | "vim.leaderAtlas"
   | "vim.leaderSearchNotes"
@@ -64,6 +65,7 @@ export type KeymapId =
   | "vim.leaderToggleSidebar"
   | "vim.leaderNoteOutline"
   | "vim.leaderSwitchVault"
+  | "vim.leaderOpenVaultFolder"
   | "vim.leaderNoteActions"
   | "vim.leaderFormatNote"
   | "vim.leaderCopyMarkdown"
@@ -84,6 +86,7 @@ export type KeymapId =
   | "vim.leaderTimeline"
   | "vim.leaderUnresolvedLinks"
   | "vim.leaderFolderGallery"
+  | "vim.leaderNewKanban"
   | "vim.panePrefix"
   | "vim.paneFocusLeft"
   | "vim.paneFocusDown"
@@ -609,6 +612,18 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     maxTokens: 1,
   },
   {
+    id: "vim.leaderImport",
+    kind: "sequence",
+    scope: "leader",
+    group: "vim",
+    title: "Leader: import notes",
+    // Lowercase `i` already inserts a template.
+    description: "Open the Import window.",
+    defaultBinding: "I",
+    vimOnly: true,
+    maxTokens: 1,
+  },
+  {
     id: "vim.leaderCloudConflicts",
     kind: "sequence",
     scope: "leader",
@@ -684,6 +699,17 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     title: "Leader: switch vault",
     description: "Open the command palette vault switcher.",
     defaultBinding: "v",
+    vimOnly: true,
+    maxTokens: 1,
+  },
+  {
+    id: "vim.leaderOpenVaultFolder",
+    kind: "sequence",
+    scope: "leader",
+    group: "vim",
+    title: "Leader: open vault in file manager",
+    description: "Open the current vault's folder in Finder, File Explorer or your file manager.",
+    defaultBinding: "F",
     vimOnly: true,
     maxTokens: 1,
   },
@@ -920,6 +946,18 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     description:
       "Open the Gallery of the current folder: its notes as cards led by their covers. The folder under the sidebar cursor while the sidebar has focus, otherwise the open note's folder.",
     defaultBinding: "G",
+    vimOnly: true,
+    maxTokens: 1,
+  },
+  {
+    id: "vim.leaderNewKanban",
+    kind: "sequence",
+    scope: "leader",
+    group: "vim",
+    title: "Leader: new Kanban",
+    description:
+      "Create a Kanban board, a database with To do / Doing / Done columns, and open it. In the folder under the sidebar cursor while the sidebar has focus, otherwise where new databases go.",
+    defaultBinding: "k",
     vimOnly: true,
     maxTokens: 1,
   },
@@ -1439,7 +1477,7 @@ const KEYMAP_DEFINITIONS: KeymapDefinition[] = [
     group: "view-actions",
     title: "Move sidebar note to Trash",
     description:
-      "With the sidebar focused, move the note under its cursor to the Trash after a confirm, or every selected note when the selection includes that row. Works with Vim mode on or off.",
+      "With the sidebar focused, move the note under its cursor to the Trash after a confirm, or every selected note when the selection includes that row. Works with Vim mode on or off. The Delete key does the same (Backspace too on a phone or tablet); unbinding this turns them off.",
     defaultBinding: "Mod+Backspace",
   },
   {

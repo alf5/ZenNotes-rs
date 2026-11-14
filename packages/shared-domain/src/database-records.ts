@@ -159,8 +159,62 @@ export function addRow(doc: DatabaseDoc): DatabaseDoc {
   return { ...doc, rows: [...doc.rows, row] }
 }
 
+/**
+ * Add an empty row while `viewId` is the view being looked at. In a view with
+ * picks the new row joins them, or it would vanish the moment it was made;
+ * `picksChanged` then tells the caller the schema changed too (rows-only
+ * writes leave schema.json alone). The grid passes the view on screen, and
+ * `zn base add` the database's active view.
+ */
+export function addRowInView(
+  doc: DatabaseDoc,
+  viewId: string
+): { doc: DatabaseDoc; rowId: string; picksChanged: boolean } {
+  const next = addRow(doc)
+  const rowId = next.rows[next.rows.length - 1].id
+  const picked = doc.views.find((v) => v.id === viewId)?.pickedRowIds
+  if (!picked) return { doc: next, rowId, picksChanged: false }
+  return {
+    doc: {
+      ...next,
+      views: next.views.map((v) => (v.id === viewId ? { ...v, pickedRowIds: [...picked, rowId] } : v))
+    },
+    rowId,
+    picksChanged: true
+  }
+}
+
 export function deleteRow(doc: DatabaseDoc, rowId: string): DatabaseDoc {
   return { ...doc, rows: doc.rows.filter((r) => r.id !== rowId) }
+}
+
+/**
+ * Give a select option a palette color, or take it off with `null`. The color
+ * lives on the option, in schema.json, so it travels with the database and every
+ * Board and Table draws the same one. A column can show a value no option names
+ * yet (a hand-edited CSV), so the option is made if it's missing.
+ */
+export function setSelectOptionColor(
+  doc: DatabaseDoc,
+  fieldId: string,
+  value: string,
+  color: string | null
+): DatabaseDoc {
+  const withOption = ensureSelectOption(doc, fieldId, value)
+  return {
+    ...withOption,
+    fields: withOption.fields.map((f) => {
+      if (f.id !== fieldId) return f
+      return {
+        ...f,
+        options: (f.options ?? []).map((option) => {
+          if (option.value !== value.trim().replace(/,/g, ' ')) return option
+          const { color: _old, ...rest } = option
+          return color ? { ...rest, color } : rest
+        })
+      }
+    })
+  }
 }
 
 export function ensureSelectOption(doc: DatabaseDoc, fieldId: string, rawValue: string): DatabaseDoc {

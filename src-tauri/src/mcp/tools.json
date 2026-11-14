@@ -5,6 +5,11 @@
     "inputSchema": {
       "type": "object",
       "properties": {}
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -29,7 +34,7 @@
         },
         "tag": {
           "type": "string",
-          "description": "Only return notes that contain this #tag."
+          "description": "Only return notes that contain this #tag. Notes in the vault’s template folder are left out."
         },
         "wikilinkTo": {
           "type": "string",
@@ -44,6 +49,11 @@
           "description": "Cap the number of notes returned. Default: 200."
         }
       }
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -52,14 +62,29 @@
     "inputSchema": {
       "type": "object",
       "properties": {}
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
     "name": "list_assets",
-    "description": "List files under the vault’s attachments directory (images, PDFs, audio, video, other binaries). Useful when a note references an asset you need to inspect.",
+    "description": "List the vault’s attachments: every file that is not a note, wherever it is (images, PDFs, audio, video, other binaries). Useful when a note references an asset you need to inspect. With deleted: true, lists the attachments in the app's Trash instead, with the undoToken restore_asset takes.",
     "inputSchema": {
       "type": "object",
-      "properties": {}
+      "properties": {
+        "deleted": {
+          "type": "boolean",
+          "description": "List deleted attachments instead."
+        }
+      }
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -76,6 +101,11 @@
       "required": [
         "path"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -97,6 +127,12 @@
         "path",
         "body"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -127,6 +163,12 @@
           "description": "Initial markdown body. Defaults to \"# <title>\\n\\n\"."
         }
       }
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -146,6 +188,12 @@
         "path",
         "newTitle"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -175,6 +223,12 @@
         "path",
         "targetFolder"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -190,6 +244,12 @@
       "required": [
         "path"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -205,6 +265,12 @@
       "required": [
         "path"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -220,6 +286,12 @@
       "required": [
         "path"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -236,6 +308,12 @@
       "required": [
         "confirm"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -255,6 +333,12 @@
         "path",
         "confirm"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -270,6 +354,12 @@
       "required": [
         "path"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -285,6 +375,12 @@
       "required": [
         "path"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -309,6 +405,12 @@
         "folder",
         "subpath"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -337,6 +439,12 @@
         "oldSubpath",
         "newSubpath"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -365,11 +473,17 @@
         "subpath",
         "confirm"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
     "name": "search_text",
-    "description": "Full-text search across live notes (inbox/quick/archive). Returns line-level matches with path, line number, and preview. Cheap first step when the user says \"find\" or \"where did I write\".",
+    "description": "Full-text search across live notes (inbox/quick/archive), leaving out the vault’s template folder. Returns line-level matches with path, line number, and preview. Cheap first step when the user says \"find\" or \"where did I write\".",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -383,6 +497,11 @@
       "required": [
         "query"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -401,11 +520,16 @@
       "required": [
         "query"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
     "name": "search_by_tag",
-    "description": "Find notes carrying a specific inline #tag. Tags are case-insensitive; pass the name with or without the leading #.",
+    "description": "Find notes carrying a specific inline #tag. Tags are case-insensitive; pass the name with or without the leading #. Notes in the vault’s template folder are left out.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -419,14 +543,24 @@
       "required": [
         "tag"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
     "name": "list_tags",
-    "description": "Enumerate every #tag used in the vault (excluding trash) with the count of notes carrying it.",
+    "description": "Enumerate every #tag used in the vault (excluding trash and the template folder) with the count of notes carrying it.",
     "inputSchema": {
       "type": "object",
       "properties": {}
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -443,6 +577,11 @@
       "required": [
         "path"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -498,25 +637,36 @@
         },
         "includeExcluded": {
           "type": "boolean",
-          "description": "Also scan notes opted out of Tasks (frontmatter `tasks: false` / `tasks: note`), folders on the vault's excluded list, and notes outside its Task folders. Default false: excluded tasks are invisible."
+          "description": "Also scan notes opted out of Tasks (frontmatter `tasks: false` / `tasks: note`), folders on the vault's excluded list, its template folder, and notes outside its Task folders. Default false: excluded tasks are invisible."
         }
       }
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
     "name": "toggle_task",
-    "description": "Flip a task’s checkbox state using its stable id from list_tasks (\"<path>#<index>\"). Returns the updated task, or null if the id no longer matches a task (content drifted).",
+    "description": "Flip a task’s checkbox state using its id from list_tasks (\"<path>#<index>\"). An id counts the task’s position in its note, so list_tasks again after that note changes. Finishing a task with `@repeat:` writes its next occurrence above it and returns the finished one under its new id. Returns the updated task, or null if the id no longer matches a task.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "id": {
           "type": "string",
-          "description": "Stable task id: sourcePath#taskIndex."
+          "description": "Task id: sourcePath#taskIndex."
         }
       },
       "required": [
         "id"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -537,6 +687,12 @@
         "path",
         "text"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -556,6 +712,12 @@
         "path",
         "text"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -580,6 +742,12 @@
         "lineNumber",
         "text"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -611,6 +779,12 @@
         "find",
         "replace"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -631,6 +805,11 @@
       "required": [
         "path"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -660,6 +839,12 @@
         "path",
         "body"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -690,6 +875,12 @@
         "id",
         "body"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -715,6 +906,334 @@
         "path",
         "id"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "read_asset",
+    "description": "Read an attachment from list_assets: an image comes back as an image you can see, text as text, anything else (PDF, audio, video) as an embedded file. Files up to 5 MiB.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Vault-relative path exactly as list_assets returned it."
+        }
+      },
+      "required": [
+        "path"
+      ]
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "upload_asset",
+    "description": "Add a file to the vault's assets folder from base64 (up to 16 MiB), never overwriting: a taken name gets a number. Returns its `path` and `markdown`, the embed or link to paste into a note with append_to_note or edit_section.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "filename": {
+          "type": "string",
+          "description": "File name with its extension, such as plot.png."
+        },
+        "content_base64": {
+          "type": "string",
+          "description": "The file's bytes as base64."
+        }
+      },
+      "required": [
+        "filename",
+        "content_base64"
+      ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "rename_asset",
+    "description": "Rename an attachment in place. Notes that embed or link it are updated to the new name; `linksNotUpdated` lists any it could not read or write, which may still use the old name, so fix those by hand. Names holding # ? | [ ] ^ or % are refused, since links could not reach the file.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string",
+          "description": "New file name with its extension, no folder."
+        }
+      },
+      "required": [
+        "path",
+        "name"
+      ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "move_asset",
+    "description": "Move an attachment to another folder, creating it if needed. Notes that embed or link it are updated; `linksNotUpdated` lists any it could not read or write, which may still use the old name. A taken name gets a number, so use the returned `path`.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "targetDir": {
+          "type": "string",
+          "description": "Vault-relative folder, such as assets/plots."
+        }
+      },
+      "required": [
+        "path",
+        "targetDir"
+      ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "duplicate_asset",
+    "description": "Copy an attachment next to itself with a \" copy\" suffix.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "delete_asset",
+    "description": "Soft-delete an attachment: it leaves the vault for the app's Trash and restore_asset brings it back. Keep the returned undoToken. Notes keep their links to it, so check them first with search_text.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "restore_asset",
+    "description": "Bring back a deleted attachment to where it was, using the undoToken from delete_asset or list_assets with deleted: true. A taken name gets a number, so use the returned `path`.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "undoToken": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "undoToken"
+      ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "update_task",
+    "description": "Change a task by its id from list_tasks: due date, priority, @waiting, state, status (Kanban column) or text. Only what you pass changes; pass \"\" to clear due, priority or status. The task stays where it is, and the rest of the note keeps its bytes, except that state done on a task with `@repeat:` writes its next occurrence above it, as toggle_task does, and returns the finished one. An id counts the task's position in its note, so pass expectedText to be told when an edit moved it. On a task note, state, status and waiting are one field: pass only one. Returns the updated task, or null if the id no longer matches one.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Task id from list_tasks: sourcePath#taskIndex."
+        },
+        "due": {
+          "type": "string",
+          "description": "YYYY-MM-DD, or \"\" to clear."
+        },
+        "priority": {
+          "type": "string",
+          "enum": [
+            "high",
+            "med",
+            "low",
+            ""
+          ],
+          "description": "\"\" clears it."
+        },
+        "waiting": {
+          "type": "boolean"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "open",
+            "done",
+            "in-progress",
+            "cancelled"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "description": "The column a Kanban board groups it under, one word, or \"\" to clear."
+        },
+        "text": {
+          "type": "string",
+          "description": "Replaces everything after the checkbox, one line, due and priority tokens included. Not for a task note: use rename_note."
+        },
+        "expectedText": {
+          "type": "string",
+          "description": "The task's content from list_tasks. If it no longer reads this, nothing changes and the call fails."
+        }
+      },
+      "required": [
+        "id"
+      ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "daily_note",
+    "description": "Find the daily note for a date (or the weekly or monthly note holding it) under this vault's own folder and naming settings, which you cannot guess. Changes nothing. If `exists`, use its `path`. If not, pass `createWith` to create_note as it is, which starts the note from the vault's template, and use the `path` create_note returns. `cannotCreate` means this assistant may not create it. `enabled: false` means the user has this kind of note turned off, so ask before creating one.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "daily",
+            "weekly",
+            "monthly"
+          ],
+          "description": "Default: daily."
+        },
+        "date": {
+          "type": "string",
+          "description": "today, yesterday, tomorrow or YYYY-MM-DD. Default: today."
+        }
+      }
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "note_sections",
+    "description": "Read a note by its headings. Without `heading`: its outline, every heading with its level and lines, for long notes and for finding where to edit. With `heading`: the text under that heading, subheadings included, so you need not read the whole note. Lines are zero-based, as in insert_at_line; endLineNumber is exclusive.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "heading": {
+          "type": "string",
+          "description": "Heading text, any case, without the #s."
+        },
+        "lineNumber": {
+          "type": "number",
+          "description": "The heading's line, from the outline, when its text appears more than once."
+        }
+      },
+      "required": [
+        "path"
+      ]
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "edit_section",
+    "description": "Edit the part of a note under one heading: `append` (the usual choice, such as a new item under Action Items; it goes above any subheading), `prepend`, or `replace`, which rewrites everything under the heading, subheadings included. The heading and the rest of the note keep their text. Fails with the note's headings if there is no such heading.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "heading": {
+          "type": "string",
+          "description": "Heading text, any case, without the #s."
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "append",
+            "prepend",
+            "replace"
+          ]
+        },
+        "text": {
+          "type": "string",
+          "description": "Markdown. Empty only with replace, to clear the section."
+        },
+        "lineNumber": {
+          "type": "number",
+          "description": "The heading's line, from note_sections, when its text appears more than once."
+        }
+      },
+      "required": [
+        "path",
+        "heading",
+        "mode",
+        "text"
+      ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   }
 ]

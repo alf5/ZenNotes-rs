@@ -8,13 +8,9 @@ import {
   type KeymapOverrides
 } from '../lib/keymaps'
 import {
-  HELP_CLI,
-  HELP_CORE_CONCEPTS,
-  HELP_HOW_TO_GUIDES,
-  HELP_QUICK_START,
-  HELP_SETTINGS,
-  HELP_SHORTCUT_SECTIONS,
-  HELP_VIM_COMMANDS
+  helpForHost,
+  type HelpSettingsSection,
+  type HelpShortcutSection
 } from '../lib/help'
 import { parseHelpKeys } from '../lib/help-keys'
 import { helpSearchText, renderHelpRichText } from '../lib/help-rich-text'
@@ -105,6 +101,8 @@ function resolveShortcutKeys(
     if (action === 'Toggle timeline') return leaderShortcut(overrides, 'vim.leaderTimeline')
     if (action === 'Unresolved links') return leaderShortcut(overrides, 'vim.leaderUnresolvedLinks')
     if (action === 'Folder gallery') return leaderShortcut(overrides, 'vim.leaderFolderGallery')
+    if (action === 'New Kanban') return leaderShortcut(overrides, 'vim.leaderNewKanban')
+    if (action === 'Open vault folder') return leaderShortcut(overrides, 'vim.leaderOpenVaultFolder')
     if (action === 'Callout type') {
       return chord(
         leaderShortcut(overrides, 'vim.leaderNoteActions'),
@@ -119,6 +117,7 @@ function resolveShortcutKeys(
     }
     if (action === 'Switch vault') return leaderShortcut(overrides, 'vim.leaderSwitchVault')
     if (action === 'Open workflows') return leaderShortcut(overrides, 'vim.leaderWorkflows')
+    if (action === 'Import notes') return leaderShortcut(overrides, 'vim.leaderImport')
     if (action === 'Review Cloud conflicts') {
       return leaderShortcut(overrides, 'vim.leaderCloudConflicts')
     }
@@ -215,6 +214,7 @@ function resolveVimCommandLabel(command: string, overrides: KeymapOverrides): st
   if (command === '<Space> e') return leaderShortcut(overrides, 'vim.leaderToggleSidebar')
   if (command === '<Space> p') return leaderShortcut(overrides, 'vim.leaderNoteOutline')
   if (command === '<Space> v') return leaderShortcut(overrides, 'vim.leaderSwitchVault')
+  if (command === '<Space> F') return leaderShortcut(overrides, 'vim.leaderOpenVaultFolder')
   return command
 }
 
@@ -270,35 +270,52 @@ export function HelpView(): JSX.Element {
   const [query, setQuery] = useState('')
   const deferredQuery = useDeferredValue(query.trim().toLowerCase())
 
-  const allCommands = buildCommands({ includeUnavailable: true })
+  const appInfo = window.zen.getAppInfo()
+  // A phone or tablet shell borrows a desktop system's key names (Android's
+  // read as Linux's), which is not the system in the reader's hands.
+  const keysShownFor =
+    appInfo.hostKind === 'ios' || appInfo.hostKind === 'android'
+      ? 'a hardware keyboard'
+      : platformLabel
+  // The reference lists commands whatever is open. The desktop app lists them
+  // all, as the manual does; elsewhere it keeps what this host has, by the
+  // `host` rule the palette applies.
+  const allCommands = buildCommands({ includeUnavailable: true }).filter(
+    (command) => appInfo.runtime === 'desktop' || !command.host || command.host()
+  )
+  const supportsWorkflows = window.zen.getCapabilities().supportsWorkflows
+  const manual = useMemo(
+    () => helpForHost({ runtime: appInfo.runtime, hostKind: appInfo.hostKind, supportsWorkflows }),
+    [appInfo.runtime, appInfo.hostKind, supportsWorkflows]
+  )
 
   const quickStart = useMemo(
     () =>
-      HELP_QUICK_START.filter((card) =>
+      manual.quickStart.filter((card) =>
         matchesQuery(deferredQuery, card.title, card.body)
       ),
-    [deferredQuery]
+    [deferredQuery, manual]
   )
 
   const coreConcepts = useMemo(
     () =>
-      HELP_CORE_CONCEPTS.filter((card) =>
+      manual.concepts.filter((card) =>
         matchesQuery(deferredQuery, card.title, card.body)
       ),
-    [deferredQuery]
+    [deferredQuery, manual]
   )
 
   const howToGuides = useMemo(
     () =>
-      HELP_HOW_TO_GUIDES.filter((card) =>
+      manual.howTo.filter((card) =>
         matchesQuery(deferredQuery, card.title, card.body)
       ),
-    [deferredQuery]
+    [deferredQuery, manual]
   )
 
   const shortcutSections = useMemo(
     () =>
-      HELP_SHORTCUT_SECTIONS.map((section) => {
+      manual.shortcuts.map((section) => {
         const items = section.items.filter((item) =>
           matchesQuery(
             deferredQuery,
@@ -322,13 +339,13 @@ export function HelpView(): JSX.Element {
           }
         }
         return null
-      }).filter((section): section is (typeof HELP_SHORTCUT_SECTIONS)[number] => !!section),
-    [deferredQuery, keymapOverrides]
+      }).filter((section): section is HelpShortcutSection => !!section),
+    [deferredQuery, keymapOverrides, manual]
   )
 
   const vimCommands = useMemo(
     () =>
-      HELP_VIM_COMMANDS.filter((command) =>
+      manual.vim.filter((command) =>
         matchesQuery(
           deferredQuery,
           resolveVimCommandLabel(command.command, keymapOverrides),
@@ -339,12 +356,12 @@ export function HelpView(): JSX.Element {
         ...command,
         command: resolveVimCommandLabel(command.command, keymapOverrides)
       })),
-    [deferredQuery, keymapOverrides]
+    [deferredQuery, keymapOverrides, manual]
   )
 
   const settingsSections = useMemo(
     () =>
-      HELP_SETTINGS.map((section) => {
+      manual.settings.map((section) => {
         const items = section.items.filter((item) =>
           matchesQuery(deferredQuery, section.title, item.label, item.detail)
         )
@@ -352,14 +369,14 @@ export function HelpView(): JSX.Element {
           return { ...section, items }
         }
         return null
-      }).filter((section): section is (typeof HELP_SETTINGS)[number] => !!section),
-    [deferredQuery]
+      }).filter((section): section is HelpSettingsSection => !!section),
+    [deferredQuery, manual]
   )
 
   const cliCards = useMemo(
     () =>
-      HELP_CLI.filter((card) => matchesQuery(deferredQuery, card.title, card.body)),
-    [deferredQuery]
+      manual.cli.filter((card) => matchesQuery(deferredQuery, card.title, card.body)),
+    [deferredQuery, manual]
   )
 
   const commandGroups = useMemo(() => {
@@ -515,7 +532,7 @@ export function HelpView(): JSX.Element {
           <SectionShell
             id="help-shortcuts"
             title="Keyboard Shortcuts"
-            subtitle={`Keys are shown for ${platformLabel}, as you have them bound. Vim keys like Ctrl-w are the same on every system.`}
+            subtitle={`Keys are shown for ${keysShownFor}, as you have them bound. Vim keys like Ctrl-w are the same on every system.`}
           >
             <div className="space-y-10">
               {shortcutSections.map((section) => (

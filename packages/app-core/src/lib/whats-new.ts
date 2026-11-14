@@ -40,6 +40,149 @@ export const CLOUD_ANNOUNCEMENT = {
 
 export const WHATS_NEW: readonly WhatsNewEntry[] = [
   {
+    version: '2.85.0',
+    highlights: [
+      {
+        title: 'The ZenNotes Web Clipper',
+        body: 'Clip a page, a selection or your highlights from Chrome, Edge, Firefox or Safari into a clean Markdown note. The extension hands the note to ZenNotes, with no account and no server in between.'
+      },
+      {
+        title: 'Clip into the note you choose',
+        body: 'Start a new note in Clippings or any folder, add to the top or bottom of a note you have, or add to today’s daily note. A note that is open keeps your unsaved typing, and undo takes the clip back out.'
+      }
+    ]
+  },
+  {
+    version: '2.84.0',
+    highlights: [
+      {
+        title: 'Import from Logseq',
+        body: 'Run Import from Logseq… from the palette and pick your graph. Pages become notes, journals become daily notes, and tasks, links and assets come with them.'
+      },
+      {
+        title: 'Reminders see every change',
+        body: 'A task written by a script or a sync tool now reminds you on time, even when no Tasks view is open.'
+      },
+      {
+        title: 'Folded headings stay folded',
+        body: 'Pasting, pressing Enter or Vim’s o and p below a folded heading puts the new lines under its section, and the fold stays where it was.'
+      }
+    ]
+  },
+  {
+    version: '2.83.0',
+    highlights: [
+      {
+        title: 'Import from Notion and Obsidian',
+        body: 'Sign in with Notion and pick your pages, or point at an Obsidian vault. Run Import Notes from the palette, or choose it during setup. Your notes stay plain Markdown files.'
+      },
+      {
+        title: 'Open a vault in your file manager',
+        body: 'Space F opens the current vault’s folder. In the vault switcher, Shift+Enter or the row’s button opens any of them.'
+      },
+      {
+        title: 'Kanban columns can have a color',
+        body: 'Press C on a column in New Kanban, or use its menu, to pick from your theme’s palette.'
+      },
+      {
+        title: 'The Delete key moves a note to the Trash',
+        body: 'With the sidebar focused, Delete asks first, then moves the note or your whole selection, Vim mode on or off.'
+      },
+      {
+        title: 'Vaults on network folders keep up',
+        body: 'On a Windows network share or mapped drive, new notes now appear on their own, and within moments of switching back to the window.'
+      },
+      {
+        title: 'Assistants can work with attachments',
+        body: 'Connected assistants can read, upload, rename and move attachments, and notes that link to a file follow it. A self-hosted server can also offer them a built-in /mcp endpoint.'
+      },
+      {
+        title: 'Safer assistant access',
+        body: 'Path limits for assistants now hold on vaults with linked files and folders, and a server that changes vault stops calls instead of writing to the wrong one. If you use zn or path limits with a server, update it to 2.82.1 or later.'
+      }
+    ]
+  },
+  {
+    version: '2.81.1',
+    highlights: [
+      {
+        title: 'Databases in a narrow pane',
+        body: '+ Row and the header menu stay on screen, and a Table with a long name opens at its first column. On a touch screen, a row no longer hides the end of its name behind Open.'
+      }
+    ]
+  },
+  {
+    version: '2.81.0',
+    highlights: [
+      {
+        title: 'Recurring tasks and reminders',
+        body: 'Add @repeat:weekly to a task and checking it off brings the next one back, subtasks and all. @remind:1d sends a desktop reminder. r and R in Tasks.'
+      },
+      {
+        title: 'A Kanban board for any folder',
+        body: 'Right-click a folder and choose New Kanban: a board of its own with To do, Doing and Done. Space k in Vim mode.'
+      },
+      {
+        title: 'Colors for Kanban columns',
+        body: 'Give a column a color from its menu, or C in Vim mode, drawn in your theme’s own shade.'
+      },
+      {
+        title: 'Pick folders, don’t type them',
+        body: 'Every Settings field that names a folder lists your vault’s folders as you type.'
+      },
+      {
+        title: 'Lists keep their bullets together',
+        body: 'Enter opens the next bullet right below, even after a blank line between the first two.'
+      },
+      {
+        title: 'zn’s settings stay put',
+        body: 'Saving settings no longer drops what only zn uses from config.toml. The bundled zn is 0.14.0.'
+      }
+    ]
+  },
+  {
+    version: '2.80.1',
+    highlights: [
+      {
+        title: 'No white square in dark themes',
+        body: 'Where a view scrolls both ways, like the board with lanes or a wide database, the corner between its scrollbars no longer shows a white square.'
+      }
+    ]
+  },
+  {
+    version: '2.80.0',
+    highlights: [
+      {
+        title: 'Swimlanes on the board',
+        body: 'Split the Kanban board into rows by priority, folder, tag or any @field, from the View menu. Drag a card to another lane to change that field. S in Vim mode.'
+      },
+      {
+        title: 'Subtasks fold into their card',
+        body: 'A task’s indented subtasks sit inside its Kanban card, with a progress bar. Check them off from the card; Tab steps onto them.'
+      },
+      {
+        title: 'WIP limits',
+        body: 'Give a Kanban column a limit from its menu, or W in Vim mode. Past the limit, the column turns red.'
+      },
+      {
+        title: 'Quieter Tasks views',
+        body: 'Empty - [ ] placeholders stay out of the Tasks views, the Calendar and Timeline panels and the home view. Options live in one View menu, and Keys lists the shortcuts.'
+      },
+      {
+        title: 'A template folder',
+        body: 'Keep templates as notes in a folder of your vault, the way Obsidian does: Settings, Templates. Their checkboxes stay out of Tasks.'
+      },
+      {
+        title: 'Share part of a vault with an assistant',
+        body: 'Launch MCP with --allow-path, --deny-path or --read-only and it sees only what you share. The bundled zn is 0.13.1.'
+      },
+      {
+        title: 'Cloud keeps syncing past a file it refuses',
+        body: 'One file Cloud won’t take stays on this device while the rest syncs, and Settings, Cloud says what to do with it.'
+      }
+    ]
+  },
+  {
     version: '2.79.0',
     highlights: [
       {

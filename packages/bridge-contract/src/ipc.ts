@@ -90,6 +90,7 @@ export const IPC = {
   VAULT_FETCH_LINK_METADATA: 'vault:fetch-link-metadata',
   VAULT_REVEAL_FOLDER_TARGET: 'vault:reveal-folder-target',
   VAULT_REVEAL_ASSETS_DIR: 'vault:reveal-assets-dir',
+  VAULT_OPEN_IN_FILE_MANAGER: 'vault:open-in-file-manager',
   VAULT_SCAN_TASKS: 'vault:scan-tasks',
   VAULT_SCAN_TASKS_FOR: 'vault:scan-tasks-for',
   VAULT_OPEN_DATABASE: 'vault:open-database',
@@ -104,6 +105,10 @@ export const IPC = {
   APP_OPEN_SETTINGS: 'app:open-settings',
   APP_OPEN_EXTERNAL_URL: 'app:open-external-url',
   APP_OPEN_NOTE_REQUESTED: 'app:open-note-requested',
+  /** A clip link for this window's vault (main -> renderer). */
+  APP_CLIP_REQUESTED: 'app:clip-requested',
+  /** A clip outcome main reports itself (main -> renderer). */
+  APP_CLIP_NOTICE: 'app:clip-notice',
   APP_FRAME_ESCAPE: 'app:frame-escape',
   APP_RENDERER_READY: 'app:renderer-ready',
   APP_ZOOM_IN: 'app:zoom-in',
@@ -112,6 +117,29 @@ export const IPC = {
   APP_UPDATER_GET_STATE: 'app-updater:get-state',
   APP_UPDATER_CHECK: 'app-updater:check',
   APP_USAGE_COUNT: 'app:usage-count',
+  OBSIDIAN_IMPORT_STATUS: 'obsidian-import:status',
+  OBSIDIAN_IMPORT_PICK: 'obsidian-import:pick',
+  OBSIDIAN_IMPORT_START: 'obsidian-import:start',
+  OBSIDIAN_IMPORT_STOP: 'obsidian-import:stop',
+  OBSIDIAN_IMPORT_DISMISS: 'obsidian-import:dismiss',
+  OBSIDIAN_IMPORT_ON_PROGRESS: 'obsidian-import:on-progress',
+  LOGSEQ_IMPORT_STATUS: 'logseq-import:status',
+  LOGSEQ_IMPORT_PICK: 'logseq-import:pick',
+  LOGSEQ_IMPORT_START: 'logseq-import:start',
+  LOGSEQ_IMPORT_STOP: 'logseq-import:stop',
+  LOGSEQ_IMPORT_DISMISS: 'logseq-import:dismiss',
+  LOGSEQ_IMPORT_ON_PROGRESS: 'logseq-import:on-progress',
+  NOTION_IMPORT_STATUS: 'notion-import:status',
+  NOTION_IMPORT_SAVE_TOKEN: 'notion-import:save-token',
+  NOTION_IMPORT_SIGN_IN: 'notion-import:sign-in',
+  NOTION_IMPORT_CANCEL_SIGN_IN: 'notion-import:cancel-sign-in',
+  NOTION_IMPORT_SIGN_OUT: 'notion-import:sign-out',
+  NOTION_IMPORT_TREE: 'notion-import:tree',
+  NOTION_IMPORT_TREE_CHILDREN: 'notion-import:tree-children',
+  NOTION_IMPORT_START: 'notion-import:start',
+  NOTION_IMPORT_STOP: 'notion-import:stop',
+  NOTION_IMPORT_DISCARD: 'notion-import:discard',
+  NOTION_IMPORT_ON_PROGRESS: 'notion-import:on-progress',
   UNSPLASH_SEARCH: 'unsplash:search',
   UNSPLASH_TRACK_DOWNLOAD: 'unsplash:track-download',
   UNSPLASH_KEY_STATUS: 'unsplash:key-status',
@@ -183,6 +211,8 @@ export const IPC = {
   APP_GET_KEEP_RUNNING_IN_TRAY: 'app:get-keep-running-in-tray',
   APP_SET_KEEP_RUNNING_IN_TRAY: 'app:set-keep-running-in-tray',
   APP_TRAY_SYNC_STATUS: 'app:tray-sync-status',
+  TASK_REMINDERS_SET: 'tasks:set-reminders',
+  TASK_REMINDER_OPEN: 'tasks:reminder-open',
   WINDOW_HIDE_TO_TRAY: 'window:hide-to-tray',
   APP_QUIT: 'app:quit',
   APP_READ_EXTERNAL_FILE: 'app:read-external-file',
@@ -436,7 +466,7 @@ export interface FileLocationSetting {
    *  the note you're viewing; `folder` → the `folder` subfolder of the primary
    *  location. */
   mode: FileLocationMode
-  /** Vault-relative subfolder used when `mode === 'folder'`, e.g. `assets/drawings`. */
+  /** Subfolder of the primary notes area used when `mode === 'folder'`, e.g. `Drawings`. */
   folder?: string
 }
 export const DEFAULT_FILE_LOCATION: FileLocationSetting = { mode: 'primary' }
@@ -654,6 +684,17 @@ export interface VaultSettings {
    * string so later preamble settings land beside it without another migration.
    */
   typstPreambles?: { folder?: string }
+  /**
+   * The template folder (#1024). `folder` is a vault-relative directory path
+   * exactly as it exists on disk (the Tasks folder lists' shape), such as
+   * `Templates`. Every note inside it, at any depth, is a template in the
+   * picker, beside the built-ins and `.zennotes/templates/`, and is left out
+   * of Tasks and of search. Absent means no template folder. Normalized by
+   * `normalizeTemplateFolderSettings` in shared-domain; a self-hosted server
+   * keeps it from 2.80 (`supportsTemplateFolder`). An object rather than a
+   * bare string so later template settings land beside it.
+   */
+  templates?: { folder?: string }
   /**
    * Harper grammar checker data that belongs to the vault: the words added to
    * its dictionary and the context hashes of ignored suggestions (digit
@@ -995,6 +1036,11 @@ export interface ServerCapabilities {
    *  keeps Default shares location hidden and the Share sheet says Quick
    *  Notes for a vault on such a server. */
   supportsSharesLocation?: boolean
+  /** vault.json's `templates.folder` survives the server's settings round
+   *  trip, and the server leaves that folder out of its task scan and text
+   *  search. Absent before 2.80, whose settings save drops it, so Settings
+   *  keeps the Template folder row hidden for a vault on such a server. */
+  supportsTemplateFolder?: boolean
 }
 
 export interface ServerSessionStatus {

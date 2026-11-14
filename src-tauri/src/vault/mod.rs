@@ -12,6 +12,7 @@ pub mod layout;
 pub mod listing;
 pub mod metadata;
 pub mod notes;
+pub mod seeded_inbox;
 pub mod settings;
 pub mod sidecars;
 pub mod templates;

@@ -17,7 +17,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use super::{ops, tasks};
+use super::backend::Backend;
+use super::tasks;
 use crate::vault::sidecars::{read_agent_edit_text, write_agent_edit_text};
 
 const AGENT_EDIT_RECORD_VERSION: u64 = 1;
@@ -56,10 +57,9 @@ pub struct Record {
 fn recorded_note(tool: &str, args: &Map<String, Value>) -> Option<String> {
     let arg = |key: &str| args.get(key).and_then(Value::as_str).filter(|s| !s.trim().is_empty());
     match tool {
-        "write_note" | "append_to_note" | "prepend_to_note" | "insert_at_line" | "replace_in_note" => {
-            arg("path").map(str::to_string)
-        }
-        "toggle_task" => tasks::split_task_id(arg("id")?).ok().map(|(rel, _)| rel),
+        "write_note" | "append_to_note" | "prepend_to_note" | "insert_at_line" | "replace_in_note"
+        | "edit_section" => arg("path").map(str::to_string),
+        "toggle_task" | "update_task" => tasks::split_task_id(arg("id")?).ok().map(|(rel, _)| rel),
         _ => None,
     }
 }
@@ -139,28 +139,32 @@ fn write_record(root: &Path, rel: &str, record: Option<&Record>) -> Result<(), S
     write_agent_edit_text(root, rel, text.as_deref())
 }
 
-fn note_text(root: &Path, rel: &str) -> Option<String> {
-    ops::read_note(root, rel).ok().map(|n| n.body)
+fn note_text(backend: &dyn Backend, rel: &str) -> Option<String> {
+    backend.read_note(rel).ok().map(|n| n.body)
 }
 
 /// Run a tool, recording its edit when it rewrites a note. Recording never
 /// stands in the way of the edit the user asked for: if the record cannot be
 /// written, the tool still runs and the change is simply not offered for
 /// review. Callers serialize tool calls, so two edits never race on a record.
+/// The note is read through the call's backend, so a scope applies here too,
+/// and the record belongs to the note however the client spelled its path.
 pub fn run_recording<T>(
     tool: &str,
     args: &Map<String, Value>,
-    root: &Path,
+    backend: &dyn Backend,
     agent: &str,
     run: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
-    let Some(rel) = recorded_note(tool, args) else { return run() };
+    let Some(named) = recorded_note(tool, args) else { return run() };
     if !review_agent_edits_enabled() {
         return run();
     }
+    let rel = backend.read_note(&named).map(|n| n.meta.path).unwrap_or(named);
+    let root: &Path = &super::ops::abs_root(backend.root());
     // Not a note we can read (the tool reports its own error), or one too
     // large to keep copies of.
-    let Some(before) = note_text(root, &rel).filter(|t| t.len() <= MAX_AGENT_EDIT_NOTE_BYTES) else {
+    let Some(before) = note_text(backend, &rel).filter(|t| t.len() <= MAX_AGENT_EDIT_NOTE_BYTES) else {
         return run();
     };
     let existing = read_agent_edit_text(root, &rel).as_deref().and_then(parse_record);
@@ -170,7 +174,7 @@ pub fn run_recording<T>(
         return run();
     }
     let result = run();
-    let after = note_text(root, &rel);
+    let after = note_text(backend, &rel);
     let finished = match after {
         // Nothing changed (no match, a task that moved, a failed write): the
         // record goes back to what it was.

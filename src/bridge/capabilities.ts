@@ -29,6 +29,13 @@ import type { ZenCapabilities } from '@zennotes/bridge-contract/bridge'
  *    records an assistant leaves through `zennotes-rs mcp`; see
  *    src/bridge/agent-edits.ts
  *  - supportsEncryptedBackupArchive — absent: cloud backups are out of scope
+ *
+ * The v2.85 additions:
+ *  - supportsTemplateFolder       — on: vault.json's `templates.folder` survives
+ *    a settings save (src-tauri/src/vault/settings.rs) and its notes stay out
+ *    of Tasks and search (#1024)
+ *  - supportsImport               — on: Obsidian, Logseq and Notion into the
+ *    local vault (src/bridge/imports, src-tauri/src/imports)
  */
 export const TAURI_CAPABILITIES: ZenCapabilities = {
   supportsUpdater: false,
@@ -38,10 +45,12 @@ export const TAURI_CAPABILITIES: ZenCapabilities = {
   supportsRemoteWorkspace: true,
   supportsCliInstall: false,
   supportsCustomTemplates: true,
+  supportsTemplateFolder: true,
   supportsCloudSync: false,
   supportsCustomCodeLanguages: true,
   supportsWorkflows: true,
   supportsHarper: true,
   supportsUndoFile: true,
-  supportsAgentEditReview: true
+  supportsAgentEditReview: true,
+  supportsImport: true
 }

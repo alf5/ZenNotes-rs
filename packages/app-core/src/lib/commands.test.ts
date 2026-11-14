@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 function installZen(): void {
   Object.defineProperty(window, 'zen', {
@@ -34,6 +34,82 @@ async function loadCommands() {
 beforeEach(() => {
   vi.restoreAllMocks()
   installZen()
+})
+
+describe('the Go commands', () => {
+  // Revealing focuses the sidebar with retries, on timers that must not outlive the
+  // test's window: there is no sidebar here for them to settle on.
+  const focusRetriesDone = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 250))
+
+  afterEach(focusRetriesDone)
+
+  const note = {
+    path: 'inbox/One.md',
+    title: 'One',
+    folder: 'inbox',
+    body: '# One',
+    siblingOrder: 0
+  }
+
+  function arrange(useStore: {
+    setState: (s: never) => void
+    getState: () => { vaultSettings: object }
+  }): void {
+    useStore.setState({
+      vault: { root: '/v', name: 'v' },
+      selectedPath: note.path,
+      activeNote: note,
+      sidebarOpen: true,
+      unifiedSidebar: true,
+      noteListOpen: false,
+      collapsedFolders: ['inbox:', 'Other:'],
+      vaultSettings: { ...useStore.getState().vaultSettings, primaryNotesLocation: 'inbox' }
+    } as never)
+  }
+
+  it.each([
+    ['nav.assets', 'openAssetsView'],
+    ['nav.folder.quick', 'openQuickNotesView'],
+    ['nav.folder.archive', 'openArchiveView'],
+    ['nav.folder.trash', 'openTrashView']
+  ])('%s opens its page and leaves the open note alone until it does', async (id, opener) => {
+    const { buildCommands, useStore } = await loadCommands()
+    arrange(useStore)
+    const open = vi.fn(async () => {})
+    useStore.setState({ [opener]: open } as never)
+    await buildCommands().find((c) => c.id === id)!.run()
+    expect(open).toHaveBeenCalledTimes(1)
+    expect(useStore.getState().activeNote?.path).toBe(note.path)
+    expect(useStore.getState().selectedPath).toBe(note.path)
+  })
+
+  it('nav.folder.inbox opens the row in the sidebar and keeps the open note', async () => {
+    const { buildCommands, useStore } = await loadCommands()
+    arrange(useStore)
+    await buildCommands().find((c) => c.id === 'nav.folder.inbox')!.run()
+    const state = useStore.getState()
+    expect(state.activeNote?.path).toBe(note.path)
+    expect(state.selectedPath).toBe(note.path)
+    expect(state.collapsedFolders).toEqual(['Other:'])
+    expect(state.focusedPanel).toBe('sidebar')
+  })
+
+  it('nav.folder.inbox still shows the folder in the note list layout', async () => {
+    const { buildCommands, useStore } = await loadCommands()
+    arrange(useStore)
+    useStore.setState({ unifiedSidebar: false, noteListOpen: true } as never)
+    await buildCommands().find((c) => c.id === 'nav.folder.inbox')!.run()
+    expect(useStore.getState().view).toEqual({ kind: 'folder', folder: 'inbox', subpath: '' })
+  })
+
+  it('nav.folder.inbox is not offered in a vault that keeps its notes at the root', async () => {
+    const { buildCommands, useStore } = await loadCommands()
+    arrange(useStore)
+    useStore.setState({
+      vaultSettings: { ...useStore.getState().vaultSettings, primaryNotesLocation: 'root' }
+    } as never)
+    expect(buildCommands().some((c) => c.id === 'nav.folder.inbox')).toBe(false)
+  })
 })
 
 describe('vault commands', () => {
@@ -731,5 +807,65 @@ describe('Go Back and Go Forward keys', () => {
     const shown = new Map(buildCommands({ includeUnavailable: true }).map((c) => [c.id, c.shortcut ?? '']))
     expect(shown.get('nav.back')).toBe(getKeymapDisplay(overrides, 'global.historyBack'))
     expect(shown.get('nav.forward')).toBe(getKeymapDisplay(overrides, 'global.historyForward'))
+  })
+})
+
+describe('commands a host does not have', () => {
+  const note = { path: 'inbox/One.md', title: 'One', folder: 'inbox', body: '# One', siblingOrder: 0 }
+  const HOST_ONLY = [
+    'app.check-updates',
+    'app.hideToTray',
+    'app.quit',
+    'view.zoom.in',
+    'view.zoom.out',
+    'view.zoom.reset',
+    'note.float',
+    'note.export-pdf',
+    'app.whatsNew'
+  ]
+
+  async function onHost(appInfo: { runtime: string; hostKind?: string }) {
+    vi.mocked(window.zen.getAppInfo).mockReturnValue(appInfo as never)
+    Object.assign(window.zen, { quitApp: vi.fn() })
+    const loaded = await loadCommands()
+    const { useTrayStore } = await import('./tray-runtime')
+    useTrayStore.setState({ keepRunningInTray: true })
+    loaded.useStore.setState({ vault: { root: '/v', name: 'v' }, activeNote: note, selectedPath: note.path } as never)
+    return loaded
+  }
+
+  it.each(['ios', 'android'])('stay out of the palette, keys and Help on %s, a note open or not', async (hostKind) => {
+    const { buildCommands } = await onHost({ runtime: 'web', hostKind })
+    const palette = buildCommands().map((c) => c.id)
+    const all = buildCommands({ includeUnavailable: true })
+    for (const id of HOST_ONLY) {
+      expect(palette).not.toContain(id)
+      const command = all.find((c) => c.id === id)!
+      expect(command.host?.()).toBe(false)
+      expect(command.when?.()).toBe(false)
+    }
+    // A bound key says the host lacks it, not that a note is missing.
+    expect(all.find((c) => c.id === 'note.float')!.unavailableReason?.()).toBe(
+      "Open in Floating Window isn't available here"
+    )
+    // What only wants a note keeps its host.
+    expect(all.find((c) => c.id === 'fold.heading')!.host).toBeUndefined()
+    // A tap on a sidebar row hands the keyboard to the editor, so this is how a
+    // hardware keyboard reaches the sidebar's keys (its Delete / Backspace).
+    expect(palette).toContain('nav.focus.sidebar')
+  })
+
+  it('stay where they were on the desktop app', async () => {
+    const { buildCommands } = await onHost({ runtime: 'desktop', hostKind: 'desktop' })
+    const palette = buildCommands().map((c) => c.id)
+    for (const id of HOST_ONLY) expect(palette).toContain(id)
+  })
+
+  it('leave the tray to its switch on the desktop app', async () => {
+    const { buildCommands } = await onHost({ runtime: 'desktop', hostKind: 'desktop' })
+    const { useTrayStore } = await import('./tray-runtime')
+    useTrayStore.setState({ keepRunningInTray: false })
+    expect(buildCommands().map((c) => c.id)).not.toContain('app.hideToTray')
+    expect(buildCommands({ includeUnavailable: true }).map((c) => c.id)).toContain('app.hideToTray')
   })
 })

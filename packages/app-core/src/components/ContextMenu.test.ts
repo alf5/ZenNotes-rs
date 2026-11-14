@@ -312,10 +312,220 @@ describe('ContextMenu with a find field (#1014)', () => {
     expect(rows()).toEqual(['Java', 'JavaScript', 'JSON'])
   })
 
+  // The menu takes the keyboard again on the frame after it opens (#850). A `/`
+  // that landed before that frame lost the field to it: a CI runner pressed it
+  // inside the first frame.
+  it('leaves the field its focus when / lands before the menu’s next frame', async () => {
+    const frames: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => frames.push(callback))
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    useStore.setState({ vimMode: true })
+    await render()
+    await act(async () => keydown(menuEl(), '/'))
+    expect(document.activeElement).toBe(field())
+    await act(async () => frames.splice(0).forEach((callback) => callback(0)))
+    expect(document.activeElement).toBe(field())
+  })
+
+  it('still takes the keyboard back on its next frame when focus left the menu (#850)', async () => {
+    const frames: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => frames.push(callback))
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    const elsewhere = document.createElement('button')
+    document.body.append(elsewhere)
+    try {
+      useStore.setState({ vimMode: true })
+      await render()
+      elsewhere.focus()
+      await act(async () => frames.splice(0).forEach((callback) => callback(0)))
+      expect(document.activeElement).toBe(menuEl())
+    } finally {
+      elsewhere.remove()
+    }
+  })
+
   it('opens on the list on a touch screen, so no keyboard covers it', async () => {
     vi.stubGlobal('matchMedia', (query: string) => ({ matches: query === '(pointer: coarse)' }))
     await render()
     expect(document.activeElement).toBe(menuEl())
     expect(field()).not.toBeNull()
+  })
+})
+
+describe('ContextMenu key hints on a touch-first device', () => {
+  let host: HTMLDivElement
+  let root: Root
+  const original = Object.getOwnPropertyDescriptor(window, 'matchMedia')
+
+  const pointer = (coarse: boolean): void => {
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: (query: string) => ({ matches: coarse && query === '(pointer: coarse)', addEventListener() {}, removeEventListener() {} })
+    })
+  }
+  const sides = async (): Promise<string[]> => {
+    await act(async () =>
+      root.render(
+        createElement(ContextMenu, {
+          x: 10,
+          y: 10,
+          items: [
+            { label: 'Open page', hint: 'Enter', onSelect: () => {} },
+            { label: 'Text', mark: '●', onSelect: () => {} },
+            { label: 'Due today', mark: '2026-11-01', hint: 'never shown', onSelect: () => {} }
+          ],
+          onClose: () => {}
+        })
+      )
+    )
+    // The menu portals into document.body, not into host.
+    return [...document.querySelectorAll('[data-ctx-menu] button')].map(
+      (button) => button.lastElementChild?.textContent ?? ''
+    )
+  }
+
+  beforeEach(() => {
+    ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+    host = document.createElement('div')
+    document.body.append(host)
+    root = createRoot(host)
+  })
+
+  afterEach(() => {
+    act(() => root.unmount())
+    host.remove()
+    if (original) Object.defineProperty(window, 'matchMedia', original)
+    else delete (window as { matchMedia?: unknown }).matchMedia
+  })
+
+  it('shows key hints and marks where there is a keyboard', async () => {
+    pointer(false)
+    expect(await sides()).toEqual(['Enter', '●', '2026-11-01'])
+  })
+
+  it('leaves the key hints out on a phone and keeps the marks', async () => {
+    pointer(true)
+    expect(await sides()).toEqual(['Open page', '●', '2026-11-01'])
+  })
+
+  it('lights the cursor row only where there is a keyboard', async () => {
+    const lit = (): number =>
+      [...document.querySelectorAll('[data-ctx-menu] button')].filter((b) => b.className.includes('bg-paper-200 ')).length
+    pointer(false)
+    await sides()
+    expect(lit()).toBe(1)
+    pointer(true)
+    await sides()
+    expect(lit()).toBe(0)
+    // The cursor itself stays, for a keyboard attached later.
+    expect(document.querySelector('[data-ctx-menu] [data-ctx-active]')).not.toBeNull()
+  })
+})
+
+describe('ContextMenu row action', () => {
+  let host: HTMLDivElement
+  let root: Root
+  let log: string[]
+  let closed: number
+
+  const items = () => [
+    {
+      label: 'Current',
+      mark: 'Current',
+      disabled: true,
+      onSelect: () => void log.push('pick current'),
+      rowAction: {
+        label: 'Open in Finder',
+        icon: createElement('i'),
+        onSelect: () => void log.push('open current')
+      }
+    },
+    {
+      label: 'Other',
+      onSelect: () => void log.push('pick other'),
+      rowAction: {
+        label: 'Open in Finder',
+        icon: createElement('i'),
+        hint: 'Shift+Enter',
+        onSelect: () => void log.push('open other')
+      }
+    },
+    { label: 'Plain', onSelect: () => void log.push('pick plain') }
+  ]
+
+  const render = async (): Promise<void> => {
+    await act(async () =>
+      root.render(
+        createElement(ContextMenu, {
+          x: 0,
+          y: 0,
+          items: items(),
+          onClose: () => {
+            closed += 1
+          }
+        })
+      )
+    )
+  }
+  const menuEl = (): HTMLElement => document.querySelector('[data-ctx-menu]') as HTMLElement
+  const press = async (key: string, init: KeyboardEventInit = {}): Promise<void> => {
+    await act(async () => {
+      menuEl().dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, ...init }))
+    })
+  }
+  const actionButtons = (): HTMLButtonElement[] => [
+    ...document.querySelectorAll<HTMLButtonElement>('[data-ctx-menu] button[aria-label="Open in Finder"]')
+  ]
+
+  beforeEach(() => {
+    ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+    log = []
+    closed = 0
+    host = document.createElement('div')
+    document.body.append(host)
+    root = createRoot(host)
+  })
+
+  afterEach(() => {
+    act(() => root.unmount())
+    host.remove()
+  })
+
+  it('Shift+Enter runs the row action and leaves the row unpicked', async () => {
+    await render()
+    await press('Enter', { shiftKey: true })
+    expect(log).toEqual(['open other'])
+    expect(closed).toBe(1)
+  })
+
+  it('Enter still picks the row', async () => {
+    await render()
+    await press('Enter')
+    expect(log).toEqual(['pick other'])
+  })
+
+  it('Shift+Enter on a row with no action picks it, as it always did', async () => {
+    await render()
+    await press('ArrowDown')
+    await press('Enter', { shiftKey: true })
+    expect(log).toEqual(['pick plain'])
+  })
+
+  it('the button runs the action alone, on a disabled row too', async () => {
+    await render()
+    expect(actionButtons()).toHaveLength(2)
+    expect(actionButtons()[0].disabled).toBe(false)
+    await act(async () => actionButtons()[0].click())
+    expect(log).toEqual(['open current'])
+    expect(closed).toBe(1)
+  })
+
+  it('draws the key on the cursor row only', async () => {
+    await render()
+    const rows = [...document.querySelectorAll('[data-ctx-menu] [role="menuitem"]')]
+    expect(rows[1].textContent).toContain('Shift+Enter')
+    await press('ArrowDown')
+    const after = [...document.querySelectorAll('[data-ctx-menu] [role="menuitem"]')]
+    expect(after[1].textContent).not.toContain('Shift+Enter')
   })
 })

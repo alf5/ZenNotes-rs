@@ -210,7 +210,9 @@ pub fn prepare_note_creation(root: &Path, rel: &str) -> Result<(), String> {
         file.write_all(format!("{{\"version\":1,\"createdAt\":{created_at}}}\n").as_bytes())?;
         file.sync_all()?;
         drop(file);
-        fs::rename(&temporary, &metadata)
+        // A reader holding the file a moment (Windows) is waited out, as
+        // upstream 66492082 does, so the creation date is not lost.
+        crate::vault::atomic::rename_with_retry(&temporary, &metadata)
     })();
     let _ = fs::remove_file(&temporary);
     result.map_err(|e| format!("write failed: {e}"))

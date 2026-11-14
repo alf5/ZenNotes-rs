@@ -31,6 +31,7 @@ import { moveLineDown, moveLineUp } from "@codemirror/commands";
 import { unfoldAll } from "@codemirror/language";
 import { foldAllOutline, foldAtCursor, unfoldAtCursor } from "../lib/cm-heading-fold";
 import { isTagsViewActive, isTasksViewActive, useStore } from "../store";
+import { remindTaskAtCursor, repeatTaskAtCursor } from "../lib/editor-task-recurrence";
 import { buildCommands, type Command } from "../lib/commands";
 import { rankItems } from "../lib/fuzzy-score";
 import { BUILTIN_TEMPLATES } from "@shared/builtin-templates";
@@ -110,6 +111,7 @@ import { copyLinkAtCursor } from "../lib/link-copy";
 import { followLinkTarget } from "../lib/follow-link";
 import { openLinkPopoverAtCursor } from "../lib/link-popover-open";
 import { openGalleryFromArgument } from "../lib/folder-gallery-open";
+import { newKanbanFromArgument } from "../lib/kanban-create";
 
 let vimCommandsRegistered = false;
 let syncedVimBindings: Partial<Record<KeymapId, string[]>> = {};
@@ -554,6 +556,25 @@ function registerVimCommands(): void {
   Vim.defineEx("format", "format", () => {
     void useStore.getState().formatActiveNote();
   });
+  // `:repeat weekly` / `:remind 9am` set the recurring-task fields on the task
+  // under the cursor (#1036); `off` takes one away, and bare they open the
+  // same picker as `r` / `R` in the Tasks views.
+  Vim.defineEx(
+    "repeat",
+    "repeat",
+    (_cm: unknown, params: { argString?: string } | undefined) => {
+      const view = useStore.getState().editorViewRef;
+      if (view) void repeatTaskAtCursor(view, params?.argString ?? "");
+    },
+  );
+  Vim.defineEx(
+    "remind",
+    "remind",
+    (_cm: unknown, params: { argString?: string } | undefined) => {
+      const view = useStore.getState().editorViewRef;
+      if (view) void remindTaskAtCursor(view, params?.argString ?? "");
+    },
+  );
   // `:cover` (`:cov`) is the ex twin of Space l c. Bare, it opens the picker;
   // `:cover!` or `:cover remove` takes the cover off; `paste` uses the
   // clipboard image; `reposition` enters reposition mode and `40%` sets the
@@ -749,6 +770,15 @@ function registerVimCommands(): void {
     "gal",
     (_cm: unknown, params: { argString?: string } | undefined) => {
       void openGalleryFromArgument(params?.argString ?? "");
+    },
+  );
+  // `:kanban` creates a Kanban board (#1038) where `Space k` would; `:kanban
+  // Biology` puts it in that folder.
+  Vim.defineEx(
+    "kanban",
+    "kanb",
+    (_cm: unknown, params: { argString?: string } | undefined) => {
+      void newKanbanFromArgument(params?.argString ?? "");
     },
   );
 

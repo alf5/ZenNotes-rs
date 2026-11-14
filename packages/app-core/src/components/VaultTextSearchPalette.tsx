@@ -5,7 +5,9 @@ import type {
   VaultTextSearchMatch
 } from '@shared/ipc'
 import { useStore } from '../store'
-import { resolveSystemFolderLabels } from '../lib/system-folder-labels'
+import { noteAreaLabel, resolveSystemFolderLabels } from '../lib/system-folder-labels'
+import { isPrimaryNotesAtRoot } from '../lib/vault-layout'
+import { isPathInTemplateFolder, resolveTemplateFolder } from '@shared/template-folder'
 import { isPaletteNextKey, isPalettePreviousKey } from '../lib/palette-nav'
 import { isImeComposing } from '../lib/ime'
 import { recordRendererPerf } from '../lib/perf'
@@ -162,6 +164,14 @@ export function VaultTextSearchPalette(): JSX.Element {
   const bodyCacheRef = useRef(new Map<string, string>())
   const notesRef = useRef(notes)
   const noteContentsRef = useRef(noteContents)
+  // Template notes (#1024) are placeholders nobody is searching for. The hosts
+  // leave them out themselves (desktop 2.80, server 2.80); this catches an
+  // older server and the renderer's own fallback.
+  const vaultSettings = useStore((s) => s.vaultSettings)
+  const matchArea = (folder: VaultTextSearchMatch['folder']): string | null =>
+    noteAreaLabel(folder, isPrimaryNotesAtRoot(vaultSettings), systemFolderLabels)
+  const templateFolderRef = useRef<string | null>(null)
+  templateFolderRef.current = resolveTemplateFolder(vaultSettings)
   const resultRefs = useRef<Array<HTMLButtonElement | null>>([])
 
   useEffect(() => {
@@ -241,7 +251,9 @@ export function VaultTextSearchPalette(): JSX.Element {
     type ScoredMatch = VaultTextSearchMatch & { score: number }
     const results: ScoredMatch[] = []
     const searchableNotes = notesRef.current.filter(
-      (note) => note.folder === 'inbox' || note.folder === 'quick' || note.folder === 'archive'
+      (note) =>
+        (note.folder === 'inbox' || note.folder === 'quick' || note.folder === 'archive') &&
+        !isPathInTemplateFolder(note.path, templateFolderRef.current)
     )
 
     const bodies = await Promise.all(
@@ -312,13 +324,14 @@ export function VaultTextSearchPalette(): JSX.Element {
       const runSearch = async (): Promise<void> => {
         const startedAt = performance.now()
         try {
-          const matches =
+          const matches = (
             typeof window.zen.searchVaultText === 'function'
               ? await window.zen.searchVaultText(trimmed, backend, {
                   ripgrepPath: ripgrepBinaryPath,
                   fzfPath: fzfBinaryPath
                 })
               : await fallbackSearchVaultText(trimmed)
+          ).filter((match) => !isPathInTemplateFolder(match.path, templateFolderRef.current))
           if (requestIdRef.current !== requestId) return
           setResults(matches)
           setLoading(false)
@@ -449,9 +462,11 @@ export function VaultTextSearchPalette(): JSX.Element {
                     <span className="truncate text-sm font-medium text-ink-900">
                       {renderHighlightedText(match.title, query)}
                     </span>
-                    <span className="shrink-0 text-2xs uppercase tracking-[0.18em] text-ink-400">
-                      {match.folder}
-                    </span>
+                    {matchArea(match.folder) && (
+                      <span className="shrink-0 text-2xs uppercase tracking-[0.18em] text-ink-400">
+                        {matchArea(match.folder)}
+                      </span>
+                    )}
                     <span className="shrink-0 text-xs text-ink-500">L{match.lineNumber}</span>
                   </div>
                   <div className="truncate text-xs text-ink-500">

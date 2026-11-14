@@ -1,33 +1,86 @@
-export interface HelpCard {
+/**
+ * Where an entry applies, when that is not everywhere the manual is read. Without
+ * it, an entry shows on every host. `desktop`: the desktop app only. `computer`:
+ * also the web client, which sits at a keyboard with a terminal nearby, but not a
+ * phone or tablet. `workflows`: wherever the host runs workflows, which on the web
+ * depends on its server.
+ */
+export type HelpAvailability = 'desktop' | 'computer' | 'workflows'
+
+/**
+ * An entry's text, when part of it is not true everywhere the entry is. A part
+ * with `only` reads `text` where that applies and `elsewhere` (or nothing) on
+ * the other hosts. Parts nest, so one list can say what the desktop app, the web
+ * client and a tablet each have. The desktop app reads every `text`, so its
+ * manual is the source text joined up.
+ */
+export type HelpTextPart =
+  | string
+  | { only: HelpAvailability; text: HelpText; elsewhere?: HelpText }
+export type HelpText = string | readonly HelpTextPart[]
+
+export interface HelpCard<T extends HelpText = string> {
   title: string
-  body: string
+  only?: HelpAvailability
+  body: T
 }
 
-export interface HelpShortcut {
+export interface HelpShortcut<T extends HelpText = string> {
   keys: string
+  only?: HelpAvailability
   action: string
-  detail: string
+  detail: T
 }
 
-export interface HelpShortcutSection {
+export interface HelpShortcutSection<T extends HelpText = string> {
   id: string
   title: string
+  only?: HelpAvailability
   description: string
-  items: HelpShortcut[]
+  items: HelpShortcut<T>[]
 }
 
-export interface HelpExCommand {
+export interface HelpExCommand<T extends HelpText = string> {
   command: string
+  only?: HelpAvailability
   summary: string
-  detail: string
+  detail: T
 }
 
-export interface HelpSettingsSection {
+export interface HelpSettingsSection<T extends HelpText = string> {
   title: string
-  items: Array<{ label: string; detail: string }>
+  only?: HelpAvailability
+  items: Array<{ label: string; only?: HelpAvailability; detail: T }>
 }
 
-export const HELP_QUICK_START: HelpCard[] = [
+/** What the manual needs to know about the app it is being read in. */
+export interface HelpHost {
+  runtime: 'desktop' | 'web'
+  hostKind?: 'desktop' | 'browser' | 'ios' | 'android'
+  supportsWorkflows?: boolean
+}
+
+/** Whether an entry applies here. On the desktop app every entry does. */
+export function helpAppliesTo(only: HelpAvailability | undefined, host: HelpHost): boolean {
+  if (!only || host.runtime === 'desktop') return true
+  if (only === 'workflows') return host.supportsWorkflows === true
+  if (only === 'computer') return host.hostKind !== 'ios' && host.hostKind !== 'android'
+  return false
+}
+
+/** An entry's text as this host reads it. */
+export function helpText(text: HelpText, host: HelpHost): string {
+  if (typeof text === 'string') return text
+  return text
+    .map((part) => {
+      if (typeof part === 'string') return part
+      if (helpAppliesTo(part.only, host)) return helpText(part.text, host)
+      return part.elsewhere === undefined ? '' : helpText(part.elsewhere, host)
+    })
+    .join('')
+}
+
+export const HELP_QUICK_START: HelpCard<HelpText>[] = [
   {
     title: 'Pick a vault you control',
     body:
@@ -70,8 +123,11 @@ export const HELP_QUICK_START: HelpCard[] = [
   },
   {
     title: 'Keep supporting material nearby',
-    body:
-      'Tabs, splits, floating windows, the reference pane, and the connections panel are all there to help you keep related material visible while you write instead of forcing constant back-and-forth navigation. The Connections, Outline, Comments, Calendar and Timeline panels stay as you set them while you move between notes. If you would rather each note kept its own, turn off Settings → Editor → Keep panels when switching notes (or run Remember Panels per Note from the command palette): a note then comes back with the panels you left it with, after a restart too (the memory is saved with your tabs and layout, never in the note), and a note you have not opened yet starts with none. With the automatic calendar on, a daily or weekly note whose calendar you closed stays closed when you return to it. The setting travels with your portable config as `keep_panels_across_notes` under `[view]`. The note always keeps a readable width: in a narrow pane (a split, a small window) the panels first shrink, and if they still do not fit, the ones you opened longest ago are tucked into a slim rail at the pane\'s right edge. They stay open; click one in the rail, or press its usual shortcut, to bring it forward.'
+    body: [
+      'Tabs, splits, ',
+      { only: 'computer', text: 'floating windows, ' },
+      'the reference pane, and the connections panel are all there to help you keep related material visible while you write instead of forcing constant back-and-forth navigation. The Connections, Outline, Comments, Calendar and Timeline panels stay as you set them while you move between notes. If you would rather each note kept its own, turn off Settings → Editor → Keep panels when switching notes (or run Remember Panels per Note from the command palette): a note then comes back with the panels you left it with, after a restart too (the memory is saved with your tabs and layout, never in the note), and a note you have not opened yet starts with none. With the automatic calendar on, a daily or weekly note whose calendar you closed stays closed when you return to it. The setting travels with your portable config as `keep_panels_across_notes` under `[view]`. The note always keeps a readable width: in a narrow pane (a split, a small window) the panels first shrink, and if they still do not fit, the ones you opened longest ago are tucked into a slim rail at the pane\'s right edge. They stay open; click one in the rail, or press its usual shortcut, to bring it forward.'
+    ]
   },
   {
     title: 'Use files without leaving ZenNotes',
@@ -80,12 +136,14 @@ export const HELP_QUICK_START: HelpCard[] = [
   },
   {
     title: 'Pick up where you left off',
-    body:
-      'ZenNotes restores open tabs, splits, built-in views, and sidebar layout per vault. It also remembers the main window bounds, so reopening the app feels like returning to a workspace rather than starting over.'
+    body: [
+      'ZenNotes restores open tabs, splits, built-in views, and sidebar layout per vault.',
+      { only: 'desktop', text: ' It also remembers the main window bounds, so reopening the app feels like returning to a workspace rather than starting over.' }
+    ]
   }
 ]
 
-export const HELP_HOW_TO_GUIDES: HelpCard[] = [
+export const HELP_HOW_TO_GUIDES: HelpCard<HelpText>[] = [
   {
     title: 'Capture a quick note',
     body:
@@ -93,13 +151,21 @@ export const HELP_HOW_TO_GUIDES: HelpCard[] = [
   },
   {
     title: 'Capture from anywhere with the floating window',
+    only: 'desktop',
     body:
       'Press the quick capture hotkey (CommandOrControl+Shift+Space by default, configurable under Settings → Editor) to drop a small always-on-top window over whatever app you are using. You type in one place: the first line becomes the note title and the rest is the body. Mod+Enter saves the note into Quick Notes and hides the window; Mod+N saves and immediately opens a fresh blank capture so you can jot several in a row; Mod+P loads an existing note to edit instead. Editing the first line of a Quick note renames that note in place rather than creating a duplicate, and you can drag the window by its top bar to reposition it.'
   },
   {
     title: 'Save a page or text from Safari and other apps (Share → ZenNotes)',
+    only: 'desktop',
     body:
       'On macOS, choose Share → ZenNotes in Safari or any app with a Share menu to save the page you are on, the text you selected, or both, as a note: in Quick Notes unless you choose another place. The sheet shows what you are saving and, in its heading, where it will go, a line for an optional note, and, when you use more than one vault, the vault it goes to: your local and Cloud vaults and the servers you have connected to. Return saves and Escape cancels; ⌘1 to ⌘9 pick a vault in the order the menu lists them, and the sheet remembers the vault you picked last. A page becomes a note named after the page, with your selection quoted, your note under it and a link back to the page; text on its own becomes a note named from its first line, the way the quick capture window names one. Settings → Vault → Notes → **Default shares location** decides where shares land, per vault: Quick Notes (the default), your primary notes location, or a specific folder inside it such as `Clippings`; a Quick Notes or Inbox folder you remapped is honored, and a vault on a self-hosted server offers the setting once that server runs 2.79 or later (an older server keeps Quick Notes). With ZenNotes running the note appears right away; when it is not running, the share waits and is filed the next time you open ZenNotes, and a share for a server is filed once ZenNotes is connected to that server. The extension comes with the app and registers once you have opened ZenNotes; macOS may list it switched off at first, so if ZenNotes is missing from a Share menu, choose Edit Extensions… at the bottom of that menu and turn ZenNotes on, or turn it on in System Settings → General → Login Items & Extensions → Sharing.'
+  },
+  {
+    title: 'Clip web pages into notes with the ZenNotes Web Clipper',
+    only: 'desktop',
+    body:
+      'The ZenNotes Web Clipper is a browser extension that turns the page you are reading into a clean Markdown note: the title, a link back to the page, the author and date when the page has them, and the text without the menus and ads around it. Chrome, Edge, Brave and Arc install it from the Chrome Web Store, Firefox from Firefox Add-ons, and Safari on the Mac through the ZenNotes Web Clipper app on the App Store. Open it on a page with Alt+Shift+Z (Option+Shift+Z on a Mac) or its toolbar button, change the note’s name if you like, pick the folder (`Clippings` unless you change it in the clipper’s settings) and where it goes: a new note, the top or bottom of a note you already have, or today’s daily note. Mod+Enter clips. The extension puts the note on your clipboard and opens a `zennotes://new` or `zennotes://daily` link, and ZenNotes writes the file; nothing passes through a server. A clip never overwrites a note: a taken name gets the next free one (`My Article 2`). The folder sits inside your notes area, so `Clippings` lands beside your other notes in a vault that keeps them at its top level, and in the Inbox otherwise. When you have more than one vault, the clipper can name one, and ZenNotes matches its name or folder name, never a path. When the note a clip goes into is open, the clip goes in through the editor, so typing you have not saved yet stays and undo takes the clip back out. If ZenNotes is closed, it opens and files the clip once it has started. ZenNotes files the clipboard only when it holds exactly what the link vouches for, so a web page cannot make it save something else you copied; if the clipboard changed in between, it says the clip did not arrive and nothing is written. On Linux the .deb, .rpm, AUR and Nix packages register ZenNotes for these links; a bare AppImage does not until something integrates it with your desktop. The links are described in `docs/web-clipper-link.md` in the ZenNotes repository, so Raycast, Shortcuts or a script can hand ZenNotes a note the same way.'
   },
   {
     title: 'Create a note in the folder you are already in',
@@ -117,19 +183,48 @@ export const HELP_HOW_TO_GUIDES: HelpCard[] = [
       'Open Settings → Templates. Press "New template" to author one: a template is just markdown with optional YAML frontmatter (`name`, `description`, `category`, `titleTemplate`, `targetFolder`, `targetSubpath`) and a body. Use the variables `{{title}}`, `{{date}}`, `{{date:FORMAT}}` (e.g. `{{date:YYYY-MM-DD}}`), `{{time}}`, `{{week}}`, and `{{cursor}}` (where the caret lands). Three more stay live instead of being substituted: `{{modified_date}}`, `{{modified_time}}` and `{{modified_datetime}}` are left in the note and always show when the file was last saved, so an `Updated:` line keeps itself current; `{{modified_date:FORMAT}}` takes the same date tokens. The date format accepts the same tokens as the daily/weekly note directory and title patterns: `yyyy`/`yy`, `MMMM`/`MMM`/`MM`/`M`, `dd`/`d`, `EEEE`/`EEE` (weekday), `ww`/`w` (ISO week), as well as moment-style `YYYY`/`DD`/`dddd`; wrap literal letters in `[brackets]`. Custom templates are saved as plain `.md` files under `.zennotes/templates/`. You can also fork a built-in by pressing Edit on it: that creates an editable copy that shadows the original, and Reset restores the built-in. From any note, the "Save Current Note as Template…" command captures it as a new template.'
   },
   {
+    title: 'Keep templates in a folder of your vault',
+    body:
+      'Pick a folder under Settings → Templates → Template folder, or choose “Use as Template Folder” from a folder’s menu in the sidebar (`m` in Vim mode). Every note in it, subfolders included, is a template in the picker, marked with its folder. The whole note is the template, named after its file, and its own frontmatter is copied into each new note. A frontmatter with only custom-template keys (`name`, `description`, `category`, `titleTemplate`, `targetFolder`, `targetSubpath`) is read as the template’s settings instead. A custom template with the same name shows too, listed first. The folder’s checkboxes stay out of Tasks, its tags out of the tag list, the Tags view and `#` completion, and its notes out of search, a `#tag` search included; start a Search Notes query with the folder’s path (`Templates/`) to find one. Saved in the vault; a self-hosted server keeps it from 2.80.'
+  },
+  {
     title: 'Draw diagrams with Excalidraw',
     body:
       'Run "New Drawing" from the command palette to create a `.excalidraw` file and open it in a built-in Excalidraw editor tab. Drawings are first-class vault files: they appear in the sidebar, can be moved and archived like notes, and auto-refresh when edited. To embed a drawing inside a note, use "Embed Existing Drawing…" (pick from a searchable list) or "Embed New Drawing" (create one at the cursor and switch to its editor). The embed syntax is `![[name.excalidraw]]`, the same as images, and supports optional size hints like `![[name.excalidraw|600]]` or `![[name.excalidraw|600x400]]`. Clicking an embed opens the drawing in a new tab. Obsidian-style `.excalidraw.md` files are also supported.'
   },
   {
     title: 'Automate repetitive edits with Workflows',
+    only: 'workflows',
     body:
       'Workflows turn a vault ritual (find the notes tagged `#book`, keep the ones rated 4 or higher, write them as a table into the reading log, tag the rest `#someday`) into a file you run with one key. The feature is off by default: turn it on once under Settings → Workflows and the view appears in the sidebar (also `Space a` in Vim mode, or "Open Workflows" in the command palette). Start from the recipe gallery ("New workflow"): each recipe is an ordinary `.md` file that copies into `.zennotes/workflows/` and opens in the same editor as anything you write yourself, as a canvas and as text, whichever you prefer. Press `R` (or the Run button) and nothing happens blind: a dry-run confirmation lists every change first, grouped and counted, and after you apply, Undo restores every file the run wrote, byte for byte. That promise survives the worst case: a run the app never finished (a crash mid-apply) is found on the next launch and offered back as an undo, and undoing a run names any file you edited after it ran instead of reverting your work silently. You can also run any active workflow without opening the view at all: every one is a command-palette entry, and "Run Workflow…" opens a picker; the receipt arrives as a toast carrying the Undo button. New workflows start as inert drafts until you activate them, and importing a workflow someone shared is a review, never an install. New to all of this? Settings → Workflows → Start tutorial walks the whole loop hands-on, on a practice folder it seeds and then removes.'
+  },
+  {
+    title: 'Bring your Notion workspace over',
+    only: 'desktop',
+    body:
+      'Run “Import Notes…” from the command palette (`Space I` in Vim mode), or set it up during onboarding, and choose Notion. Then choose Sign in with Notion. Your browser asks you to approve, and that’s all the setup: nothing has to be shared page by page. ZenNotes then shows your workspace as a tree with everything ticked. Open a page to see what’s under it and untick whatever should stay behind, which leaves out everything beneath it too; arrows or `j`/`k`/`h`/`l` in Vim mode move, Space ticks. Choose Import and it reads what you picked, then adds one `Notion Import` folder to your notes in one step, so nothing already in your vault changes and deleting that folder undoes it. Pages become notes (a page with subpages is `Title.md` beside a `Title/` folder), and links between them become `[[wikilinks]]`. Images, PDFs, audio, video and other files go in the folder’s `assets/`, including ones hosted outside Notion; one that can’t be fetched stays a link, and YouTube and Vimeo stay embeds. Databases become real ZenNotes databases: fields keep their types, relations become note links, and table and board views keep their columns, sorts and the filters ZenNotes can express. A large workspace can take hours at Notion’s rate limit. It runs in the background, and if you stop it or quit, the next run picks up where it was. Formula and rollup columns keep the values they had and stop calculating; calendar, timeline, gallery and other views become tables; comments, page history and permissions do not come over. `Import Report` in the folder lists what was left out or changed. Imported to-dos stay out of Tasks unless you tick “Show imported to-dos in Tasks”. Not available on a vault hosted on a server: import into a local vault, then sync it. Use a token instead if you’d rather share page by page with a Notion integration.'
+  },
+  {
+    title: 'Bring your Obsidian vault over',
+    only: 'desktop',
+    body:
+      'Run “Import Notes…” from the command palette (`Space I` in Vim mode), or set it up during onboarding, choose Obsidian, and pick the folder that holds your vault. There are two ways to go from there. Open as its own vault points ZenNotes at the folder directly, so both apps share the same files and nothing is copied. Copy in brings it into the vault you have open: you get a tree of its folders and notes with everything ticked, and unticking a folder leaves it out, though images a kept note uses still come along. It adds one `Obsidian Import` folder in one step, with the same folders inside, so your original vault and what’s already here don’t change, and deleting that folder undoes it. Callouts, `[[wikilinks]]`, embeds, block references, tags and frontmatter work as they are, so most notes stay byte for byte what they were. A link only changes where its name is now shared: a title two folders use, or one that’s already in this vault, gets pinned to the note Obsidian would have opened. `.obsidian` and `.trash` stay behind, and plugins don’t come over, so Dataview queries stay code blocks and canvases and Obsidian Bases stay files that ZenNotes doesn’t open. `Import Report` in the folder lists these, and where your daily notes and templates went so you can point Settings at them. To-dos show in Tasks unless you untick “Show imported to-dos in Tasks”.'
+  },
+  {
+    title: 'Bring your Logseq graph over',
+    only: 'desktop',
+    body:
+      'Run “Import from Logseq…” from the command palette, or “Import Notes…” (`Space I` in Vim mode) and choose Logseq, then pick the folder that holds your graph: the one with `pages`, `journals` and `assets` in it. Logseq’s own `logseq` folder stays behind, and the graph itself is only read. Name the folder it goes into (`Logseq` unless you change it; a taken name gets a number, so nothing is merged or written over), and choose Import. Pages become notes named by their title, and a namespace page like `Projects/ZenNotes` becomes `ZenNotes` in a `Projects` folder. Journals become daily notes where your daily note settings put them, under your title pattern; a day that already has a daily note keeps its journal in the folder’s `Journals` instead. Untick “Make journals daily notes” to keep them all there. The outline reads as a document: a top-level block with nothing under it becomes a paragraph, a top-level heading block a heading with its children under it, and everything nested stays a list; tick “Keep every block a bullet” to keep it exactly as Logseq shows it. Page properties become frontmatter (`alias::` becomes `aliases`), `[[links]]` stay links and still find their page, `#[[two words]]` becomes the tag `#two-words`, and `((block references))` become links to that block, which gets a `^id` anchor; embeds become `![[…]]`. Tasks keep their state: TODO and LATER are open, NOW and DOING in progress, DONE done, CANCELED cancelled, with `[#A]` as `!high`, a deadline or schedule as `due:`, and a repeater as `@repeat:`. Files under `assets` go to the folder’s `assets` with their links rewritten. Queries, other `{{macros}}`, Org mode pages and whiteboards have nothing to turn into here, so they stay exactly as written, in a code block, and `Import Report` in the folder lists each one along with what was left out (time logs and Logseq’s own block properties). To-dos show in Tasks unless you untick “Show imported to-dos in Tasks”.'
   },
   {
     title: 'Turn a CSV into a database',
     body:
       'Run “New Database” from the command palette (or right-click a folder in the sidebar → New database) to create one, or just open an existing `.csv` file from the vault. ZenNotes stores a database as a `<Name>.base` folder: `data.csv` (the rows), `schema.json` (field types, select options, saved views), and the record-page notes rows open into. A database opens from its sidebar row like a note: click it, or press Enter or `l` on it in Vim mode (the row’s `m` menu carries Open database too); the chevron still expands the folder to browse its record pages, and the open grid closes like any tab. Edit cells inline in the Table view, group records in a Board by any select field, switch the raw-CSV toggle to see the underlying file, and open a row as a full Markdown page whose frontmatter mirrors the row’s properties (its Open button, Open page in its menu, or `o` in Vim mode). The whole grid is keyboard-driven. See the Database grid shortcuts.'
+  },
+  {
+    title: 'Make a Kanban board for each project',
+    body:
+      'Right-click a folder in the sidebar and choose New Kanban for a board of its own: one per class, project or client, each with its own cards. It is a database (`Untitled Kanban.base`) with a Name and a Status of To do, Doing and Done, and it opens on its Board, so it works on the phones, a self-hosted server, the web app and `zn base` like any database. New Kanban is also in the command palette, `Space k` in Vim mode and `:kanban` on the ex line, which create it in the folder under the sidebar cursor while the sidebar has focus and where new databases go otherwise (Settings → Vault → Default Locations); `:kanban Biology` names the folder. Double-click the title to rename it. Add card at the foot of a column adds a card there: type its title and press Enter, and the field stays open for the next one. Drag a card to another column, or move it from the keyboard (see the Database board shortcuts). Add column makes another status, and a card with no status sits in a No status column that shows only while it holds a card. Open a card as a page for its notes, or switch to the Table to add fields such as a due date. This is separate from the Tasks Kanban board, which shows the `- [ ]` tasks of the whole vault.'
   },
   {
     title: 'Set the width of a table column',
@@ -139,15 +234,20 @@ export const HELP_HOW_TO_GUIDES: HelpCard[] = [
   {
     title: 'Convert a Markdown table into a database',
     body:
-      'A note often starts with a small pipe table that outgrows inline editing. Put the cursor in it and run “Convert Table to Database…” from the command palette (`:table_to_database` on the ex line, or `Space l d` in Vim mode); in a rendered table, the same entry sits at the bottom of the cell menu (right-click, or `m` in Vim mode). Confirm a name (prefilled from the heading above the table, or the note’s title) and ZenNotes creates a `<Name>.base` database where new databases go (Settings → Vault → New Drawings, Databases & Tasks location), then replaces the table in the note with a `[[Name]]` link that opens the grid. Every column becomes a field, typed the way an opened CSV is (checkbox, number, date, text) so the Board and filters work at once; cell text travels verbatim, inline Markdown included, and the CSV layer takes care of commas and quotes. Column widths you dragged in the editor carry over; alignment does not, since a grid has none. The swap is an ordinary edit: `u` (or Undo) brings the table back while the database stays in the vault, and the confirmation toast offers an Open button if you want to jump straight to the grid.'
+      'A note often starts with a small pipe table that outgrows inline editing. Put the cursor in it and run “Convert Table to Database…” from the command palette (`:table_to_database` on the ex line, or `Space l d` in Vim mode); in a rendered table, the same entry sits at the bottom of the cell menu (right-click, or `m` in Vim mode). Confirm a name (prefilled from the heading above the table, or the note’s title) and ZenNotes creates a `<Name>.base` database where new databases go (Settings → Vault → Default Locations), then replaces the table in the note with a `[[Name]]` link that opens the grid. Every column becomes a field, typed the way an opened CSV is (checkbox, number, date, text) so the Board and filters work at once; cell text travels verbatim, inline Markdown included, and the CSV layer takes care of commas and quotes. Column widths you dragged in the editor carry over; alignment does not, since a grid has none. The swap is an ordinary edit: `u` (or Undo) brings the table back while the database stays in the vault, and the confirmation toast offers an Open button if you want to jump straight to the grid.'
   },
   {
     title: 'Give a note a cover image',
-    body:
-      'A cover is a wide banner image across the top of a note. Press `Space l c` in Vim mode, run “Add Cover…” from the command palette, or type `:cover` to open the cover picker. Type to search it, move with the arrow keys and press Enter to pick a gradient, a photograph from the gallery (public-domain works from The Met and NASA), or an image already in the vault. Upload image… takes a file from disk, and an image you paste (⌘V / Ctrl+V) or drop anywhere in the picker becomes the cover; paste an https link into the search field to use a picture from the web, or press Tab for the Unsplash tab and its free photos (see the next guide). Gradients, gallery photos and uploads are copied into the vault’s `assets/` folder like a pasted image, so the cover works offline, on a self-hosted server and through Cloud sync, end-to-end encrypted vaults included. Hover the cover for Change cover, Reposition and Remove, or drop an image straight onto it. Reposition (also “Reposition Cover” in the palette and `:cover reposition`) lets you drag the picture up or down, or move it with ↑/↓ (j/k in Vim mode, Shift for small steps); Enter keeps the new position and Escape puts the old one back. The cover is plain frontmatter, `banner: "![[assets/photo.jpg]]"` with the focal point in `banner_y` (0 is the top edge, 1 the bottom), the keys Obsidian’s banner plugins read, so a shared vault shows the same banner there; a `cover:` image, or one written as a plain `[[link]]`, shows too. In Edit and Split those lines fold into one muted line in the note’s properties, such as `cover · lisbon.jpg` or `cover · Unsplash photo by Jane Doe`, since the cover above already shows the picture; the other properties stay as they are. Move the cursor onto that line (the arrow keys, or `j`/`k` in Vim mode) or click it and the raw lines open for editing; they fold again when the cursor leaves. The file itself never changes, so copying, searching and undo work on the lines as written, and with Live Preview off or covers hidden in Settings they show in full. The Assets view counts a cover image as used, renaming or moving the image updates the note, and `u` (or Undo) takes back a cover change made in the editor. Settings → Typography → Note covers decides whether the cover scrolls away with the text, stays pinned above the editor and Read view, or is hidden. A published note’s public page shows its cover too, and so does Quick Look when you press Space on a note in Finder on macOS: both draw it read-only at the note’s focal point. Quick Look follows the Hidden setting and leaves out a cover from the web, since a preview never goes online.'
+    body: [
+      'A cover is a wide banner image across the top of a note. Press `Space l c` in Vim mode, run “Add Cover…” from the command palette, or type `:cover` to open the cover picker. Type to search it, move with the arrow keys and press Enter to pick a gradient, a photograph from the gallery (public-domain works from The Met and NASA), or an image already in the vault. Upload image… takes a file from disk, and an image you paste (⌘V / Ctrl+V) or drop anywhere in the picker becomes the cover; paste an https link into the search field to use a picture from the web',
+      { only: 'computer', text: ', or press Tab for the Unsplash tab and its free photos (see the next guide)' },
+      '. Gradients, gallery photos and uploads are copied into the vault’s `assets/` folder like a pasted image, so the cover works offline, on a self-hosted server and through Cloud sync, end-to-end encrypted vaults included. Hover the cover for Change cover, Reposition and Remove, or drop an image straight onto it. Reposition (also “Reposition Cover” in the palette and `:cover reposition`) lets you drag the picture up or down, or move it with ↑/↓ (j/k in Vim mode, Shift for small steps); Enter keeps the new position and Escape puts the old one back. The cover is plain frontmatter, `banner: "![[assets/photo.jpg]]"` with the focal point in `banner_y` (0 is the top edge, 1 the bottom), the keys Obsidian’s banner plugins read, so a shared vault shows the same banner there; a `cover:` image, or one written as a plain `[[link]]`, shows too. In Edit and Split those lines fold into one muted line in the note’s properties, such as `cover · lisbon.jpg` or `cover · Unsplash photo by Jane Doe`, since the cover above already shows the picture; the other properties stay as they are. Move the cursor onto that line (the arrow keys, or `j`/`k` in Vim mode) or click it and the raw lines open for editing; they fold again when the cursor leaves. The file itself never changes, so copying, searching and undo work on the lines as written, and with Live Preview off or covers hidden in Settings they show in full. The Assets view counts a cover image as used, renaming or moving the image updates the note, and `u` (or Undo) takes back a cover change made in the editor. Settings → Typography → Note covers decides whether the cover scrolls away with the text, stays pinned above the editor and Read view, or is hidden. A published note’s public page shows its cover too',
+      { only: 'desktop', text: ', and so does Quick Look when you press Space on a note in Finder on macOS: both draw it read-only at the note’s focal point. Quick Look follows the Hidden setting and leaves out a cover from the web, since a preview never goes online.', elsewhere: ', read-only at the note’s focal point.' }
+    ]
   },
   {
     title: 'Use an Unsplash photo as a cover',
+    only: 'computer',
     body:
       'The cover picker has a second tab, Unsplash, that searches Unsplash’s free photos with an access key of your own. The first time, the tab says how to get one: at unsplash.com/developers, open Your apps, create a New Application (a free Unsplash account is enough) and copy its Access Key; then press Enter on Open Settings and paste the key into Settings → Typography → Covers → Unsplash access key (“Set Unsplash Access Key…” in the command palette goes there too). Save checks the key with one request to Unsplash and keeps it unless Unsplash refuses it, Test asks again and says how many of the hour’s requests are left, and Clear removes it. The desktop app keeps the key in your system’s secure storage and the web client in your browser, never in `config.toml` or the vault, and sends it only to api.unsplash.com: searches go from your machine straight to Unsplash, and zennotes.org takes no part. A new Unsplash app allows 50 requests an hour until Unsplash approves it for production; when they run out the tab says so, and if Unsplash stops accepting the key it offers Change key. Press Tab in the picker to switch between Covers and Unsplash (what you typed comes along), press `Space l u` in Vim mode, run “Add Cover from Unsplash…” from the command palette, or type `:cover unsplash mountains` to open the tab on a search. Photos appear as you type; move with the arrow keys (or Ctrl+N/P, Ctrl+J/K) and press Enter to make the selected one the cover. The line under the grid credits the selected photo’s photographer, with links to their profile and to Unsplash. Unsplash’s rules keep its photos on Unsplash, so unlike a gradient or a gallery photo the picture is not copied into `assets/`: the note links to it, `banner: "https://images.unsplash.com/…"`, with the credit on the two lines under it, `banner_credit` (the photographer) and `banner_credit_url` (their Unsplash profile). In the editor the three lines fold into one, `cover · Unsplash photo by …`, until the cursor moves onto it. Hover the cover to see “Photo by … on Unsplash” with both links; a published note’s page always shows it. The picture needs a connection to load. One you have seen before usually still shows offline; otherwise the cover says it could not load the picture from images.unsplash.com. To keep a photo for offline use, download it from unsplash.com and drop it on the picker. The Covers tab never goes online. Choosing another cover or removing this one takes the credit away with it.'
   },
@@ -160,6 +260,12 @@ export const HELP_HOW_TO_GUIDES: HelpCard[] = [
     title: 'Give a vault a name of its own',
     body:
       'A vault is named after its folder, which is fine until several vaults are all called `docs` (one per project repo, say). Rename the vault without touching the folder: run “Rename Vault…” from the command palette (`:vault_rename` on the ex line), pick it from the sidebar’s vault menu (click the vault name at the top of the sidebar), or type the name into Settings → Vault → Location → Vault name. The name shows in the sidebar header, the vault switcher (`Space v`), the title bar and `zn vault list`; the folder keeps its name on disk, and clearing the field goes back to it. It is saved in the vault’s own `.zennotes/vault.json` as `displayName`, so it travels with the folder to every machine that opens it and shows up in the switcher after the vault has been opened there once. A temporary folder session and a remote workspace do not offer it: the first writes nothing into its folder, and the second’s settings belong to its server.'
+  },
+  {
+    title: 'Open a vault in your file manager',
+    only: 'desktop',
+    body:
+      'Every local vault can open its folder in Finder, File Explorer or your file manager, whether or not it is the vault you are in. Click the vault name at the top of the sidebar: each vault in the list shows a folder button when you point at it, and `Shift+Enter` does the same for the row under the cursor. In the vault switcher (`Space v`), `Shift+Enter` opens the highlighted vault’s folder instead of switching to it. For the vault you are in, use “Open in Finder” in that same sidebar menu, “Open Vault in File Manager” in the command palette, `Space F` in Vim mode, or the button in Settings → Vault → Location. A remote workspace has no folder on this machine, so it does not offer this, and neither does the web app. A vault whose folder has moved says so instead of opening.'
   },
   {
     title: 'Move a note without dragging',
@@ -178,8 +284,13 @@ export const HELP_HOW_TO_GUIDES: HelpCard[] = [
   },
   {
     title: 'Trash notes from the sidebar',
-    body:
-      'With the sidebar focused, `Mod+Backspace` (⌘⌫ on macOS, Ctrl+Backspace on Windows and Linux) moves the note under the sidebar cursor to the Trash, after the same confirm Move Note to Trash shows; in Vim mode `x` does the same. When that note is part of a multi-selection, the whole selection goes, with one confirm (“Move 3 notes to Trash?”). Escape on the confirm leaves everything as it was, and after the move the cursor sits on the row that took the note’s place, still in the sidebar. A folder is not trashed this way, since deleting a folder takes everything inside and cannot be undone: delete it from its menu (`m`, or right-click). The palette’s Move Note to Trash and Move Note to Archive, and any key you gave them, follow the sidebar the same way: with the sidebar focused and its cursor on a note, they act on that note (or the selection it is in) rather than the note open in the editor. Rebind the chord as Move sidebar note to Trash (`nav.sidebarTrash`) under Settings → Keymap, or unbind it; `x` is Delete selected result (`nav.delete`).'
+    body: [
+      'With the sidebar focused',
+      { only: 'computer', text: '', elsewhere: ' (Focus Sidebar in the command palette)' },
+      ', `Mod+Backspace` (⌘⌫ on macOS, Ctrl+Backspace on Windows and Linux) moves the note under the sidebar cursor to the Trash, after the same confirm Move Note to Trash shows; ',
+      { only: 'computer', text: 'the Delete key does the same', elsewhere: 'the Delete or Backspace key does the same' },
+      ', and in Vim mode so does `x`. When that note is part of a multi-selection, the whole selection goes, with one confirm (“Move 3 notes to Trash?”). Escape on the confirm leaves everything as it was, and after the move the cursor sits on the row that took the note’s place, still in the sidebar. A folder is not trashed this way, since deleting a folder takes everything inside and cannot be undone: delete it from its menu (`m`, or right-click). The palette’s Move Note to Trash and Move Note to Archive, and any key you gave them, follow the sidebar the same way: with the sidebar focused and its cursor on a note, they act on that note (or the selection it is in) rather than the note open in the editor. Rebind the chord as Move sidebar note to Trash (`nav.sidebarTrash`) under Settings → Keymap, or unbind it; `x` is Delete selected result (`nav.delete`).'
+    ]
   },
   {
     title: 'Ctrl, Alt and Cmd keys in list views',
@@ -208,26 +319,32 @@ export const HELP_HOW_TO_GUIDES: HelpCard[] = [
   },
   {
     title: 'Keep supporting notes visible',
-    body:
-      'Open a note in a floating window when you want it in a separate OS window, or pin a note or PDF as a reference when you want it attached to the current writing context inside ZenNotes.'
+    body: [
+      { only: 'computer', text: 'Open a note in a floating window when you want it in a separate OS window, or pin', elsewhere: 'Pin' },
+      ' a note or PDF as a reference when you want it attached to the current writing context inside ZenNotes.'
+    ]
   },
   {
     title: 'Search from Raycast on macOS',
+    only: 'desktop',
     body:
       'Install the `zn` CLI from Settings → CLI, then use the Raycast Extension section on the same page to install ZenNotes for Raycast locally. Raycast can search notes, filter by folder or tag, open a note in the app, open it in a floating window, archive or unarchive, move to Trash, reveal in Finder, copy the note path, and copy a wikilink.'
   },
   {
     title: 'Preview a note in Finder with Quick Look',
+    only: 'desktop',
     body:
       'On macOS, select a Markdown file in Finder and press Space: Quick Look shows it the way ZenNotes renders it, in your theme and fonts, with callouts, tasks, tables, code, math, Mermaid diagrams and the images the note embeds. Press Open in ZenNotes to open it in the app: a note inside a vault you use opens there, any other file in its own window. Once you click into the preview, Enter does the same, and with Vim mode on `o` opens it too while `j` / `k`, Ctrl+D / Ctrl+U, `gg` and `G` move through the note. The preview is read-only and never goes online: links to websites open in your browser, wikilinks and tags stay plain text, and pictures on the web are not loaded. The preview comes with the app and turns on after you open ZenNotes once; to use another app\'s preview, turn ZenNotes off in System Settings → General → Login Items & Extensions → Quick Look.'
   },
   {
     title: 'Check for updates and install them',
+    only: 'desktop',
     body:
       'Use Check for Updates from the app menu, the command palette, or Settings → About. ZenNotes also checks on its own shortly after launch. If that check finds no network (Settings → About then says "Waiting for network"), nothing needs doing: it checks again by itself once the connection is back, and keeps trying at growing intervals if GitHub stays out of reach. A check that runs while a new release is still being published says so (for example "ZenNotes 2.79.0 is still being published"): try again in a few minutes. Any other failed check or download is one sentence in Settings → About, with the technical text under Details, where Copy details and Report an Issue help with a bug report. When a release is available, ZenNotes can download it in the background and then prompt you to install and relaunch. A copy installed by a package manager (the AUR package, or a tarball unpacked by hand) is only told that a newer version exists; install it the way you installed ZenNotes, since the package manager owns those files. On Arch, a `.pacman` build installs through a graphical polkit prompt; dismissing it keeps the download ready to retry, and if no graphical agent can run, Details in Settings → About shows the manual install command.'
   },
   {
     title: 'Run the self-hosted web version with Docker',
+    only: 'computer',
     body:
       'Prefer ZenNotes in a browser instead of the desktop app? Pull the prebuilt, multi-arch image from Docker Hub with `docker pull adibhanna/zennotes`, generate a login token and keep a copy (`openssl rand -hex 32`), then start the container with your vault mounted:\n`docker run -d -p 127.0.0.1:7878:7878 \\\n  -e ZENNOTES_AUTH_TOKEN=<your-token> \\\n  -v "$HOME/Documents/MyVault:/workspace" \\\n  -v "$HOME/zennotes-data:/data" \\\n  adibhanna/zennotes:latest`\nThe server binds to 0.0.0.0, so it will not start without that token. Open http://localhost:7878 and paste the token on first connect. Your notes stay as ordinary .md files on the host, and the desktop app can point at the same server. The full walkthrough, including reverse-proxy and TLS hardening, lives at zennotes.org/docs. The image is built from the server’s own repository, ZenNotes/znserver, whose releases also carry standalone `zennotes-server` binaries for running it without Docker.'
   },
@@ -238,6 +355,7 @@ export const HELP_HOW_TO_GUIDES: HelpCard[] = [
   },
   {
     title: 'Connect the desktop app to a self-hosted server',
+    only: 'desktop',
     body:
       'Settings → Vault → Remote workspace takes the server URL and its token. **On macOS**, a server on your own network also needs the system Local Network permission: macOS asks the first time ZenNotes reaches a local address, and if you dismiss that prompt the connection fails with no packets sent and no further warning: it looks exactly like a server that is down. Turn it back on under System Settings → Privacy & Security → Local Network. A server reached over the public internet is unaffected. Live updates travel over a WebSocket at /api/watch. If a reverse proxy in front of the server does not pass WebSocket upgrades, the app refreshes on its own every 30 seconds instead, so a note renamed or trashed on another device can show its old name for up to half a minute; passing the upgrade through gives instant updates.'
   },
@@ -249,15 +367,17 @@ export const HELP_HOW_TO_GUIDES: HelpCard[] = [
   {
     title: 'When Cloud reports a problem',
     body:
-      'When ZenNotes Cloud can\'t finish something, the status bar and Settings → Cloud say what happened and what you can do, in plain words: **Can\'t reach Cloud** when this device is offline or Cloud is unreachable, or **Signed out of Cloud** when this device was removed from your account on the website. Your notes stay on this device either way. Under the message, **Details** holds the technical line (Cloud\'s answer, its HTTP status and code); **Copy details** puts it on the clipboard, and **Report an Issue** opens the ZenNotes issue tracker on GitHub so you can paste it into a report. The status bar shows these even when you have turned it off under Settings → Appearance → Chrome.'
+      'When ZenNotes Cloud can\'t finish something, the status bar and Settings → Cloud say what happened and what you can do, in plain words: **Can\'t reach Cloud** when this device is offline or Cloud is unreachable, or **Signed out of Cloud** when this device was removed from your account on the website. Your notes stay on this device either way. Under the message, **Details** holds the technical line (Cloud\'s answer, its HTTP status and code); **Copy details** puts it on the clipboard, and **Report an Issue** opens the ZenNotes issue tracker on GitHub so you can paste it into a report. The status bar shows these even when you have turned it off under Settings → Appearance → Chrome.\n\nWhen Cloud refuses one file, the rest of the vault keeps syncing, and Settings → Cloud lists the file, what to do about it, and Cloud\'s answer under Details. Nothing is lost. Usually it is a file ZenNotes keeps for itself under `.zennotes`, and there is nothing to change on your side: the run counts as synced, the status bar reads **Synced** as usual (its tooltip adds **1 file stays on this device**), and sync offers the file to Cloud again once a day, so it goes up by itself once Cloud takes it; if it keeps coming back, copy the details and choose Report an Issue. If it is one of your notes or attachments, it waits for you: the status bar reads **1 file stays on this device** until you fix it, even when you have turned the status bar off. Cloud did not accept its name or location, most often because the path is longer than the 1,024 characters Cloud takes: give it a shorter name or move it to a folder nearer the top of the vault, and it syncs under the new path. A note you moved or renamed there stays in Cloud under its old name until then, so your other devices keep it.'
   },
   {
     title: 'Customize the look: themes vs. overrides',
+    only: 'desktop',
     body:
       'ZenNotes has two CSS-based ways to change how it looks. A **theme** is a complete palette you select under Settings → Appearance → Custom. An **override** is a small CSS file that layers on top of whichever theme is active, toggled on or off under Settings → Appearance → Overrides. Reach for a theme to design a whole look; reach for an override to change one or two things (a different accent, a darker background) without forking a theme. Both apply live, no restart.'
   },
   {
     title: 'Build a custom theme',
+    only: 'desktop',
     body:
       'Settings → Appearance → Custom → New theme scaffolds a folder at `~/.config/zennotes/themes/<name>/` with a `manifest.json` and a `theme.css`, reveals it, and adds a card you click to apply. Edits to `theme.css` apply live. Only the active theme CSS is loaded, so write `:root { … }` for the light/shared values and `:root[data-theme-mode="dark"] { … }` for dark. You never put the theme name in a selector. Colors are the `--z-*` tokens, written as space-separated RGB (`--z-accent: 255 59 48;`): backgrounds `--z-bg` / `--z-bg-softer` / `--z-bg-1`…`--z-bg-4`, text `--z-fg-1` / `--z-fg-2` / `--z-grey-0`…`--z-grey-2`, accent `--z-accent` / `--z-accent-soft` / `--z-accent-muted`, and the syntax hues `--z-red` / `--z-green` / `--z-yellow` / `--z-blue` / `--z-purple` / `--z-aqua`. `manifest.json` carries name, author, version, description, `modes` (light | dark | both), and an optional preview swatch.'
   },
@@ -268,26 +388,32 @@ export const HELP_HOW_TO_GUIDES: HelpCard[] = [
   },
   {
     title: 'Add syntax highlighting for another language',
+    only: 'desktop',
     body:
       'In the desktop app, open Settings → Editor → Languages and select a self-contained `.tmLanguage.json` TextMate grammar. Choose its fenced-code tag and aliases, then edit the sample to verify the live preview before installing it. Enabled languages highlight the same fences in Edit, Split, and Preview without changing your Markdown files. Built-in language and diagram tags stay reserved. ZenNotes stores installed packs machine-wide under `~/.config/zennotes/languages/`; this first version adds highlighting only, not completion, formatting, indentation, or language-server features.'
   },
   {
     title: 'Override one thing on any theme',
+    only: 'desktop',
     body:
       'An override is a `.css` file in `~/.config/zennotes/overrides/`, toggled under Settings → Appearance → Overrides. Enabled overrides inject on top of the active theme in filename order, so they win the cascade. Target `:root[data-theme] { … }` so the rule beats both built-in and custom themes. Because they sit on top, one override re-themes everything: `:root[data-theme] { --z-accent: 255 59 48; }` turns the accent hot pink on every theme. Overrides stack, so keep several small ones and flip each independently. The seeded `example.css` is a commented cookbook with the full token list and ready-to-uncomment recipes. To find what controls an element, use the **Developer tools** button in that same Overrides section and inspect it.'
   },
   {
     title: 'Bundle fonts and images in a theme',
+    only: 'desktop',
     body:
       'Ship an asset with a theme by dropping the file in the theme folder and referencing it with the `zen-theme://` scheme, where the host is the folder name: `@font-face { font-family: "Display"; src: url(zen-theme://my-theme/display.woff2); }`. Remote http/https URLs are never loaded, so themes stay self-contained and work offline; small images can also be inlined as `data:` URIs. Font family and text size are not theme tokens. Set those under Settings → Typography.'
   }
 ]
 
-export const HELP_CORE_CONCEPTS: HelpCard[] = [
+export const HELP_CORE_CONCEPTS: HelpCard<HelpText>[] = [
   {
     title: 'Notes are real markdown files',
-    body:
-      'ZenNotes edits markdown on disk. Rename, move, archive, restore, and floating-window operations all work on the underlying files, not an internal copy. A note’s creation date is app-owned metadata kept beside it under `.zennotes/note-metadata`, moved, renamed and deleted with the note by the desktop, the CLI and MCP, so it survives syncs and filesystems that drop birth times; keep `.zennotes` with the vault in backups.'
+    body: [
+      'ZenNotes edits markdown on disk. Rename, move, archive, ',
+      { only: 'computer', text: 'restore, and floating-window operations', elsewhere: 'and restore' },
+      ' all work on the underlying files, not an internal copy. A note’s creation date is app-owned metadata kept beside it under `.zennotes/note-metadata`, moved, renamed and deleted with the note by the desktop, the CLI and MCP, so it survives syncs and filesystems that drop birth times; keep `.zennotes` with the vault in backups.'
+    ]
   },
   {
     title: 'System folders are workflow buckets',
@@ -297,17 +423,21 @@ export const HELP_CORE_CONCEPTS: HelpCard[] = [
   {
     title: 'Primary notes can live at the vault root',
     body:
-      'Settings → Vault lets you choose between the original Inbox model and a Vault root model. Vault root mode surfaces top-level notes, folders, and loose files directly, which is better for imported Obsidian-style vaults and flat Markdown folders.'
+      'Settings → Vault lets you choose between the original Inbox model and a Vault root model. Vault root mode surfaces top-level notes, folders, and loose files directly, which is better for imported Obsidian-style vaults and flat Markdown folders. A vault that has not chosen follows what is in it: copy folders into a new one and it turns to Vault root mode. The Welcome note goes with the Inbox if nobody wrote in it; a note you edited stays, as a folder named `inbox`.'
   },
   {
     title: 'Tabs and splits are first-class',
-    body:
-      'Each editor pane can hold multiple tabs. Split the current tab right or down, move between panes with pane motions, switch the active note between Edit, Split, and Preview from commands, and, if you hide tabs, use the buffer switcher shortcut or `:buffers`. The active tab also has a full keyboard context menu, so actions like Close Others, Close Tabs to the Right, Pin Tab, Pin as Reference, Open in Floating Window, and Reveal in Finder stay accessible without the mouse. If you disable Vim mode, use the command palette instead. Each note keeps its own undo history while the app is open: switch tabs, or close a note and open it again, and `u` / Mod+Z (and redo) still walk through the edits you made to it. Renaming or moving the note you are editing keeps its caret, scroll position and undo history too. If the note was changed somewhere else in the meantime (another pane, sync, an external editor), it starts a clean history, because the old undo steps would no longer fit the text. The same happens the moment a sync tool, a script or another editor changes the file while you are looking at it: the new text appears in place, the caret stays, and Undo starts over instead of undoing your earlier typing underneath text that arrived from outside. Another pane typing into the same note leaves the history alone. On the desktop app you can also keep undo history after quitting, the way Vim\'s `undofile` does: turn on Settings → Editor → Keep undo history after quitting (or `:set undofile` in Vim mode, or the command palette). It is off by default because the history contains text you deleted; it is stored with the app on this computer, never in your vault, histories nobody returns to expire after 90 days, and turning the setting off erases them all. It travels in `config.toml` as `persist_undo_history` under `[editor]`.'
+    body: [
+      'Each editor pane can hold multiple tabs. Split the current tab right or down, move between panes with pane motions, switch the active note between Edit, Split, and Preview from commands, and, if you hide tabs, use the buffer switcher shortcut or `:buffers`. The active tab also has a full keyboard context menu, so actions like Close Others, Close Tabs to the Right, Pin Tab, ',
+      { only: 'desktop', text: 'Pin as Reference, Open in Floating Window, and Reveal in Finder', elsewhere: [{ only: 'computer', text: 'Pin as Reference, and Open in Floating Window', elsewhere: 'and Pin as Reference' }] },
+      ' stay accessible without the mouse. If you disable Vim mode, use the command palette instead. Each note keeps its own undo history while the app is open: switch tabs, or close a note and open it again, and `u` / Mod+Z (and redo) still walk through the edits you made to it. Renaming or moving the note you are editing keeps its caret, scroll position and undo history too. If the note was changed somewhere else in the meantime (another pane, sync, an external editor), it starts a clean history, because the old undo steps would no longer fit the text. The same happens the moment a sync tool, a script or another editor changes the file while you are looking at it: the new text appears in place, the caret stays, and Undo starts over instead of undoing your earlier typing underneath text that arrived from outside. Another pane typing into the same note leaves the history alone.',
+      { only: 'desktop', text: ' On the desktop app you can also keep undo history after quitting, the way Vim\'s `undofile` does: turn on Settings → Editor → Keep undo history after quitting (or `:set undofile` in Vim mode, or the command palette). It is off by default because the history contains text you deleted; it is stored with the app on this computer, never in your vault, histories nobody returns to expire after 90 days, and turning the setting off erases them all. It travels in `config.toml` as `persist_undo_history` under `[editor]`.' }
+    ]
   },
   {
     title: 'Context menus are part of the keyboard model',
     body:
-      'ZenNotes treats context menus as keyboard-reachable UI, not mouse-only escape hatches. Use the configured context-menu binding on the selected sidebar or note-list row. In the editor, select text and press `m` to open the text menu with commenting first; `Shift+F10` / the system Context Menu key still opens the active tab menu when no text is selected. The command palette also exposes the same high-value tab actions directly.'
+      'ZenNotes treats context menus as keyboard-reachable UI, not mouse-only escape hatches. Use the configured context-menu binding on the selected sidebar or note-list row. In the editor with Vim mode on, select text and press `m` (or `Shift+F10`) to open the text menu with commenting first; `Shift+F10` / the system Context Menu key still opens the active tab menu when no text is selected. With Vim mode off, `Shift+F10` or the Context Menu key opens the editor\'s right-click menu at the cursor, with or without a selection, on macOS as on Windows and Linux. The command palette also exposes the same high-value tab actions directly.'
   },
   {
     title: 'Comments attach to selected text',
@@ -321,8 +451,12 @@ export const HELP_CORE_CONCEPTS: HelpCard[] = [
   },
   {
     title: 'Sessions restore on relaunch',
-    body:
-      'Workspace restore is saved per vault, while the window frame restore is global. Reopening ZenNotes brings back your pane layout, open buffers, built-in views, and the last window bounds instead of dropping you into a fresh shell.'
+    body: [
+      { only: 'desktop', text: 'Workspace restore is saved per vault, while the window frame restore is global.', elsewhere: 'Workspace restore is saved per vault.' },
+      ' Reopening ZenNotes brings back your pane layout, open buffers',
+      { only: 'desktop', text: ', built-in views, and the last window bounds', elsewhere: ', and built-in views' },
+      ' instead of dropping you into a fresh shell.'
+    ]
   },
   {
     title: 'Leader mode can teach itself',
@@ -347,7 +481,7 @@ export const HELP_CORE_CONCEPTS: HelpCard[] = [
   {
     title: 'Not every checkbox is a task',
     body:
-      'A reading list is a checklist, not a to-do. Add `tasks: false` (or `off`) to a note’s frontmatter and its checkboxes stay checkboxes: they render and toggle exactly as before, but stop feeding the Tasks list, the boards, the calendars, `zn task list`, and the MCP tools. On a #task note, `tasks: note` keeps the note itself on the board while silencing its internal checklist, so a project note can be one card instead of twenty. To collect tasks from a few folders only, such as a single Tasks folder, right-click each one in the sidebar and choose “Use as Task Folder”: once any Task folder is set, checkboxes everywhere else stay plain checkboxes. To retire a whole folder instead (a media backlog, a reference library), choose “Exclude from Tasks”, which also works inside a Task folder. Both lists live under Settings → Tasks and in the vault’s own settings, so the desktop app, the self-hosted web app, the CLI, and the MCP tools agree. When you do want to see past them, `zn task list --include-excluded` and the MCP `list_tasks` tool’s `includeExcluded` flag list everything.'
+      'A reading list is a checklist, not a to-do. Add `tasks: false` (or `off`) to a note’s frontmatter and its checkboxes stay checkboxes: they render and toggle exactly as before, but stop feeding the Tasks list, the boards, the calendars, `zn task list`, and the MCP tools. On a #task note, `tasks: note` keeps the note itself on the board while silencing its internal checklist, so a project note can be one card instead of twenty. To collect tasks from a few folders only, such as a single Tasks folder, right-click each one in the sidebar and choose “Use as Task Folder”: once any Task folder is set, checkboxes everywhere else stay plain checkboxes. To retire a whole folder instead (a media backlog, a reference library), choose “Exclude from Tasks”, which also works inside a Task folder. Both lists live under Settings → Tasks and in the vault’s own settings, so the desktop app, the self-hosted web app, the CLI, and the MCP tools agree. In Settings, the field under each list offers the vault’s folders: type to narrow them and pick one with Enter, or type the path of a folder that does not exist yet. When you do want to see past them, `zn task list --include-excluded` and the MCP `list_tasks` tool’s `includeExcluded` flag list everything.'
   },
   {
     title: 'Check off a task with ⌘L',
@@ -362,7 +496,7 @@ export const HELP_CORE_CONCEPTS: HelpCard[] = [
   {
     title: 'A whole note can be a task (task files)',
     body:
-      'Besides inline `- [ ]` checkboxes, a whole note can itself be a task: give its frontmatter a `task` tag (`tags: [task]`) and its metadata lives in frontmatter, including `status` (open / in-progress / done…), `priority` (high / normal / low), `due` and `scheduled` (`YYYY-MM-DD`), plus any `tags`, while the note body holds free-form detail or sub-checkboxes. These "task files" show up in the Tasks views right alongside inline tasks, so both styles live in one vault. This is the TaskNotes convention, so a vault stays interoperable with TaskForge and Obsidian. Quick-add one from the command palette (**New Task**, or **New Task in Folder…** to choose where it lands), the "+ New task" button in the Tasks header, the `a` key (Vim mode), or the `:newtask` / `:task` ex command; `:newtask Projects/Website` drops it straight into a folder so multiple projects stay organized. New task files default to your configured tasks location (Settings → Vault → Notes → **Default tasks location**, or search Settings for "tasks folder"). That is your primary notes area unless you pick the active note’s folder or a specific folder, and a specific folder lives inside the primary notes area: `Tasks` means `inbox/Tasks/` in an Inbox vault and `Tasks/` in a root vault, as the setting itself shows. The folder-picking options override it per task. Checking a task file off rewrites its frontmatter (`status: done` and a `completedDate`) rather than a checkbox character, and rescheduling from the calendar or changing its column on the Kanban board updates the matching frontmatter field. Delete on a task file trashes the whole note (after a confirm).'
+      'Besides inline `- [ ]` checkboxes, a whole note can itself be a task: give its frontmatter a `task` tag (`tags: [task]`) and its metadata lives in frontmatter, including `status` (open / in-progress / done…), `priority` (high / normal / low), `due` and `scheduled` (`YYYY-MM-DD`), plus any `tags`, while the note body holds free-form detail or sub-checkboxes. These "task files" show up in the Tasks views right alongside inline tasks, so both styles live in one vault. This is the TaskNotes convention, so a vault stays interoperable with TaskForge and Obsidian. Quick-add one from the command palette (**New Task**, or **New Task in Folder…** to choose where it lands), the "+ New task" button in the Tasks header, the `a` key (Vim mode; on the Tasks calendar with daily notes on, `a` adds a task to the selected day instead), or the `:newtask` / `:task` ex command; `:newtask Projects/Website` drops it straight into a folder so multiple projects stay organized. New task files default to your configured tasks location (Settings → Vault → Notes → **Default tasks location**, or search Settings for "tasks folder"). That is your primary notes area unless you pick the active note’s folder or a specific folder, and a specific folder lives inside the primary notes area: `Tasks` means `inbox/Tasks/` in an Inbox vault and `Tasks/` in a root vault, as the setting itself shows. The folder-picking options override it per task. Checking a task file off rewrites its frontmatter (`status: done` and a `completedDate`) rather than a checkbox character, and rescheduling from the calendar or changing its column on the Kanban board updates the matching frontmatter field. Delete on a task file trashes the whole note (after a confirm).'
   },
   {
     title: 'The Tasks calendar schedules and reschedules',
@@ -377,7 +511,37 @@ export const HELP_CORE_CONCEPTS: HelpCard[] = [
   {
     title: 'The Tasks Kanban board, custom statuses, and any field',
     body:
-      'Switch Tasks to Kanban (the button, or `3` in Vim mode) for a column board. "Group by" offers Status (Today / Upcoming / No due date / In progress / Waiting / Done, derived from due dates, `[/]` and `@waiting`), Priority, Folder, Custom status, and one entry per inline `@field` you use. The Folder board gives every note folder its own column (`Projects/alpha`, `Areas`, the Inbox root, Quick Notes), so notes that live together group together with nothing to maintain; point it at one folder under Settings → Tasks → Folder board, with `:folderroot Projects` on the board, or with `kanban_folder_root = "Projects"` in config.toml, and that folder\'s children become the columns, deeper notes roll up to their child, and notes outside it share an Other folders column. Folder columns stay read-only: move a note to change its column. On the Status board a started task (`[/]`) sits in its own In progress column between No due date and Waiting: drop a card there (or send it with `Shift+L`) to mark it `[/]`, drop it back on Today or Upcoming to reopen it with that date (or on No due date to reopen it without one: that drop clears its `due:`, and a daily-note task, whose date is its note’s, cannot take it), and a `@waiting` card keeps its `[/]` underneath so clearing the wait returns it to In progress. Any task field works: tag tasks with `@key:value` tokens like `@status:review`, `@sprint:24`, or `@area:backend`, and each key becomes its own board with a column per value (auto-discovered, so it appears the moment you use it). For the status field, define the columns under Settings → Tasks → Kanban statuses, or list them in order in `config.toml` under `[view]`, e.g. `kanban_statuses = ["backlog", "in_progress", "review", "done"]`; other fields sort their columns automatically. A note-level `status:` in frontmatter sets a default for that note’s tasks. A note tagged `task` is a card of its own: its frontmatter `status:` is its custom status, and without one it sits in the trailing No status column until you move it. Finished and cancelled tasks leave the boards, with one exception: a task note whose `status:` names one of your Kanban statuses stays in that column on the Custom status board, so a `done` column holds the task notes you finished, still checked. Everything is keyboard-first: `h`/`l` move between columns, `j`/`k` between cards, `g` cycles the group-by, `Shift+H` / `Shift+L` send the focused card to the previous/next column (rewriting its `@field` token), `<` / `>` reorder the columns themselves (saved per board), and `Space`/`Enter` toggle/open. Drag does the same with the mouse, including dragging a column header to reorder, and dragging a card to a new spot inside its column to hand-prioritize it (that arrangement is saved per column and restored when you come back to the board). To have the cards follow their dates instead, set **Order** in the board\'s toolbar to Due date (`s` in Vim mode, `:order due` on the ex line, or `kanban_card_sort = "due"` under `[view]` in config.toml): every column on every board, custom status boards included, then sorts by due date, earliest first and cards without one last, and a card dropped into another column lands in its date slot. Your dragged arrangement is kept meanwhile, and Manual brings it back. On a board wider than the window, hold a dragged card or column header near the board\'s left or right edge and the board scrolls that way, faster the closer you get to the edge; a card held near the top or bottom of a long column scrolls the column. After a drop the cursor sits on the card or column you moved, so the keyboard picks up where the mouse left off. Renaming a column (click its title, or `[kanban_column_titles]` in `config.toml`) sets a display label only: the column still shows its underlying `@field:value` beneath the name, and moving a card in writes that value, not the label.'
+      'Switch Tasks to Kanban (the button, or `3` in Vim mode) for a column board. "Group by" offers Status (Today / Upcoming / No due date / In progress / Waiting / Done, derived from due dates, `[/]` and `@waiting`), Priority, Folder, Custom status, and one entry per inline `@field` you use. The Folder board gives every note folder its own column (`Projects/alpha`, `Areas`, the Inbox root, Quick Notes), so notes that live together group together with nothing to maintain; point it at one folder under Settings → Tasks → Folder board, with `:folderroot Projects` on the board, or with `kanban_folder_root = "Projects"` in config.toml, and that folder\'s children become the columns, deeper notes roll up to their child, and notes outside it share an Other folders column. Folder columns stay read-only: move a note to change its column. On the Status board a started task (`[/]`) sits in its own In progress column between No due date and Waiting: drop a card there (or send it with `Shift+L`) to mark it `[/]`, drop it back on Today or Upcoming to reopen it with that date (or on No due date to reopen it without one: that drop clears its `due:`, and a daily-note task, whose date is its note’s, cannot take it), and a `@waiting` card keeps its `[/]` underneath so clearing the wait returns it to In progress. Any task field works: tag tasks with `@key:value` tokens like `@status:review`, `@sprint:24`, or `@area:backend`, and each key becomes its own board with a column per value (auto-discovered, so it appears the moment you use it). For the status field, define the columns under Settings → Tasks → Kanban statuses, or list them in order in `config.toml` under `[view]`, e.g. `kanban_statuses = ["backlog", "in_progress", "review", "done"]`; other fields sort their columns automatically. A note-level `status:` in frontmatter sets a default for that note’s tasks. A note tagged `task` is a card of its own: its frontmatter `status:` is its custom status, and without one it sits in the trailing No status column until you move it. Finished and cancelled tasks leave the boards, with one exception: a task note whose `status:` names one of your Kanban statuses stays in that column on the Custom status board, so a `done` column holds the task notes you finished, still checked. Everything is keyboard-first: `h`/`l` move between columns, `j`/`k` between cards, `g` cycles the group-by, `Shift+H` / `Shift+L` send the focused card to the previous/next column (rewriting its `@field` token), `<` / `>` reorder the columns themselves (saved per board), and `Space`/`Enter` toggle/open (`Tab` steps onto a card’s subtasks). Drag does the same with the mouse, including dragging a column header to reorder, and dragging a card to a new spot inside its column to hand-prioritize it (that arrangement is saved per column and restored when you come back to the board). To have the cards follow their dates instead, set **Order** in the board\'s toolbar to Due date (`s` in Vim mode, `:order due` on the ex line, or `kanban_card_sort = "due"` under `[view]` in config.toml): every column on every board, custom status boards included, then sorts by due date, earliest first and cards without one last, and a card dropped into another column lands in its date slot. Your dragged arrangement is kept meanwhile, and Manual brings it back. On a board wider than the window, hold a dragged card or column header near the board\'s left or right edge and the board scrolls that way, faster the closer you get to the edge; a card held near the top or bottom of a long column scrolls the column. After a drop the cursor sits on the card or column you moved, so the keyboard picks up where the mouse left off. Renaming a column (click its title, or `[kanban_column_titles]` in `config.toml`) sets a display label only: the column still shows its underlying `@field:value` beneath the name, and moving a card in writes that value, not the label. For a separate board per project, whose cards are not tasks, use New Kanban (see Make a Kanban board for each project).'
+  },
+  {
+    title: 'Subtasks on the Kanban board',
+    body:
+      'On the Kanban board, a task’s indented subtasks fold into its card. The card shows a bar with `3/5 · 60%`, counted like the `3/5` chip in the note: direct subtasks only, cancelled and forwarded ones left out, in-progress ones not yet done. Click the bar to show or hide the subtask lines; click a box to check that subtask off in its note. From the keyboard, `Tab` steps onto a card’s subtasks (`Shift+Tab` back, `Esc` to the card), `Space` (or `x` in Vim mode) toggles one, and `Enter` opens the note at its line, where you edit, add or reorder subtasks. A task note’s checkboxes are its card’s subtasks. Only cards sit in columns: a subtask’s own date or fields never place it, the filter finds a card by its subtasks, and the Tasks list and calendars still show every subtask.',
+  },
+  {
+    title: 'Empty tasks stay out of the Tasks views',
+    body:
+      'A bare `- [ ]`, like the ones a daily-note template leaves, is an empty task, and the Tasks views, the Calendar and Timeline panels, and the home view leave it out. A quiet “3 hidden” beside the **View** button says how many; click it to show them. A task with any text always shows, even just `due:2026-11-02`. Turn it off in the View menu (`v`, then Hide empty tasks), with `E` in Vim mode, or in Settings → Tasks. Config key: `hide_empty_tasks` under `[view]`.'
+  },
+  {
+    title: 'WIP limits on Kanban columns',
+    body:
+      'A WIP limit caps how many cards a column should hold. Right-click a column header and choose **Set WIP limit…**. The header then reads `2 / 3`; past the limit the column turns red, as in `4 / 3`. From the keyboard, `↑` on a column’s first card reaches its header, where `Shift+F10` opens the menu and `Enter` renames the column. In Vim mode, `W` sets the focused column’s limit, `:wip 3` does too, and a bare `:wip` clears it. Limits are kept per board and column, in config.toml’s `[kanban_wip_limits]` table, such as `"status:in-progress" = 3`. The count ignores the filter and the hidden empty tasks.'
+  },
+  {
+    title: 'Kanban column colors',
+    body:
+      'Both kinds of board have them: a Tasks Kanban keeps its colors in your settings, and a board made with New Kanban keeps them on the column’s option in the database, so they go wherever the database goes and show on its chips in the Table too. On a database board, right-click a column’s header and choose Color…, press `C` in Vim mode, or run Set Board Column Color… from the palette; with Vim off, `Shift+F10` on a card or an Add card slot reaches it too. The rest is about Tasks boards, which also have `:color`. Give a column a color: right-click its header and choose **Color…**, then pick Gray, Red, Yellow, Green, Teal, Blue or Purple (No color takes it off). The header gets a dot and a colored top edge, and the cards’ `@field:value` chips for that column take the same color. Each color comes from the active theme, so it fits light and dark themes alike. From the keyboard, `Shift+F10` on a column’s header opens its menu; in Vim mode, `C` opens the colors for the focused column, `:color blue` sets one, and a bare `:color` clears it. Colors are kept per board and column, in config.toml’s `[kanban_column_colors]` table, such as `"status:in-progress" = "blue"`.'
+  },
+  {
+    title: 'Swimlanes on the Kanban board',
+    body:
+      'Split the board into horizontal lanes by a second field: in the **View** menu (`v` in Vim mode), pick Lanes: Priority, Folder, Tag, or any `@field` you use. Each lane is a row across the same columns, with its own count. Drag a card into another lane to change that field on its task line, the way a column drop changes the column’s: a priority lane writes `!high`, an `@sprint` lane `@sprint:24`, and a tag lane makes its tag the task’s first (a task sits in the lane of its first tag; No tag removes them). Folder lanes are read-only, like folder columns. Click a lane’s header to collapse it; collapsed lanes are kept per board. WIP limits still count the whole column. In Vim mode, `S` steps through the lane fields, `{` / `}` hop between lanes, `Shift+J` / `Shift+K` move the card a lane down or up, `za` collapses or expands a lane, and `zM` / `zR` do all of them. With Vim mode off, the arrows reach each lane’s header, where Enter or Space collapses it. On the ex line, `:lanes tag` (a bare `:lanes` turns them off). Config key: `kanban_lanes` under `[view]`.'
+  },
+  {
+    title: 'Keys for the Tasks views',
+    body:
+      'Each Tasks view has a **Keys** button at the right of its toolbar (`?` in Vim mode) that lists its keys. With Vim mode off it shows only the keys that work then: the arrows, Enter, Space, Tab, and Shift+F10.'
   },
   {
     title: 'Filter the Tasks views to one project',
@@ -397,7 +561,7 @@ export const HELP_CORE_CONCEPTS: HelpCard[] = [
   {
     title: 'Right-click a task for actions',
     body:
-      'Every task surface has the same right-click menu: the Tasks list, the Kanban board, the Tasks calendar, the calendar side panel, and the Timeline panel. It carries Open note, Mark done, Mark in progress, Cancel, @waiting, Forward to note…, due-date presets (today / tomorrow / next week / clear) with Choose a date… for any other day, priority, and Delete, with the keyboard equivalent shown beside each one so the menu doubles as a reminder of the shortcut. Right-clicking also moves the cursor to that task, so the menu and the keyboard always act on the same row. The menu takes typing as a filter: right-click, type “prio”, and only the priority entries stay. Editing a task inline is offered on the calendar surfaces and the Timeline, which have an edit field; elsewhere “Open note” takes you to the line.'
+      'Every task surface has the same right-click menu: the Tasks list, the Kanban board, the Tasks calendar, the calendar side panel, and the Timeline panel. It carries Open note, Mark done, Mark in progress, Cancel, @waiting, Forward to note…, due-date presets (today / tomorrow / next week / clear) with Choose a date… for any other day, Repeat… and Remind… (and Skip this time on a repeating task), priority, and Delete, with the keyboard equivalent shown beside each one so the menu doubles as a reminder of the shortcut. Right-clicking also moves the cursor to that task, so the menu and the keyboard always act on the same row. The menu takes typing as a filter: right-click, type “prio”, and only the priority entries stay. Editing a task inline is offered on the calendar surfaces and the Timeline, which have an edit field; elsewhere “Open note” takes you to the line.'
   },
   {
     title: 'Mark a task in progress',
@@ -405,9 +569,28 @@ export const HELP_CORE_CONCEPTS: HelpCard[] = [
       'A task you have started but not finished can say so: `- [/]`. Write it directly, run “Mark Task In Progress” from the command palette with the cursor on a task, or press `i` on a task in the Tasks list (press `i` again to set it back to open). It renders as a half-filled box in the editor and the reading view, and that box is clickable on both surfaces: a click checks the task off, the same `[/]` to `[x]` the toggle command performs (the forwarded and cancelled markers stay unclickable records). Moving an in-progress card between live Kanban columns keeps the `/` too. Unlike forwarded or cancelled, an in-progress task is still live work: it keeps its place in Today, Upcoming, or No due date, stays on the calendar and the Kanban board, and rolls forward with your unfinished tasks when you roll over a daily note, `/` and all. A whole-note task file uses `status: in-progress` in its frontmatter (`doing`, `started` and `wip` are read the same way).'
   },
   {
+    title: 'Repeat a task',
+    body:
+      'Add `@repeat:` to a task and checking it off schedules the next one: `- [ ] Water the plants @repeat:weekly due:2026-11-01`. The rules are `daily`, `weekdays`, `weekly`, `monthly` and `yearly`; `2d`, `3w`, `6m` or `1y` for every so many days, weeks, months or years; weekdays like `mon/thu`; and `after-3d` (any interval) to count from the day you finish instead of the due date. Check it off with `⌘L`, a click on its checkbox, `x` in the Tasks views or a drop into Done, and the next occurrence is written right above it with the next date in `due:`, while the finished line stays below as the record, without `@repeat` (so unchecking it never makes a second copy). Its subtasks repeat too, every checkbox open again, and the record cancels (`[-]`) the ones you left open, so only the fresh copies stay on your lists; subtasks you select along with the task (`Vjj` then `⌘L`) are checked off instead. The next date counts from the due date (or, without one, the daily note’s date, then today) and is never today or earlier: a daily task done three days late comes back tomorrow, not as three overdue copies. `monthly` from the 31st lands on the last day of shorter months. Press `r` in the Tasks views (or Repeat… in the right-click menu, or `:repeat weekly` in a note) to set or stop it; Skip this time in the menu schedules the next one and records this one as cancelled. In the Tasks views a repeating task shows a repeat icon beside its date. Typing an `x` into the brackets by hand is just text and does not repeat. Whole-note task files do not repeat yet.'
+  },
+  {
+    title: 'Remind me before a task is due',
+    body: [
+      'Add `@remind:` to a task with a due date and ',
+      { only: 'desktop', text: 'ZenNotes shows', elsewhere: 'the desktop app shows' },
+      ' a notification: `@remind:9am` (or `930am`, `1730`, `17h30`) at that time on the due date, `@remind:1d` the day before at your reminder time',
+      { only: 'desktop', text: ' (09:00 unless changed in Settings → Tasks)', elsewhere: ' (09:00 unless changed in the desktop app)' },
+      ', `@remind:2d-6pm` two days before at 6 PM. A daily note’s tasks remind on the note’s date. Click the notification to open the task. Press `R` in the Tasks views (or Remind… in the right-click menu, or `:remind 9am` in a note) to set or remove it; the Tasks views show a bell and the time. Reminders fire from the desktop app while it runs',
+      { only: 'desktop', text: ', the window hidden in the tray included' },
+      '.',
+      { only: 'desktop', text: ' ZenNotes quit misses them: the next launch shows what came due in the last 24 hours once, as one notification. Turn reminders off under Settings → Tasks → Task reminders.' },
+      ' A recurring task carries its reminder to each new occurrence.'
+    ]
+  },
+  {
     title: 'Subtask progress on the parent',
     body:
-      'A parent task with subtasks shows how far along they are: a `2/5` chip sits at the end of the parent line in the editor and the reading view, turning green when every child is done. The count is derived while rendering and is never written into the markdown, so it stays correct no matter which app last edited the file. Direct children only, one nesting level down, and a grandchild rolls into its own parent. Cancelled (`- [-]`) and forwarded (`- [>]`) children leave the count entirely; an in-progress child (`- [/]`) counts as not yet done.'
+      'A parent task with subtasks shows how far along they are: a `2/5` chip sits at the end of the parent line in the editor and the reading view, turning green when every child is done. The count is derived while rendering and is never written into the markdown, so it stays correct no matter which app last edited the file. Direct children only, one nesting level down, and a grandchild rolls into its own parent. Cancelled (`- [-]`) and forwarded (`- [>]`) children leave the count entirely; an in-progress child (`- [/]`) counts as not yet done. The parent’s Kanban card shows the same count as a bar.'
   },
   {
     title: 'Style completed tasks',
@@ -431,8 +614,11 @@ export const HELP_CORE_CONCEPTS: HelpCard[] = [
   },
   {
     title: 'Command palette mirrors the important tab actions',
-    body:
-      'You do not need to remember where a tab action lives. The command palette exposes direct entries for closing the current tab, closing sibling tabs, closing tabs to the right, pinning or unpinning the tab, opening the active tab menu, splitting the current tab, pinning the active note as a reference, opening the note in a floating window, and revealing it in Finder.'
+    body: [
+      'You do not need to remember where a tab action lives. The command palette exposes direct entries for closing the current tab, closing sibling tabs, closing tabs to the right, pinning or unpinning the tab, opening the active tab menu, splitting the current tab, ',
+      { only: 'desktop', text: 'pinning the active note as a reference, opening the note in a floating window, and revealing it in Finder', elsewhere: [{ only: 'computer', text: 'pinning the active note as a reference, and opening the note in a floating window', elsewhere: 'and pinning the active note as a reference' }] },
+      '.'
+    ]
   },
   {
     title: 'Slash commands speed up writing',
@@ -477,7 +663,7 @@ export const HELP_CORE_CONCEPTS: HelpCard[] = [
   {
     title: 'Templates scaffold new notes',
     body:
-      'Templates turn a repeated note shape into one keystroke. ZenNotes ships built-in templates for engineering (ADR, RFC, Bug Report, Postmortem, Meeting Notes, 1:1) and personal use (Daily Note, Weekly Review, Reading Notes, Journal, Project Kickoff, To-do), and you can author your own under Settings → Templates. A template is plain markdown with optional frontmatter and variables (`{{title}}`, `{{date}}`, `{{date:FORMAT}}`, `{{time}}`, `{{week}}`, and `{{cursor}}`) substituted at creation time, plus the live `{{modified_date}}`, `{{modified_time}}` and `{{modified_datetime}}`, which stay in the note and show its last-saved time. Custom templates are stored as `.md` files in `.zennotes/templates/`, so they stay portable like everything else. Daily and weekly notes can each be assigned a template so dated notes start pre-filled.'
+      'Templates turn a repeated note shape into one keystroke. ZenNotes ships built-in templates for engineering (ADR, RFC, Bug Report, Postmortem, Meeting Notes, 1:1) and personal use (Daily Note, Weekly Review, Reading Notes, Journal, Project Kickoff, To-do), and you can author your own under Settings → Templates. A template is plain markdown with optional frontmatter and variables (`{{title}}`, `{{date}}`, `{{date:FORMAT}}`, `{{time}}`, `{{week}}`, and `{{cursor}}`) substituted at creation time, plus the live `{{modified_date}}`, `{{modified_time}}` and `{{modified_datetime}}`, which stay in the note and show its last-saved time. Custom templates are stored as `.md` files in `.zennotes/templates/`, so they stay portable like everything else; a template folder makes the notes in it templates too. Daily and weekly notes can each be assigned a template so dated notes start pre-filled.'
   },
   {
     title: 'Reference and connections support research-heavy work',
@@ -496,6 +682,7 @@ export const HELP_CORE_CONCEPTS: HelpCard[] = [
   },
   {
     title: 'Open links in other applications',
+    only: 'desktop',
     body:
       'On desktop, enable application prefixes such as zotero, obsidian, or vscode under Settings → Editor → Links → External application links. Separate prefixes with commas; they are saved in config.toml. Use ordinary Markdown, for example [Paper](zotero://open-pdf/library/items/W78FUE98). Editor clicks, Cmd/Ctrl-click, preview links, and Vim gd open enabled links in the installed application. A disabled application link offers Open settings, never note creation. If the application cannot open the link, ZenNotes shows an error.'
   },
@@ -526,8 +713,9 @@ export const HELP_CORE_CONCEPTS: HelpCard[] = [
   },
   {
     title: 'The CLI is the bridge to launchers',
+    only: 'computer',
     body:
-      'The `zn` command-line tool can list, read, search, capture, edit, archive, trash, inspect tasks, work with databases (`zn base list / rows / get / add / set / create / pages`: add rows with record pages, give every record its page with `zn base pages`, set fields with the grid’s exact semantics, locally or against a self-hosted server; renaming a record page with `zn rename` keeps its row pointing at it), and start the MCP server without the app running. With no `--vault` or `--server` flag, `zn` works on the vault the app has open, a connected server included (it sends the token `zn connect` saved for that server, or `ZENNOTES_REMOTE_TOKEN` / `--token`). Raycast uses it for search, then uses `zennotes://open` and `zennotes://open-window` links to bring the selected note back into ZenNotes. On macOS, Settings → CLI can install the bundled Raycast extension locally so users do not need to wait for the Raycast Store version.'
+      'The `zn` command-line tool can list, read, search, capture, edit, archive, trash, inspect tasks, work with databases (`zn base list / rows / get / add / set / create / pages`: add rows with record pages (a row added while the database opens on a view of picked rows joins that view\'s picks, as + Row does in the grid), give every record its page with `zn base pages`, set fields with the grid’s exact semantics, locally or against a self-hosted server; renaming a record page with `zn rename` keeps its row pointing at it), and start the MCP server without the app running. With no `--vault` or `--server` flag, `zn` works on the vault the app has open, a connected server included (it sends the token `zn connect` saved for that server, or `ZENNOTES_REMOTE_TOKEN` / `--token`). Raycast uses it for search, then uses `zennotes://open` and `zennotes://open-window` links to bring the selected note back into ZenNotes. On macOS, Settings → CLI can install the bundled Raycast extension locally so users do not need to wait for the Raycast Store version.'
   },
   {
     title: 'Excalidraw drawings are first-class files',
@@ -556,27 +744,31 @@ export const HELP_CORE_CONCEPTS: HelpCard[] = [
   },
   {
     title: 'Updates are release-driven',
+    only: 'desktop',
     body:
       'In-app updates read the published GitHub release feed. That means update checks, download prompts, and release notes are all driven by the same public releases you can open manually from the app menu or command palette.'
   },
   {
     title: 'Workflows plan first and write second',
+    only: 'workflows',
     body:
       'A workflow is a plain `.md` file under `.zennotes/workflows/`: frontmatter plus one pipeline per line, like `good = books | where rating >= 4`. Wires carry sets of notes, so every wire on the canvas shows the live count flowing through it, and the canvas and the text are lossless projections of the same file (layout is computed, so no coordinates ever land in your vault). The engine can only propose changes: running shows the full dry-run diff before anything is applied, applying journals every file\'s pre-run bytes so Undo restores them exactly, and a run that fails midway rolls the whole thing back on its own. There are no code steps, no shell, and no network, which is why a workflow you did not write is safe to read and run. A workflow runs when you run it, and since 2.55 also on its own when its `trigger:` names an event: `on note-created`, `on note-saved`, `on note-moved` or `on tag-added` fires for the note you change in this app, a moment after it settles, with no confirmation and a receipt toast that carries Undo (see the Event triggers card); a `schedule` trigger parses but does not fire yet. Local desktop vaults, self-hosted web servers, and desktop remote workspaces can all author and run workflows; a remote workspace needs a server on 2.29 or newer, and against an older server workflows stay read-only. The feature is off by default; enable it under Settings → Workflows.'
   },
   {
     title: 'The workflow grammar in one card',
+    only: 'workflows',
     body:
       'Six sources open a set: `all`, `folder inbox`, `tag #book`, `search reading list`, `current`, `selection` (the Trash and Archive stay out unless you name them, like `folder trash`; the four system names `inbox`, `quick`, `archive`, `trash` mean those folders wherever the vault keeps them, so on a vault whose notes live at the root `folder inbox` is the vault root). Thirteen steps filter and shape it: `where rating >= 4`, `tagged` / `not-tagged #x`, `no-tags`, `in inbox/projects`, `matching inbox/**/*.md`, `contains TODO`, `since 7d`, `sort finished desc`, `limit 25`, `dedupe`, and `union` / `subtract <wire>` to combine named wires. `tag`, `tagged` and `not-tagged` also take a comma-separated list and match any tag in it, so `all | not-tagged #someday, #reference` keeps the notes carrying neither, and `all | no-tags` keeps the notes with no tag at all. Mutating steps change every note on the wire, always behind the dry-run confirmation: `set status done`, `add-tag` / `remove-tag`, `move`, `rename {{date}}-{{title}}`, `append` / `prepend`, `apply-template`, `archive`, `trash`. Outputs turn the wire into text: `render table title, rating` feeds `write "Log.md"`, `write-section "Log.md" "Finished"`, `create-each "inbox/{{title}}.md"`, `notify`, or `clipboard`, and `call <workflow>` folds another workflow into the same run. `{{title}}`, `{{date}}`, `{{count}}` and any frontmatter field expand per note. Press `?` in the Workflows view for the live reference, with a one-line description and a real example for every step.'
   },
   {
     title: 'Event triggers',
+    only: 'workflows',
     body:
       'Set `trigger: on note-saved` (or `on note-created`, `on note-moved`, `on tag-added`) on an active workflow and it runs by itself when you make that change in this app, about a second and a half after the note settles: a burst of autosaves while you type is one run, and a note you are still typing in waits for its next save. `note-moved` fires with the note\'s new path for a rename, a move, Archive, Trash and Restore; `tag-added` fires for a save that gave the note a tag it did not have. The run sees only the note that changed: every source (`all`, `folder`, `tag`, `search`, `current`) resolves over that one note, so `all | contains type: topic | move Topics` means "file this note under Topics when it says so", and nothing is read across the vault on every save. Add a condition to fire only when the note matches: `trigger: on note-saved where folder = inbox` takes the same `field op value` a `where` step takes. There is no confirmation; the receipt toast carries Undo, a run that changed nothing says nothing, and a note the run would write that has unsaved edits is left alone and named. Only edits made in this app fire: a change that arrives by sync or from another device does not, what a run itself writes never fires again, a folder rename does not fire for the notes inside it, and the phone apps do not fire at all. `status: draft` or `trigger: manual` silences one workflow; Settings → Workflows → Event triggers (`workflow_event_triggers` under `[view]` in config.toml) silences them all on this device. A `schedule` trigger still parses without firing.'
   }
 ]
 
-export const HELP_SHORTCUT_SECTIONS: HelpShortcutSection[] = [
+export const HELP_SHORTCUT_SECTIONS: HelpShortcutSection<HelpText>[] = [
   {
     id: 'global-shortcuts',
     title: 'Global shortcuts',
@@ -587,7 +779,7 @@ export const HELP_SHORTCUT_SECTIONS: HelpShortcutSection[] = [
       { keys: 'Enter on a tagged block (in Search notes)', action: 'Open the note at that block', detail: 'With a #tag in the query, notes list their tagged blocks; Enter opens the note at the block’s line, highlighted, and Ctrl+O comes back. Enter on “+N more tagged blocks” opens the rest in the Tags view, your words still filtering.' },
       { keys: 'Shift+Enter (in Search notes)', action: 'Create a note named after your search', detail: 'The last row of the results offers to create the note you typed: Shift+Enter (or Enter on that row) opens a New note form with three fields. Name starts as your search text, selected so you can retype it. Folder starts empty (your Inbox) or as the path you typed, like projects/roadmap; landing in it lists every folder, typing narrows the list, Enter picks the highlighted one and ArrowUp keeps a folder that does not exist yet. Tags starts with any #tag words from your search; type to pick an existing tag or add a new one, Space or comma commits, Backspace on an empty field removes the last one. The line under the fields tells you what will happen. A note with the same name in that folder blocks Create until you change the name, and Shift+↵ opens the existing note instead; the same name elsewhere only warns. Enter in Name, or Ctrl/Cmd+Enter anywhere, creates the note and opens it; Escape goes back to the results.' },
       { keys: 'Mod+F', action: 'Search notes (non-Vim mode)', detail: 'Open the note search palette directly when Vim mode is off.' },
-      { keys: 'Mod+F (in the editor)', action: 'Find and replace in the note', detail: 'In Edit and Split, open the editor’s find-and-replace bar: Tab moves between the Find and Replace fields, with match-case, whole-word, and regex toggles. Esc closes it. With Vim mode off, Mod+F in the main window opens note search instead (the row above); unbind or move Search notes in non-Vim mode under Settings \u2192 Keymap to give Mod+F to the bar, or use F3. With Vim mode on, Linux and Windows keep Ctrl+F as Vim\u2019s page-forward (search with / instead); macOS keeps Cmd+F for the bar. A floating window has no note search, so there Mod+F opens the bar with Vim mode off too.' },
+      { keys: 'Mod+F (in the editor)', action: 'Find and replace in the note', detail: ['In Edit and Split, open the editor’s find-and-replace bar: Tab moves between the Find and Replace fields, with match-case, whole-word, and regex toggles. Esc closes it. With Vim mode off, Mod+F in the main window opens note search instead (the row above); unbind or move Search notes in non-Vim mode under Settings \u2192 Keymap to give Mod+F to the bar, or use F3. With Vim mode on, Linux and Windows keep Ctrl+F as Vim\u2019s page-forward (search with / instead); macOS keeps Cmd+F for the bar.', { only: 'computer', text: ' A floating window has no note search, so there Mod+F opens the bar with Vim mode off too.' }] },
       { keys: 'F3 / Mod+G (in the editor)', action: 'Find the next match in the note', detail: 'With the find bar closed, open it with your last search filled in and selected, ready to retype or to press F3 again; with it open, move to the next match. Shift+F3 or Shift+Mod+G moves to the previous one. The same with Vim mode on or off, in every window.' },
       { keys: 'Shift+Mod+P', action: 'Open commands', detail: 'Open the command palette.' },
       { keys: 'Alt+Enter (in the command palette)', action: 'Give the highlighted command a key', detail: 'Record a key for the command under the cursor without leaving the palette (Option+Enter on macOS). Enter saves, Escape returns to the same row, which then shows its key. Every command can take one; the same keys live in Settings → Keymap → Commands.' },
@@ -595,7 +787,7 @@ export const HELP_SHORTCUT_SECTIONS: HelpShortcutSection[] = [
       { keys: 'Shift+Mod+N', action: 'New Quick Note', detail: 'Create a quick capture note in the main window and focus its title.' },
       { keys: 'Alt+Mod+T (macOS)', action: 'New note from template', detail: 'Open the template picker to create a note, with Vim mode on or off. Bound by default on macOS; on Linux and Windows it starts unbound, since Ctrl+Alt+T opens a terminal on most Linux desktops, so set a key under Settings → Keymap.' },
       { keys: 'Unbound', action: 'Insert template into current note', detail: 'Pick a template and insert it at the cursor of the active note, with Vim mode on or off. Unbound until you set a key under Settings → Keymap.' },
-      { keys: 'Shift+Mod+Space', action: 'Open quick capture window', detail: 'Open the floating, always-on-top capture window. Bound system-wide (CommandOrControl+Shift+Space by default) so it works over any app; change it under Settings → Editor.' },
+      { only: 'desktop', keys: 'Shift+Mod+Space', action: 'Open quick capture window', detail: 'Open the floating, always-on-top capture window. Bound system-wide (CommandOrControl+Shift+Space by default) so it works over any app; change it under Settings → Editor.' },
       { keys: 'Mod+,', action: 'Open Settings', detail: 'Open settings for appearance, editor behavior, fonts, vault controls, and app details. Settings opens on its search: type to filter, move through the results with ↑/↓ (or Ctrl+J / Ctrl+K), and press Enter to jump to the picked setting. From anywhere in Settings, Mod+F (or / in Vim mode) returns to the search.' },
       { keys: 'Mod+1', action: 'Toggle sidebar', detail: 'Hide or show the left sidebar.' },
       { keys: 'Mod+2', action: 'Toggle connections', detail: 'Toggle the connections panel for the active editor pane.' },
@@ -605,22 +797,23 @@ export const HELP_SHORTCUT_SECTIONS: HelpShortcutSection[] = [
       { keys: 'a', action: 'Reply in a comment thread', detail: 'Comments panel: open a reply box under the selected comment; `Mod+Enter` sends it, `Esc` cancels.' },
       { keys: 'Alt+H / Alt+J / Alt+K / Alt+L', action: 'Focus pane left / down / up / right', detail: 'Always-on pane-focus motions: they work even with Vim mode off and skip the Ctrl+W prefix some Linux setups intercept. (Ctrl+W h/j/k/l still works in Vim mode.) Both walk the same cycle, in the order the panels appear on screen: sidebar → note list → editor → connections → comments → outline → calendar → timeline, and back again.' },
       { keys: '↑ / ↓ / → / ← / Enter / Esc', action: 'Move inside a focused panel', detail: 'Once a panel has focus (the sidebar, the note list, connections, the outline or comments), the arrows move its row cursor, Enter or → opens the row under the cursor, Esc returns focus to the editor, and ← goes back the way `h` does there: from the note list to the sidebar, from connections, the outline and comments to the editor. Shift+F10 or the Context Menu key opens the row’s menu in the sidebar and the note list. In comments, Enter or → jumps to the comment’s text, and Backspace or Delete deletes it after a confirm. With Vim mode off, Home and End jump to the ends and Page Up / Page Down move a screenful of rows; the single-key motions (j / k, gg / G) and the panels’ letter keys stay Vim-only. The sidebar, reached with Alt+H or Focus Sidebar in the command palette, works like a tree: → opens the row or expands its folder, ← collapses a folder, or from a note folds its folder and lands on it (Esc still returns to the editor).' },
+      { keys: 'Enter / Tab / Esc (in a question)', action: 'Answer a confirmation', detail: 'Enter presses the highlighted button. A question that deletes or discards something (Delete permanently, Empty Trash, Discard changes) opens on Cancel, so Enter keeps everything as it was; Tab moves to the button that goes ahead, then Enter confirms. Any other question opens on its confirm button, so Enter confirms. Esc always cancels.' },
       { keys: 'Mod+.', action: 'Toggle Zen mode', detail: 'Hide or restore the app chrome so only the active editor, preview, or split view stays on screen.' },
-      { keys: 'Mod+W', action: 'Close active tab', detail: 'Close the current note or virtual tab. With Settings open it closes Settings instead, and in a floating window or the quick capture window it closes that window, like its close button. While a dialog, palette or menu is open it does nothing, so it never closes the tab behind it; press Esc to dismiss those first. With Vim mode on, Linux and Windows keep Ctrl+W as the pane prefix while a tab is open: close the tab with :q or :bd, from the tab menu, or rebind this.' },
+      { keys: 'Mod+W', action: 'Close active tab', detail: ['Close the current note or virtual tab. With Settings open it closes Settings instead', { only: 'desktop', text: ', and in a floating window or the quick capture window it closes that window, like its close button' }, '. While a dialog, palette or menu is open it does nothing, so it never closes the tab behind it; press Esc to dismiss those first. With Vim mode on, Linux and Windows keep Ctrl+W as the pane prefix while a tab is open: close the tab with :q or :bd, from the tab menu, or rebind this.'] },
       { keys: 'Ctrl+Tab', action: 'Switch to previous note', detail: 'Switch to the most recently used note. Press again to alternate between the last two notes.' },
       { keys: 'Alt+1 … Alt+9', action: 'Go to tab 1 through 9', detail: 'Jump straight to a tab by position, browser-style (Ctrl+1 … Ctrl+9 on macOS, where Option types characters and the ⌘ digits are taken). Tab numbers count across panes in the same order gt cycles; rebindable under Settings → Keymaps. Vim users get the same jump as {count}gt. Heads-up for macOS with multiple Spaces: Mission Control claims Ctrl+digit for Switch to Desktop, so rebind here or free the key under System Settings → Keyboard Shortcuts.' },
       { keys: 'Ctrl+PageDown / Ctrl+PageUp', action: 'Next / previous tab', detail: 'Step through the open tabs, counted across panes in the same order gt and gT cycle, wrapping at either end. Works with Vim mode on or off, and from the command palette as Next Tab and Previous Tab. On macOS the defaults are Cmd+Option+Right and Cmd+Option+Left. Rebindable under Settings → Keymaps, to Ctrl+Tab for example if you would rather have that than Switch to previous note.' },
       { keys: 'Shift+Mod+T', action: 'Reopen closed tab', detail: 'Reopen the most recently closed tab, restoring its position and pinned state. Repeat to walk back through your close history.' },
-      { keys: 'Mod+O', action: 'Open file', detail: 'Desktop only: pick a Markdown file with the native dialog. A file inside a known vault opens against that vault; anything else opens in a standalone external-file window. Links in that window follow from the file\'s own folder: a relative link such as `../README.md` opens the file it names, and a `[[wikilink]]` finds a page of that name in the folder or below it, each in its own window (or in its vault, when the target lives in one).' },
+      { only: 'desktop', keys: 'Mod+O', action: 'Open file', detail: 'Desktop only: pick a Markdown file with the native dialog. A file inside a known vault opens against that vault; anything else opens in a standalone external-file window. Links in that window follow from the file\'s own folder: a relative link such as `../README.md` opens the file it names, and a `[[wikilink]]` finds a page of that name in the folder or below it, each in its own window (or in its vault, when the target lives in one).' },
       { keys: 'Mod+4 / Mod+5 / Mod+6', action: 'Edit / Split / Preview mode', detail: 'Switch the active note between the raw editor, side-by-side split, and rendered preview. Preview opens at the line you were editing; Edit and Split open on the section you were reading when you scrolled away from the cursor in Preview, and keep the cursor where it was when you only peeked.' },
       { keys: 'Mod+A', action: 'Select the note\u2019s text', detail: 'In the editor, select everything under the note\u2019s `# ` title heading, the line a new note starts with; press again to select the whole note, title and frontmatter included. With the cursor on the title, or in a note that does not start with a `# ` heading, the first press selects the whole note. With Vim mode on Linux and Windows, Ctrl+A in normal and visual mode stays Vim\u2019s increment (and does nothing without a number); it selects from insert mode, and `ggVG` selects in normal mode.' },
       { keys: 'Mod+L', action: 'Toggle checkbox', detail: 'Turn the current line into a checkbox and toggle it on repeat. See the “Check off a task with ⌘L” card in Core concepts for the full state rules.' },
       { keys: 'Shift+Mod+K', action: 'Open link popover', detail: 'Open the link popover for the [[wikilink]] under the cursor, keyboard inside: edit the note it names in place, or create it when it does not exist yet. Escape closes it and returns to the link; Mod+Enter opens the note in a tab. Works with Vim mode on or off (Vim mode also has `K`). Remappable as editor.linkPopover.' },
       { keys: 'Alt+Q (macOS: Ctrl+Q)', action: 'Reflow paragraph', detail: 'Join the hard-wrapped lines of the paragraph under the cursor (or every paragraph in the selection) into one line, so the editor wraps it to the pane. Headings, lists, tables, code, and explicit line breaks are untouched. See the “Reflow a hard-wrapped paragraph” card. Remappable as editor.reflowParagraph.' },
-      { keys: 'Shift+Mod+E', action: 'Export note as PDF', detail: 'Export the active note as a PDF file.' },
-      { keys: 'Mod+=', action: 'Zoom in', detail: 'Scale the whole app up, including chrome, editor, and preview.' },
-      { keys: 'Mod+-', action: 'Zoom out', detail: 'Scale the whole app down when the UI feels too large.' },
-      { keys: 'Mod+0', action: 'Reset zoom', detail: 'Return the app to its default scale.' },
+      { only: 'computer', keys: 'Shift+Mod+E', action: 'Export note as PDF', detail: 'Export the active note as a PDF file.' },
+      { only: 'desktop', keys: 'Mod+=', action: 'Zoom in', detail: 'Scale the whole app up, including chrome, editor, and preview.' },
+      { only: 'desktop', keys: 'Mod+-', action: 'Zoom out', detail: 'Scale the whole app down when the UI feels too large.' },
+      { only: 'desktop', keys: 'Mod+0', action: 'Reset zoom', detail: 'Return the app to its default scale.' },
       { keys: 'Alt+Z', action: 'Toggle word wrap', detail: 'Switch between wrapped lines and horizontal scrolling.' },
       { keys: 'Esc', action: 'Dismiss overlay', detail: 'Close note search or the command palette when they are open.' }
     ]
@@ -628,6 +821,7 @@ export const HELP_SHORTCUT_SECTIONS: HelpShortcutSection[] = [
   {
     id: 'quick-capture-window',
     title: 'Quick capture window',
+    only: 'desktop',
     description: 'These apply inside the floating capture window, opened with the quick capture hotkey.',
     items: [
       { keys: 'Mod+Enter', action: 'Save and hide', detail: 'Save the note into Quick Notes and hide the window. A fresh capture clears for next time; an opened note is left as you left it.' },
@@ -658,18 +852,21 @@ export const HELP_SHORTCUT_SECTIONS: HelpShortcutSection[] = [
       { keys: 'Space p', action: 'Note outline', detail: 'Jump to any heading in the active note via a searchable overlay.' },
       { keys: 'Space u', action: 'Unresolved links', detail: 'Open the Unresolved Links view: every link in the vault to a note that does not exist yet, with the notes and lines that link to it. Enter on a name creates the note, Enter on a line opens the note at the link, and K writes the missing note in the link popover. Also `:unresolved`.' },
       { keys: 'Space G', action: 'Folder gallery', detail: 'Open the Gallery of the folder under the sidebar cursor (while the sidebar has focus) or of the open note’s folder: its notes as cards led by their covers. h / j / k / l move, Enter opens, / filters by title. A capital G, since `Space g` is the Atlas.' },
+      { keys: 'Space k', action: 'New Kanban', detail: 'Create a Kanban board (To do, Doing, Done) in the folder under the sidebar cursor while the sidebar has focus, otherwise where new databases go, and open it. Also New Kanban in the palette and `:kanban`.' },
       { keys: 'Space v', action: 'Switch vault', detail: 'Open the command palette directly to the local vault switcher.' },
+      { only: 'desktop', keys: 'Space I', action: 'Import notes', detail: 'Open the Import window, for Notion, Obsidian and Logseq.' },
+      { only: 'desktop', keys: 'Space F', action: 'Open vault folder', detail: 'Open the current vault’s folder in Finder, File Explorer or your file manager. Desktop, local vaults only.' },
       { keys: 'Space a', action: 'Open workflows', detail: 'Open the Workflows view, where saved pipelines over your notes are built and run. Workflows are off by default; turn them on under Settings → Workflows first.' },
       { keys: 'Space r', action: 'Review Cloud conflicts', detail: 'Open whatever Cloud sync is waiting on: the queue of files two devices changed at once, one decision at a time, or the vault settings question, which lists each setting that differs with this device’s value beside the cloud’s and lets you pick a side per setting. When the open note is one of the waiting files, the queue starts on it. A waiting note also says so across its top, in Edit and Preview alike: sync is paused for it until you choose what to keep, and its Review button opens the queue on it. Choosing the other device’s version puts the file where that device left it; when this device already has a different file there, that file moves beside it under the next free name, such as Untitled 2.md. A notification with Review appears once when a new conflict arrives. When the Cloud vault this vault syncs with is deleted, on this device, another device or the website, the status bar says Cloud vault deleted and the binding opens Settings → Cloud instead, where This vault says what happened until you choose a cloud vault, start a new one, or dismiss the notice. If another device moved it into an end-to-end encrypted vault, the status bar says Cloud vault now encrypted instead, and This vault asks you to unlock this device if needed, then choose the encrypted vault. The binding and the command palette entry appear only while something is waiting, and open the same place as Review in the status bar.' },
       { keys: 'Space g', action: 'Open atlas', detail: 'Open the Atlas view: the whole vault drawn as a map of notes and links.' },
-      { keys: 'Space q', action: 'Quick capture window', detail: 'Open the floating, always-on-top capture window, same as the global hotkey.' },
-      { keys: 'Space b', action: 'Hide to tray', detail: 'With Settings → Appearance → Keep running in the tray on, hide this window. ZenNotes keeps running, Cloud sync and the Quick capture hotkey keep working, and the tray icon brings the window back. Hide Window to Tray in the command palette does the same.' },
+      { only: 'desktop', keys: 'Space q', action: 'Quick capture window', detail: 'Open the floating, always-on-top capture window, same as the global hotkey.' },
+      { only: 'desktop', keys: 'Space b', action: 'Hide to tray', detail: 'With Settings → Appearance → Keep running in the tray on, hide this window. ZenNotes keeps running, Cloud sync and the Quick capture hotkey keep working, and the tray icon brings the window back. Hide Window to Tray in the command palette does the same.' },
       { keys: 'Space i', action: 'Insert template into note', detail: 'Pick a template and insert it at the cursor of the active note, instead of creating a new note from it. Without Vim mode, give “Insert template into current note” a key under Settings → Keymap.' },
       { keys: 'Space c', action: 'Toggle calendar', detail: 'Show or hide the calendar panel for the active pane.' },
       { keys: 'Space n', action: 'Toggle timeline', detail: 'Show or hide the Timeline panel for the active pane, and move the keyboard into it: j / k move, gg / G jump to the ends, x ticks the task, Enter opens it at its line, m opens the task menu, / focuses the filter, and Esc goes back to the note. Mod+7 toggles it in any mode.' },
       { keys: 'Space l s', action: 'Toggle favorite', detail: 'Add or remove the active note from the Favorites section shown in the sidebar and on the home view. Folders join it from their context menu.' },
       { keys: 'Space l c', action: 'Cover image', detail: 'Open the cover picker for the active note: a gradient, a gallery photo, an image in the vault, an upload, a pasted image or an https link. Also “Add Cover…” in the command palette and `:cover`.' },
-      { keys: 'Space l u', action: 'Cover from Unsplash', detail: 'Open the cover picker on its Unsplash tab to search free photos for the active note’s cover. Also “Add Cover from Unsplash…” in the command palette and `:cover unsplash {search}`.' },
+      { only: 'computer', keys: 'Space l u', action: 'Cover from Unsplash', detail: 'Open the cover picker on its Unsplash tab to search free photos for the active note’s cover. Also “Add Cover from Unsplash…” in the command palette and `:cover unsplash {search}`.' },
       { keys: 'Space l a', action: 'Callout type', detail: 'Open the callout type menu at the cursor: pick a type to turn the paragraph or the selected lines into a callout, or to change the type of the callout the cursor is in. Also “Set Callout Type…” in the command palette, and “Turn into callout…” or “Change callout type…” in the right-click menu, where “Remove callout” sits too.' },
       { keys: 'Space l l', action: 'Code block language', detail: 'Open the code block language picker for the code block the cursor is in: pick a language to write after its opening fence, “Text (plain)” to take it away, or the detected guess at the top to keep it. Also “Set Code Block Language…” in the command palette, and the language button at the top right of each block in Edit mode.' },
       { keys: 'Space l d', action: 'Convert table to database', detail: 'Turn the Markdown table under the cursor (or the rendered table whose cell you are in) into a `.base` database and leave a `[[link]]` to it in the note. Also “Convert Table to Database…” in the command palette, `:table_to_database`, and the bottom of the table cell menu.' },
@@ -713,9 +910,9 @@ export const HELP_SHORTCUT_SECTIONS: HelpShortcutSection[] = [
       { keys: 'h', action: 'Collapse or move left', detail: 'Collapse the current folder or move focus back toward the editor.' },
       { keys: 'o', action: 'Toggle folder', detail: 'Expand or collapse the selected folder in the sidebar.' },
       { keys: '/', action: 'Search notes', detail: 'Open note search directly from keyboard navigation mode.' },
-      { keys: 'm', action: 'Open context menu', detail: 'Open the right-click menu for the selected sidebar or note-list row, including move, archive, trash, floating-window, and reveal actions where they apply.' },
+      { keys: 'm', action: 'Open context menu', detail: ['Open the right-click menu for the selected sidebar or note-list row, including move, archive, ', { only: 'computer', text: 'trash, floating-window, and reveal actions', elsewhere: 'and trash actions' }, ' where they apply.'] },
       { keys: 'x', action: 'Move to Trash', detail: 'Move the note under the cursor to the Trash after a confirm, or the whole multi-selection when that note is part of it. The cursor stays in the sidebar, on the row that took the note’s place. Folders are left alone: delete one from its menu (`m`).' },
-      { keys: 'Mod+Backspace', action: 'Move to Trash, Vim on or off', detail: 'The same as `x`, with Vim mode on or off: ⌘⌫ on macOS, Ctrl+Backspace on Windows and Linux. Rebind or unbind it as Move sidebar note to Trash under Settings → Keymap.' },
+      { keys: 'Mod+Backspace / Delete', action: 'Move to Trash, Vim on or off', detail: ['The same as `x`, with Vim mode on or off: ⌘⌫ on macOS, Ctrl+Backspace on Windows and Linux, ', { only: 'computer', text: 'and the Delete key everywhere', elsewhere: 'and Delete or Backspace here' }, '. Rebind the chord or unbind both as Move sidebar note to Trash under Settings → Keymap.'] },
       { keys: 'Esc', action: 'Return to editor', detail: 'Drop back into the main editor focus path.' }
     ]
   },
@@ -764,7 +961,7 @@ export const HELP_SHORTCUT_SECTIONS: HelpShortcutSection[] = [
       { keys: 'j / k', action: 'Scroll preview', detail: 'Move through rendered preview content line-by-line.' },
       { keys: 'Ctrl-d / Ctrl-u', action: 'Half-page scroll', detail: 'Move preview content by half a viewport.' },
       { keys: 'g g / G', action: 'Jump to top or bottom', detail: 'Go to the start or end of the preview or connections list.' },
-      { keys: 'm / Shift+F10', action: 'Open active tab menu', detail: 'Open the right-click menu for the active tab while you are reading preview content. This exposes Close, Close Others, Close Tabs to the Right, Pin Tab, Split Right, Split Down, Pin as Reference, Open in Floating Window, and Reveal in Finder.' },
+      { keys: 'm / Shift+F10', action: 'Open active tab menu', detail: ['Open the right-click menu for the active tab while you are reading preview content. This exposes Close, Close Others, Close Tabs to the Right, Pin Tab, Split Right, Split Down, ', { only: 'desktop', text: 'Pin as Reference, Open in Floating Window, and Reveal in Finder', elsewhere: [{ only: 'computer', text: 'Pin as Reference, and Open in Floating Window', elsewhere: 'and Pin as Reference' }] }, '.'] },
       { keys: '/', action: 'Search notes', detail: 'Open note search without leaving keyboard navigation.' },
       { keys: 'p', action: 'Peek backlink', detail: 'In the connections panel, open the hover preview for the selected note.' },
       { keys: 'h / Esc', action: 'Back out', detail: 'Return from hover preview to connections, or from connections to the editor.' }
@@ -773,23 +970,32 @@ export const HELP_SHORTCUT_SECTIONS: HelpShortcutSection[] = [
   {
     id: 'tasks-tags-trash',
     title: 'Tasks, tags, and trash views',
-    description: 'These virtual views each run their own keyboard loop in the main pane, and the Vim leader works here too (for example Space h for hint mode). The single keys below belong to Vim mode: with it off only the arrows, Enter and Escape stay live everywhere, plus Shift+J/K to reorder in the list, Tab to pick a task on the calendar and Space to toggle one on the board or the calendar; everything else sits in the right-click menu. An action you rebind to a chord with Ctrl, Alt or Cmd works with Vim mode on or off.',
+    description: 'These virtual views each run their own keyboard loop in the main pane, and the Vim leader works here too (for example Space h for hint mode). The single keys below belong to Vim mode: with it off only the arrows, Enter and Escape stay live everywhere, plus Shift+J/K to reorder in the list, Tab to pick a task on the calendar or to step onto a card’s subtasks on the board, and Space to toggle one on the board or the calendar; everything else sits in the right-click menu. An action you rebind to a chord with Ctrl, Alt or Cmd works with Vim mode on or off.',
     items: [
       { keys: 'j / k', action: 'Move row cursor', detail: 'Step through task rows, tagged notes and their tagged blocks, or trashed notes.' },
       { keys: 'g g / G', action: 'Jump to top or bottom', detail: 'Move to the first or last visible result.' },
       { keys: 'Enter / o', action: 'Open current result', detail: 'Open the selected task source note, tagged note, or trashed note. On a tagged block, open its note at that line, highlighted.' },
-      { keys: '} / {', action: 'Next or previous note', detail: 'Tags view only: hop to the next note past the current note\'s tagged blocks, or back to the previous note (from a block, to its own note).' },
+      { keys: '} / {', action: 'Next or previous note or lane', detail: 'Tags view: hop to the next note past the current note\'s tagged blocks, or back to the previous note (from a block, to its own note). On a Kanban board with lanes: hop to the next or previous lane\'s header (from a card, to its own lane).' },
       { keys: 'x', action: 'Toggle task', detail: 'Tasks view only: check or uncheck the selected task. A checked task lingers in place for a couple of seconds before it drops into Done, so you can toggle it again to undo. Space also toggles unless Space is your Vim leader key, in which case it starts a leader sequence.' },
       { keys: '>', action: 'Forward task', detail: 'Tasks list only: forward the selected task to another note. Opens a note picker that filters as you type and preselects the first match, so Enter forwards without reaching for an arrow key. The original becomes a forwarded record (`[>]`) linking to the target, and a fresh copy is added there, backlinked home, subtasks and all. Forwarded tasks live under a “Forwarded” group.' },
       { keys: 'i', action: 'Mark task in progress', detail: 'Tasks list only: mark the selected task as started (`- [/]`), or set it back to open. In-progress tasks keep their group and their day on the calendar, so the row keeps its place.' },
       { keys: 'c', action: 'Cancel task', detail: 'Tasks list only: mark the selected task as intentionally abandoned (`- [-]`), or un-cancel it. Cancelled tasks live under a “Cancelled” group, out of Today and Done.' },
+      { keys: 'r / R', action: 'Repeat or remind', detail: 'Tasks list, board, and calendar: `r` sets how the selected task repeats (`@repeat:`), `R` when it reminds (`@remind:`). Each opens a picker of common choices; type any other rule, like `2w` or `2d-6pm`. Also in the right-click menu.' },
       { keys: '@', action: 'Choose due date', detail: 'Tasks list, board, and calendar: give the selected task any due date from the month calendar that typing `@date` opens in a note, the same as Choose a date… in its right-click menu. It starts on the task’s due date (today without one); arrows move, Enter sets the day, or type a date.' },
-      { keys: 'K / J', action: 'Move task up / down', detail: 'Tasks list only: reorder the selected task within its group. Works with Vim mode on or off, in Note order (see `s`).' },
+      { keys: 'Tab / Shift+Tab', action: 'Step through a card’s subtasks', detail: 'Kanban board: step onto a card’s subtasks and back. Space (or x), Enter, i, c and @ act on that subtask; Esc returns to the card. Works with Vim mode on or off.' },
+      { keys: 'K / J', action: 'Move task up / down', detail: 'Tasks list: reorder the selected task within its group. Works with Vim mode on or off, in Note order (see `s`). On a Kanban board with lanes, in Vim mode: move the card a lane up or down, writing that lane\'s field.' },
       { keys: 's', action: 'Order the list', detail: 'Tasks list only: switch the order inside each group between the notes’ line order and priority (high, then medium, low, and none, ties by due date). Same as the Order menu above the list, `:order priority` / `:order note`, and `tasks_list_order` under `[view]` in config.toml.' },
       { keys: 'r', action: 'Restore trashed note', detail: 'Trash view only: restore the selected trashed note.' },
       { keys: 'x / d', action: 'Delete forever', detail: 'Trash view only: permanently delete the selected trashed note after confirmation.' },
       { keys: '/', action: 'Filter the view', detail: 'Focus the local filter box for tasks, tag matches, or trashed notes. In Tags, a word from a tagged block narrows the list to that block.' },
       { keys: 'F', action: 'Pick a saved Tasks filter', detail: 'Tasks view: open the list of saved filters and apply one. Save the current query with the Save filter… chip or `:savefilter <name>`.' },
+      { keys: 'E', action: 'Show or hide empty tasks', detail: 'Tasks view: show or hide bare `- [ ]` tasks in the Tasks views, the Calendar and Timeline panels, and the home view.' },
+      { keys: 'v', action: 'View menu', detail: 'Tasks view: open the View menu (Hide empty tasks, and the board\'s Lanes).' },
+      { keys: '?', action: 'Keys', detail: 'Tasks view: list the current view’s keys. Esc closes it.' },
+      { keys: 'W', action: 'Set a WIP limit', detail: 'Tasks board only: set the focused column’s WIP limit. Same as `:wip <limit>`.' },
+      { keys: 'C', action: 'Color a column', detail: 'Pick the focused column’s color. Same as Color… in the column menu, or `:color <name>`.' },
+      { keys: 'S', action: 'Pick the board\'s lanes', detail: 'Tasks board only: step the lanes through None, Priority, Folder, Tag and your @fields. Same as Lanes in the View menu, or `:lanes <field>`.' },
+      { keys: 'za / zM / zR', action: 'Collapse lanes', detail: 'Tasks board with lanes: `za` collapses or expands the lane under the cursor, `zM` collapses every lane, `zR` expands them all. Enter on a lane\'s header does what `za` does.' },
       { keys: ':', action: 'Open local ex prompt', detail: 'Run the view-specific command line inside Tasks or Tags.' },
       { keys: 'Esc', action: 'Clear the filter', detail: 'Clears an active filter. These views are tabs, so Esc no longer closes them. Close with :q or the ✕ in the tab header.' }
     ]
@@ -827,6 +1033,7 @@ export const HELP_SHORTCUT_SECTIONS: HelpShortcutSection[] = [
   {
     id: 'workflows-view',
     title: 'Workflows view',
+    only: 'workflows',
     description:
       'Off by default; enable under Settings → Workflows. The single-letter keys below are Vim-mode only, like every list in the app; arrows, Enter, and Esc always work, and Shift+F10 (or the ContextMenu key) opens the row menu in either mode.',
     items: [
@@ -849,11 +1056,12 @@ export const HELP_SHORTCUT_SECTIONS: HelpShortcutSection[] = [
   {
     id: 'database-grid',
     title: 'Database grid (Table view)',
-    description: 'Keys for a CSV database table while its grid has focus; the grid takes them before any global motion. The single-letter keys (h / j / k / l, H / L, 0 / ^ / $, g g / G, i, x, o, O, c, m, a, d d) and Ctrl-o / Ctrl-w belong to Vim mode, like every list in the app. With Vim mode off the arrows, Enter, Space, Esc and Shift+F10 (or the Context Menu key) stay live, and the rest is in the row and column menus, the header buttons and the command palette.',
+    description: 'Keys for a CSV database table while its grid has focus; the grid takes them before any global motion. The single-letter keys (h / j / k / l, H / L, 0 / ^ / $, g g / G, i, x, o, O, c, m, a, d d) and Ctrl-o / Ctrl-w belong to Vim mode, like every list in the app. With Vim mode off the arrows, Enter, Space, Esc, Delete / Backspace and Shift+F10 (or the Context Menu key) stay live, and the rest is in the row and column menus, the header buttons and the command palette.',
     items: [
       { keys: '↑ / ↓ / ← / →', action: 'Move the cell cursor', detail: 'In either mode. ↑ from the first row reaches the column-header row, where Enter renames the field and Shift+F10 opens its column menu. In Vim mode h / j / k / l move too, k climbs onto the header the same way, and 0 / ^ jump to the first column, $ to the last.' },
       { keys: 'Enter', action: 'Edit the cell', detail: 'In either mode; i does it too in Vim mode. On a checkbox cell this toggles it instead of opening an editor, and on the column header it renames the field.' },
       { keys: 'Space', action: 'Select the row', detail: 'In either mode; x does it too in Vim mode. On a checkbox cell Space toggles the checkbox instead. Selected rows get the selection bar: Delete, or Show only these in this view, which makes the selection the view’s picked rows (also Show Only Selected Rows in the command palette). The view then says “Showing N picked rows” under the header, with Edit picks and Show all rows.' },
+      { keys: 'Delete / Backspace', action: 'Delete the selected rows', detail: 'In either mode. Deletes the selected rows, or the row at the cursor when none is selected, after asking first, since a deleted row cannot be brought back. The question opens on Cancel, so Enter or Esc keeps them and the selection; Tab to Delete, then Enter, deletes them. While you edit a view’s picks these keys do nothing. When some of the rows have a linked page note, a second question asks whether to move those notes to Trash too or keep them as standalone notes.' },
       { keys: 'Shift+F10', action: 'Open the row menu', detail: 'In either mode, or the Context Menu key; m does it too in Vim mode. On a cell it is the record’s right-click menu (Open page, Delete row, and the rest); with rows selected it offers Show only selected rows, and in a view showing picked rows, Remove from this view’s picks. On the column header it is the column menu, with Hide column and Choose columns….' },
       { keys: 'Esc', action: 'Clear selection / leave the grid', detail: 'In either mode. Leaves Edit picks without changing them, else clears a multi-row selection, then blurs the grid.' },
       { keys: '[[ (in a text cell)', action: 'Link a note from the cell', detail: 'While editing a text cell, `[[` opens the same note search as the editor; ↑/↓ or Ctrl+N/P move, Enter inserts the `[[wikilink]]`, Escape closes the list and keeps typing.' },
@@ -864,14 +1072,27 @@ export const HELP_SHORTCUT_SECTIONS: HelpShortcutSection[] = [
       { keys: 'o', action: 'Open the record page', detail: 'Vim mode. Open the row as a Markdown note in the per-database folder. In either mode, Open page is in the row menu and on the row itself.' },
       { keys: 'O', action: 'Create pages for all records', detail: 'Vim mode. Give every record that has no page its note in the per-database folder, so each one can be linked with [[wikilinks]]. Records that already have a page keep it, a page file already in the folder under a record’s name is linked instead of copied, and rows with an empty title are left out. Asks first. In either mode it is also in the database’s ⋯ menu and the command palette.' },
       { keys: 'a', action: 'Add a row', detail: 'Vim mode. Append a new empty record and move the cursor to it; in either mode New row under the table and + Row in the header do the same. In a view showing picked rows the new row joins the picks, so it stays in view.' },
-      { keys: 'd d', action: 'Delete the row', detail: 'Vim mode. Remove the record at the cursor. In either mode Delete row is in the row menu, and Delete in the selection bar removes the selected rows.' },
+      { keys: 'd d', action: 'Delete the row', detail: 'Vim mode. Remove the record at the cursor at once; a row with a linked page asks about its note first. In either mode Delete / Backspace ask before deleting, Delete row is in the row menu, and Delete in the selection bar removes the selected rows.' },
       { keys: 'Ctrl-o', action: 'Jump back to the grid', detail: 'Vim mode. From a record page, return to the database grid, whether you opened it as a .csv file or via New Database.' },
       { keys: 'Ctrl-w k / j / h / l', action: 'Move to tabs or panes', detail: 'Vim mode. Move between the grid, the tab strip, and split panes, exactly like from the editor.' }
+    ]
+  },
+  {
+    id: 'database-board',
+    title: 'Database board (Board view)',
+    description: 'Keys for a database Board, a Kanban made with New Kanban included, while the board has focus. They match the Tasks Kanban board. The letters belong to Vim mode; with Vim mode off the arrows, Enter and Shift+F10 (or the Context Menu key) do the work, and the card menu moves cards.',
+    items: [
+      { keys: '← / → / ↑ / ↓', action: 'Move the cursor', detail: 'In either mode; h / l / k / j in Vim mode. Down from a column’s last card reaches its Add card.' },
+      { keys: 'Enter', action: 'Open the card’s page', detail: 'In either mode; o in Vim mode. On Add card, or in an empty column, it opens the field for a new card.' },
+      { keys: 'a', action: 'Add a card', detail: 'Vim mode. Opens Add card in the cursor’s column. Enter adds the card and keeps the field open for the next; Escape closes it.' },
+      { keys: 'H / L', action: 'Move the card a column left / right', detail: 'Vim mode. Sets the card’s status; the cursor follows it. In either mode, drag the card or use Move to in its menu.' },
+      { keys: 'C', action: 'Color the column', detail: 'Vim mode. Pick the cursor’s column’s color, kept on its option in the database. Right-click a column’s header for the same, in either mode, or use Column color… in the card menu.' },
+      { keys: 'Shift+F10', action: 'Open the card menu', detail: 'In either mode, or the Context Menu key; m in Vim mode. On Add card it opens the column’s menu instead. Open page, Move to each other column, and Delete card (which asks first).' }
     ]
   }
 ]
 
-export const HELP_VIM_COMMANDS: HelpExCommand[] = [
+export const HELP_VIM_COMMANDS: HelpExCommand<HelpText>[] = [
   {
     command: ':w',
     summary: 'Save the active note',
@@ -890,7 +1111,13 @@ export const HELP_VIM_COMMANDS: HelpExCommand[] = [
   {
     command: ':unbind action.id',
     summary: 'Remove an action’s or a command’s key entirely',
-    detail: 'Leave an action with no key at all, instead of parking it on some obscure chord: `:unbind global.zoomIn` takes Zoom in off its key until it is rebound or reset under Settings, Keymaps. `:unbind command note.trash` does the same for a command palette command. A bare id that names no action but does name a command unbinds the command; `nav.back`, both an action (`h`, back out) and the Go Back command, is the action, and `:unbind command nav.back` the command. Bare `:unbind` opens that page, which lists every id. The unbind travels in `config.toml` as `\"global.zoomIn\" = \"\"`.'
+    detail: [
+      'Leave an action with no key at all, instead of parking it on some obscure chord: ',
+      { only: 'desktop', text: '`:unbind global.zoomIn` takes Zoom in off its key', elsewhere: '`:unbind global.toggleWordWrap` takes Toggle word wrap off its key' },
+      ' until it is rebound or reset under Settings, Keymaps. `:unbind command note.trash` does the same for a command palette command. A bare id that names no action but does name a command unbinds the command; `nav.back`, both an action (`h`, back out) and the Go Back command, is the action, and `:unbind command nav.back` the command. Bare `:unbind` opens that page, which lists every id. The unbind travels in `config.toml` as ',
+      { only: 'desktop', text: '`\"global.zoomIn\" = \"\"`', elsewhere: '`\"global.toggleWordWrap\" = \"\"`' },
+      '.'
+    ]
   },
   {
     command: ':bind <keys> command.id',
@@ -916,6 +1143,21 @@ export const HELP_VIM_COMMANDS: HelpExCommand[] = [
     command: ':order due | manual | priority | note',
     summary: 'Order Kanban cards by due date or by hand, or the list by priority',
     detail: 'In the Tasks view, `:order due` sorts the cards in every Kanban column by due date, earliest first and cards without one last; `:order manual` brings back the order you dragged them into, which ordering by date never overwrites. On the board or the calendar, bare `:order` switches between the two, like `s` on the board in Vim mode. Same as `kanban_card_sort` under `[view]` in config.toml. In the list, `:order priority` puts high priority first inside each group and `:order note` brings back the notes’ line order; bare `:order` there switches between the two, like `s`. Same as `tasks_list_order` under `[view]`.'
+  },
+  {
+    command: ':wip <limit>',
+    summary: 'Set the focused Kanban column’s WIP limit',
+    detail: 'On the board, `:wip 3` caps the focused column at three cards; past that it turns red. A bare `:wip` clears it. Same as Set WIP limit… in the column menu, or `W`.'
+  },
+  {
+    command: ':color <name>',
+    summary: 'Color the focused Kanban column',
+    detail: 'On the board, `:color blue` gives the focused column a blue dot and top edge; gray, red, yellow, green, teal and purple work too. A bare `:color` clears it. Same as Color… in the column menu, or `C`.'
+  },
+  {
+    command: ':lanes <field>',
+    summary: 'Split the Kanban board into lanes',
+    detail: 'On the board, `:lanes priority` splits it into a lane per priority; `folder`, `tag`, `status` (Custom status) and any `@field` work too. A bare `:lanes` turns lanes off. Same as Lanes in the View menu, or `S` to step through them.'
   },
   {
     command: ':delfilter <name>',
@@ -950,7 +1192,11 @@ export const HELP_VIM_COMMANDS: HelpExCommand[] = [
   {
     command: ':cover [image]',
     summary: 'Set the note’s cover image',
-    detail: 'Bare `:cover` (or `:cov`) opens the cover picker. With an argument it sets the cover: an https URL, a vault image by path or unique file name, or a built-in cover by name (`:cover dusk`, `:cover earthrise`). `:cover unsplash fog` opens the picker’s Unsplash tab on that search (Enter picks the first photo), `:cover paste` uses the image on the clipboard, `:cover reposition` enters reposition mode, `:cover 30%` sets the focal point, and `:cover!` (or `:cover remove`) removes the cover.'
+    detail: [
+      'Bare `:cover` (or `:cov`) opens the cover picker. With an argument it sets the cover: an https URL, a vault image by path or unique file name, or a built-in cover by name (`:cover dusk`, `:cover earthrise`). ',
+      { only: 'computer', text: '`:cover unsplash fog` opens the picker’s Unsplash tab on that search (Enter picks the first photo), ' },
+      '`:cover paste` uses the image on the clipboard, `:cover reposition` enters reposition mode, `:cover 30%` sets the focal point, and `:cover!` (or `:cover remove`) removes the cover.'
+    ]
   },
   {
     command: ':tasks',
@@ -969,6 +1215,7 @@ export const HELP_VIM_COMMANDS: HelpExCommand[] = [
   },
   {
     command: ':whatsnew',
+    only: 'desktop',
     summary: 'Show what this version brought',
     detail: 'Open the What’s New window for this version of ZenNotes: its highlights and any announcement, with a link to the full release notes. The window also opens by itself the first time ZenNotes starts after an update, once per version. Desktop app.'
   },
@@ -1088,6 +1335,11 @@ export const HELP_VIM_COMMANDS: HelpExCommand[] = [
     detail: 'Opens the Gallery of the open note’s folder: its notes as cards led by their covers. With a folder, opens that one instead, given as a path in the vault (`:gallery inbox/Projects`), a folder in your notes (`:gallery Projects/Website`) or a system folder (`:gallery archive`). `:gal` for short; `Space G` and Open Folder Gallery in the palette do the same.'
   },
   {
+    command: ':kanban [folder]',
+    summary: 'Create a Kanban board',
+    detail: 'Creates a Kanban board, a database with To do, Doing and Done columns that opens on its Board, where `Space k` would: the folder under the sidebar cursor while the sidebar has focus, otherwise where new databases go. With a folder (`:kanban Biology`), creates it there. `:kanb` for short.'
+  },
+  {
     command: ':unresolved',
     summary: 'Open the Unresolved Links view',
     detail: 'Lists every `[[wikilink]]` in the vault that points at a note that does not exist yet, with the notes and lines that link to it. `:unres` for short; `Space u` does the same.'
@@ -1101,6 +1353,16 @@ export const HELP_VIM_COMMANDS: HelpExCommand[] = [
     command: 'o / O',
     summary: 'Open a line, continuing the list',
     detail: 'On a list item, `o` (below) and `O` (above) carry the marker forward like pressing Enter: bullets repeat, numbered lists advance and renumber, checkboxes start a fresh unchecked box, and indentation is kept. On a non-list line they open a plain new line as usual.'
+  },
+  {
+    command: ':repeat [rule|off]',
+    summary: 'Repeat the task under the cursor',
+    detail: 'Writes `@repeat:` on the cursor’s task line: `:repeat weekly`, `:repeat 2w`, `:repeat mon/thu`. `:repeat off` stops it, and a bare `:repeat` opens the picker. Also “Repeat Task…” in the command palette.'
+  },
+  {
+    command: ':remind [when|off]',
+    summary: 'Remind about the task under the cursor',
+    detail: 'Writes `@remind:` on the cursor’s task line: `:remind 9am`, `:remind 1d`, `:remind 2d-6pm`. `:remind off` removes it, and a bare `:remind` opens the picker. Also “Remind Task…” in the command palette.'
   },
   {
     command: 'Mod+L',
@@ -1158,6 +1420,12 @@ export const HELP_VIM_COMMANDS: HelpExCommand[] = [
     detail: 'Open the command palette directly to the local vault switcher.'
   },
   {
+    command: '<Space> F',
+    only: 'desktop',
+    summary: 'Leader open vault folder',
+    detail: 'Open the current vault’s folder in the system file manager.'
+  },
+  {
     command: '<Space> t',
     summary: 'Leader new from template',
     detail: 'Open the template picker to create a note from a built-in or custom template.'
@@ -1169,6 +1437,7 @@ export const HELP_VIM_COMMANDS: HelpExCommand[] = [
   },
   {
     command: '<Space> q',
+    only: 'desktop',
     summary: 'Leader quick capture',
     detail: 'Open the floating, always-on-top capture window, same as the global hotkey.'
   },
@@ -1254,14 +1523,14 @@ export const HELP_VIM_COMMANDS: HelpExCommand[] = [
   }
 ]
 
-export const HELP_SETTINGS: HelpSettingsSection[] = [
+export const HELP_SETTINGS: HelpSettingsSection<HelpText>[] = [
   {
     title: 'Appearance',
     items: [
       { label: 'Theme, mode, and variant', detail: 'Pick a theme family: Apple, Gruvbox, Catppuccin, GitHub, Solarized, One, Nord, Tokyo Night, Kanagawa (Wave / Dragon / Paper Ink (Custom) / Lotus), Rosé Pine (Rosé Pine / Moon / Dawn), or the monochrome, true-black (OLED-friendly) Black Metal, plus light or dark mode and the active flavor or contrast where the theme supports it.' },
       { label: 'Window title bar', detail: 'Under Settings → Appearance → Chrome, turn off Window title bar to remove the main window title and controls on macOS, Windows, and Linux, including tiling desktops such as Hyprland. The sidebar and editor stay visible, and the change applies to open vault windows without a restart. Drag blank space in the tab strip, the sidebar header or the note list header to move the window, or use your window manager shortcuts. Press Cmd/Ctrl+, to restore the setting. The preference is saved as [appearance].show_window_title_bar in config.toml. In the browser app the same switch is called Title bar: it hides the bar with the open note’s title, in that browser.' },
       { label: 'Status bar', detail: 'Under Settings → Appearance → Chrome, Status bar shows or hides the bar along the bottom of the window: the ZenNotes Cloud status (Synced, Sync now, Set up) and, on desktop, the open note’s backlinks, words, characters, reading time and cursor position. It is on by default. Turned off, the bar stays hidden except while Cloud needs you: a sync that stopped or failed, files or vault settings waiting for review, a Cloud vault that went away, or a device that was signed out. Then it comes back until that is dealt with, so nothing that needs an answer goes silent. On Android the bar is the Cloud row at the bottom of the screen, and turning it off gives that row back to the note; the iPhone already shows that row only while Cloud needs you. Toggle it from the command palette (Toggle Status Bar) or, in Vim mode, with `:set nostatusbar` and `:set statusbar`. The preference is saved as [appearance].show_status_bar in config.toml.' },
-      { label: 'Keep running in the tray', detail: 'Off by default. Under Settings → Appearance → Window, turn it on and closing the last window hides it instead of ending the session: a ZenNotes icon in the system tray (the menu bar on macOS) stays, Cloud sync and the Quick capture hotkey keep working, and the icon\'s tooltip and menu show the sync state while a Cloud vault is linked. Click the icon, or choose Open ZenNotes in its menu, to bring the window back; on macOS the Dock icon does too. Quit from the icon\'s menu, with Quit ZenNotes in the command palette, or with Cmd+Q on macOS. On a desktop with no tray host the icon does not appear: open ZenNotes again and the window comes back. `Space b` (Hide Window to Tray in the palette) hides the window on purpose, which a tiling window manager cannot do with minimise. The setting belongs to this computer and is not part of config.toml. While ZenNotes runs it also checks for updates every six hours, not only at launch.' },
+      { only: 'desktop', label: 'Keep running in the tray', detail: 'Off by default. Under Settings → Appearance → Window, turn it on and closing the last window hides it instead of ending the session: a ZenNotes icon in the system tray (the menu bar on macOS) stays, Cloud sync and the Quick capture hotkey keep working, and the icon\'s tooltip and menu show the sync state while a Cloud vault is linked. Click the icon, or choose Open ZenNotes in its menu, to bring the window back; on macOS the Dock icon does too. Quit from the icon\'s menu, with Quit ZenNotes in the command palette, or with Cmd+Q on macOS. On a desktop with no tray host the icon does not appear: open ZenNotes again and the window comes back. `Space b` (Hide Window to Tray in the palette) hides the window on purpose, which a tiling window manager cannot do with minimise. The setting belongs to this computer and is not part of config.toml. While ZenNotes runs it also checks for updates every six hours, not only at launch.' },
       { label: 'Dark sidebar', detail: 'Tint the sidebar slightly darker than the canvas so the chrome reads as a distinct surface.' },
       { label: 'Sidebar arrows', detail: 'Show or hide disclosure arrows for collapsible sidebar folders and sections.' },
       { label: 'Use theme for PDF export', detail: 'Under Settings → Appearance → PDF export. Off by default, so exported PDFs use a clean light print theme. Turn it on to export in your current look instead: your theme (colors and dark/light, including custom themes), plus your enabled CSS snippets and color tweaks, as a full-bleed page. This toggle is the single switch for how the PDF looks; your CSS snippets style the export only while it is on, so you customize the PDF by editing your snippets, not with a separate print stylesheet.' }
@@ -1306,7 +1575,7 @@ export const HELP_SETTINGS: HelpSettingsSection[] = [
       { label: 'Font size and line height', detail: 'Tune reading density in the editor and preview.' },
       { label: 'Reading width and editor width', detail: 'Cap long lines so wide windows stay readable.' },
       { label: 'Content alignment', detail: 'Center note content in its column or left-align it to the pane edge.' },
-      { label: 'Note covers', detail: 'Where a note’s cover image shows: on top of the text, scrolling away with it (the default); pinned above the editor and Read view so it stays in sight; or hidden. Hidden only stops drawing covers; the `banner` frontmatter stays in the note, the editor shows its lines in full instead of folding them into one `cover` line, and Quick Look on macOS follows it too.' },
+      { label: 'Note covers', detail: ['Where a note’s cover image shows: on top of the text, scrolling away with it (the default); pinned above the editor and Read view so it stays in sight; or hidden. Hidden only stops drawing covers; the `banner` frontmatter stays in the note, the editor shows its lines in full instead of folding them into one `cover` line', { only: 'desktop', text: ', and Quick Look on macOS follows it too' }, '.'] },
       { label: 'Line numbers', detail: 'Switch between off, absolute, and relative gutter numbering.' },
       { label: 'Line number position', detail: 'Keep the gutter next to the centered text or pin it to the editor edge.' }
     ]
@@ -1319,7 +1588,7 @@ export const HELP_SETTINGS: HelpSettingsSection[] = [
       { label: 'Recorded sequences', detail: 'Capture single shortcuts or multi-step sequences such as Leader flows, pane prefixes, `g g`, `g d`, or fold motions without editing raw config files.' },
       { label: 'Conflict detection', detail: 'When you record a global shortcut that another action already uses, the recorder names the clash and disables Save, so two actions can no longer silently share one key. The same goes between commands and actions, both ways: a key another of your bindings holds is refused. A command’s key that lands on a built-in default is allowed, since your key wins, and the recorder and both rows say which default stops answering it. A leader sequence that starts on a built-in leader key is refused, because built-in leader keys always win. Any existing clash shows a badge on the affected rows. Vim, navigation, and view keys that deliberately reuse a key by context are left alone.' },
       { label: 'Context-menu bindings', detail: 'The same keymap table controls the context-menu action used in the sidebar, note list, and preview-side active-tab menu, so mouse-free navigation stays configurable.' },
-      { label: 'Unbind a key', detail: 'Unbind removes an action’s key entirely instead of parking it on some obscure chord: nothing triggers the action until you record a new key or reset it, the row reads “Unbound”, and the which-key hints, the command palette, and this manual stop advertising it. Unbind sits next to Change on every row and inside the recorder; `:unbind <action.id>` (for example `:unbind global.zoomIn`) does the same from the ex line, and in `config.toml` the entry is `"global.zoomIn" = ""`.' },
+      { label: 'Unbind a key', detail: ['Unbind removes an action’s key entirely instead of parking it on some obscure chord: nothing triggers the action until you record a new key or reset it, the row reads “Unbound”, and the which-key hints, the command palette, and this manual stop advertising it. Unbind sits next to Change on every row and inside the recorder; `:unbind <action.id>` (for example ', { only: 'desktop', text: '`:unbind global.zoomIn`', elsewhere: '`:unbind global.toggleWordWrap`' }, ') does the same from the ex line, and in `config.toml` the entry is ', { only: 'desktop', text: '`"global.zoomIn" = ""`', elsewhere: '`"global.toggleWordWrap" = ""`' }, '.'] },
       { label: 'Reset controls', detail: 'Clear an individual override, including an unbind, or reset the entire keymap table back to the shipped defaults; Reset all also takes every command’s key away.' },
       { label: 'Ignored keys', detail: 'Keys the app never sees. Keyboard remappers with tap-hold layers (Kanata, QMK, ZMK) send a harmless extra key with every keystroke, on Linux usually the Katakana/Hiragana key, which reads as KanaMode, and each one used to reset a pending `jk`, `dd`, leader chord or hint. Record the key here (or `:ignorekey KanaMode`, or `ignored_keys = ["KanaMode"]` under `[editor]` in config.toml) and it is swallowed before the editor or any panel reacts.' }
     ]
@@ -1327,14 +1596,15 @@ export const HELP_SETTINGS: HelpSettingsSection[] = [
   {
     title: 'Vault',
     items: [
-      { label: 'Vault location', detail: 'Reveal or change the root folder ZenNotes treats as the active vault.' },
+      { only: 'desktop', label: 'Vault location', detail: 'Open the folder ZenNotes treats as the active vault in Finder, File Explorer or your file manager, or change it.' },
       { label: 'Vault name', detail: 'What the sidebar header, the vault switcher and the title bar call this vault; the folder keeps its own name on disk. Leave it empty to use the folder name. Saved in the vault’s `.zennotes/vault.json`, so it follows the folder wherever it is opened. Also “Rename Vault…” in the command palette (`:vault_rename`) and the sidebar’s vault menu. Local vaults only.' },
       { label: 'Primary notes location', detail: 'Treat `inbox/` as the main notes area, or use the vault root directly for an Obsidian-style flat vault.' },
-      { label: 'New Drawings, Databases & Tasks location', detail: 'Choose where new Excalidraw drawings, databases, and task files are created so they do not pile up in the vault root: the primary notes location (the default), the folder of the note you are currently viewing, or a specific folder you name (e.g. `assets/drawings` or `Tasks`). A specific folder lives inside the primary notes area, so `Tasks` means `inbox/Tasks/` in an Inbox vault and `Tasks/` in a root vault; the folder field shows the exact destination. Search Settings for "tasks folder" or "drawings folder" to jump there. Only new files are affected; existing ones stay put.' },
-      { label: 'Shares location (macOS)', detail: 'Where a page or text shared from Safari and other apps with Share → ZenNotes is filed in this vault: Quick Notes (the default), the primary notes location, or a specific folder you name inside it. Saved in the vault’s `.zennotes/vault.json`. On a self-hosted server it needs server 2.79 or later; an older server keeps Quick Notes.' },
+      { label: 'Default Locations', detail: 'Choose where new Excalidraw drawings, databases (Kanbans included), and task files are created so they do not pile up in the vault root: the primary notes location (the default), the folder of the note you are currently viewing, or a specific folder you name (e.g. `Drawings` or `Tasks`). A specific folder lives inside the primary notes area, so `Tasks` means `inbox/Tasks/` in an Inbox vault and `Tasks/` in a root vault; the folder field lists the folders there and shows the exact destination. In a root vault, a folder under `assets/` (or another attachments folder, or a hidden one) cannot hold notes, so new files go to the vault root instead and the field says why. New task files come from `+ New task`, the `a` key in the Tasks view, `:newtask` and the command palette; `New Task in Folder…` and `:newtask <folder>` still pick a folder per task. Search Settings for "tasks folder" or "drawings folder" to jump there. Only new files are affected; existing ones stay put.' },
+      { only: 'desktop', label: 'Shares location (macOS)', detail: 'Where a page or text shared from Safari and other apps with Share → ZenNotes is filed in this vault: Quick Notes (the default), the primary notes location, or a specific folder you name inside it. Saved in the vault’s `.zennotes/vault.json`. On a self-hosted server it needs server 2.79 or later; an older server keeps Quick Notes.' },
       { label: 'Daily notes', detail: "Enable a daily-notes workflow, choose a directory pattern, naming pattern, locale, and template so each day’s note starts in the right place. Supported tokens are `yyyy`, `yy`, `M`, `MM`, `MMM`, `MMMM`, `d`, `dd`, `EEE`, `EEEE`, `w`, and `ww`; quote literal words like `'Daily Notes'/yyyy/MM-MMM`. Open today’s note with `Space d`, `:daily`, or the command palette. For another day, past or future, double-click it in the calendar panel, or follow a link like `[[2026-11-03]]` to a day that has no note yet: both create that day’s note in the right place, from its template. Hover a day in the calendar panel to read its note, drawn the way it reads, without opening it. Two task options live here too: “Tasks are due on the note’s date” makes tasks in a daily note show on the calendar for that day (on by default), and “Roll over unfinished tasks to today” moves every unchecked task from past daily notes into today when you open it (off by default; also runnable from the command palette)." },
       { label: 'Weekly notes', detail: "Enable weekly notes with a directory pattern, naming pattern, locale, and template. Weekly patterns support the same tokens as daily notes plus ISO week `w` and `ww`; the default title pattern is `yyyy-'W'ww`. Open this week’s note with `Space w`, `:weekly`, or the command palette." },
       { label: 'Monthly notes', detail: 'Enable monthly notes with a directory pattern, naming pattern, locale, and template. It creates one note per calendar month, handy for monthly reviews and reflections. The default title pattern is `yyyy-MM` (e.g. `2026-07`). Open this month’s note with `Space m`, `:monthly`, or the command palette. Each notes section in Settings now collapses its fields when its toggle is off.' },
+      { label: 'Folder fields', detail: 'A Settings field that names a folder (a specific folder for new files, Task folders, the template folder, the Kanban folder root, the Typst preamble folder) lists the vault’s folders when it has focus. Typing narrows the list and highlights the first match; the arrows or `Ctrl+N` / `Ctrl+P` move, Enter picks, and Escape closes the list. A path that matches nothing is kept as typed, so a folder can be named before it exists.' },
       { label: 'Folder Paths', detail: 'Point any of the four system folders (Inbox, Quick Notes, Archive, Trash) at a directory of your choosing, labels included; stored as `systemFolderPaths` in `vault.json` so the vault stays portable. Relabeling without moving anything on disk works too.' },
       { label: 'Folder icons', detail: 'Right-click a folder in the sidebar and choose a custom icon that follows the current theme colors.' },
       { label: 'Saved Remote Workspaces', detail: 'Save multiple remote servers or vaults, reconnect from Settings or the command palette, and edit or remove them later. When connected remotely, Settings also exposes Change Remote Vault…, Return to Local Vault, and Open Local Vault….' }
@@ -1343,6 +1613,7 @@ export const HELP_SETTINGS: HelpSettingsSection[] = [
   {
     title: 'Templates',
     items: [
+      { label: 'Template folder', detail: 'Notes in this folder are templates, kept out of Tasks, Tags and search. Pick it from the vault’s folders, or clear the field for none. Saved in the vault.' },
       { label: 'Template library', detail: 'Browse every template, built-in and custom. Built-ins cover engineering (ADR, RFC, Bug Report, Postmortem, Meeting Notes, 1:1) and personal use (Daily Note, Weekly Review, Reading Notes, Journal, Project Kickoff, To-do).' },
       { label: 'Create a custom template', detail: 'Author a new template as markdown with optional frontmatter (`name`, `description`, `category`, `titleTemplate`, `targetFolder`, `targetSubpath`) and variables like `{{title}}`, `{{date}}`, `{{date:FORMAT}}`, `{{time}}`, `{{week}}`, `{{cursor}}`, and the live `{{modified_date}}` / `{{modified_time}}` / `{{modified_datetime}}` (rendered from the note’s last-saved time rather than substituted). It is saved as a `.md` file in `.zennotes/templates/`.' },
       { label: 'Edit or reset built-ins', detail: 'Press Edit on a built-in to fork an editable copy that shadows the original everywhere; Reset removes the copy and restores the built-in. Custom templates can be edited or deleted directly.' },
@@ -1352,6 +1623,7 @@ export const HELP_SETTINGS: HelpSettingsSection[] = [
   },
   {
     title: 'CLI',
+    only: 'desktop',
     items: [
       { label: 'Install Command-Line Tool', detail: 'Symlink the bundled `zn` wrapper into a usable PATH location so any terminal session can capture, search, and edit notes. ZenNotes prefers user-writable directories and only prompts for admin access when no writable PATH target is available. The app carries the tested CLI runtime, so desktop-managed updates ship together. Builds with the terminal app install a persistent copy that also works after desktop closes.' },
       { label: 'Status, path, and quick reference', detail: 'Settings → CLI shows whether `zn` is installed, where the symlink lives, and a copy-able quick reference of the most useful commands. If the chosen directory is not on PATH yet, Settings shows the exact shell command to add it. An "External install" badge appears when something else owns `zn` so ZenNotes never clobbers an unmanaged binary.' },
@@ -1364,6 +1636,11 @@ export const HELP_SETTINGS: HelpSettingsSection[] = [
     title: 'Tasks',
     items: [
       { label: 'Show tasks from archived notes', detail: 'Off by default: archiving a note retires its tasks from the Tasks list, calendar, and Kanban. Turn this on to keep them visible everywhere, Archive column included. The raw key is `show_archived_tasks` in `config.toml`.' },
+      { only: 'desktop', label: 'Task reminders', detail: 'Desktop only, on by default: a task with `@remind:` shows a notification at its time. The phone and web apps leave this setting out, since reminders fire from the desktop app. Config key `task_reminders` under `[view]`.' },
+      { only: 'desktop', label: 'Reminder time', detail: 'Desktop only. When a reminder that names a day but no time fires, such as `@remind:1d`. 09:00 by default; config key `task_reminder_time` under `[view]`.' },
+      { label: 'Hide empty tasks', detail: 'On by default: bare `- [ ]` tasks stay out of the Tasks views, the Calendar and Timeline panels, and the home view. Same as the View menu; config key `hide_empty_tasks`.' },
+      { label: 'Task folders', detail: 'Once any Task folder is set, only the notes inside Task folders feed Tasks; the folders excluded from Tasks never do. Add a folder by picking it from the list under each field or typing its path from the vault root, or from the folder’s sidebar menu. Saved in the vault.' },
+      { label: 'Kanban lanes', detail: 'Splits the Kanban board into rows by Priority, Folder, or Tag; an `@field` picked on the board shows here too. Same as Lanes in the View menu; config key `kanban_lanes`.' },
       { label: 'Kanban statuses', detail: 'Define the ordered columns of the custom-status Kanban board here; `kanban_statuses` under `[view]` in `config.toml` is the file-level equivalent.' },
       { label: 'Tasks list order', detail: 'Note order keeps each group of the Tasks list in its notes’ line order, which Shift+J/K and dragging rearrange; Priority puts high priority first, then medium, low, and none, ties by due date. The list’s Order menu sets the same thing, and the raw key is `tasks_list_order` (`note` or `priority`) under `[view]` in `config.toml`.' },
       { label: 'Kanban card order', detail: 'Manual keeps the cards in the order you drag them into; Due date sorts every Kanban column by due date, cards without one last, and keeps your manual order for when you switch back. The board\'s Order menu sets the same thing, and the raw key is `kanban_card_sort` (`manual` or `due`) under `[view]` in `config.toml`.' }
@@ -1377,6 +1654,7 @@ export const HELP_SETTINGS: HelpSettingsSection[] = [
   },
   {
     title: 'Workflows',
+    only: 'workflows',
     items: [
       { label: 'Workflows', detail: 'Off by default. Turn it on to add the Workflows view (sidebar row, palette commands, and the Space a leader binding in Vim mode): saved, repeatable pipelines over your notes, edited on a canvas and run behind a dry-run confirmation with whole-run undo. Turning it off hides all of that again and closes the view if it is open.' }
     ]
@@ -1386,95 +1664,152 @@ export const HELP_SETTINGS: HelpSettingsSection[] = [
     items: [
       { label: 'App identity', detail: 'See the ZenNotes app icon, current version, and a short description of the app as a keyboard-first markdown workflow with Vim motions and plain local files.' },
       { label: 'Version details', detail: 'Under the version, a Version details block lists what a bug report needs: operating system and architecture, the Electron or browser engine, how this copy was installed, and the remote server version when connected to one. Copy details puts the block on the clipboard. In Vim mode, `:version` prints the same lines and `:version copy` copies them.' },
-      { label: 'What’s New', detail: 'The first time ZenNotes starts after an update, a window shows what the version brought, once: its highlights, any announcement, and a link to the full release notes. Escape or Close dismisses it. Open it again any time with What’s New in ZenNotes in the command palette, or `:whatsnew` in Vim mode.' },
-      { label: 'Count this copy anonymously', detail: 'Once when ZenNotes is installed and once per update, the desktop app sends zennotes.org the version, operating system, architecture and install type, so we know how many copies are in use. It carries no identifier and nothing about your notes, vaults or account, and only daily totals are kept. On by default; turn it off here to send nothing. Set in config.toml as `[privacy] usage_count`.' },
-      { label: 'Updates and releases', detail: 'Check for updates, download a newer build, install and relaunch, or jump straight to the latest GitHub release from inside the app. AUR and tarball installs get the check and the notice only; the package manager does the install.' },
+      { only: 'desktop', label: 'What’s New', detail: 'The first time ZenNotes starts after an update, a window shows what the version brought, once: its highlights, any announcement, and a link to the full release notes. Escape or Close dismisses it. Open it again any time with What’s New in ZenNotes in the command palette, or `:whatsnew` in Vim mode.' },
+      { only: 'desktop', label: 'Count this copy anonymously', detail: 'Once when ZenNotes is installed and once per update, the desktop app sends zennotes.org the version, operating system, architecture and install type, so we know how many copies are in use. It carries no identifier and nothing about your notes, vaults or account, and only daily totals are kept. On by default; turn it off here to send nothing. Set in config.toml as `[privacy] usage_count`.' },
+      { only: 'desktop', label: 'Updates and releases', detail: 'Check for updates, download a newer build, install and relaunch, or jump straight to the latest GitHub release from inside the app. AUR and tarball installs get the check and the notice only; the package manager does the install.' },
       { label: 'Website, community, and issue links', detail: 'The app now exposes direct links to the ZenNotes website, Discord, GitHub repository, and issue tracker so support paths stay discoverable.' },
-      { label: 'Configuration file', detail: 'Your preferences (theme, editor, Vim, keymaps, fonts, search backend, and more) are mirrored to a plain-text `config.toml` so you can sync them across machines with git, stow, or chezmoi. It lives at `$XDG_CONFIG_HOME/zennotes/config.toml` (`~/.config/zennotes/config.toml` on macOS and Linux, `%APPDATA%\\zennotes\\config.toml` on Windows), or wherever `$ZENNOTES_CONFIG_DIR` points. The file is self-documenting: every available setting is listed with its allowed values, and every keymap action is listed with its default binding (commented out: uncomment a line and edit it to remap, or set it to `""` to remove the key entirely), and every command palette command is listed under `[keymaps.commands]` (`"note.trash" = "Mod+Backspace"`, or `"note.archive" = "Leader x a"` for a leader sequence; a command id written straight under `[keymaps]` is read as a command key too and moved to that table on the next save), so you can discover and change anything without opening the app. That list reads the same on every OS: where macOS has its own default, the line notes it, as in `# "tabs.select1" = "Alt+1"  # Go to tab 1 (macOS: "Ctrl+1")`, so a file synced between a Mac and a Linux or Windows machine changes only when you change a setting. Settings → About has Reveal and Copy-path buttons. Existing setups are written out automatically the first time you launch this version, and edits to the file, by hand or via a synced dotfile, apply live without a restart. Machine-specific layout (window size, pane widths, collapsed folders) stays local so the file does not churn.' },
+      { only: 'desktop', label: 'Configuration file', detail: 'Your preferences (theme, editor, Vim, keymaps, fonts, search backend, and more) are mirrored to a plain-text `config.toml` so you can sync them across machines with git, stow, or chezmoi. It lives at `$XDG_CONFIG_HOME/zennotes/config.toml` (`~/.config/zennotes/config.toml` on macOS and Linux, `%APPDATA%\\zennotes\\config.toml` on Windows), or wherever `$ZENNOTES_CONFIG_DIR` points. The file is self-documenting: every available setting is listed with its allowed values, and every keymap action is listed with its default binding (commented out: uncomment a line and edit it to remap, or set it to `""` to remove the key entirely), and every command palette command is listed under `[keymaps.commands]` (`"note.trash" = "Mod+Backspace"`, or `"note.archive" = "Leader x a"` for a leader sequence; a command id written straight under `[keymaps]` is read as a command key too and moved to that table on the next save), so you can discover and change anything without opening the app. That list reads the same on every OS: where macOS has its own default, the line notes it, as in `# "tabs.select1" = "Alt+1"  # Go to tab 1 (macOS: "Ctrl+1")`, so a file synced between a Mac and a Linux or Windows machine changes only when you change a setting. Settings → About has Reveal and Copy-path buttons. Existing setups are written out automatically the first time you launch this version, and edits to the file, by hand or via a synced dotfile, apply live without a restart. Tables and keys only zn uses, like `[terminal]`, stay in the file when the app saves it. Machine-specific layout (window size, pane widths, collapsed folders) stays local so the file does not churn.' },
       { label: 'Lumary Labs', detail: 'The About section links to Lumary Labs at lumarylabs.com so company details stay easy to find from inside the app.' }
     ]
   }
 ]
 
-export const HELP_CLI: HelpCard[] = [
+export const HELP_CLI: HelpCard<HelpText>[] = [
   {
     title: 'What the CLI is for',
+    only: 'computer',
     body:
       '`zn` is a command-line companion that talks to your vault directly. It reads and writes the same markdown files the app does, so anything you do in a terminal (capture, search, append, archive, list tasks) shows up in the app instantly. Use it for shell pipelines, scripts, cron jobs, editor plugins (vim, emacs, helix), launcher integrations (Raycast, Alfred), or just because the keyboard is faster.'
   },
   {
     title: 'Install it once from Settings',
+    only: 'desktop',
     body:
       'Open Settings → CLI and click Install. ZenNotes symlinks the bundled wrapper into a usable PATH location, preferring user-writable directories and only asking for admin access when no writable PATH target is available. After that, `zn --help` works in any new terminal. You can also run the install from the command palette via "Install Command-Line Tool (zn)".'
   },
   {
     title: 'The terminal app and existing installations',
+    only: 'desktop',
     body:
       'Builds with the Go terminal tool include `zn tui`. An existing desktop-managed CLI keeps itself up to date (see Updates arrive without a ZenNotes update); keep using the same `zn` commands. Settings shows the installed terminal version and offers Repair if an upgrade needs attention. Desktop-installed commands keep following the desktop vault, while the TUI remembers its own selection. Explicit `--vault` and `--server` flags still win. Set `ZENNOTES_WORKSPACE_SOURCE=terminal` to use the terminal default for a command, or `ZENNOTES_CLI_ENGINE=legacy` to run the previous CLI during the transition. Homebrew and manual installations stay managed by their own installer. A shortcut left behind by a moved Mac app or an old AppImage can be repaired from Settings: review the old target, replacement and backup path before choosing Repair shortcut. Note saves preserve creation dates in small files under `.zennotes/note-metadata` without changing Markdown; keep the `.zennotes` folder with vault backups. Explicit legacy rollback needs the original app resources to remain available.'
   },
   {
-    title: 'CLI 0.12.2 in desktop 2.78.0',
+    title: 'CLI 0.17.1 in desktop 2.83.0',
+    only: 'desktop',
     body:
-      'On macOS and Linux, desktop 2.78.0 bundles CLI 0.12.2. Run `zn` in an interactive terminal or `zn tui` to open the editor. It includes editable settings, restored splits and sessions, comments, attachments, templates, bulk actions, and cross-note yank and paste. Use `:version` in the TUI for a persistent report and press `c` or `y` to copy it. `zn status`, `zn doctor`, `zn config`, and `zn completion` help with setup and scripts; `zn server` manages native local servers, also available through `:servers`. Since 0.6.1, `zn vault list` marks each entry `app` (saved by this desktop app) or `terminal` (saved by zn itself) and says which of them `zn use`, `zn disconnect` and `zn vault remove` act on; every command starts without waiting on terminals that do not answer a background-color query; and the help output lines up. 0.6.2 is the first release with a signed manifest, which is how this app keeps its managed zn current, 0.6.3 reads a line over a lone `-` as a paragraph, as the app does (#898), and 0.7.0’s `zn mcp` records an assistant’s edits for review in this app and no longer lets an assistant write into `.zennotes`. 0.7.1 leaves cancelled tasks out of the open ones in `zn task list` and in `zn mcp`’s `list_tasks` (#929), and when a server needs a token, its message points to Settings → MCP → Server token. 0.7.2 reads tasks in numbered lists and quotes the way the app does, in `zn task` and in `zn mcp`, and 0.8.0 adds `zn task watch`, which prints each task status change as it happens, and gives each task’s status in `zn task list --json` and in `list_tasks`. 0.8.1 keeps a finished task note in its Custom status column and gives `zn mcp` this app’s assistant instructions again, and 0.9.0 follows the vault’s Task folders in `zn task list`, `zn task watch` and `zn mcp`, and the TUI’s Settings saves both Tasks folder lists where every app reads them. 0.9.1 keeps a wikilink of more than one word from widening the TUI preview’s row and scrolling the whole screen. 0.9.2 lets a second `$` on a wrapped line reach the end of the line and makes three backticks a code fence, 0.10.0 adds `zn base pages`, which gives every database record its record page so each can be linked, and 0.11.0 gives a task without a due date its own No due date group and Status board column, as this app does (#990), and orders the task list by priority with `O` or `:order priority` (#989). 0.12.0 can draw display math and TikZ in the TUI preview with `[terminal] math = "latex"`, using TeX installed on your computer (zn does not include TeX; `zn doctor` prints the install commands), 0.12.1 fits pictures in the preview to the pane as it grows or shrinks, and 0.12.2 says which TeX tool is missing and how to install it. Run `zn update --check` to see the latest CLI release; for a desktop-managed CLI, ZenNotes installs it. The full command reference is at https://zennotes.org/tui/docs.'
+      'On macOS and Linux, desktop 2.83.0 bundles CLI 0.17.1. Run `zn` in an interactive terminal or `zn tui` to open the editor. It includes editable settings, restored splits and sessions, comments, attachments, templates, bulk actions, and cross-note yank and paste. Use `:version` in the TUI for a persistent report and press `c` or `y` to copy it. `zn status`, `zn doctor`, `zn config`, and `zn completion` help with setup and scripts; `zn server` manages native local servers, also available through `:servers`. Since 0.6.1, `zn vault list` marks each entry `app` (saved by this desktop app) or `terminal` (saved by zn itself) and says which of them `zn use`, `zn disconnect` and `zn vault remove` act on; every command starts without waiting on terminals that do not answer a background-color query; and the help output lines up. 0.6.2 is the first release with a signed manifest, which is how this app keeps its managed zn current, 0.6.3 reads a line over a lone `-` as a paragraph, as the app does (#898), and 0.7.0’s `zn mcp` records an assistant’s edits for review in this app and no longer lets an assistant write into `.zennotes`. 0.7.1 leaves cancelled tasks out of the open ones in `zn task list` and in `zn mcp`’s `list_tasks` (#929), and when a server needs a token, its message points to Settings → MCP → Server token. 0.7.2 reads tasks in numbered lists and quotes the way the app does, in `zn task` and in `zn mcp`, and 0.8.0 adds `zn task watch`, which prints each task status change as it happens, and gives each task’s status in `zn task list --json` and in `list_tasks`. 0.8.1 keeps a finished task note in its Custom status column and gives `zn mcp` this app’s assistant instructions again, and 0.9.0 follows the vault’s Task folders in `zn task list`, `zn task watch` and `zn mcp`, and the TUI’s Settings saves both Tasks folder lists where every app reads them. 0.9.1 keeps a wikilink of more than one word from widening the TUI preview’s row and scrolling the whole screen. 0.9.2 lets a second `$` on a wrapped line reach the end of the line and makes three backticks a code fence, 0.10.0 adds `zn base pages`, which gives every database record its record page so each can be linked, and 0.11.0 gives a task without a due date its own No due date group and Status board column, as this app does (#990), and orders the task list by priority with `O` or `:order priority` (#989). 0.12.0 can draw display math and TikZ in the TUI preview with `[terminal] math = "latex"`, using TeX installed on your computer (zn does not include TeX; `zn doctor` prints the install commands), 0.12.1 fits pictures in the preview to the pane as it grows or shrinks, 0.12.2 says which TeX tool is missing and how to install it, and 0.13.0 lets `zn mcp` share only part of a vault (`--allow-path`, `--deny-path`, `--read-only`, `--access`; see Share part of a vault with an assistant), keeps assistants out of hidden and system folders, and puts a row `zn base add` makes into the picked rows of the view the database opens on; 0.13.1 leaves the template folder out of tasks, search and tags, as the app does; 0.14.0 adds month, week and day views to the TUI’s Tasks calendar, a bar cursor while you type, a note’s own view mode from its frontmatter (`[terminal] view_mode_field` and `[terminal.view_mode_rules]`), and opens every new note in the editor; and 0.15.0 stops undo from wiping a note, lets autosave be turned off (`[terminal] autosave = false`), and makes `gd` follow links the way the desktop does. 0.16.0 gives `zn mcp` tools for attachments, `update_task`, `daily_note` and sections. 0.17.0 draws Mermaid diagrams at any pane width, keeps a note’s control sequences out of your terminal, keeps code literal in the preview, and reads a table’s `[[Note\\|alias]]` as a link. 0.17.1 moves the TUI’s reading view on the first `j`, Ctrl+D or Ctrl+F press, draws a flowchart’s side edges honestly, and keeps color codes in names out of your terminal. Run `zn update --check` to see the latest CLI release; for a desktop-managed CLI, ZenNotes installs it. The full command reference is at https://zennotes.org/tui/docs.'
   },
   {
     title: 'Updates arrive without a ZenNotes update',
+    only: 'desktop',
     body:
       'For a zn installed from Settings → CLI, ZenNotes checks the latest zn release once a day and installs it when it is newer than the zn you have, so a CLI fix no longer waits for a ZenNotes release. Every release carries a manifest signed with the ZenNotes release key: ZenNotes checks that signature and the download\'s checksum, then runs the new zn once to confirm it answers before switching to it, so a failed or tampered download never replaces a working CLI. The zn a ZenNotes build ships is its floor: a newer release stays installed across restarts, and a ZenNotes update that ships something newer takes over. A release that needs a newer ZenNotes waits until you update ZenNotes. Turn off Update zn automatically in Settings → CLI → Updates to be told instead; Check for updates there, or Check for zn Updates… in the command palette, checks right away. A zn installed with Homebrew, Go or by hand keeps updating through its own installer (`zn update`).'
   },
   {
     title: 'No app required',
+    only: 'computer',
     body:
       'The CLI reads from the same vault folder the desktop app uses, so it works whether or not ZenNotes is open. When the app is open, file watchers pick up CLI changes automatically, so captures and edits show up live in the sidebar.'
   },
   {
     title: 'Point it at a self-hosted server',
+    only: 'computer',
     body:
       'Every command works against a vault behind a ZenNotes server, not just one on this disk. Once you have connected the desktop app to a server, that server is nameable from the terminal: `zn list --server home`, `zn capture "..." --server home`. `zn vault list` shows local vaults and servers together, and `--vault <name>` resolves either kind, so the short name you already type keeps working. Pass a URL directly for a server you have not saved (`zn list --server 192.168.1.10:7878`) and `--token` for its auth token. For CI or a headless box, set `ZENNOTES_SERVER` and `ZENNOTES_REMOTE_TOKEN` instead of storing anything on disk. `zn open` is the one exception: it hands file paths to the desktop app, so it needs a local vault.'
   },
   {
     title: 'Capture is the gateway drug',
+    only: 'computer',
     body:
       'The fastest way to add a note is `zn capture "..."`. Pipe-friendly: `pbpaste | zn capture --tag idea` lifts the clipboard into a tagged note. The first non-empty line becomes the title. Markdown works too: `zn capture "- [ ] buy milk"` keeps the leading `- [ ]` as a task in the body (so it appears in the Tasks view) while the title reads "buy milk".'
   },
   {
     title: 'Read and search from the terminal',
+    only: 'computer',
     body:
       'Use `zn list` to see recent notes, `zn list --tag work --limit 5` to filter, `zn read inbox/Project.md` to print a body, and `zn search "deadline"` for full-text matches with file:line previews. Quote paths with spaces, like `zn read "hellointerview/system design.md"`, or use `--path`. Add `--json` to any command to get structured output you can pipe into `jq`.'
   },
   {
     title: 'Open notes, folders, and a second window',
+    only: 'computer',
     body:
       '`zn open inbox/Today.md` brings the ZenNotes window to the front with that note loaded, and `zn open ~/code/project/docs` opens a folder as a focused session without turning it into a vault. When a window already shows the vault or folder, `zn open` raises that window. Add `-n` (or `--new-window`) for a second window on the same notes instead, with its own tabs, leaving the first window where it was: `zn open -n ~/notes`. A markdown file outside every vault always reuses its editor window, since nothing keeps two standalone editors of one file in sync.'
   },
   {
     title: 'Raycast uses the same CLI',
+    only: 'desktop',
     body:
       'On macOS, install the Raycast extension locally from Settings → CLI after `zn` is installed. ZenNotes copies the bundled extension into app data, runs the local build, and imports it into Raycast, so you do not need the Raycast Store version. The Search Notes command reads from `zn list --json`, then uses `zennotes://open` to open notes in the main app or `zennotes://open-window` to open a floating window. Cmd+K actions also archive, unarchive, move to Trash, reveal in Finder, copy the path, and copy a wikilink.'
   },
   {
     title: 'Raycast local install requirements',
+    only: 'desktop',
     body:
       'The local Raycast installer is macOS-only. It needs Raycast, the `zn` CLI, Node.js 22.14 or newer, and npm 7 or newer available from your login shell. Settings shows each requirement, the local extension path, and whether the installed copy is current with the bundled ZenNotes version.'
   },
   {
     title: 'Edit incrementally',
+    only: 'computer',
     body:
       'Prefer `zn append` and `zn prepend` over `zn write` for journals and running lists: they preserve the rest of the body. Both accept `--body "literal"` or `--body -` to read stdin (so `cat ideas.txt | zn append daily.md --body -` works).'
   },
   {
     title: 'Tasks and folders',
+    only: 'computer',
     body:
       '`zn task list` enumerates open checkboxes across the vault with stable ids; with `--json`, each task also carries its status. `zn task toggle <id>` flips a task without opening the note. `zn task watch` prints a line each time a task’s status changes, with the previous and the new status: a card moved on the Kanban board, a task note’s `status:` or a line’s `@status:` edited, or a box checked. With `--json` each change is one line of JSON, so a script can start an agent when a task becomes ready; zn only reports, and whatever runs is your own script. `zn folder list / create / rename / delete` keep your subfolder tree manageable from the terminal.'
   },
   {
     title: 'MCP for AI agents',
+    only: 'computer',
     body:
-      '`zn mcp` starts the ZenNotes MCP server in stdio mode, the same one Claude Code, Claude Desktop, and Codex use under the hood. The Claude desktop app\'s Code tab runs Claude Code, so it reads the **Claude Code (CLI + Desktop Code tab)** entry in Settings → MCP; **Claude Desktop (Chat)** reaches only its Chat tab. Once `zn` is installed from Settings → CLI, Settings → MCP installs configure the clients to launch `zn mcp` directly, so the install path is one stable absolute path that survives app moves; otherwise, a `zn` installed some other way included, they run the server bundled with the app. The server works on the vault the app has open: a folder on this machine, or a self-hosted ZenNotes server you connected from Settings → Vault. `vault_info` says which. Switch vaults in the app and the server follows: the assistant\'s next tool call is refused with a note naming the old and the new vault, and once `vault_info` confirms the switch it carries on in the new one, so nothing planned in one vault lands in the other. A server that requires a token needs one the MCP server can read, because the app keeps its own copy in the OS secret store. Settings → MCP → Server token → **Let assistants use it** saves it to `credentials.toml` in the config folder, the file `zn connect` writes and both servers read (`zn mcp` and the bundled one), and the assistant\'s next call uses it. Any program running as you can read that file, so it is your choice: **Stop sharing** removes the token, forgetting the server in Settings → Vault removes it too, and a new token you save for the server replaces it. From a terminal, `zn connect <server-url> --no-default` saves it the same way without changing which vault `zn` follows, and `ZENNOTES_REMOTE_TOKEN` in the MCP client\'s environment works as well. To point an agent somewhere else, give the command the same flags every other `zn` command takes: `zn mcp --vault work` or `zn mcp --server home --token <token>` in the client\'s config, or `ZENNOTES_SERVER` / `ZENNOTES_VAULT` in its environment. Beyond reading and writing notes, the server can hold a review with you through comments: ask the assistant to read a note\'s comments and answer them, and its replies land in the Comments panel under yours, signed with its name (`list_comments`, `add_comment`, `reply_to_comment`, `resolve_comment`).'
+      '`zn mcp` starts the ZenNotes MCP server in stdio mode, the same one Claude Code, Claude Desktop, and Codex use under the hood. The Claude desktop app\'s Code tab runs Claude Code, so it reads the **Claude Code (CLI + Desktop Code tab)** entry in Settings → MCP; **Claude Desktop (Chat)** reaches only its Chat tab. Once `zn` is installed from Settings → CLI, Settings → MCP installs configure the clients to launch `zn mcp` directly, so the install path is one stable absolute path that survives app moves; otherwise, a `zn` installed some other way included, they run the server bundled with the app. The server works on the vault the app has open: a folder on this machine, or a self-hosted ZenNotes server you connected from Settings → Vault. `vault_info` says which. Switch vaults in the app and the server follows: the assistant\'s next tool call is refused with a note naming the old and the new vault, and once `vault_info` confirms the switch it carries on in the new one, so nothing planned in one vault lands in the other. A server that requires a token needs one the MCP server can read, because the app keeps its own copy in the OS secret store. Settings → MCP → Server token → **Let assistants use it** saves it to `credentials.toml` in the config folder, the file `zn connect` writes and both servers read (`zn mcp` and the bundled one), and the assistant\'s next call uses it. Any program running as you can read that file, so it is your choice: **Stop sharing** removes the token, forgetting the server in Settings → Vault removes it too, and a new token you save for the server replaces it. From a terminal, `zn connect <server-url> --no-default` saves it the same way without changing which vault `zn` follows, and `ZENNOTES_REMOTE_TOKEN` in the MCP client\'s environment works as well. To point an agent somewhere else, give the command the same flags every other `zn` command takes: `zn mcp --vault work` or `zn mcp --server home --token <token>` in the client\'s config, or `ZENNOTES_SERVER` / `ZENNOTES_VAULT` in its environment. Beyond reading and writing notes, the server can hold a review with you through comments: ask the assistant to read a note\'s comments and answer them, and its replies land in the Comments panel under yours, signed with its name (`list_comments`, `add_comment`, `reply_to_comment`, `resolve_comment`).\n\nIt can work with attachments too. `list_assets` lists every file in the vault that is not a note, `read_asset` returns one up to 5 MiB (an image the model can see, text as text, anything else as an embedded file), and `upload_asset` adds a file from base64, up to 16 MiB, to the `assets` folder without overwriting anything and returns the embed to paste into a note. `rename_asset` and `move_asset` update the notes that link to the file and name any that may still use the old name, `duplicate_asset` copies it, and `delete_asset` moves it to the Trash with a token `restore_asset` takes; `list_assets` with `deleted: true` shows what can come back. Permanent deletion stays in the app. Files reach `upload_asset` as base64 in the tool call, so a model that writes it out itself only manages small ones; there is deliberately no argument that reads a path on your computer, since that would let an assistant with no file access of its own pull any of your files into the vault.\n\nFour more save an assistant from guessing. `update_task` changes a task\'s due date, priority, `@waiting`, state, status or text by its id, `daily_note` finds the daily, weekly or monthly note for a date under the vault\'s own settings and says how to start it if it does not exist, `note_sections` lists a note\'s headings or reads the part under one, and `edit_section` appends to, prepends to or replaces that part.'
+  },
+  {
+    title: 'Share part of a vault with an assistant',
+    only: 'computer',
+    body:
+      'An assistant connected through MCP sees the whole vault unless its launch flags say otherwise, and the server enforces them on every tool: listings, search, tags, tasks, backlinks, assets, comments and error messages, so a hidden note cannot be listed or read another way. One thing can still show: a new or moved file takes a number when a hidden file already has its name. `--allow-path <path>` shares only that folder or note and what is inside it (repeat it for more), `--deny-path <path>` hides one even inside an allowed folder, `--read-only` offers the reading tools only, and `--access comment` adds the comment tools to them. Paths are vault-relative, as the tools report them: `Projects` in a vault that keeps notes at its root, `inbox/Projects` in one with an Inbox folder, and a system folder you moved under its own name (`99 Archive/Projects` shares that folder\'s archived notes). A path covers the folder and everything below it, never a sibling that only starts with the same letters, and case and accents do not matter, except that an `--allow-path` with accents shares only a folder that has them. A database\'s record pages are notes to an assistant, wherever the vault is, so a path can name one page or the whole `.base` folder; its `data.csv` and `schema.json` stay out of reach. With a path scope, on a local vault too, it sees and can write the record pages inside what it allows, but cannot rename, move, copy, archive, trash or delete one, or treat a `.base` folder as a folder. `zn mcp` and the server bundled with the app take the same flags and give the same answers; add them after the command in the client\'s config, for example `"args": ["mcp", "--allow-path", "Projects", "--read-only"]`. Settings → MCP then shows that client as **Needs update**, and updating it there removes the flags.\n\nWhat the assistant gets: a hidden note answers exactly like a missing one (`Note not found`), and so do paths through a symbolic link, case variants and the `.zennotes` folder. Its errors and `vault_info` never show where the vault lives on disk, and `vault_info` lists what was shared under `access`. Tools it cannot use are not offered, and `empty_trash` never is once paths are restricted, since it would delete trashed notes it cannot see. New notes, moves and restores land only inside allowed folders, never through a symbolic link; archiving or trashing a note it can see is allowed even when the archive or trash is not shared, and the note then leaves its view. A `--deny-path` follows a note into the other system folders, however it names the folder: `Journal` also hides `archive/Journal`. `duplicate_note` refuses a copy that would land outside what is shared. A folder is renamed or deleted as a whole only when nothing inside it is hidden. Renaming a note rewrites `[[links]]` only in notes the assistant can see with `zn mcp`, and in none with the bundled server; on a self-hosted ZenNotes server, which rewrites links in every note, an assistant that sees part of the vault cannot rename notes. Attachments follow the same paths: a file is visible when its path is, and a hidden one answers `Asset not found`, like a missing one. Name them in the flags as `list_assets` shows them (`--allow-path assets`, `--deny-path assets/private`). `upload_asset` writes only to `assets`, so it needs that folder shared. Renaming or moving a file rewrites links only in notes the assistant can see. On a self-hosted server, an assistant that sees part of the vault cannot rename, move, read or copy a file; it can list, upload, delete and restore. `daily_note` gives no template, since a template is not filed under any folder a path can name, and where a note\'s folder is not shared it says so rather than offering to create it. A `--deny-path` that names nothing in the vault (renamed outside ZenNotes, or meant for another vault) shares nothing at all until it is fixed, so a rename never quietly reveals what it hid; the MCP server\'s log, which the client keeps, names the entry.\n\nThe flags govern the ZenNotes tools only. An assistant that can also run commands or read files (Claude Code, Codex, OpenCode) can still read the vault from disk.'
   },
   {
     title: 'Review an assistant’s edits',
+    only: 'computer',
     body:
-      'When an assistant changes a note through MCP (`write_note`, `append_to_note`, `prepend_to_note`, `insert_at_line`, `replace_in_note`, `toggle_task`), ZenNotes keeps what the note said before, beside it in `.zennotes/agent-edits/`. The note then shows a banner, “Claude Code changed this note 4 minutes ago”, and **Review changes** opens the review in the note itself: each change inline, the removed lines above the new ones, with **Accept** and **Reject** on each and **Accept all**, **Reject all** and **Done** on top. Reject puts the old text back. The note is read-only while you review, and once every change is decided the kept copy is deleted. What you typed after the assistant is yours and is not part of the review. Keys: Ctrl+Alt+↓ and Ctrl+Alt+↑ (Cmd+Option on macOS) move between changes, Ctrl+Shift+Enter (Cmd+Shift+Enter) accepts and Ctrl+Shift+Backspace (Cmd+Shift+Backspace) rejects; in Vim mode, Vim’s diff-mode keys: `]c` and `[c` move, `dp` keeps a change and `do` puts back what it replaced. Escape or **Done** leaves the review and keeps what is undecided. The palette lists every note waiting (**Review Agent Changes**). To tell the assistant why, comment on a change before you decide it; it reads comments with `list_comments`. Turn it off in Settings → MCP → **Review agent edits**. Not kept yet: notes in a vault on a self-hosted server, new notes an assistant creates, and moves, renames and deletions (Trash keeps those).'
+      'When an assistant changes a note through MCP (`write_note`, `append_to_note`, `prepend_to_note`, `insert_at_line`, `replace_in_note`, `edit_section`, `toggle_task`, `update_task`), ZenNotes keeps what the note said before, beside it in `.zennotes/agent-edits/`. The note then shows a banner, “Claude Code changed this note 4 minutes ago”, and **Review changes** opens the review in the note itself: each change inline, the removed lines above the new ones, with **Accept** and **Reject** on each and **Accept all**, **Reject all** and **Done** on top. Reject puts the old text back. The note is read-only while you review, and once every change is decided the kept copy is deleted. What you typed after the assistant is yours and is not part of the review. Keys: Ctrl+Alt+↓ and Ctrl+Alt+↑ (Cmd+Option on macOS) move between changes, Ctrl+Shift+Enter (Cmd+Shift+Enter) accepts and Ctrl+Shift+Backspace (Cmd+Shift+Backspace) rejects; in Vim mode, Vim’s diff-mode keys: `]c` and `[c` move, `dp` keeps a change and `do` puts back what it replaced. Escape or **Done** leaves the review and keeps what is undecided. The palette lists every note waiting (**Review Agent Changes**). To tell the assistant why, comment on a change before you decide it; it reads comments with `list_comments`. Turn it off in Settings → MCP → **Review agent edits**. Not kept yet: notes in a vault on a self-hosted server, new notes an assistant creates, and moves, renames and deletions (Trash keeps those).'
   }
 ]
+
+/** The manual as this host shows it. On the desktop app, the whole of it. */
+export function helpForHost(host: HelpHost): {
+  quickStart: HelpCard[]
+  howTo: HelpCard[]
+  concepts: HelpCard[]
+  shortcuts: HelpShortcutSection[]
+  vim: HelpExCommand[]
+  settings: HelpSettingsSection[]
+  cli: HelpCard[]
+} {
+  const applies = (entry: { only?: HelpAvailability }): boolean =>
+    helpAppliesTo(entry.only, host)
+  const cards = (list: HelpCard<HelpText>[]): HelpCard[] =>
+    list.filter(applies).map((card) => ({ ...card, body: helpText(card.body, host) }))
+  const detailed = <E extends { only?: HelpAvailability; detail: HelpText }>(
+    list: E[]
+  ): Array<Omit<E, 'detail'> & { detail: string }> =>
+    list.filter(applies).map((entry) => ({ ...entry, detail: helpText(entry.detail, host) }))
+  return {
+    quickStart: cards(HELP_QUICK_START),
+    howTo: cards(HELP_HOW_TO_GUIDES),
+    concepts: cards(HELP_CORE_CONCEPTS),
+    shortcuts: HELP_SHORTCUT_SECTIONS.filter(applies).map((section) => ({
+      ...section,
+      items: detailed(section.items)
+    })),
+    vim: detailed(HELP_VIM_COMMANDS),
+    settings: HELP_SETTINGS.filter(applies).map((section) => ({
+      ...section,
+      items: detailed(section.items)
+    })),
+    cli: cards(HELP_CLI)
+  }
+}

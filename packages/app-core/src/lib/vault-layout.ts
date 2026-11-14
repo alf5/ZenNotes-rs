@@ -30,6 +30,7 @@ import {
   normalizeTasksIncludedFolders
 } from '@shared/tasks-excluded-folders'
 import { normalizeTypstPreambleSettings } from '@shared/typst-preamble-folder'
+import { normalizeTemplateFolderSettings } from '@shared/template-folder'
 import { normalizeHarperVaultState } from '@shared/harper-settings'
 import { normalizeShareLocation } from '@shared/share-location'
 import { normalizeVaultDisplayName } from '@shared/vault-display-name'
@@ -539,7 +540,8 @@ function normalizeFileLocation(
  *  - `primary`     → the primary notes location root (default; the pre-#362 behavior)
  *  - `active-note` → the folder of the active note (falls back to primary when
  *                    nothing is open or the note is in Trash)
- *  - `folder`      → the given subfolder of the primary location
+ *  - `folder`      → the given subfolder of the primary location, unless it
+ *                    lands in a reserved folder (see `reservedCreateFolderTop`)
  */
 export function resolveCreateLocation(
   setting: FileLocationSetting | null | undefined,
@@ -550,10 +552,33 @@ export function resolveCreateLocation(
   if (normalized.mode === 'active-note' && activeNote && activeNote.folder !== 'trash') {
     return { folder: activeNote.folder, subpath: noteFolderSubpath(activeNote, settings) }
   }
-  if (normalized.mode === 'folder' && normalized.folder) {
+  if (
+    normalized.mode === 'folder' &&
+    normalized.folder &&
+    !reservedCreateFolderTop(normalized.folder, settings)
+  ) {
     return { folder: 'inbox', subpath: normalized.folder }
   }
   return { folder: 'inbox', subpath: '' }
+}
+
+/**
+ * The top-level folder that keeps a `Specific folder` location from holding
+ * notes, or null when it can. Only a root vault has one: there the location's
+ * first segment is a top-level directory, and `assets/` (with the other
+ * attachment folders) and dot folders hold files the vault never lists or
+ * opens as notes. A drawing created in `assets/drawings` was written, then
+ * could not be opened, so New Drawing seemed to do nothing (charles, Discord,
+ * 2026-11-01); such a location now creates in the primary location instead.
+ */
+export function reservedCreateFolderTop(
+  folder: string | null | undefined,
+  settings: VaultSettings | null | undefined
+): string | null {
+  const clean = (folder ?? '').trim().replace(/^\/+|\/+$/g, '')
+  if (!clean) return null
+  const top = vaultRelativeFolderPath('inbox', clean, settings).split('/')[0] ?? ''
+  return top.startsWith('.') || RESERVED_NON_SYSTEM_ROOT_NAMES.has(top.toLowerCase()) ? top : null
 }
 
 /**
@@ -625,6 +650,7 @@ export function normalizeVaultSettings(
     settings?.tasks?.includedFolders
   )
   const normalizedTypstPreambles = normalizeTypstPreambleSettings(settings?.typstPreambles)
+  const normalizedTemplates = normalizeTemplateFolderSettings(settings?.templates)
   const normalizedHarper = normalizeHarperVaultState(settings?.harper)
   const displayName = normalizeVaultDisplayName(settings?.displayName)
   const primaryNotesLocation =
@@ -707,6 +733,7 @@ export function normalizeVaultSettings(
         }
       : {}),
     ...(normalizedTypstPreambles ? { typstPreambles: normalizedTypstPreambles } : {}),
+    ...(normalizedTemplates ? { templates: normalizedTemplates } : {}),
     ...(normalizedHarper ? { harper: normalizedHarper } : {}),
     ...(displayName ? { displayName } : {})
   }
@@ -1490,6 +1517,21 @@ export function buildDailyNoteDateByPath(
     if (info?.kind === 'daily') out.set(note.path, noteTitleForDate(info.date))
   }
   return out
+}
+
+/** The date one note's tasks take from it, the single-note form of
+ *  {@link buildDailyNoteDateByPath}: a recurring task without a `due:` counts
+ *  its next occurrence from it (#1036). */
+export function dailyNoteDueForPath(
+  notes: readonly NoteMeta[],
+  settings: VaultSettings | null | undefined,
+  path: string
+): string | undefined {
+  const normalized = normalizeVaultSettings(settings)
+  if (!normalized.dailyNotes.enabled || !normalized.dailyNotes.tasksDueOnNoteDate) return undefined
+  const note = notes.find((n) => n.path === path)
+  const info = note ? classifyDateNote(note, normalized) : null
+  return info?.kind === 'daily' ? noteTitleForDate(info.date) : undefined
 }
 
 export function dateNoteFolderMayBelongToDatePattern(

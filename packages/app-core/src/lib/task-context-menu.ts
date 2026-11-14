@@ -4,6 +4,8 @@ import type { ContextMenuItem } from '../components/ContextMenu'
 import { useStore } from '../store'
 import { promptDate } from './date-prompt-requests'
 import { forwardTaskWithPicker } from './forward-task'
+import { parseRepeatRule } from '@shared/task-recurrence'
+import { chooseTaskRemind, chooseTaskRepeat } from './task-recurrence-pickers'
 
 /**
  * The right-click menu for a task, shared by the Tasks list, the Kanban board
@@ -105,15 +107,15 @@ export function buildTaskMenuItems(
       onSelect: () => void forwardTaskWithPicker(task)
     },
     { kind: 'separator' },
-    { label: 'Due today', hint: dueIn(0), onSelect: () => mutate({ kind: 'set-due', due: dueIn(0) }) },
+    { label: 'Due today', mark: dueIn(0), onSelect: () => mutate({ kind: 'set-due', due: dueIn(0) }) },
     {
       label: 'Due tomorrow',
-      hint: dueIn(1),
+      mark: dueIn(1),
       onSelect: () => mutate({ kind: 'set-due', due: dueIn(1) })
     },
     {
       label: 'Due next week',
-      hint: dueIn(7),
+      mark: dueIn(7),
       onSelect: () => mutate({ kind: 'set-due', due: dueIn(7) })
     },
     { label: 'Choose a date…', hint: key('@'), onSelect: () => void chooseTaskDueDate(task, today) }
@@ -122,6 +124,28 @@ export function buildTaskMenuItems(
   // `due:` token, so there is nothing on the line to clear.
   if (task.due && !task.dueInferred) {
     items.push({ label: 'Clear due date', onSelect: () => mutate({ kind: 'set-due', due: null }) })
+  }
+
+  // Recurrence (#1036). Whole-note tasks keep their state in frontmatter, which
+  // repeats on TaskNotes' terms, not yet built.
+  const repeats = parseRepeatRule(task.fields?.repeat) != null
+  items.push(
+    { kind: 'separator' },
+    {
+      label: 'Repeat…',
+      hint: key('r'),
+      disabled: task.kind === 'file',
+      onSelect: () => void chooseTaskRepeat(task)
+    },
+    {
+      label: 'Remind…',
+      hint: key('R'),
+      disabled: task.kind === 'file',
+      onSelect: () => void chooseTaskRemind(task)
+    }
+  )
+  if (repeats && task.kind !== 'file' && !task.checked && !task.cancelled && !task.forwarded) {
+    items.push({ label: 'Skip this time', onSelect: () => void state.skipTaskOccurrence(task) })
   }
 
   items.push(

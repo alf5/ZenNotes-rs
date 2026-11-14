@@ -232,6 +232,12 @@ fn hide_tray(app: &AppHandle) {
     }
 }
 
+/// The tray no longer holds `label`: something brought it back on purpose
+/// (upstream's `trayHiddenWindowIds.delete`).
+pub fn forget_hidden(app: &AppHandle, label: &str) {
+    tray_state(app).hidden.lock().unwrap().remove(label);
+}
+
 /// Bring back every window the tray is holding, the main one in front. With
 /// none held and none open, open a workspace window.
 pub fn reveal_tray_hidden_windows(app: &AppHandle) {

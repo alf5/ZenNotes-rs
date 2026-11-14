@@ -46,13 +46,13 @@
 .zn-app-shell {
   height: 100vh;
   height: 100dvh;
-}
-
-/* Keep the sidebar footer's controls above the iOS home indicator once
- * viewport-fit=cover lets content extend into the safe area. 0 on desktop. */
-.zn-sidebar-footer-safe {
+  /* Under a status bar the page draws beneath (a tablet's, where the title row stays;
+   * a phone shell sets its own padding here). 0 on desktop. */
+  padding-top: env(safe-area-inset-top, 0px);
+  /* Above the home indicator or gesture pill, for the sidebar footer and the editor
+   * alike. The footer takes no inset of its own, or it would clear the pill twice.
+   * A phone shell's `padding` replaces both edges. 0 on desktop. */
   padding-bottom: env(safe-area-inset-bottom, 0px);
-  box-sizing: content-box;
 }
 
 /* The conflicted-note banner keeps desktop density under a mouse. On a touch
@@ -65,7 +65,22 @@
   }
 }
 
-.task-kanban-column.is-drop-target {
+/* A coloured Kanban column (#1037): its top edge in the column's hue, the
+   border plus an inset line, so no column shifts by a pixel. The ring vars
+   keep Tailwind's ring-* drop highlight; the drop-target rule below wins
+   while a card hovers. */
+.task-kanban-column[data-kanban-column-color],
+[data-db-board-column][data-kanban-column-color] {
+  border-top-color: rgb(var(--kanban-column-hue));
+  box-shadow:
+    inset 0 1px 0 0 rgb(var(--kanban-column-hue)),
+    var(--tw-ring-offset-shadow, 0 0 #0000),
+    var(--tw-ring-shadow, 0 0 #0000);
+}
+
+.task-kanban-column.is-drop-target,
+.task-kanban-lane-cell.is-drop-target,
+.task-kanban-lane-header.is-drop-target {
   border-color: rgb(var(--z-accent) / 0.62);
   box-shadow: 0 0 0 1px rgb(var(--z-accent) / 0.28);
 }
@@ -1457,6 +1472,12 @@ textarea,
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+/* Once ::-webkit-scrollbar is styled, Chromium paints the corner where a
+   view's two scrollbars meet solid white unless it is styled too: a white
+   square on the lanes board and wide database grids in every dark theme. */
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
 ::-webkit-scrollbar-thumb {
   background: var(--scrollbar);
   border-radius: 999px;
@@ -1585,6 +1606,23 @@ textarea,
   .zen-note-cover .zen-note-cover-credit,
   .zen-gallery-cover .zen-note-cover-credit {
     opacity: 1;
+  }
+}
+/* Hover styles apply only where a pointer can hover (the Tailwind preset's
+   hoverOnlyWhenSupported, which reads "(hover: hover) and (pointer: fine)").
+   Elsewhere a control that appears on hover would never appear, so the ones
+   people need (row actions, a tab's close, the Table's select boxes, Open)
+   carry zn-hover-reveal and show all the time, as the cover credit above
+   does. Tooltips and key hints carry no class and stay out of sight there. */
+@media not all and (hover: hover) and (pointer: fine) {
+  .zn-hover-reveal {
+    opacity: 1 !important;
+  }
+  /* A hover shortcut for something already on screen: the Table row's Open,
+     which would sit over the end of a long name (the row's page glyph opens
+     the page on every device). Gone there, so no unseen button takes a tap. */
+  .zn-hover-only {
+    display: none !important;
   }
 }
 /* In the editor the cover lives in a block widget inside the capped text
@@ -5730,6 +5768,10 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
 .cm-table-widget.is-col-resizing .cm-table-cell {
   user-select: none;
 }
+.cm-table-widget .cm-table-cell img {
+  max-width: 100%;
+  height: auto;
+}
 .cm-table-widget th,
 .cm-table-widget td {
   border: 1px solid rgb(var(--z-bg-3) / 0.9);
@@ -6133,6 +6175,38 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
   padding-left: calc(16px + var(--z-list-hanging-indent, 0));
 }
 
+/* A quote inside a list item (`- > text`): the bullet stays outside the quote,
+   as in Preview. The bar sits at the `>`'s column, which is why it cannot be
+   the line's border, and it is not a background because the list guides own
+   that. The gap goes on the first line's text and on the wrapped lines. */
+.cm-wysiwyg .cm-editor .cm-line.cm-wq-quote-in-list {
+  --z-quote-gap: 14px;
+  position: relative;
+  color: rgb(var(--z-fg-2));
+}
+.cm-wysiwyg .cm-editor .cm-line.cm-wq-quote-in-list::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--z-list-indent-pad, 0ch) + var(--z-quote-column, 0ch));
+  width: 3px;
+  background: rgb(var(--z-accent) / 0.45);
+}
+.cm-wysiwyg .cm-editor .cm-line.cm-wq-quote-in-list.cm-markdown-list-line {
+  padding-left: calc(
+    var(--z-list-hanging-indent, 0) + var(--z-list-indent-pad, 0ch) + var(--z-quote-gap)
+  );
+  text-indent: calc((var(--z-list-hanging-indent, 0) + var(--z-quote-gap)) * -1);
+}
+.cm-wysiwyg .cm-editor .cm-wq-quote-body {
+  padding-left: var(--z-quote-gap);
+}
+.cm-wysiwyg .cm-editor .cm-wq-quote-in-list .tok-quote {
+  font-style: normal;
+  color: inherit;
+}
+
 /* Unordered-list bullet rendered in place of `-` / `*` / `+`. */
 .cm-wysiwyg .cm-editor .cm-wq-bullet {
   color: rgb(var(--z-grey-1));
@@ -6382,6 +6456,23 @@ html[data-completed-task-style="gray-strikethrough"] .prose-zen li.task-list-ite
 .prose-zen .zen-task-field {
   color: rgb(var(--z-purple));
   background-color: rgb(var(--z-purple) / 0.12);
+}
+/* #1036: the recurring-task fields wear their own colors; a value the field
+   cannot mean anything with draws dimmed. */
+.cm-wysiwyg .cm-editor .cm-task-repeat,
+.prose-zen .zen-task-repeat {
+  color: rgb(var(--z-aqua));
+  background-color: rgb(var(--z-aqua) / 0.14);
+}
+.cm-wysiwyg .cm-editor .cm-task-remind,
+.prose-zen .zen-task-remind {
+  color: rgb(var(--z-yellow));
+  background-color: rgb(var(--z-yellow) / 0.15);
+}
+.cm-wysiwyg .cm-editor .cm-task-meta-invalid,
+.prose-zen .zen-task-meta-invalid {
+  opacity: 0.55;
+  text-decoration: underline dotted;
 }
 /* #512: derived subtask progress on a parent task line. Neutral until every
    child is done, then it borrows the green the done state already owns. */

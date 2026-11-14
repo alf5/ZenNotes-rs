@@ -502,6 +502,147 @@ describe('daily task rollover', () => {
   })
 })
 
+describe('daily note from a template, with rollover (yeminn, Discord 2026-10-29)', () => {
+  // Opening today's note from a template created it, then started the rollover.
+  // The template path left the new note out of the note list until its own
+  // listing landed, and that listing is dropped when a newer one started in the
+  // meantime: the watcher's echo of the very same write does exactly that while
+  // a Cloud run keeps main busy. The rollover then found no note for today,
+  // created one, got "<today> 2.md" and moved the tasks there, while the editor
+  // showed the empty "<today>.md".
+  it('rolls the tasks into the note it opened when a newer listing overtakes the template\'s', async () => {
+    const iso = (date: Date) => [date.getFullYear(), String(date.getMonth() + 1).padStart(2, '0'),
+      String(date.getDate()).padStart(2, '0')].join('-')
+    const now = new Date()
+    const yesterday = new Date(now)
+    yesterday.setDate(yesterday.getDate() - 1)
+    const sourcePath = `inbox/Daily Notes/${iso(yesterday)}.md`
+    const targetPath = `inbox/Daily Notes/${iso(now)}.md`
+    const files = new Map([[sourcePath, `# ${iso(yesterday)}\n\n- [ ] Call the bank\n`]])
+    const notes = () => [...files].map(([path, body]) => makeNote(body, path))
+    const createNote = vi.fn(async (_folder: string, title: string, subpath: string) => {
+      // Main picks the next free name when the file is already there.
+      let path = `inbox/${subpath}/${title}.md`
+      for (let n = 2; files.has(path); n++) path = `inbox/${subpath}/${title} ${n}.md`
+      files.set(path, `# ${title}\n`)
+      return makeNote(files.get(path)!, path)
+    })
+    // The first listing after the create is overtaken by a newer one (the
+    // watcher's echo), which lands only after the rollover has looked.
+    let release!: () => void
+    const echoLanded = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let listings = 0
+    const { useStore } = await loadStore()
+    installZen({
+      createNote,
+      listNotes: vi.fn(async () => {
+        listings += 1
+        if (listings === 1) {
+          const echo = useStore.getState().refreshNotes()
+          void echo
+          await new Promise((resolve) => setTimeout(resolve, 0))
+          return notes()
+        }
+        if (listings === 2) {
+          await echoLanded
+          return notes()
+        }
+        return notes()
+      }),
+      listFolders: vi.fn(async () => []),
+      hasAssetsDir: vi.fn(async () => false),
+      readNote: vi.fn(async (path: string) => makeNote(files.get(path)!, path)),
+      writeNote: vi.fn(async (path: string, body: string) => {
+        files.set(path, body)
+        return makeNote(body, path)
+      })
+    })
+    useStore.setState({
+      notes: notes(),
+      customTemplates: [{
+        id: 'custom:daily', name: 'Daily', description: '', category: 'Custom', builtin: false,
+        body: '# {{title}}\n\n## Tasks\n\n'
+      }],
+      vaultSettings: {
+        ...useStore.getState().vaultSettings,
+        dailyNotes: {
+          enabled: true, directory: 'Daily Notes', templateId: 'custom:daily', rolloverUnfinishedTasks: true
+        }
+      }
+    })
+
+    try {
+      await useStore.getState().openDailyNoteForDate(now)
+      await vi.waitFor(() => expect(files.get(sourcePath)).not.toContain('Call the bank'))
+    } finally {
+      release()
+    }
+
+    expect(createNote).toHaveBeenCalledOnce()
+    expect([...files.keys()].sort()).toEqual([sourcePath, targetPath].sort())
+    const today = useStore.getState().noteContents[targetPath]?.body ?? files.get(targetPath)
+    expect(today).toContain('- [ ] Call the bank')
+    expect(useStore.getState().selectedPath).toBe(targetPath)
+  })
+})
+
+describe('an edit to a note cached but open in no pane', () => {
+  // The rollover trims a past daily note through its cached buffer when there
+  // is one, and the save runs PATH_SAVE_DEBOUNCE_MS later. A note listing that
+  // landed first dropped every buffer no pane shows, unsaved edits included,
+  // so the save found nothing to write and the task stayed in yesterday's note
+  // as well as today's (seen with a busy main, yeminn, Discord 2026-10-29).
+  // A listing carries metadata only, never a body.
+  const listed = (body: string, path: string) => {
+    const { body: _body, ...meta } = makeNote(body, path)
+    return meta
+  }
+
+  it('is still saved when a note listing lands before its save', async () => {
+    const path = 'inbox/Daily Notes/2026-10-29.md'
+    const writeNote = vi.fn(async (target: string, body: string) => makeNote(body, target))
+    installZen({
+      listNotes: vi.fn(async () => [listed('# 2026-10-29\n\n- [ ] Call the bank\n', path)]),
+      writeNote
+    })
+    const { useStore } = await loadStore()
+    useStore.setState({
+      notes: [makeNote('# 2026-10-29\n\n- [ ] Call the bank\n', path)],
+      noteContents: { [path]: makeNote('# 2026-10-29\n\n- [ ] Call the bank\n', path) }
+    })
+
+    await onFakeClock(1000, async () => {
+      useStore.getState().updateNoteBody(path, '# 2026-10-29\n\n')
+      await useStore.getState().refreshNotes()
+    })
+
+    expect(writeNote).toHaveBeenCalledWith(path, '# 2026-10-29\n\n')
+  })
+
+  it('is let go once saved, by the next listing', async () => {
+    const path = 'inbox/Daily Notes/2026-10-29.md'
+    installZen({
+      listNotes: vi.fn(async () => [listed('# 2026-10-29\n\n', path)]),
+      writeNote: vi.fn(async (target: string, body: string) => makeNote(body, target))
+    })
+    const { useStore } = await loadStore()
+    useStore.setState({
+      notes: [makeNote('# 2026-10-29\n\n- [ ] Call the bank\n', path)],
+      noteContents: { [path]: makeNote('# 2026-10-29\n\n- [ ] Call the bank\n', path) }
+    })
+
+    await onFakeClock(1000, async () => {
+      useStore.getState().updateNoteBody(path, '# 2026-10-29\n\n')
+    })
+    await useStore.getState().refreshNotes()
+
+    expect(useStore.getState().noteDirty[path]).toBeUndefined()
+    expect(useStore.getState().noteContents[path]).toBeUndefined()
+  })
+})
+
 describe('weekly note patterns', () => {
   it('creates weekly notes using the configured directory and title patterns', async () => {
     const created = {
@@ -1455,6 +1596,29 @@ describe('note jump history with the Tasks and Tags views (#633)', () => {
     expect(useStore.getState().selectedPath).toBe('inbox/Other.md')
   })
 
+  it('a task opened from the Tasks view leaves Tasks behind it, so Ctrl+O and Back return there', async () => {
+    // openTaskAt opened the note through the raw tab primitive and recorded
+    // no jump, so Ctrl+O (and the phones' Back) skipped Tasks and landed on
+    // the note before it (2.81.0 iPhone walk).
+    installZen({
+      readNote: vi
+        .fn()
+        .mockImplementation(async (path: string) => makeNote('- [ ] Pay rent', path))
+    })
+    const { useStore } = await loadStore()
+
+    await useStore.getState().selectNote('inbox/From.md')
+    await useStore.getState().openTasksView()
+    await useStore.getState().openTaskAt(makeTask('Pay rent'))
+    expect(useStore.getState().selectedPath).toBe('inbox/Note.md')
+    expect(useStore.getState().noteBackstack.map((l) => l.path).at(-1)).toBe(TASKS_TAB_PATH)
+
+    await useStore.getState().jumpToPreviousNote()
+    expect(useStore.getState().selectedPath).toBe(TASKS_TAB_PATH)
+    await useStore.getState().jumpToPreviousNote()
+    expect(useStore.getState().selectedPath).toBe('inbox/From.md')
+  })
+
   it('the Tags view round-trips the same way', async () => {
     installZen({
       readNote: vi
@@ -1529,6 +1693,29 @@ describe('note jump history for offset opens (#484)', () => {
     const before = useStore.getState().noteBackstack.length
     await useStore.getState().openNoteAtOffset('inbox/Same.md', 8)
     expect(useStore.getState().noteBackstack.length).toBe(before)
+  })
+})
+
+describe('a database load that fails', () => {
+  it('records the failure until a load starts again, so the view stops retrying', async () => {
+    // The view loads while a database is missing and nothing is loading; a
+    // failure that left no trace made it retry, and toast, on every render
+    // (1,089 times on the Android walk of 2.81.0).
+    const csvPath = 'inbox/Board.base/data.csv'
+    const doc = { path: csvPath, title: 'Board', rows: [], columns: [], views: [] }
+    const openDatabase = vi.fn().mockRejectedValueOnce(new Error('Disk unreadable')).mockResolvedValue(doc)
+    installZen({ openDatabase })
+    const { useStore } = await loadStore()
+
+    await useStore.getState().loadDatabase(csvPath)
+    expect(useStore.getState().databases[csvPath]).toBeUndefined()
+    expect(useStore.getState().databasesLoadError[csvPath]).toBeTruthy()
+    expect(useStore.getState().databasesLoading[csvPath]).toBe(false)
+
+    // Try again clears it and loads.
+    await useStore.getState().loadDatabase(csvPath)
+    expect(useStore.getState().databases[csvPath]).toBeTruthy()
+    expect(useStore.getState().databasesLoadError[csvPath]).toBeUndefined()
   })
 })
 
@@ -2001,6 +2188,135 @@ describe('folder Gallery', () => {
     const tabs = allLeaves(useStore.getState().paneLayout).flatMap((leaf) => leaf.tabs)
     expect(tabs.filter((tab) => tab === galleryTabPath('inbox', 'Recipes'))).toHaveLength(1)
     expect(tabs).toContain(galleryTabPath('archive', ''))
+  })
+})
+
+describe('hideEmptyTasks (#1026)', () => {
+  it('hides empty tasks by default and remembers showing them', async () => {
+    installZen()
+    const { useStore } = await loadStore()
+    expect(useStore.getState().hideEmptyTasks).toBe(true)
+
+    useStore.getState().setHideEmptyTasks(false)
+    expect(useStore.getState().hideEmptyTasks).toBe(false)
+    const saved = JSON.parse(localStorage.getItem('zen:prefs:v2') ?? '{}')
+    expect(saved.hideEmptyTasks).toBe(false)
+
+    vi.resetModules()
+    const reloaded = await import('./store')
+    expect(reloaded.useStore.getState().hideEmptyTasks).toBe(false)
+  })
+})
+
+describe('kanbanWipLimits (#1025)', () => {
+  it('keeps a limit per board and column, through a restart', async () => {
+    installZen()
+    const { useStore } = await loadStore()
+    expect(useStore.getState().kanbanWipLimits).toEqual({})
+
+    useStore.getState().setKanbanWipLimit('status', 'in-progress', 3)
+    useStore.getState().setKanbanWipLimit('field:status', 'review', 2)
+    expect(useStore.getState().kanbanWipLimits).toEqual({
+      'status:in-progress': 3,
+      'field:status:review': 2
+    })
+    const saved = JSON.parse(localStorage.getItem('zen:prefs:v2') ?? '{}')
+    expect(saved.kanbanWipLimits).toEqual({ 'status:in-progress': 3, 'field:status:review': 2 })
+
+    vi.resetModules()
+    const reloaded = await import('./store')
+    expect(reloaded.useStore.getState().kanbanWipLimits['status:in-progress']).toBe(3)
+  })
+
+  it('clears a limit with null', async () => {
+    installZen()
+    const { useStore } = await loadStore()
+    useStore.getState().setKanbanWipLimit('status', 'in-progress', 3)
+    useStore.getState().setKanbanWipLimit('status', 'in-progress', null)
+    expect(useStore.getState().kanbanWipLimits).toEqual({})
+  })
+
+  it('drops limits a hand-edited config.toml cannot mean', async () => {
+    installZen()
+    vi.resetModules()
+    localStorage.clear()
+    localStorage.setItem(
+      'zen:prefs:v2',
+      JSON.stringify({
+        kanbanWipLimits: {
+          'status:in-progress': 3,
+          'status:waiting': '4',
+          'priority:high': 0,
+          'priority:med': -2,
+          'priority:low': 2.5,
+          'status:done': 1000,
+          'folder:Projects/alpha': 5,
+          bogus: 3
+        }
+      })
+    )
+    const { useStore } = await import('./store')
+    expect(useStore.getState().kanbanWipLimits).toEqual({
+      'status:in-progress': 3,
+      'status:waiting': 4,
+      'folder:Projects/alpha': 5
+    })
+  })
+})
+
+describe('kanbanColumnColors (#1037)', () => {
+  it('keeps a colour per board and column, through a restart', async () => {
+    installZen()
+    const { useStore } = await loadStore()
+    expect(useStore.getState().kanbanColumnColors).toEqual({})
+
+    useStore.getState().setKanbanColumnColor('status', 'in-progress', 'blue')
+    useStore.getState().setKanbanColumnColor('field:status', 'done', 'green')
+    expect(useStore.getState().kanbanColumnColors).toEqual({
+      'status:in-progress': 'blue',
+      'field:status:done': 'green'
+    })
+    const saved = JSON.parse(localStorage.getItem('zen:prefs:v2') ?? '{}')
+    expect(saved.kanbanColumnColors).toEqual({ 'status:in-progress': 'blue', 'field:status:done': 'green' })
+
+    vi.resetModules()
+    const reloaded = await import('./store')
+    expect(reloaded.useStore.getState().kanbanColumnColors['status:in-progress']).toBe('blue')
+  })
+
+  it('clears a colour with null and leaves the other columns alone', async () => {
+    installZen()
+    const { useStore } = await loadStore()
+    useStore.getState().setKanbanColumnColor('status', 'in-progress', 'blue')
+    useStore.getState().setKanbanColumnColor('status', 'waiting', 'yellow')
+    useStore.getState().setKanbanColumnColor('status', 'in-progress', null)
+    expect(useStore.getState().kanbanColumnColors).toEqual({ 'status:waiting': 'yellow' })
+  })
+
+  it('reads the names a hand-edited config.toml can mean, and drops the rest', async () => {
+    installZen()
+    vi.resetModules()
+    localStorage.clear()
+    localStorage.setItem(
+      'zen:prefs:v2',
+      JSON.stringify({
+        kanbanColumnColors: {
+          'status:in-progress': 'Blue',
+          'status:waiting': 'grey',
+          'priority:high': '#ff0000',
+          'priority:med': 'orange',
+          'priority:low': 3,
+          'folder:Projects/alpha': 'aqua',
+          bogus: 'red'
+        }
+      })
+    )
+    const { useStore } = await import('./store')
+    expect(useStore.getState().kanbanColumnColors).toEqual({
+      'status:in-progress': 'blue',
+      'status:waiting': 'gray',
+      'folder:Projects/alpha': 'teal'
+    })
   })
 })
 
@@ -2499,6 +2815,74 @@ describe('applyTaskMutation write queue (#503)', () => {
 
     expect(disk).toBe('- [x] alpha\n- [x] beta')
     expect(writeNote).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('Kanban lanes (#1027)', () => {
+  it('starts with no lanes and keeps the lane field through a restart', async () => {
+    installZen()
+    const { useStore } = await loadStore()
+    expect(useStore.getState().kanbanLanes).toBe('none')
+
+    useStore.getState().setKanbanLanes('priority')
+    expect(useStore.getState().kanbanLanes).toBe('priority')
+    const saved = JSON.parse(localStorage.getItem('zen:prefs:v2') ?? '{}')
+    expect(saved.kanbanLanes).toBe('priority')
+
+    vi.resetModules()
+    const reloaded = await import('./store')
+    expect(reloaded.useStore.getState().kanbanLanes).toBe('priority')
+  })
+
+  it('reads a hand-edited lane field it can mean, and none for anything else', async () => {
+    const { normalizeKanbanLanes } = await loadStore()
+    expect(normalizeKanbanLanes('tag')).toBe('tag')
+    expect(normalizeKanbanLanes('field:sprint')).toBe('field:sprint')
+    expect(normalizeKanbanLanes('status')).toBe('none')
+    expect(normalizeKanbanLanes('field:Bad Key')).toBe('none')
+    expect(normalizeKanbanLanes(3)).toBe('none')
+  })
+
+  it('remembers collapsed lanes per board and lane field', async () => {
+    installZen()
+    const { useStore } = await loadStore()
+    useStore.getState().setKanbanCollapsedLanes('status', 'priority', ['low', 'none'])
+    useStore.getState().setKanbanCollapsedLanes('field:status', 'tag', ['home'])
+    expect(useStore.getState().kanbanCollapsedLanes).toEqual({
+      'status|priority': ['low', 'none'],
+      'field:status|tag': ['home']
+    })
+    useStore.getState().setKanbanCollapsedLanes('field:status', 'tag', [])
+    expect(useStore.getState().kanbanCollapsedLanes).toEqual({ 'status|priority': ['low', 'none'] })
+
+    vi.resetModules()
+    const reloaded = await import('./store')
+    expect(reloaded.useStore.getState().kanbanCollapsedLanes).toEqual({ 'status|priority': ['low', 'none'] })
+  })
+
+  it('drops collapsed-lane entries no board can build', async () => {
+    const { normalizeKanbanCollapsedLanes } = await loadStore()
+    expect(
+      normalizeKanbanCollapsedLanes({
+        'status|priority': ['low', 'low', '', 7],
+        'priority|priority': ['high'],
+        'bogus|tag': ['x'],
+        'status|nope': ['x'],
+        'folder|tag': 'home'
+      })
+    ).toEqual({ 'status|priority': ['low'] })
+  })
+
+  it('writes a tag lane move onto the task line, keeping its other tokens', async () => {
+    let disk = '- [ ] alpha #work due:2026-11-02 !high'
+    const readNote = vi.fn(async () => makeNote(disk))
+    const writeNote = vi.fn(async (_path: string, body: string) => {
+      disk = body
+    })
+    installZen({ readNote, writeNote })
+    const { useStore } = await loadStore()
+    await useStore.getState().applyTaskMutation(makeTask('alpha', 0), { kind: 'set-tag', tag: 'home' })
+    expect(disk).toBe('- [ ] alpha #home due:2026-11-02 !high')
   })
 })
 
@@ -3014,6 +3398,177 @@ describe('custom templates on the change feed (#723)', () => {
 
     expect(listTemplates).toHaveBeenCalled()
     expect(useStore.getState().customTemplates.map((t) => t.name)).toEqual(['Weekly'])
+  })
+})
+
+// #1024: the vault's template folder. Its notes are templates, read through
+// the same note bridge every runtime has (desktop, server, web, phones), and
+// they are placeholders rather than work: no Tasks, no search hits.
+describe('template folder (#1024)', () => {
+  const MEETING = 'Templates/Meeting.md'
+  const MEETING_BODY = '# {{title}}\n\n- [ ] agenda item\n'
+  const noteAt = (path: string, body: string, updatedAt = 1) => ({
+    ...makeNote(body, path),
+    updatedAt
+  })
+  const taskIn = (path: string, content: string): VaultTask => ({
+    ...makeTask(content),
+    id: `${path}#0`,
+    sourcePath: path
+  })
+
+  function installVault(files: Record<string, string>, settings: object = {}) {
+    const disk = new Map(Object.entries(files))
+    const stamps = new Map<string, number>()
+    const listNotes = vi.fn(async () =>
+      [...disk.entries()].map(([path, body]) => noteAt(path, body, stamps.get(path) ?? 1))
+    )
+    const readNote = vi.fn(async (path: string) => {
+      const body = disk.get(path)
+      if (body === undefined) throw missing(path)
+      return noteAt(path, body, stamps.get(path) ?? 1)
+    })
+    let vaultSettings: object = { templates: { folder: 'Templates' }, ...settings }
+    const getVaultSettings = vi.fn(async () => vaultSettings)
+    const setVaultSettings = vi.fn(async (next: object) => {
+      vaultSettings = next
+      return next
+    })
+    installZen({
+      listNotes,
+      readNote,
+      getVaultSettings,
+      setVaultSettings,
+      listTemplates: vi.fn().mockResolvedValue([
+        { sourcePath: '.zennotes/templates/meeting.md', raw: '---\nname: Meeting\n---\nstored\n' }
+      ])
+    })
+    return {
+      disk,
+      readNote,
+      setVaultSettings,
+      edit(path: string, body: string) {
+        disk.set(path, body)
+        stamps.set(path, (stamps.get(path) ?? 1) + 1)
+      }
+    }
+  }
+
+  async function openVault(settings: object = {}) {
+    const { useStore } = await loadStore()
+    const { normalizeVaultSettings } = await import('./lib/vault-layout')
+    useStore.setState({
+      vaultSettings: normalizeVaultSettings({
+        ...(await window.zen.getVaultSettings()),
+        ...settings
+      } as never)
+    })
+    await useStore.getState().loadCustomTemplates()
+    await useStore.getState().refreshNotes()
+    await useStore.getState().loadFolderTemplates()
+    return useStore
+  }
+
+  it('lists the notes in the folder as templates, after the .zennotes/templates ones', async () => {
+    installVault({ [MEETING]: MEETING_BODY, 'Templates/Work/Retro.md': '## Went well\n', 'Notes/Plan.md': '# Plan\n' })
+    const useStore = await openVault()
+
+    expect(useStore.getState().customTemplates.map((t) => [t.id, t.source ?? 'custom'])).toEqual([
+      ['custom:meeting', 'custom'],
+      ['folder:Meeting', 'folder'],
+      ['folder:Work/Retro', 'folder']
+    ])
+    expect(useStore.getState().customTemplates.find((t) => t.id === 'folder:Meeting')?.body).toBe(
+      MEETING_BODY
+    )
+  })
+
+  it('creates a note whose body is the template, variables filled in', async () => {
+    installVault({ [MEETING]: MEETING_BODY })
+    const createNote = vi.fn(async () => noteAt('Weekly sync.md', ''))
+    const writeNote = vi.fn(async () => noteAt('Weekly sync.md', ''))
+    Object.assign(window.zen, { createNote, writeNote })
+    const useStore = await openVault()
+    const template = useStore.getState().customTemplates.find((t) => t.id === 'folder:Meeting')!
+
+    await useStore.getState().createFromTemplate(template, {
+      folder: 'inbox',
+      subpath: '',
+      title: 'Weekly sync'
+    })
+
+    expect(writeNote).toHaveBeenCalledWith('Weekly sync.md', '# Weekly sync\n\n- [ ] agenda item\n')
+  })
+
+  it('picks up an edit to the template note without a restart', async () => {
+    const vault = installVault({ [MEETING]: MEETING_BODY })
+    const useStore = await openVault()
+
+    vault.edit(MEETING, '# {{title}}\n\nedited\n')
+    await useStore.getState().applyChange({ kind: 'change', path: MEETING, folder: 'inbox' })
+    await flushAsyncWork()
+
+    expect(useStore.getState().customTemplates.find((t) => t.id === 'folder:Meeting')?.body).toBe(
+      '# {{title}}\n\nedited\n'
+    )
+  })
+
+  it('reads an unchanged template note once, not on every refresh', async () => {
+    const vault = installVault({ [MEETING]: MEETING_BODY, 'Notes/Plan.md': '# Plan\n' })
+    const useStore = await openVault()
+    const reads = vault.readNote.mock.calls.filter(([p]) => p === MEETING).length
+
+    await useStore.getState().refreshNotes()
+    await useStore.getState().loadFolderTemplates()
+
+    expect(vault.readNote.mock.calls.filter(([p]) => p === MEETING).length).toBe(reads)
+  })
+
+  it('keeps the template placeholders out of Tasks, from any host', async () => {
+    // A server or phone that does not know the setting still hands these over.
+    installVault({ [MEETING]: MEETING_BODY })
+    const useStore = await openVault()
+    const scanTasks = vi
+      .fn()
+      .mockResolvedValue([taskIn(MEETING, 'agenda item'), taskIn('Notes/Plan.md', 'real work')])
+    const scanTasksForPath = vi.fn().mockResolvedValue([taskIn(MEETING, 'agenda item')])
+    Object.assign(window.zen, { scanTasks, scanTasksForPath })
+
+    await useStore.getState().refreshTasks()
+    expect(useStore.getState().vaultTasks.map((t) => t.content)).toEqual(['real work'])
+
+    await useStore.getState().rescanTasksForPath(MEETING)
+    expect(useStore.getState().vaultTasks.map((t) => t.content)).toEqual(['real work'])
+  })
+
+  it('drops the folder templates and lets their tasks back when the setting is cleared', async () => {
+    const vault = installVault({ [MEETING]: MEETING_BODY })
+    const useStore = await openVault()
+    const scanTasks = vi.fn().mockResolvedValue([taskIn(MEETING, 'agenda item')])
+    Object.assign(window.zen, { scanTasks })
+
+    await useStore.getState().setTemplateFolder(null)
+
+    expect(vault.setVaultSettings).toHaveBeenCalled()
+    expect(useStore.getState().vaultSettings.templates).toBeUndefined()
+    expect(useStore.getState().customTemplates.map((t) => t.id)).toEqual(['custom:meeting'])
+    expect(useStore.getState().vaultTasks.map((t) => t.content)).toEqual(['agenda item'])
+  })
+
+  it('sets the folder from Settings and lists its notes straight away', async () => {
+    const vault = installVault({ [MEETING]: MEETING_BODY }, { templates: undefined })
+    const useStore = await openVault({ templates: undefined })
+    expect(useStore.getState().customTemplates.map((t) => t.id)).toEqual(['custom:meeting'])
+
+    await useStore.getState().setTemplateFolder(' Templates/ ')
+
+    expect(vault.setVaultSettings.mock.calls.at(-1)?.[0]).toMatchObject({
+      templates: { folder: 'Templates' }
+    })
+    expect(useStore.getState().customTemplates.map((t) => t.id)).toEqual([
+      'custom:meeting',
+      'folder:Meeting'
+    ])
   })
 })
 

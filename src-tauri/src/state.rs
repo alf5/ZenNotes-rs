@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::ipc::types::VaultInfo;
 use crate::remote::RemoteSession;
-use crate::watcher::VaultDebouncer;
+use crate::watcher::VaultWatch;
 
 #[derive(Default)]
 pub struct AppState {
@@ -27,13 +27,16 @@ pub struct AppState {
     /// vault at launch must not each open a connection.
     pub workspace_lock: Mutex<()>,
     /// Active vault watcher; dropping it stops watching.
-    pub watcher: Mutex<Option<VaultDebouncer>>,
+    pub watcher: Mutex<Option<VaultWatch>>,
     /// External (out-of-vault) markdown files bound to standalone editor
     /// windows, keyed by window label.
     pub external_files: Mutex<HashMap<String, PathBuf>>,
     /// Notes queued to open in the main window before the renderer signalled
     /// ready (deep links / file-open at launch). Flushed on `app_renderer_ready`.
     pub pending_open_notes: Mutex<Vec<String>>,
+    /// Clip links (`zennotes-rs://new` / `daily`) waiting for the main
+    /// renderer, in the order they arrived.
+    pub pending_clip_links: Mutex<Vec<String>>,
     /// Whether the main renderer has mounted and subscribed to open-note events.
     pub renderer_ready: Mutex<bool>,
 }
@@ -91,8 +94,18 @@ impl AppState {
     }
 
     /// Replace the active watcher (the previous one, if any, is dropped/stopped).
-    pub fn set_watcher(&self, watcher: Option<VaultDebouncer>) {
-        *self.watcher.lock().unwrap() = watcher;
+    pub fn set_watcher(&self, watcher: Option<VaultWatch>) {
+        // Dropped outside the lock: stopping a watch joins its threads.
+        let previous = std::mem::replace(&mut *self.watcher.lock().unwrap(), watcher);
+        drop(previous);
+    }
+
+    /// A window gained focus: re-read the vault if its folder cannot report
+    /// changes (upstream's `rescanUnwatchedVaults`).
+    pub fn rescan_unwatched_vault(&self) {
+        if let Some(watch) = self.watcher.lock().unwrap().as_ref() {
+            watch.rescan_now();
+        }
     }
 
     pub fn set_external_file(&self, label: &str, path: PathBuf) {
@@ -117,6 +130,14 @@ impl AppState {
 
     pub fn drain_pending_open_notes(&self) -> Vec<String> {
         std::mem::take(&mut *self.pending_open_notes.lock().unwrap())
+    }
+
+    pub fn queue_clip_link(&self, raw: String) {
+        self.pending_clip_links.lock().unwrap().push(raw);
+    }
+
+    pub fn drain_pending_clip_links(&self) -> Vec<String> {
+        std::mem::take(&mut *self.pending_clip_links.lock().unwrap())
     }
 }
 

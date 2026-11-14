@@ -17,7 +17,11 @@ import {
 } from "@zennotes/shared-domain/cloud-auto-sync";
 import { formatCloudBytes } from "@zennotes/shared-domain/cloud-bytes";
 import {
+  cloudSyncRefusedPathRow,
+  cloudSyncRefusedPathsLabel,
+  cloudSyncRefusedPathsMessage,
   describeCloudError,
+  isInternalVaultPath,
   type CloudErrorCopy,
   type CloudErrorKind,
 } from "@zennotes/shared-domain/cloud-error-copy";
@@ -351,6 +355,27 @@ export async function connectCloudAccountFromStatusBar(
   }
 }
 
+/** The footer's way out of a sign-in that is waiting on the browser, which is the
+ *  same thing Settings → Cloud's Cancel sign-in does. */
+export async function cancelCloudSignInFromStatusBar(
+  bridge: Pick<ZenBridge, "getCloudAccountStatus" | "logoutCloudAccount"> = getZenBridge(),
+): Promise<void> {
+  try {
+    // The footer can be behind: the browser may have finished between the last look
+    // and this click, and Cancel must not sign out an account that just connected.
+    const status = await bridge.getCloudAccountStatus();
+    if (status.state === "connected") {
+      requestCloudAutoSync("account-change");
+      return;
+    }
+    if (status.state === "connecting") await bridge.logoutCloudAccount();
+    markCloudSyncDisconnected();
+  } catch (error) {
+    markCloudSyncDisconnected(failureText(cloudSyncErrorCopy(error)));
+    throw error;
+  }
+}
+
 export async function syncCloudVaultWithStatus(
   bridge: Pick<CloudAutoSyncBridge, "syncCloudVault"> &
     Partial<
@@ -457,8 +482,26 @@ function attentionMessageWithoutSettings(
   summary: CloudSyncRunSummary | null,
 ): string | null {
   if (summary === null) return null;
-  const attention = cloudSyncAttentionMessage(summary);
+  const attention = runAttentionMessage(summary);
   return attention === SETTINGS_ATTENTION_MESSAGE ? null : attention;
+}
+
+/**
+ * What a run leaves on the status: null when nothing in it needs the person.
+ * A file ZenNotes keeps for itself that Cloud refused is set aside and
+ * offered again on its own (#1004), so a run whose only news is such files
+ * has synced everything it could: the status reads synced, the tray stays
+ * idle and a status bar turned off stays off. Settings → Cloud still lists
+ * each file with Cloud's answer, from the summary. A note or attachment of
+ * the person's is different: it waits until they rename or move it, so it
+ * keeps the status on attention, in the calm words cloudSyncAttentionLabel
+ * gives it, until a run no longer holds it.
+ */
+function runAttentionMessage(summary: CloudSyncRunSummary): string | null {
+  const quiet =
+    cloudSyncAttentionIsRefusedOnly(summary) &&
+    (summary.refused_paths ?? []).every((row) => isInternalVaultPath(row.path));
+  return quiet ? null : cloudSyncAttentionMessage(summary);
 }
 
 /** True while sync waits for an answer about the vault settings. */
@@ -738,7 +781,7 @@ function applyCloudSyncSummary(summary: CloudSyncRunSummary, vaultName?: string 
   // A run that reports nothing new has still not synced the vault settings
   // while the question from an earlier run is open.
   const attention =
-    cloudSyncAttentionMessage(summary) ??
+    runAttentionMessage(summary) ??
     (current.settingsConflict !== null ? SETTINGS_ATTENTION_MESSAGE : null);
   useCloudSyncStatusStore.setState({
     phase: attention === null ? "ready" : "attention",
@@ -1093,16 +1136,21 @@ export function oversizedFileConflicts(summary: CloudSyncRunSummary): CloudSyncC
 
 /**
  * The few words the status row and the Settings heading give a run that could
- * not finish because of a Cloud limit. A phone has no hover to show the
- * sentence behind "Sync incomplete", so the limit names itself. Null when the
- * run stopped for any other reason.
+ * not finish because of a Cloud limit, or whose only trouble is a file Cloud
+ * refused. A phone has no hover to show the sentence behind "Sync incomplete",
+ * so the reason names itself. Null when the run stopped for any other reason.
  */
 export function cloudSyncAttentionLabel(
   summary: CloudSyncRunSummary | null,
 ): string | null {
   if (!summary) return null;
   const capacityConflict = firstCapacityConflict(summary);
-  if (!capacityConflict) return null;
+  if (!capacityConflict) {
+    // A run whose only trouble is a file Cloud refused names that, calmly.
+    return cloudSyncAttentionIsRefusedOnly(summary)
+      ? cloudSyncRefusedPathsLabel(summary.refused_paths?.length ?? 0)
+      : null;
+  }
   const dimension = capacityConflict.capacity?.dimension;
   if (dimension === "sync_max_file_bytes" || capacityConflict.code === "FILE_SIZE_LIMIT_EXCEEDED") {
     const count = Math.max(1, oversizedFileConflicts(summary).length);
@@ -1111,6 +1159,16 @@ export function cloudSyncAttentionLabel(
   if (dimension === "sync_active_bytes") return "Cloud storage full";
   if (dimension === "sync_active_items") return "Cloud file limit reached";
   return "Cloud capacity reached";
+}
+
+/** True when the only thing a run reports is files Cloud refused. */
+export function cloudSyncAttentionIsRefusedOnly(summary: CloudSyncRunSummary): boolean {
+  const refused = summary.refused_paths ?? [];
+  return (
+    refused.length > 0 &&
+    cloudSyncAttentionMessage(summary) ===
+      cloudSyncRefusedPathsMessage(refused.map((row) => row.path))
+  );
 }
 
 export function cloudSyncAttentionMessage(
@@ -1156,6 +1214,8 @@ export function cloudSyncAttentionMessage(
     const count = summary.conflicts.length;
     return `${count} ${count === 1 ? "change" : "changes"} didn't sync. The list below says what happened to each file.`;
   }
+  const refused = summary.refused_paths ?? [];
+  if (refused.length > 0) return cloudSyncRefusedPathsMessage(refused.map((row) => row.path));
 
   return null;
 }
@@ -1174,7 +1234,8 @@ export interface CloudSyncAttentionItem {
     | "kept-local"
     | "settings"
     | "bootstrap"
-    | "rejected";
+    | "rejected"
+    | "refused";
   /** The file on this device the item is about. */
   path: string;
   /** What happened and what to do, in plain words. */
@@ -1288,6 +1349,15 @@ export function cloudSyncAttentionItems(
       detail,
       conflictCopyPath: null,
       technical: known ? null : `${conflict.code} · item ${conflict.item_id}`,
+    });
+  }
+  for (const refused of summary.refused_paths ?? []) {
+    items.push({
+      kind: "refused",
+      path: refused.path,
+      detail: cloudSyncRefusedPathRow(refused.path),
+      conflictCopyPath: null,
+      technical: refused.detail || null,
     });
   }
   return items;

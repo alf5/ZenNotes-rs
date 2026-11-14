@@ -5,6 +5,7 @@ import { isNoteEditingLocked, lockNoteEditing } from './lib/note-lifecycle-lock'
 import { create } from 'zustand'
 import { rewriteWikilinksForRename } from '@shared/wikilink-rename'
 import { useToastStore } from './lib/toast'
+import { parseKanbanColumnColor, type KanbanColumnColor } from './lib/kanban-column-colors'
 import type { EditorView } from '@codemirror/view'
 import {
   editorCursorPosition,
@@ -25,6 +26,12 @@ import {
   normalizeTasksIncludedFolder,
   rewriteTasksFoldersForRename
 } from '@shared/tasks-excluded-folders'
+import {
+  isPathInTemplateFolder,
+  normalizeTemplateFolder,
+  resolveTemplateFolder,
+  rewriteTemplateFolderForRename
+} from '@shared/template-folder'
 import { toggleTasksFolder } from './lib/tasks-folder-lists'
 import { cloudSyncPathKey } from '@zennotes/shared-domain/cloud-sync'
 import { useCloudSyncStatusStore } from './lib/cloud-auto-sync'
@@ -59,6 +66,7 @@ import {
   isObsidianExcalidrawPath
 } from '@shared/excalidraw'
 import { TASKS_TAB_PATH, isTasksTabPath, parseTasksFromBody, toIsoDateLocal } from '@shared/tasks'
+import { completeRecurringTaskAtIndex, type RecurringCompletion } from '@shared/task-recurrence'
 import {
   TYPST_PREAMBLE_FOLDER,
   isTypstPreamblePath,
@@ -86,6 +94,7 @@ import {
   isDatabaseTabPath,
   isDatabaseCsvPath
 } from '@shared/databases'
+import { KANBAN_DATABASE_TITLE, kanbanDatabaseSeed } from '@shared/database-csv'
 import { parseFrontmatter } from '@shared/template-files'
 import { recordTitle, composePageBody, planRecordPages, recordPageToAdopt } from './lib/database-cells'
 import { applyManualMove, manualOrderCompare, parentDirOf } from './lib/manual-order'
@@ -118,6 +127,9 @@ import {
   setTaskInProgressAtIndex,
   setTaskPriorityAtIndex,
   setTaskFieldAtIndex,
+  setTaskTagAtIndex,
+  setFirstTag,
+  withFirstTag,
   setTaskTextAtIndex,
   setTaskWaitingAtIndex,
   toggleTaskAtIndex,
@@ -175,6 +187,7 @@ import {
   findWeeklyNoteForDate,
   findMonthlyNoteForDate,
   noteTitleForDate,
+  dailyNoteDueForPath,
   isPrimaryNotesAtRoot,
   removeFavoritesForFolder,
   removeFolderColors,
@@ -201,6 +214,7 @@ import {
   findTemplate,
   mergeTemplates,
   parseCustomTemplate,
+  parseFolderTemplate,
   slugifyTemplateName
 } from '@shared/template-files'
 import { buildWorkflowIndex } from './lib/workflow-index'
@@ -511,6 +525,40 @@ function resolveTemplate(
   return findTemplate(mergeTemplates(BUILTIN_TEMPLATES, customTemplates), id)
 }
 
+/** Template-folder notes as parsed (#1024), keyed by vault root and path, with
+ *  the listing stamp each was read at. Every note listing re-checks the folder
+ *  and most listings follow an edit somewhere else, so a note whose stamp has
+ *  not moved is not read again. */
+const folderTemplateCache = new Map<string, { stamp: string; template: NoteTemplate }>()
+let folderTemplateLoad = 0
+
+/** A template-folder template with its body as it reads right now; any other
+ *  template as it is. Creating from a template reads the note once more, so a
+ *  new note never starts from a copy the listing has not caught up with. */
+async function withCurrentFolderTemplateBody(template: NoteTemplate): Promise<NoteTemplate> {
+  if (template.source !== 'folder' || !template.sourcePath) return template
+  const state = useStore.getState()
+  const folder = resolveTemplateFolder(state.vaultSettings)
+  if (!folder || !isPathInTemplateFolder(template.sourcePath, folder)) return template
+  try {
+    const raw =
+      state.noteContents[template.sourcePath]?.body ??
+      (await window.zen.readNote(template.sourcePath)).body
+    return parseFolderTemplate(raw, template.sourcePath, folder)
+  } catch {
+    return template
+  }
+}
+
+/** The tasks a host handed over, less those from the template folder (#1024).
+ *  A template's `- [ ]` lines are placeholders, and a server or phone that
+ *  does not know the setting yet still sends them. */
+function withoutTemplateFolderTasks(tasks: VaultTask[], settings: VaultSettings): VaultTask[] {
+  const folder = resolveTemplateFolder(settings)
+  if (!folder) return tasks
+  return tasks.filter((task) => !isPathInTemplateFolder(task.sourcePath, folder))
+}
+
 function isDeletedAssetRecord(value: unknown): value is DeletedAsset {
   if (!value || typeof value !== 'object') return false
   const candidate = value as Record<string, unknown>
@@ -817,6 +865,34 @@ interface Prefs {
    *  they were dragged into (due date until then), `due` always sorts them by
    *  due date and leaves that arrangement untouched for later. (#889) */
   kanbanCardSort: KanbanCardSort
+  /** Leave tasks with no text (a template's bare `- [ ]`) off the Tasks
+   *  list, calendar and Kanban board, the Calendar and Timeline panels and
+   *  Home. On by default; portable as `hide_empty_tasks` under [view]. (#1026) */
+  hideEmptyTasks: boolean
+  /** Notify for tasks with `@remind:` (#1036). On by default: only a task
+   *  someone gave a reminder ever notifies. Portable as `task_reminders`. */
+  taskReminders: boolean
+  /** `HH:MM`: when a reminder that names a day but no time fires
+   *  (`@remind:1d`). Portable as `task_reminder_time`. */
+  taskReminderTime: string
+  /** Kanban WIP limits: the most cards a column should hold, keyed by
+   *  `${groupBy}:${columnId}` like the column titles. Portable as the
+   *  `[kanban_wip_limits]` table. (#1025) */
+  kanbanWipLimits: Record<string, number>
+  /** Kanban column colours, palette names keyed by `${groupBy}:${columnId}`
+   *  like the column titles. Portable as the `[kanban_column_colors]` table.
+   *  (#1037) */
+  kanbanColumnColors: Record<string, KanbanColumnColor>
+  /** A second field that splits the Kanban board into horizontal lanes, or
+   *  'none'. Portable as `kanban_lanes` under [view], like the card order: a
+   *  global display choice, not a per-vault override, which the Go server's
+   *  vault.json mirror would have to learn. (#1027) */
+  kanbanLanes: KanbanLaneBy
+  /** Collapsed Kanban lanes, keyed `${groupBy}|${laneBy}` to lane ids.
+   *  Machine-local like the column and card arrangements: folding a lane is
+   *  where you are looking today, not a setting worth a config.toml write on
+   *  every `za`. (#1027) */
+  kanbanCollapsedLanes: Record<string, string[]>
   /** Tasks list groups in their notes' line order or by priority. (#989) */
   tasksListOrder: TasksListOrder
   /** How far ahead the Timeline panel reaches. (#1007) */
@@ -853,6 +929,10 @@ interface Prefs {
 export type TasksViewMode = 'list' | 'calendar' | 'kanban'
 export type KanbanGroupBy = 'status' | 'priority' | 'folder' | `field:${string}`
 export type KanbanCardSort = 'manual' | 'due'
+/** What splits the Kanban board into horizontal lanes (#1027): a second field
+ *  beside the columns' own, or 'none'. Status is not a lane field: its
+ *  buckets come from dates and states, which is what columns are for. */
+export type KanbanLaneBy = 'none' | 'priority' | 'folder' | 'tag' | `field:${string}`
 /** `note` keeps each Tasks list group in its notes' line order (what J/K
  *  rearrange); `priority` puts high before medium before low. (#989) */
 export type TasksListOrder = 'note' | 'priority'
@@ -867,6 +947,9 @@ export type TaskMutation =
   | { kind: 'set-priority'; priority: TaskLinePriority | null }
   | { kind: 'set-due'; due: string | null }
   | { kind: 'set-field'; key: string; value: string | null }
+  /** Make `tag` the line's first `#tag`, or strip them all with null: the
+   *  Kanban tag lane a card sits in (#1027). */
+  | { kind: 'set-tag'; tag: string | null }
   | { kind: 'set-text'; text: string }
 
 type AssetUndoEntry = { kind: 'delete-asset'; deleted: DeletedAsset; createdAt: number }
@@ -899,6 +982,60 @@ export function normalizeKanbanGroupBy(raw: unknown): KanbanGroupBy {
   if (raw === 'custom') return 'field:status'
   return isKanbanGroupBy(raw) ? raw : 'status'
 }
+
+export function isKanbanLaneBy(value: unknown): value is KanbanLaneBy {
+  return (
+    value === 'none' ||
+    value === 'priority' ||
+    value === 'folder' ||
+    value === 'tag' ||
+    (typeof value === 'string' && FIELD_GROUP_BY_RE.test(value))
+  )
+}
+
+/** A persisted lane field, or 'none' for anything a board cannot split by. */
+export function normalizeKanbanLanes(raw: unknown): KanbanLaneBy {
+  return isKanbanLaneBy(raw) ? raw : 'none'
+}
+
+const MAX_KANBAN_COLLAPSED_LANE_BOARDS = 64
+const MAX_KANBAN_COLLAPSED_LANES = 128
+const MAX_KANBAN_LANE_ID_LENGTH = 256
+
+/** The collapsed-lanes key of one board split by one lane field. */
+export function kanbanCollapsedLanesKey(group: KanbanGroupBy, laneBy: KanbanLaneBy): string {
+  return `${group}|${laneBy}`
+}
+
+// Collapsed lanes (#1027): `{ "<groupBy>|<laneBy>": ["<laneId>", ...] }`. Lane
+// ids are tag names, field values and folder paths, so only their length is
+// checked; a key whose two halves no board can build is dropped, as is a lane
+// field equal to its board's own column field.
+export function normalizeKanbanCollapsedLanes(raw: unknown): Record<string, string[]> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
+  const out: Record<string, string[]> = {}
+  let boards = 0
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!Array.isArray(value)) continue
+    const bar = key.indexOf('|')
+    if (bar < 0) continue
+    const group = key.slice(0, bar)
+    const laneBy = key.slice(bar + 1)
+    if (!isKanbanGroupBy(group) || !isKanbanLaneBy(laneBy)) continue
+    if (laneBy === 'none' || laneBy === group) continue
+    const ids: string[] = []
+    for (const entry of value) {
+      if (typeof entry !== 'string' || !entry || entry.length > MAX_KANBAN_LANE_ID_LENGTH) continue
+      if (!ids.includes(entry)) ids.push(entry)
+      if (ids.length >= MAX_KANBAN_COLLAPSED_LANES) break
+    }
+    if (ids.length === 0) continue
+    out[key] = ids
+    boards += 1
+    if (boards >= MAX_KANBAN_COLLAPSED_LANE_BOARDS) break
+  }
+  return out
+}
 const MAX_KANBAN_STATUSES = 24
 const MAX_KANBAN_STATUS_ID_LENGTH = 32
 const MAX_KANBAN_COLUMN_TITLE_LENGTH = 48
@@ -921,20 +1058,80 @@ const FIELD_COLUMN_TITLE_KEY_RE = /^field:[a-z][a-z0-9_-]*:(?:__none__|[\p{L}\d]
 // Folder columns are keyed by the note directory (#730): any printable path.
 const FOLDER_COLUMN_TITLE_KEY_RE = /^folder:(?:__none__|[^\u0000-\u001f]{1,256})$/u
 
+/** A `<groupBy>:<columnId>` key some board can build: what titles, card
+ *  orders and WIP limits are stored under. */
+function isKanbanColumnKey(key: string): boolean {
+  const isStatic =
+    STATIC_COLUMN_TITLE_KEY_RE.test(key) &&
+    STATIC_KANBAN_GROUP_BYS.some((group) => key.startsWith(`${group}:`))
+  return isStatic || FIELD_COLUMN_TITLE_KEY_RE.test(key) || FOLDER_COLUMN_TITLE_KEY_RE.test(key)
+}
+
 function normalizeKanbanColumnTitles(raw: unknown): Record<string, string> {
   if (!raw || typeof raw !== 'object') return {}
 
   const out: Record<string, string> = {}
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
     if (typeof value !== 'string') continue
-    const isStatic =
-      STATIC_COLUMN_TITLE_KEY_RE.test(key) &&
-      STATIC_KANBAN_GROUP_BYS.some((group) => key.startsWith(`${group}:`))
-    const isField = FIELD_COLUMN_TITLE_KEY_RE.test(key)
-    const isFolder = FOLDER_COLUMN_TITLE_KEY_RE.test(key)
-    if (!isStatic && !isField && !isFolder) continue
+    if (!isKanbanColumnKey(key)) continue
     const normalized = normalizeKanbanColumnTitle(value)
     if (normalized) out[key] = normalized
+  }
+  return out
+}
+
+/** The largest WIP limit a column takes; TasksKanban's parseWipLimitInput
+ *  holds typed limits to the same bound. */
+export const MAX_KANBAN_WIP_LIMIT = 999
+// The most columns that keep a WIP limit, or a colour, before the rest drop.
+const MAX_KANBAN_SETTING_COLUMNS = 256
+
+function normalizeKanbanWipLimit(raw: unknown): number | null {
+  // A hand-edited config.toml can quote the number; anything that is not a
+  // whole number from 1 to the cap means no limit, never a guessed one.
+  const value =
+    typeof raw === 'number' ? raw : typeof raw === 'string' && /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : NaN
+  return Number.isInteger(value) && value >= 1 && value <= MAX_KANBAN_WIP_LIMIT ? value : null
+}
+
+/** A reminder time as Settings and config.toml keep it: `HH:MM`, 24-hour,
+ *  zero-padded. Anything else falls back to 09:00. */
+export function normalizeReminderTime(raw: unknown): string {
+  const m = typeof raw === 'string' ? /^(\d{1,2}):(\d{2})$/.exec(raw.trim()) : null
+  if (!m || Number(m[1]) > 23 || Number(m[2]) > 59) return '09:00'
+  return `${m[1].padStart(2, '0')}:${m[2]}`
+}
+
+// WIP limits per column (#1025): `{ "<groupBy>:<columnId>": <limit> }`, the
+// column-title key grammar with a whole-number value.
+export function normalizeKanbanWipLimits(raw: unknown): Record<string, number> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
+  const out: Record<string, number> = {}
+  let columns = 0
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!isKanbanColumnKey(key)) continue
+    const limit = normalizeKanbanWipLimit(value)
+    if (limit === null) continue
+    out[key] = limit
+    columns += 1
+    if (columns >= MAX_KANBAN_SETTING_COLUMNS) break
+  }
+  return out
+}
+
+// Column colours (#1037): `{ "<groupBy>:<columnId>": "<palette name>" }`. A
+// hand-edited name the palette does not have is dropped, never guessed at.
+export function normalizeKanbanColumnColors(raw: unknown): Record<string, KanbanColumnColor> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
+  const out: Record<string, KanbanColumnColor> = {}
+  let columns = 0
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!isKanbanColumnKey(key)) continue
+    const color = parseKanbanColumnColor(value)
+    if (color === null) continue
+    out[key] = color
+    columns += 1
+    if (columns >= MAX_KANBAN_SETTING_COLUMNS) break
   }
   return out
 }
@@ -982,12 +1179,7 @@ export function normalizeKanbanCardOrder(raw: unknown): Record<string, string[]>
   let columns = 0
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
     if (!Array.isArray(value)) continue
-    const isStatic =
-      STATIC_COLUMN_TITLE_KEY_RE.test(key) &&
-      STATIC_KANBAN_GROUP_BYS.some((group) => key.startsWith(`${group}:`))
-    const isField = FIELD_COLUMN_TITLE_KEY_RE.test(key)
-    const isFolder = FOLDER_COLUMN_TITLE_KEY_RE.test(key)
-    if (!isStatic && !isField && !isFolder) continue
+    if (!isKanbanColumnKey(key)) continue
     const cards: string[] = []
     const seen = new Set<string>()
     for (const entry of value) {
@@ -1266,6 +1458,13 @@ export const DEFAULT_PREFS: Prefs = {
   showArchivedTasks: false,
   kanbanGroupBy: 'status',
   kanbanCardSort: 'manual',
+  hideEmptyTasks: true,
+  taskReminders: true,
+  taskReminderTime: '09:00',
+  kanbanWipLimits: {},
+  kanbanColumnColors: {},
+  kanbanLanes: 'none',
+  kanbanCollapsedLanes: {},
   tasksListOrder: 'note',
   timelineRange: DEFAULT_TIMELINE_RANGE,
   gallerySort: 'updated',
@@ -1651,6 +1850,15 @@ function normalizePrefs(p: Partial<Prefs>): Prefs {
         : DEFAULT_PREFS.showArchivedTasks,
     kanbanGroupBy: normalizeKanbanGroupBy(p.kanbanGroupBy),
     kanbanCardSort: p.kanbanCardSort === 'due' ? 'due' : 'manual',
+    hideEmptyTasks:
+      typeof p.hideEmptyTasks === 'boolean' ? p.hideEmptyTasks : DEFAULT_PREFS.hideEmptyTasks,
+    taskReminders:
+      typeof p.taskReminders === 'boolean' ? p.taskReminders : DEFAULT_PREFS.taskReminders,
+    taskReminderTime: normalizeReminderTime(p.taskReminderTime),
+    kanbanWipLimits: normalizeKanbanWipLimits(p.kanbanWipLimits),
+    kanbanColumnColors: normalizeKanbanColumnColors(p.kanbanColumnColors),
+    kanbanLanes: normalizeKanbanLanes(p.kanbanLanes),
+    kanbanCollapsedLanes: normalizeKanbanCollapsedLanes(p.kanbanCollapsedLanes),
     tasksListOrder: p.tasksListOrder === 'priority' ? 'priority' : 'note',
     timelineRange: normalizeTimelineRange(p.timelineRange),
     gallerySort: normalizeGallerySort(p.gallerySort),
@@ -2214,6 +2422,121 @@ function withFileTaskStatus(task: VaultTask, status: FileTaskStatus): VaultTask 
   }
 }
 
+/** The check-off edit for `task` when it is an open recurring task (#1036),
+ *  computed on `body`; null for any other task, which toggles as usual. */
+function recurringCompletionFor(
+  task: VaultTask,
+  body: string,
+  skip = false
+): RecurringCompletion | null {
+  if (task.kind === 'file' || !/@repeat:/i.test(task.rawText)) return null
+  const state = useStore.getState()
+  return completeRecurringTaskAtIndex(body, task.taskIndex, {
+    today: toIsoDateLocal(new Date()),
+    fallbackDue: task.dueInferred
+      ? task.due
+      : dailyNoteDueForPath(state.notes, state.vaultSettings, task.sourcePath),
+    skip
+  })
+}
+
+/** Write a task's note: through the open buffer when there is one (it merges
+ *  with unsaved edits and autosaves), else straight to disk. */
+async function writeTaskNoteBody(path: string, nextBody: string): Promise<boolean> {
+  const state = useStore.getState()
+  if (state.noteContents[path]) {
+    state.updateNoteBody(path, nextBody)
+    return true
+  }
+  try {
+    await window.zen.writeNote(path, nextBody)
+    return true
+  } catch (err) {
+    console.error('writeNote (recurring task) failed', err)
+    return false
+  }
+}
+
+/** Re-read one note's inline tasks from `body`. A recurring check-off inserts
+ *  lines, so every index after it moves; patching one row would be wrong. */
+function replaceInlineTasksForNote(task: VaultTask, body: string): void {
+  const fresh = parseTasksFromBody(body, {
+    path: task.sourcePath,
+    title: task.noteTitle,
+    folder: task.noteFolder
+  })
+  useStore.setState((s) => ({
+    vaultTasks: [
+      ...s.vaultTasks.filter((t) => t.sourcePath !== task.sourcePath || t.kind === 'file'),
+      ...fresh
+    ]
+  }))
+}
+
+function shortDayLabel(iso: string): string {
+  const [y, m, d] = iso.split('-').map(Number)
+  return new Date(y, m - 1, d).toLocaleDateString(undefined, {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric'
+  })
+}
+
+/** "Next: Sun, Nov 8", with an Undo that restores the note as it was, as long
+ *  as nothing else has changed it since. */
+function announceRecurrence(
+  task: VaultTask,
+  done: RecurringCompletion,
+  before: string,
+  skip: boolean
+): void {
+  const label = `Next: ${shortDayLabel(done.nextDue)}`
+  useToastStore.getState().addToast(
+    skip ? `Skipped. ${label}` : label,
+    'info',
+    { label: 'Undo', onClick: () => void undoRecurrence(task, done.body, before) },
+    6000
+  )
+}
+
+const undoRecurrence = trackTaskWrite(async (task: VaultTask, written: string, before: string) => {
+  const path = task.sourcePath
+  let current: string
+  try {
+    current = useStore.getState().noteContents[path]?.body ?? (await window.zen.readNote(path)).body
+  } catch (err) {
+    console.error('readNote (undo recurring task) failed', err)
+    return
+  }
+  if (current !== written) {
+    useToastStore.getState().addToast('The note changed since, so nothing was undone.', 'info')
+    return
+  }
+  if (await writeTaskNoteBody(path, before)) replaceInlineTasksForNote(task, before)
+})
+
+/** Check off (or with `skip`, skip) a recurring task in its note: the next
+ *  occurrence above it, the task itself a record. False when `task` is not an
+ *  open recurring task, so the caller can toggle it as usual. */
+async function completeRecurringTaskInNote(task: VaultTask, skip: boolean): Promise<boolean> {
+  if (task.kind === 'file' || task.checked || !/@repeat:/i.test(task.rawText)) return false
+  const path = task.sourcePath
+  let body: string
+  try {
+    body = useStore.getState().noteContents[path]?.body ?? (await window.zen.readNote(path)).body
+  } catch (err) {
+    console.error('readNote (recurring task) failed', err)
+    return false
+  }
+  const done = recurringCompletionFor(task, body, skip)
+  if (!done) return false
+  if (await writeTaskNoteBody(path, done.body)) {
+    replaceInlineTasksForNote(task, done.body)
+    announceRecurrence(task, done, body, skip)
+  }
+  return true
+}
+
 function applyTaskMutationsToTask(task: VaultTask, mutations: TaskMutation[]): VaultTask {
   let next = task
   for (const m of mutations) {
@@ -2261,6 +2584,11 @@ function applyTaskMutationsToTask(task: VaultTask, mutations: TaskMutation[]): V
         if (m.key === 'status') next = { ...next, status: value }
         break
       }
+      case 'set-tag': {
+        const tags = withFirstTag(next.tags ?? [], m.tag)
+        next = { ...next, tags, content: setFirstTag(next.content, m.tag).trim() }
+        break
+      }
       case 'set-text': {
         const content = m.text.trim()
         if (next.content !== content) next = { ...next, content }
@@ -2299,6 +2627,10 @@ function fileTaskMutationUpdates(
         break
       case 'set-field':
         updates[m.key] = m.value
+        break
+      // A task note's tags are a frontmatter list this writer does not edit;
+      // the board refuses a tag-lane drop for one (laneDropMutationsFor).
+      case 'set-tag':
         break
       case 'set-text':
         updates.title = m.text.trim()
@@ -2625,6 +2957,13 @@ function collectPrefs(s: {
   showArchivedTasks: boolean
   kanbanGroupBy: KanbanGroupBy
   kanbanCardSort: KanbanCardSort
+  hideEmptyTasks: boolean
+  taskReminders: boolean
+  taskReminderTime: string
+  kanbanWipLimits: Record<string, number>
+  kanbanColumnColors: Record<string, KanbanColumnColor>
+  kanbanLanes: KanbanLaneBy
+  kanbanCollapsedLanes: Record<string, string[]>
   tasksListOrder: TasksListOrder
   timelineRange: TimelineRange
   gallerySort: GallerySort
@@ -2746,6 +3085,13 @@ function collectPrefs(s: {
     showArchivedTasks: s.showArchivedTasks,
     kanbanGroupBy: s.kanbanGroupBy,
     kanbanCardSort: s.kanbanCardSort,
+    hideEmptyTasks: s.hideEmptyTasks,
+    taskReminders: s.taskReminders,
+    taskReminderTime: s.taskReminderTime,
+    kanbanWipLimits: s.kanbanWipLimits,
+    kanbanColumnColors: s.kanbanColumnColors,
+    kanbanLanes: s.kanbanLanes,
+    kanbanCollapsedLanes: s.kanbanCollapsedLanes,
     tasksListOrder: s.tasksListOrder,
     timelineRange: s.timelineRange,
     gallerySort: s.gallerySort,
@@ -3052,6 +3398,37 @@ function tasksSurfaceVisible(state: { paneLayout: PaneLayout }): boolean {
   )
 }
 
+/** True when task reminders are on and the host shows them. The reminder
+ *  schedule is computed from `vaultTasks`, so a task another program writes
+ *  has to reach the index whatever is on screen, or its reminder waits for
+ *  someone to open Tasks (#1065). The web client has no reminder host and
+ *  keeps the surface-only rule. */
+export function remindersNeedTaskIndex(state: {
+  vault: VaultInfo | null
+  taskReminders: boolean
+}): boolean {
+  return (
+    state.vault != null &&
+    state.taskReminders &&
+    typeof window !== 'undefined' &&
+    typeof window.zen?.setTaskReminders === 'function'
+  )
+}
+
+/** True when something reads the shared task cache and a full reload of it is
+ *  worth doing: a task surface on screen, or reminders over an index that has
+ *  been loaded (the reminder reporter loads it the first time). */
+function taskIndexWanted(state: {
+  paneLayout: PaneLayout
+  vault: VaultInfo | null
+  taskReminders: boolean
+  vaultTasks: VaultTask[]
+}): boolean {
+  return (
+    tasksSurfaceVisible(state) || (remindersNeedTaskIndex(state) && state.vaultTasks.length > 0)
+  )
+}
+
 /** True when the active pane's active tab is the vault-wide Tags view. */
 export function isTagsViewActive(state: {
   paneLayout: PaneLayout
@@ -3168,6 +3545,10 @@ interface Store {
   templatePaletteOpen: boolean
   /** "Embed existing drawing" picker visibility. */
   embedDrawingPaletteOpen: boolean
+  /** The Import window and what it's showing. A run lives in main and outlasts it. */
+  importDialog: 'choose' | 'notion' | 'obsidian' | 'logseq' | null
+  /** Where the last import this session landed, for onboarding to say so. */
+  lastImportFolder: string | null
   /** The note the cover picker is open for, or null while it is closed. */
   noteCoverPickerPath: string | null
   /** The tab and search the picker opens on (`:cover unsplash fog`, Space l u);
@@ -3185,8 +3566,14 @@ interface Store {
   /** When set, the template picker creates in this folder (set by right-click);
    *  null means prompt the user for a destination. */
   templatePaletteTarget: { folder: NoteFolder; subpath: string } | null
-  /** Custom templates loaded from `.zennotes/templates/` (built-ins are constants). */
+  /** Every template the user has (built-ins are constants): the files in
+   *  `.zennotes/templates/` first, then the notes in the vault's template
+   *  folder (#1024). What every picker merges with the built-ins. */
   customTemplates: NoteTemplate[]
+  /** The `.zennotes/templates/` half of `customTemplates`. */
+  storedTemplates: NoteTemplate[]
+  /** The template-folder half of `customTemplates` (#1024). */
+  folderTemplates: NoteTemplate[]
   /**
    * The vault's workflows, summarized for surfaces outside the workflows view.
    * The command palette builds its Run entries from this synchronously, which
@@ -3401,9 +3788,9 @@ interface Store {
   /** Show the ISO week-number column in the calendar. Persisted. */
   calendarShowWeekNumbers: boolean
 
-  /** Vault-wide Tasks view state. Populated lazily when the view is opened
-   *  and kept incrementally fresh via the chokidar watcher while the view
-   *  is visible. */
+  /** Vault-wide Tasks view state. Populated lazily when a task view opens, or
+   *  by the reminder reporter when reminders are on, and kept incrementally
+   *  fresh via the watcher while either needs it. */
   vaultTasks: VaultTask[]
 
   /** User themes parsed from ~/.config/zennotes/themes. Loaded + watched by
@@ -3432,6 +3819,21 @@ interface Store {
   kanbanGroupBy: KanbanGroupBy
   /** Cards in each Kanban column by hand-placed order or by due date. (#889) */
   kanbanCardSort: KanbanCardSort
+  /** Tasks with no text stay off the Tasks views, the Calendar and Timeline
+   *  panels and Home. (#1026) */
+  hideEmptyTasks: boolean
+  /** Task reminders on (#1036). */
+  taskReminders: boolean
+  /** `HH:MM` for reminders that name a day but no time (#1036). */
+  taskReminderTime: string
+  /** Per-column Kanban WIP limits, keyed `${groupBy}:${columnId}`. (#1025) */
+  kanbanWipLimits: Record<string, number>
+  /** Per-column Kanban colours, keyed `${groupBy}:${columnId}`. (#1037) */
+  kanbanColumnColors: Record<string, KanbanColumnColor>
+  /** The field that splits the board into lanes, or 'none'. (#1027) */
+  kanbanLanes: KanbanLaneBy
+  /** Collapsed lanes per board and lane field. (#1027) */
+  kanbanCollapsedLanes: Record<string, string[]>
   /** Tasks list groups in note order or by priority. (#989) */
   tasksListOrder: TasksListOrder
   /** How far ahead the Timeline panel reaches: two weeks, a month, or every
@@ -3471,6 +3873,10 @@ interface Store {
   /** In-flight load flags keyed by `.csv` path. */
   databasesDeletingRows: Record<string, boolean>
   databasesLoading: Record<string, boolean>
+  /** Why the last load of a database failed, keyed by `.csv` path, until a
+   *  load starts again: the open view shows it with Try again rather than
+   *  retrying (and toasting) on every render. */
+  databasesLoadError: Record<string, string>
 
   /** Tags currently selected in the Tags view. The view shows every non-
    *  trash note carrying *all* (or, in `any` mode, any) of these, depending on
@@ -3638,6 +4044,11 @@ interface Store {
   ) => Promise<DatabaseDoc | undefined>
   /** Create a database in the configured default databases location and open it. (#362) */
   newDatabase: () => Promise<void>
+  /** Create a Kanban (a database that opens on its Board, with To do / Doing
+   *  / Done columns) under `folder`/`subpath` and open it. (#1038) */
+  createKanban: (folder: NoteFolder, subpath?: string, isCurrent?: () => boolean) => Promise<void>
+  /** Create a Kanban where new databases go and open it. (#1038) */
+  newKanban: () => Promise<void>
   /** Rename a database (its `.base` folder); rehomes the open grid tab. */
   renameDatabase: (csvPath: string, newTitle: string, isCurrent?: () => boolean) => Promise<void>
   /** Optimistically replace a database's rows and debounce-persist the CSV. */
@@ -3646,7 +4057,10 @@ interface Store {
    *  row write only touches the CSV, so a stale UUID would otherwise linger in
    *  schema.json). When a deleted row has a linked page note, prompt whether to
    *  trash the note too or keep it as a standalone note. (#391) */
-  deleteDatabaseRows: (csvPath: string, rowIds: string[]) => Promise<void>
+  /** `confirm` asks before any row goes, plain ones included; a row has no
+   *  undo, so a key press passes it. Rows with a linked page are asked about
+   *  their notes either way. */
+  deleteDatabaseRows: (csvPath: string, rowIds: string[], options?: { confirm?: boolean }) => Promise<void>
   /** Optimistically replace a database's schema/views and debounce-persist sidecar + CSV. */
   updateDatabaseSchema: (csvPath: string, next: DatabaseDoc) => void
   /** Re-read a database from disk after an external change (skips our own write echoes). */
@@ -3680,6 +4094,9 @@ interface Store {
   toggleTaskFromList: (task: VaultTask) => Promise<void>
   /** Toggle a task's cancelled state (`[-]` inline, `status: cancelled` for a
    *  file-task). Cancelled = intentionally abandoned, distinct from done. (#450) */
+  /** Skip one occurrence of a recurring task (#1036): the record is written
+   *  cancelled and the next occurrence goes above it. */
+  skipTaskOccurrence: (task: VaultTask) => Promise<void>
   cancelTaskFromList: (task: VaultTask) => Promise<void>
   /** Toggle a task's in-progress state (`[/]` inline, `status: in-progress` for
    *  a file-task). Still open work: it keeps its place in Today rather than
@@ -3716,6 +4133,21 @@ interface Store {
   confirmArchiveNotes: (paths: string[]) => Promise<boolean>
   setKanbanGroupBy: (group: KanbanGroupBy) => void
   setKanbanCardSort: (sort: KanbanCardSort) => void
+  setHideEmptyTasks: (hide: boolean) => void
+  setTaskReminders: (on: boolean) => void
+  setTaskReminderTime: (time: string) => void
+  /** Set one column's WIP limit, or clear it with null. (#1025) */
+  setKanbanWipLimit: (group: KanbanGroupBy, columnId: string, limit: number | null) => void
+  /** Set one column's colour, or clear it with null. (#1037) */
+  setKanbanColumnColor: (
+    group: KanbanGroupBy,
+    columnId: string,
+    color: KanbanColumnColor | null
+  ) => void
+  /** Split the board into lanes by a second field, or 'none'. (#1027) */
+  setKanbanLanes: (laneBy: KanbanLaneBy) => void
+  /** The collapsed lanes of one board split by one field; empty clears. (#1027) */
+  setKanbanCollapsedLanes: (group: KanbanGroupBy, laneBy: KanbanLaneBy, laneIds: string[]) => void
   setTasksListOrder: (order: TasksListOrder) => void
   setTimelineRange: (range: TimelineRange) => void
   setTimelineFilter: (query: string) => void
@@ -4018,6 +4450,8 @@ interface Store {
   openThisMonthMonthlyNote: (options?: PeriodicNoteOpenOptions) => Promise<void>
   setTemplatePaletteOpen: (open: boolean) => void
   setEmbedDrawingPaletteOpen: (open: boolean) => void
+  setImportDialog: (dialog: 'choose' | 'notion' | 'obsidian' | 'logseq' | null) => void
+  setLastImportFolder: (folder: string | null) => void
   setNoteCoverPickerPath: (
     path: string | null,
     start?: { tab: 'covers' | 'unsplash'; query: string } | null
@@ -4041,6 +4475,16 @@ interface Store {
   insertTemplateIntoActiveNote: (template: NoteTemplate) => void
   /** Reload custom templates from disk (called on vault open and after CRUD). */
   loadCustomTemplates: () => Promise<void>
+  /** Re-read the notes in the vault's template folder (#1024) as templates.
+   *  Runs after every note listing; a note whose listing stamp has not moved
+   *  is not read again. */
+  loadFolderTemplates: () => Promise<void>
+  /**
+   * Point the vault at a template folder (#1024), a vault-relative path such
+   * as `Templates`, or clear it with null. Saved to vault.json; the picker,
+   * Tasks and search follow at once.
+   */
+  setTemplateFolder: (folder: string | null) => Promise<void>
   /** Reload the workflow index (called with the vault indexes and after workflow CRUD). */
   loadWorkflowIndex: () => Promise<void>
   saveCustomTemplate: (input: {
@@ -4052,10 +4496,11 @@ interface Store {
   /** Create + open a note from a template, substituting variables and placing
    *  the caret at `{{cursor}}`. Falls back to a title prompt when the template
    *  has no titleTemplate and no explicit title is supplied. */
+  /** Resolves to the note it made, or null when cancelled or it failed. */
   createFromTemplate: (
     template: NoteTemplate,
     opts?: { folder?: NoteFolder; subpath?: string; title?: string; date?: Date }
-  ) => Promise<void>
+  ) => Promise<NoteMeta | null>
   saveActiveNoteAsTemplate: () => Promise<void>
   saveActiveNoteAs: (newName: string) => Promise<void>
   setWordWrap: (on: boolean) => void
@@ -4089,6 +4534,8 @@ interface Store {
   rolloverUnfinishedTasksIntoToday: (opts?: {
     force?: boolean
     open?: boolean
+    /** Today's daily note when the caller has just opened or made it. */
+    today?: NoteMeta
   }) => Promise<number>
   /** Mark the first-run onboarding as complete (or skipped). Persists. */
   completeOnboarding: () => void
@@ -4874,6 +5321,7 @@ function rewriteFolderWorkspace(
         : {})
     })),
     databasesLoading: remap(s.databasesLoading, () => false),
+    databasesLoadError: {},
     noteBackstack: history(s.noteBackstack),
     noteForwardstack: history(s.noteForwardstack),
     closedTabStack: s.closedTabStack.flatMap((entry) => {
@@ -5428,6 +5876,12 @@ export const useStore = create<Store>((set, get) => {
           // the next toggle would write the old paths back.
           tasks: rewriteTasksFoldersForRename(
             s.vaultSettings.tasks,
+            oldPrefix.replace(/\/$/, ''),
+            newPrefix.replace(/\/$/, '')
+          ),
+          // So did the template folder (#1024), an on-disk path as well.
+          templates: rewriteTemplateFolderForRename(
+            s.vaultSettings.templates,
             oldPrefix.replace(/\/$/, ''),
             newPrefix.replace(/\/$/, '')
           )
@@ -6173,6 +6627,8 @@ export const useStore = create<Store>((set, get) => {
   outlinePaletteOpen: false,
   templatePaletteOpen: false,
   embedDrawingPaletteOpen: false,
+  importDialog: null,
+  lastImportFolder: null,
   noteCoverPickerPath: null,
   noteCoverPickerStart: null,
   noteCoverReposition: null,
@@ -6180,6 +6636,8 @@ export const useStore = create<Store>((set, get) => {
   templatePaletteMode: 'create',
   templatePaletteTarget: null,
   customTemplates: [],
+  storedTemplates: [],
+  folderTemplates: [],
   workflowIndex: [],
   query: '',
   initialized: false,
@@ -6300,6 +6758,13 @@ export const useStore = create<Store>((set, get) => {
   showArchivedTasks: loadPrefs().showArchivedTasks,
   kanbanGroupBy: loadPrefs().kanbanGroupBy,
   kanbanCardSort: loadPrefs().kanbanCardSort,
+  hideEmptyTasks: loadPrefs().hideEmptyTasks,
+  taskReminders: loadPrefs().taskReminders,
+  taskReminderTime: loadPrefs().taskReminderTime,
+  kanbanWipLimits: loadPrefs().kanbanWipLimits,
+  kanbanColumnColors: loadPrefs().kanbanColumnColors,
+  kanbanLanes: loadPrefs().kanbanLanes,
+  kanbanCollapsedLanes: loadPrefs().kanbanCollapsedLanes,
   tasksListOrder: loadPrefs().tasksListOrder,
   timelineRange: loadPrefs().timelineRange,
   timelineFilter: '',
@@ -6327,6 +6792,7 @@ export const useStore = create<Store>((set, get) => {
   databases: {},
   databasesDeletingRows: {},
   databasesLoading: {},
+  databasesLoadError: {},
   selectedTags: [],
   tagMatchMode: 'all',
   tagViewFilterSeed: null,
@@ -6662,7 +7128,10 @@ export const useStore = create<Store>((set, get) => {
     const version = databaseLoadVersions.get(csvPath) ?? 0
     const generation = workspaceGeneration()
     const isCurrent = () => generation === workspaceGeneration() && contextIsCurrent() && (databaseLoadVersions.get(csvPath) ?? 0) === version
-    set((s) => ({ databasesLoading: { ...s.databasesLoading, [csvPath]: true } }))
+    set((s) => {
+      const { [csvPath]: _cleared, ...databasesLoadError } = s.databasesLoadError
+      return { databasesLoading: { ...s.databasesLoading, [csvPath]: true }, databasesLoadError }
+    })
     try {
       const doc = await window.zen.openDatabase(csvPath)
       if (!isCurrent()) return
@@ -6680,10 +7149,10 @@ export const useStore = create<Store>((set, get) => {
       // the console. Whatever the cause (server unreachable, bad schema),
       // say so where the user is looking.
       console.error('loadDatabase failed', err)
+      const message = humanIpcError(err, 'Could not open database')
+      set((s) => ({ databasesLoadError: { ...s.databasesLoadError, [csvPath]: message } }))
       const { useToastStore } = await import('./lib/toast')
-      useToastStore
-        .getState()
-        .addToast(humanIpcError(err, 'Could not open database'), 'error')
+      useToastStore.getState().addToast(message, 'error')
     } finally {
       set((s) =>
         csvPath in s.databasesLoading
@@ -6764,6 +7233,21 @@ export const useStore = create<Store>((set, get) => {
       settings
     )
     await get().createDatabase(folder, subpath)
+  },
+  createKanban: async (folder, subpath = '', hostIsCurrent) => {
+    await get().createDatabase(folder, subpath, KANBAN_DATABASE_TITLE, hostIsCurrent, {
+      seed: kanbanDatabaseSeed()
+    })
+  },
+  newKanban: async () => {
+    const s = get()
+    const settings = normalizeVaultSettings(s.vaultSettings)
+    const { folder, subpath } = resolveCreateLocation(
+      settings.databasesLocation,
+      s.activeNote,
+      settings
+    )
+    await get().createKanban(folder, subpath)
   },
   newTaskFile: trackNoteWrite(null, async (opts) => {
     const title = (
@@ -6863,7 +7347,7 @@ export const useStore = create<Store>((set, get) => {
     scheduleDatabaseWrite(csvPath, 'rows', () => get().databases[csvPath])
     remirrorOpenRecordPages(csvPath, get)
   },
-  deleteDatabaseRows: async (csvPath, rowIds) => {
+  deleteDatabaseRows: async (csvPath, rowIds, options) => {
     if (workspaceWritesBlocked()) return
     const doc = get().databases[csvPath]
     const vault = get().vault
@@ -6875,6 +7359,21 @@ export const useStore = create<Store>((set, get) => {
     const mappings = new Map(ids.map((id) => [id, doc.pages?.[id]]))
     const attached = [...mappings.values()].filter((path): path is string => !!path)
     let trashNotes = false
+    if (options?.confirm) {
+      const one = ids.length === 1
+      pendingRowConfirmation = true
+      try {
+        const confirmed = await confirmApp({
+          title: one ? 'Delete this row?' : `Delete ${ids.length} rows?`,
+          description: attached.length > 0
+            ? 'This cannot be undone. You choose what happens to the linked page notes next.'
+            : 'This cannot be undone.',
+          confirmLabel: one ? 'Delete row' : `Delete ${ids.length} rows`,
+          danger: true
+        })
+        if (!confirmed) return
+      } finally { pendingRowConfirmation = false }
+    }
     if (attached.length > 0) {
       const many = attached.length > 1
       pendingRowConfirmation = true
@@ -6890,15 +7389,25 @@ export const useStore = create<Store>((set, get) => {
     }
     if (!isCurrent()) return
     const latest = get().databases[csvPath]
-    if (!latest || ids.some((id) => !latest.rows.some(row => row.id === id) || latest.pages?.[id] !== mappings.get(id))) {
+    if (!latest) return
+    // The questions were about these rows and their notes. A linked page
+    // that changed meanwhile, or a row with one that went, makes the answer
+    // about the notes stale. A row without one that went meanwhile (another
+    // window, a sync) is simply already deleted, and the rest still go.
+    const present = ids.filter((id) => latest.rows.some((row) => row.id === id))
+    if (ids.some((id) => latest.pages?.[id] !== mappings.get(id) || (!present.includes(id) && mappings.get(id)))) {
       useToastStore.getState().addToast('The linked pages changed. Review the rows before deleting them.', 'info')
+      return
+    }
+    if (present.length === 0) {
+      useToastStore.getState().addToast(ids.length === 1 ? 'That row was already deleted.' : 'Those rows were already deleted.', 'info')
       return
     }
     if (databaseRowActions.size || folderMutations.size || databaseCreations.size || inFlightNoteWrites.size || inFlightTaskMutations.size || taskMutationQueues.size || [...uncertainFolderMutations.values()].includes(vault)) {
       useToastStore.getState().addToast('Wait for pending file and task changes before deleting rows.', 'info')
       return
     }
-    const removeSet = new Set(ids)
+    const removeSet = new Set(present)
     const nextPages = { ...(latest.pages ?? {}) }
     const nextFlags = { ...(latest.pageHasContent ?? {}) }
     for (const id of ids) {
@@ -7036,12 +7545,14 @@ export const useStore = create<Store>((set, get) => {
     }
     // Drop the cached doc + loading flag so nothing re-reads a file that's gone.
     set((s) => {
-      if (!(csvPath in s.databases) && !(csvPath in s.databasesLoading)) return {}
+      if (!(csvPath in s.databases) && !(csvPath in s.databasesLoading) && !(csvPath in s.databasesLoadError)) return {}
       const databases = { ...s.databases }
       const databasesLoading = { ...s.databasesLoading }
+      const databasesLoadError = { ...s.databasesLoadError }
       delete databases[csvPath]
       delete databasesLoading[csvPath]
-      return { databases, databasesLoading }
+      delete databasesLoadError[csvPath]
+      return { databases, databasesLoading, databasesLoadError }
     })
   },
   openRecordPage: trackNoteWrite(undefined, async (csvPath, rowId) => {
@@ -7251,17 +7762,39 @@ export const useStore = create<Store>((set, get) => {
   setTagMatchMode: (mode) => set({ tagMatchMode: mode }),
 
   refreshTasks: async () => {
-    if (folderMutations.size > 0) return
+    if (folderMutations.size > 0) {
+      // A scan dropped just below can land here, with its loading state still up.
+      if (get().tasksLoading) set({ tasksLoading: false })
+      return
+    }
     const isCurrent = captureFolderActionContext(get)
+    const scannedVault = get().vault
+    const scannedBridge = window.zen
     const revision = taskIndexRevision
+    // A scan that went stale is dropped, which is right, but the same vault still
+    // needs an answer: a layout that moved under it left Tasks on "scanning..."
+    // until the next resume (#1023). A folder move or a local edit keeps the tasks
+    // it already rewrote, so that only ends the loading state. Another vault has
+    // its own state and scan.
+    const dropIfStale = async (): Promise<boolean> => {
+      if (isCurrent() && revision === taskIndexRevision) return false
+      if (get().vault === scannedVault && window.zen === scannedBridge) {
+        if (isCurrent()) set({ tasksLoading: false })
+        else await get().refreshTasks()
+      }
+      return true
+    }
     set({ tasksLoading: true })
     try {
       const tasks = await window.zen.scanTasks()
-      if (!isCurrent() || revision !== taskIndexRevision) return
-      set({ vaultTasks: tasks, tasksLoading: false })
+      if (await dropIfStale()) return
+      set({
+        vaultTasks: withoutTemplateFolderTasks(tasks, get().vaultSettings),
+        tasksLoading: false
+      })
     } catch (err) {
       console.error('scanTasks failed', err)
-      if (!isCurrent() || revision !== taskIndexRevision) return
+      if (await dropIfStale()) return
       set({ tasksLoading: false })
     }
   },
@@ -7273,9 +7806,17 @@ export const useStore = create<Store>((set, get) => {
     try {
       const fresh = await window.zen.scanTasksForPath(relPath)
       if (!isCurrent() || folderMutationBlocks(relPath) || version !== folderReadVersion(relPath)) return
-      set((s) => ({
-        vaultTasks: s.vaultTasks.filter((t) => t.sourcePath !== relPath).concat(fresh)
-      }))
+      set((s) => {
+        const next = withoutTemplateFolderTasks(fresh, s.vaultSettings)
+        // Most saves leave a note's tasks as they were (typing prose). With
+        // reminders on this runs on every save, so an unchanged file keeps the
+        // list as it is rather than waking every reader of it.
+        const held = s.vaultTasks.filter((t) => t.sourcePath === relPath)
+        if (held.length === next.length && JSON.stringify(held) === JSON.stringify(next)) return s
+        return {
+          vaultTasks: s.vaultTasks.filter((t) => t.sourcePath !== relPath).concat(next)
+        }
+      })
     } catch (err) {
       console.error('scanTasksForPath failed', err)
     }
@@ -7315,7 +7856,10 @@ export const useStore = create<Store>((set, get) => {
 
     // Focus / open the note in the active pane. This replaces the Tasks
     // tab's content area with the note (the Tasks tab itself stays in the
-    // strip, so the user can hop back with a click).
+    // strip, so the user can hop back with a click). `openNoteInPane` keeps
+    // no history, so the jump is recorded here, as openNoteAtOffset does
+    // (#484): Ctrl+O and the phones' Back return to Tasks, not past it.
+    set(noteHistoryAfterJump(get(), task.sourcePath))
     await get().openNoteInPane(state.activePaneId, task.sourcePath)
     if (!isCurrent() || get().selectedPath !== task.sourcePath) return
     // Make sure the folder view is sensible in case the sidebar is visible.
@@ -7342,6 +7886,8 @@ export const useStore = create<Store>((set, get) => {
   },
 
   toggleTaskFromList: trackTaskWrite(async (task) => {
+    // Checking off a recurring task writes its next occurrence (#1036).
+    if (!task.checked && (await completeRecurringTaskInNote(task, false))) return
     const state = get()
     const path = task.sourcePath
     const openBuffer = state.noteContents[path]
@@ -7381,6 +7927,10 @@ export const useStore = create<Store>((set, get) => {
           : t
       )
     }))
+  }),
+
+  skipTaskOccurrence: trackTaskWrite(async (task) => {
+    await completeRecurringTaskInNote(task, true)
   }),
 
   cancelTaskFromList: trackTaskWrite(async (task) => {
@@ -7489,6 +8039,7 @@ export const useStore = create<Store>((set, get) => {
         }
 
         let nextBody = body
+        let recurring: RecurringCompletion | null = null
         if (task.kind === 'file') {
           // Whole-note task: every field lives in frontmatter, so apply the whole
           // batch as one frontmatter rewrite rather than per-line edits.
@@ -7497,10 +8048,14 @@ export const useStore = create<Store>((set, get) => {
             fileTaskMutationUpdates(mutations, toIsoDateLocal(new Date()))
           )
         } else {
+          // Checking off goes last: a recurring task's check-off copies the
+          // line as the other mutations left it into its next occurrence.
+          let checkOff = false
           for (const m of mutations) {
             switch (m.kind) {
               case 'set-checked':
-                nextBody = setTaskCheckedAtIndex(nextBody, task.taskIndex, m.checked)
+                if (m.checked) checkOff = true
+                else nextBody = setTaskCheckedAtIndex(nextBody, task.taskIndex, false)
                 break
               case 'set-waiting':
                 nextBody = setTaskWaitingAtIndex(nextBody, task.taskIndex, m.waiting)
@@ -7517,10 +8072,17 @@ export const useStore = create<Store>((set, get) => {
               case 'set-field':
                 nextBody = setTaskFieldAtIndex(nextBody, task.taskIndex, m.key, m.value)
                 break
+              case 'set-tag':
+                nextBody = setTaskTagAtIndex(nextBody, task.taskIndex, m.tag)
+                break
               case 'set-text':
                 nextBody = setTaskTextAtIndex(nextBody, task.taskIndex, m.text)
                 break
             }
+          }
+          if (checkOff) {
+            recurring = recurringCompletionFor(task, nextBody)
+            nextBody = recurring?.body ?? setTaskCheckedAtIndex(nextBody, task.taskIndex, true)
           }
         }
         if (nextBody === body) {
@@ -7556,6 +8118,10 @@ export const useStore = create<Store>((set, get) => {
               return { noteContents: { ...s.noteContents, [path]: { ...cached, body: nextBody } } }
             })
           }
+        }
+        if (recurring) {
+          replaceInlineTasksForNote(task, nextBody)
+          announceRecurrence(task, recurring, body, false)
         }
       })
     })()
@@ -7812,6 +8378,48 @@ export const useStore = create<Store>((set, get) => {
     set({ kanbanCardSort: sort })
     savePrefs(collectPrefs(get()))
   },
+  setHideEmptyTasks: (hide) => {
+    set({ hideEmptyTasks: hide })
+    savePrefs(collectPrefs(get()))
+  },
+  setTaskReminders: (on) => {
+    set({ taskReminders: on })
+    savePrefs(collectPrefs(get()))
+  },
+  setTaskReminderTime: (time) => {
+    set({ taskReminderTime: normalizeReminderTime(time) })
+    savePrefs(collectPrefs(get()))
+  },
+  // Global and portable like the column titles, deliberately not a per-vault
+  // view override: that would need the Go server's vault.json mirror to learn
+  // it (the reasoning #889 gave for the card order).
+  setKanbanWipLimit: (group, columnId, limit) => {
+    const key = `${group}:${columnId}`
+    const next = { ...get().kanbanWipLimits }
+    if (limit === null) delete next[key]
+    else next[key] = limit
+    set({ kanbanWipLimits: normalizeKanbanWipLimits(next) })
+    savePrefs(collectPrefs(get()))
+  },
+  // Kept like the WIP limits: global and portable, not a per-vault override.
+  setKanbanColumnColor: (group, columnId, color) => {
+    const key = `${group}:${columnId}`
+    const next: Record<string, KanbanColumnColor> = { ...get().kanbanColumnColors }
+    if (color === null) delete next[key]
+    else next[key] = color
+    set({ kanbanColumnColors: normalizeKanbanColumnColors(next) })
+    savePrefs(collectPrefs(get()))
+  },
+  setKanbanLanes: (laneBy) => {
+    set({ kanbanLanes: normalizeKanbanLanes(laneBy) })
+    savePrefs(collectPrefs(get()))
+  },
+  setKanbanCollapsedLanes: (group, laneBy, laneIds) => {
+    const next = { ...get().kanbanCollapsedLanes }
+    next[kanbanCollapsedLanesKey(group, laneBy)] = laneIds
+    set({ kanbanCollapsedLanes: normalizeKanbanCollapsedLanes(next) })
+    savePrefs(collectPrefs(get()))
+  },
   setTasksListOrder: (order) => {
     set({ tasksListOrder: order })
     savePrefs(collectPrefs(get()))
@@ -8032,6 +8640,8 @@ export const useStore = create<Store>((set, get) => {
   refreshNotes: async () => {
     const request = ++noteIndexRequest
     const isCurrent = captureFolderActionContext(get)
+    const listedVault = get().vault
+    const listedBridge = window.zen
     try {
       // Load this vault's manual note order once per vault (drives #224).
       const orderRoot = get().vault?.root ?? ''
@@ -8045,7 +8655,15 @@ export const useStore = create<Store>((set, get) => {
         window.zen.listFolders(),
         window.zen.hasAssetsDir()
       ])
-      if (!isCurrent() || request !== noteIndexRequest) return
+      if (request !== noteIndexRequest) return
+      if (!isCurrent()) {
+        // The same vault's layout moved while it was listed, which is what a
+        // resync that fetches settings and notes side by side does when files
+        // settle it (#1023). This listing may predate the move and is dropped,
+        // but with nothing to follow it the sidebar stayed empty: list again.
+        if (get().vault === listedVault && window.zen === listedBridge) await get().refreshNotes()
+        return
+      }
       recordRendererPerf('store.refreshNotes.fetch', performance.now() - startedAt, {
         notes: notes.length,
         folders: folders.length,
@@ -8101,15 +8719,21 @@ export const useStore = create<Store>((set, get) => {
         if (pinnedRefPath) referenced.add(pinnedRefPath)
         // The link popover edits a cached note no pane may have open.
         for (const held of linkPopoverHeldPaths(s)) referenced.add(held)
+        // A buffer with an edit not yet on disk stays until its save lands,
+        // open or not: the rollover and the task lists edit notes no pane
+        // shows, and a listing that landed between such an edit and its
+        // debounced save used to drop the edit unwritten.
+        const unsaved = (path: string): boolean =>
+          s.noteDirty[path] === true || pathSaveTimers.has(path) || pathSaveQueues.has(path)
         const contents: Record<string, NoteContent> = {}
         const dirty: Record<string, boolean> = {}
         for (const [path, content] of Object.entries(s.noteContents)) {
-          if (!referenced.has(path)) continue
+          if (!referenced.has(path) && !unsaved(path)) continue
           const latestMeta = noteMetaByPath.get(path)
           contents[path] = latestMeta ? { ...content, ...latestMeta } : content
         }
         for (const [path, isDirty] of Object.entries(s.noteDirty)) {
-          if (referenced.has(path)) dirty[path] = isDirty
+          if (referenced.has(path) || unsaved(path)) dirty[path] = isDirty
         }
         const next = {
           notes:
@@ -8134,6 +8758,10 @@ export const useStore = create<Store>((set, get) => {
       // The note list is where preamble notes are discovered, so keep them in
       // step with it (no-op unless the setting is on). (#486)
       if (get().typstTagPreambles) void get().refreshTypstPreambles()
+      // Template-folder notes too (#1024): a note added, removed or edited in
+      // the folder, here or on another device, reaches the picker this way.
+      // Unchanged notes are not read again.
+      void get().loadFolderTemplates()
     } catch (err) {
       console.error('refresh failed', err)
     }
@@ -8325,13 +8953,17 @@ export const useStore = create<Store>((set, get) => {
           .catch((err) => {
             console.error('resync vault settings failed', err)
           }),
-        tasksSurfaceVisible(get()) ? get().refreshTasks() : Promise.resolve(),
+        get().refreshRootContentHidden(),
+        taskIndexWanted(get()) ? get().refreshTasks() : Promise.resolve(),
         // Templates ride the feed too (scope 'templates'), so a gap may have
         // swallowed a template saved on another device.
         get().loadCustomTemplates(),
         // So do agent edit records (scope 'agent-edits').
         get().refreshAgentEdits()
       ])
+      // The listing and the settings landed in either order; read the
+      // template folder (#1024) against both.
+      await get().loadFolderTemplates()
       const stateAfter = get()
       const openTabs = [...new Set(allLeaves(stateAfter.paneLayout).flatMap((leaf) => leaf.tabs))]
       // Databases and comment threads have their own feed scopes ('database',
@@ -8423,6 +9055,28 @@ export const useStore = create<Store>((set, get) => {
       if (ev.kind !== 'change') await get().refreshAssets()
       return
     }
+    // A vault whose vault.json does not state its layout has it inferred from
+    // the root's own entries, so the first folder or note to land there can
+    // move it to root mode, and only main notices (#1023). Filling an empty
+    // vault left every note under a collapsed Inbox until a reload.
+    if (!ev.path.includes('/') && (ev.scope === undefined || ev.scope === 'folder')) {
+      const root = get().vault?.root
+      void window.zen
+        .getVaultSettings()
+        .then((settings) => {
+          const next = normalizeVaultSettings(settings)
+          if (
+            get().vault?.root === root &&
+            next.primaryNotesLocation !== get().vaultSettings.primaryNotesLocation
+          ) {
+            set({ vaultSettings: next })
+          }
+          void get().refreshRootContentHidden()
+        })
+        .catch((err) => {
+          console.error('refresh vault settings failed', err)
+        })
+    }
     if (ev.scope === 'folder') {
       // A folder was created/removed/renamed externally (e.g. in another
       // client sharing this vault). An empty folder produces no note event,
@@ -8451,6 +9105,7 @@ export const useStore = create<Store>((set, get) => {
             .getVaultSettings()
             .then((settings) => {
               const normalized = normalizeVaultSettings(settings)
+              const templateFolderBefore = resolveTemplateFolder(get().vaultSettings)
               // Re-overlay view overrides if vault.json changed externally — only
               // in per-vault scope. (#292)
               set({
@@ -8462,6 +9117,12 @@ export const useStore = create<Store>((set, get) => {
               const nameBefore = get().vault?.name
               applyVaultNameFromSettings(normalized)
               if (get().vault?.name !== nameBefore) void get().refreshLocalVaults()
+              // A template folder set on another device or by hand (#1024)
+              // changes the picker and which checkboxes count as tasks.
+              if (resolveTemplateFolder(normalized) !== templateFolderBefore) {
+                void get().loadFolderTemplates()
+                if (taskIndexWanted(get())) void get().refreshTasks()
+              }
             })
             .catch((err) => {
               console.error('refresh vault settings failed', err)
@@ -8487,13 +9148,34 @@ export const useStore = create<Store>((set, get) => {
     // doesn't show stale cards) and the calendar panel, whose weekly task list
     // otherwise kept showing a daily note's tasks as they were at the last full
     // scan (stale checked-state, missing newly added tasks).
-    if (tasksSurfaceVisible(state)) {
+    //
+    // Reminders read the same cache with nothing on screen, so with them on a
+    // file another program writes reaches it too (#1065). An index that holds
+    // nothing yet may never have been loaded: splicing one file into it would
+    // pass for the whole vault (Home and the calendar load only an empty list,
+    // and the reminder schedule would drop every other task), so a file with
+    // tasks loads it whole instead. That happens once; later changes splice.
+    const surfaceVisible = tasksSurfaceVisible(state)
+    if (surfaceVisible || remindersNeedTaskIndex(state)) {
       if (ev.kind === 'unlink') {
-        set((s) => ({
-          vaultTasks: s.vaultTasks.filter((t) => t.sourcePath !== ev.path)
-        }))
-      } else {
+        if (state.vaultTasks.some((t) => t.sourcePath === ev.path)) {
+          set((s) => ({
+            vaultTasks: s.vaultTasks.filter((t) => t.sourcePath !== ev.path)
+          }))
+        }
+      } else if (surfaceVisible || state.vaultTasks.length > 0 || state.tasksLoading) {
         await get().rescanTasksForPath(ev.path)
+      } else {
+        const fresh = await window.zen.scanTasksForPath(ev.path).catch(() => [])
+        const after = get()
+        if (
+          after.vault === state.vault &&
+          after.vaultTasks.length === 0 &&
+          !after.tasksLoading &&
+          withoutTemplateFolderTasks(fresh, after.vaultSettings).length > 0
+        ) {
+          void after.refreshTasks()
+        }
       }
     }
 
@@ -8663,6 +9345,12 @@ export const useStore = create<Store>((set, get) => {
             ...activeFieldsFrom(cur.paneLayout, cur.activePaneId, cur.noteContents, dirty)
           }
         })
+        // A template edited in the editor (#1024) reaches the picker with the
+        // save, without waiting for the watcher's echo: the listing stamp just
+        // moved, so the folder load reads this note again.
+        if (isPathInTemplateFolder(path, resolveTemplateFolder(get().vaultSettings))) {
+          void get().loadFolderTemplates()
+        }
         // This app saved the note, which is what the workflow event triggers
         // listen for. A tag the note did not carry before is its own event.
         emitNoteEvent('note-saved', path)
@@ -9380,6 +10068,8 @@ export const useStore = create<Store>((set, get) => {
     }),
   setBufferPaletteOpen: (open) => set({ bufferPaletteOpen: open }),
   setEmbedDrawingPaletteOpen: (open) => set({ embedDrawingPaletteOpen: open }),
+  setImportDialog: (dialog) => set({ importDialog: dialog }),
+  setLastImportFolder: (folder) => set({ lastImportFolder: folder }),
   setNoteCoverPickerPath: (path, start = null) =>
     set({ noteCoverPickerPath: path, noteCoverPickerStart: path ? start : null }),
   setNoteCoverReposition: (reposition) => set({ noteCoverReposition: reposition }),
@@ -10117,13 +10807,14 @@ export const useStore = create<Store>((set, get) => {
     if (!settings.dailyNotes.enabled) return
     const { title, subpath } = dailyNoteLocationForDate(date, settings)
     const existing = findDailyNoteForDate(state.notes, settings, date)
+    let opened: NoteMeta | null = existing ?? null
     if (existing) {
       set({ view: { kind: 'folder', folder: 'inbox', subpath } })
       await get().selectNote(existing.path)
     } else {
       const template = resolveTemplate(state.customTemplates, settings.dailyNotes.templateId)
       if (template) {
-        await get().createFromTemplate(template, { folder: 'inbox', subpath, title, date })
+        opened = await get().createFromTemplate(template, { folder: 'inbox', subpath, title, date })
       } else {
         await get().createAndOpen('inbox', subpath, { title })
       }
@@ -10136,9 +10827,12 @@ export const useStore = create<Store>((set, get) => {
     requestEditorFocus({ read: !!existing && options?.readIfExisting === true })
     // Opening *today's* note rolls unfinished tasks forward from past daily
     // notes (Obsidian-style) when enabled. Fire-and-forget so the note shows
-    // right away; the rollover appends into the now-open buffer.
+    // right away; the rollover appends into the now-open buffer. It is handed
+    // the note just opened or made rather than looking it up: the note list
+    // can trail a note made a moment ago, and a rollover that found no note
+    // for today made a second one ("<today> 2.md") and filled that instead.
     if (noteTitleForDate(date) === noteTitleForDate(new Date())) {
-      void get().rolloverUnfinishedTasksIntoToday()
+      void get().rolloverUnfinishedTasksIntoToday(opened ? { today: opened } : undefined)
     }
   },
 
@@ -10158,6 +10852,10 @@ export const useStore = create<Store>((set, get) => {
     try {
       const meta = await window.zen.createNote('inbox', title, subpath)
       rememberEditModeForCreatedNote(meta.path)
+      // In the list at once, as createAndOpen does: the listing below is
+      // dropped when a newer one starts first (the watcher's echo of this very
+      // write does), and a second call meanwhile must find today's note.
+      set((s) => ({ notes: s.notes.some((n) => n.path === meta.path) ? s.notes : [...s.notes, meta] }))
       if (body) await window.zen.writeNote(meta.path, body)
       emitNoteEvent('note-created', meta.path)
       await get().refreshNotes()
@@ -10220,7 +10918,7 @@ export const useStore = create<Store>((set, get) => {
     const todayIso = noteTitleForDate(today)
     const vaultRoot = get().vault?.root ?? ''
     if (!force && !settings.dailyNotes.rolloverUnfinishedTasks) return 0
-    const todayNote = await get().ensureDailyNoteForDate(today)
+    const todayNote = opts?.today ?? (await get().ensureDailyNoteForDate(today))
     if (!todayNote) return 0
     if (opts?.open) {
       const { subpath } = dailyNoteLocationForDate(today, settings)
@@ -10414,13 +11112,81 @@ export const useStore = create<Store>((set, get) => {
   },
 
   loadCustomTemplates: async () => {
+    let stored: NoteTemplate[] = []
     try {
       const files = await window.zen.listTemplates()
-      set({ customTemplates: files.map((f) => parseCustomTemplate(f.raw, f.sourcePath)) })
+      stored = files.map((f) => parseCustomTemplate(f.raw, f.sourcePath))
     } catch (err) {
       console.error('loadCustomTemplates failed', err)
-      set({ customTemplates: [] })
     }
+    set((s) => ({ storedTemplates: stored, customTemplates: [...stored, ...s.folderTemplates] }))
+  },
+
+  loadFolderTemplates: async () => {
+    // The template folder's notes are ordinary notes (#1024): they arrive with
+    // the note listing and are read through readNote, which every host has, so
+    // a self-hosted server, the web client and the phones need nothing of
+    // their own to show them.
+    const load = ++folderTemplateLoad
+    const state = get()
+    const root = state.vault?.root ?? ''
+    const folder = resolveTemplateFolder(state.vaultSettings)
+    const candidates = folder
+      ? state.notes.filter(
+          (note) =>
+            note.folder !== 'trash' &&
+            /\.md$/i.test(note.path) &&
+            // An Obsidian drawing is a `.excalidraw.md` file, not a template.
+            !isObsidianExcalidrawPath(note.path) &&
+            isPathInTemplateFolder(note.path, folder)
+        )
+      : []
+    const present = new Set<string>()
+    const read = await Promise.all(
+      candidates.map(async (note): Promise<NoteTemplate | null> => {
+        const key = `${root}\0${note.path}`
+        const stamp = `${folder}\0${note.updatedAt}\0${note.size}`
+        present.add(key)
+        const cached = folderTemplateCache.get(key)
+        if (cached && cached.stamp === stamp) return cached.template
+        try {
+          const { body } = await window.zen.readNote(note.path)
+          const template = parseFolderTemplate(body, note.path, folder!)
+          folderTemplateCache.set(key, { stamp, template })
+          return template
+        } catch (err) {
+          console.error('template folder read failed', note.path, err)
+          return null
+        }
+      })
+    )
+    if (load !== folderTemplateLoad) return // a newer listing is loading them
+    for (const key of folderTemplateCache.keys()) {
+      if (!present.has(key)) folderTemplateCache.delete(key)
+    }
+    const loaded = read
+      .filter((t): t is NoteTemplate => t !== null)
+      .sort((a, b) => (a.sourcePath ?? '').localeCompare(b.sourcePath ?? ''))
+    const previous = get().folderTemplates
+    if (loaded.length === previous.length && loaded.every((t, i) => t === previous[i])) return
+    set((s) => ({ folderTemplates: loaded, customTemplates: [...s.storedTemplates, ...loaded] }))
+  },
+
+  setTemplateFolder: async (folder) => {
+    const settings = get().vaultSettings
+    const cleaned = folder === null ? null : normalizeTemplateFolder(folder)
+    if (folder !== null && !cleaned) return
+    if (cleaned === resolveTemplateFolder(settings)) return
+    const { templates: _previous, ...rest } = settings
+    void _previous
+    // setVaultSettings re-lists the notes, which re-reads the folder.
+    const saved = await get().setVaultSettings(
+      cleaned ? { ...rest, templates: { folder: cleaned } } : rest
+    )
+    if (!saved) return
+    await get().loadFolderTemplates()
+    // The old folder's checkboxes come back to Tasks, the new one's leave.
+    await get().refreshTasks()
   },
 
   loadWorkflowIndex: async () => {
@@ -10447,7 +11213,7 @@ export const useStore = create<Store>((set, get) => {
     await get().loadCustomTemplates()
   },
 
-  createFromTemplate: trackNoteWrite(undefined, async (template, opts) => {
+  createFromTemplate: trackNoteWrite(null, async (template, opts) => {
     try {
       // 1. Destination. An explicit folder (e.g. right-click on a folder) is
       // used directly; otherwise prompt, defaulting to the vault root so the
@@ -10468,7 +11234,7 @@ export const useStore = create<Store>((set, get) => {
         const entered = await promptApp(
           buildTemplateDestinationPrompt(template.name, initialPath, state.folders)
         )
-        if (entered == null) return // cancelled
+        if (entered == null) return null // cancelled
         const dest = parseTemplateDestination(entered)
         folder = dest.folder
         subpath = dest.subpath
@@ -10485,13 +11251,18 @@ export const useStore = create<Store>((set, get) => {
           initialValue: template.name,
           okLabel: 'Create'
         })
-        if (entered == null) return // cancelled
+        if (entered == null) return null // cancelled
         title = entered.trim()
       }
       if (!title) title = template.name
-      const { body, cursorOffset } = renderTemplate(template.body, { title, now: opts?.date })
+      const current = await withCurrentFolderTemplateBody(template)
+      const { body, cursorOffset } = renderTemplate(current.body, { title, now: opts?.date })
       const meta = await window.zen.createNote(folder, title, subpath)
       rememberEditModeForCreatedNote(meta.path)
+      // In the list at once, as createAndOpen does: the listing below is
+      // dropped when a newer one starts first, which the watcher's echo of
+      // this very write does while main is busy (a Cloud run hashing the vault).
+      set((s) => ({ notes: s.notes.some((n) => n.path === meta.path) ? s.notes : [...s.notes, meta] }))
       emitNoteEvent('note-created', meta.path)
       // Write the rendered body before opening so the editor never flashes the
       // default `# Title` scaffold (mirrors importDroppedMarkdownFiles).
@@ -10508,8 +11279,10 @@ export const useStore = create<Store>((set, get) => {
       // command palette, a folder menu — where focus would otherwise stay on
       // the picker/prompt that just closed. (#436, mirrors the daily-note flow)
       requestEditorFocus()
+      return get().notes.find((n) => n.path === meta.path) ?? meta
     } catch (err) {
       console.error('createFromTemplate failed', err)
+      return null
     }
   }),
 
@@ -11377,7 +12150,7 @@ export const useStore = create<Store>((set, get) => {
 
   duplicateFolder: trackNoteWrite(undefined, async (folder, subpath) => {
     const newSubpath = await window.zen.duplicateFolder(folder, subpath)
-    await get().refreshNotes()
+    await Promise.all([get().refreshNotes(), get().refreshAssets()])
     set((s) => ({
       view: { kind: 'folder', folder, subpath: newSubpath },
       vaultSettings: {
@@ -12331,7 +13104,7 @@ useCloudSyncStatusStore.subscribe((state, previous) => {
   )
   // Task views always use the local note. A completed decision can replace
   // that note, so refresh even when the filesystem watcher coalesces its write.
-  if (restoredPath && tasksSurfaceVisible(useStore.getState())) {
+  if (restoredPath && taskIndexWanted(useStore.getState())) {
     void useStore.getState().refreshTasks()
   }
 })

@@ -1,3 +1,4 @@
+import type { NoteFolder } from '@bridge-contract/ipc'
 import { isWorkspaceTransitionPending } from './workspace-transition'
 import {
   csvPathForFormDir,
@@ -141,6 +142,31 @@ export async function requestCreateBrowseNote(
   }
 }
 
+/**
+ * Open a primary-notes directory as a Gallery, the desktop folder menu's
+ * Open as Gallery. An empty directory means its root. A database lists its
+ * record pages in its own grid, so it has no Gallery, as on desktop. The
+ * cards draw vault covers from the file list, which is read lazily: it is
+ * read here first, so a vault switch during that read opens nothing.
+ */
+export async function openBrowseFolderGallery(
+  host: BrowseActionHost,
+  directory = ''
+): Promise<BrowseActionResult> {
+  if (formDirContaining(directory)) return 'unavailable'
+  const context = start(host, directory, true)
+  if (!context) return 'unavailable'
+  const { isCurrent, targetExists } = context
+  try {
+    if (!useStore.getState().assetFilesListed) await useStore.getState().refreshAssets()
+    if (!isCurrent() || !targetExists()) return 'stale'
+    await useStore.getState().openFolderGallery('inbox', directory)
+    return isCurrent() ? 'completed' : 'stale'
+  } finally {
+    pending = false
+  }
+}
+
 /** Prompt for an ordinary folder's leaf name. Database renaming uses its own feature. */
 export async function requestRenameBrowseFolder(
   host: BrowseActionHost,
@@ -245,6 +271,30 @@ export async function createBrowseDatabase(
   host: BrowseActionHost,
   directory?: string
 ): Promise<BrowseActionResult> {
+  return createDatabaseFromBrowse(host, directory, (folder, subpath, isCurrent) =>
+    useStore.getState().createDatabase(folder, subpath, undefined, isCurrent)
+  )
+}
+
+/**
+ * New Kanban (#1038) from Browse: a database that opens on its Board, placed
+ * like createBrowseDatabase. With a directory it is the desktop folder menu's
+ * New Kanban, which the phones' folder sheet offers.
+ */
+export async function createBrowseKanban(
+  host: BrowseActionHost,
+  directory?: string
+): Promise<BrowseActionResult> {
+  return createDatabaseFromBrowse(host, directory, (folder, subpath, isCurrent) =>
+    useStore.getState().createKanban(folder, subpath, isCurrent)
+  )
+}
+
+async function createDatabaseFromBrowse(
+  host: BrowseActionHost,
+  directory: string | undefined,
+  create: (folder: NoteFolder, subpath: string, isCurrent: () => boolean) => Promise<unknown>
+): Promise<BrowseActionResult> {
   const state = useStore.getState()
   const target =
     directory === undefined
@@ -258,9 +308,7 @@ export async function createBrowseDatabase(
   const context = start(host, directory ?? '', true)
   if (!context) return 'unavailable'
   try {
-    await useStore
-      .getState()
-      .createDatabase(target.folder, target.subpath, undefined, context.isCurrent)
+    await create(target.folder, target.subpath, context.isCurrent)
     return context.isCurrent() ? 'completed' : 'stale'
   } finally {
     pending = false

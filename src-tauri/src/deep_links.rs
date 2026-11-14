@@ -117,6 +117,11 @@ pub fn handle_url_or_path(app: &AppHandle, raw: &str) -> bool {
     if is_quick_capture_request(raw) {
         return crate::windows::toggle_quick_capture(app, crate::windows::read_pinned(app)).is_ok();
     }
+    // Clip links before the scheme check: `zennotes-rs:new` is one too.
+    if crate::clip_links::is_clip_link(raw) {
+        crate::clip_links::deliver(app, raw);
+        return true;
+    }
     if raw.starts_with(&format!("{DEEP_LINK_SCHEME}://")) {
         if let Some(req) = parse_open_note_deep_link(raw) {
             open_note_request(app, req);

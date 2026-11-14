@@ -276,6 +276,8 @@ export function getBrowseDirectory(
 
 export {
   createBrowseDatabase,
+  createBrowseKanban,
+  openBrowseFolderGallery,
   requestRenameBrowseDatabase,
   requestCreateBrowseFolder,
   requestCreateBrowseNote,

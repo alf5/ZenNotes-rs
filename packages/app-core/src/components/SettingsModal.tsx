@@ -52,6 +52,11 @@ import {
 import { useStore, refreshCustomThemes, refreshOverrides } from "../store";
 import { vaultFolderName } from "../lib/rename-vault";
 import {
+  canOpenCurrentVaultFolder,
+  fileManagerName,
+  openVaultFolder,
+} from "../lib/vault-folder";
+import {
   WORKFLOW_PRESETS,
   hiddenPresetsInOrder,
 } from "@shared/workflows/presets";
@@ -113,6 +118,13 @@ import {
   type DropdownRect,
 } from "../lib/dropdown-placement";
 import {
+  folderNameChoices,
+  primaryFolderChoices,
+  vaultFolderPathChoices,
+  type FolderChoice,
+} from "../lib/folder-picker";
+import { FolderPickerInput } from "./FolderPickerInput";
+import {
   DEFAULT_SYSTEM_FOLDER_LABELS,
   getSystemFolderLabel,
 } from "../lib/system-folder-labels";
@@ -131,6 +143,7 @@ import {
   normalizeMonthlyNoteLocale,
   normalizeMonthlyNoteTitlePattern,
   normalizeMonthlyNotesDirectory,
+  reservedCreateFolderTop,
   specificFolderDestination,
 } from "../lib/vault-layout";
 import { BUILTIN_TEMPLATES } from "@shared/builtin-templates";
@@ -139,12 +152,16 @@ import {
   findTemplate,
   mergeTemplates,
   templateSettingId,
+  templateSource,
+  templateSourceLabel,
 } from "@shared/template-files";
+import { resolveTemplateFolder } from "@shared/template-folder";
 import { TemplateEditorModal } from "./TemplateEditorModal";
 import type { NoteTemplate } from "@bridge-contract/templates";
 import {
   getSettingsSearchResults,
   inNavigationOrder,
+  settingsResultSubTab,
   type SettingsSearchCategory,
 } from "../lib/settings-search";
 import { useAppUpdateState } from "../lib/app-update-state";
@@ -177,6 +194,8 @@ import { CloudSettings } from "./CloudSettings";
 import { ErrorDetails } from "./ErrorDetails";
 import { consumeSettingsTarget } from "../lib/settings-navigation";
 import { unsplashKeySupported } from "../lib/unsplash-key";
+import { laneFieldLabel } from "../lib/kanban-lanes";
+import type { KanbanLaneBy } from "../store";
 import { UnsplashKeySetting } from "./UnsplashKeySetting";
 import { normalizeApplicationSchemes } from "@shared/application-links";
 
@@ -367,6 +386,20 @@ function specificFolderDestinationLabel(
 ): string {
   const dir = specificFolderDestination(folder, settings);
   return dir ? `\`${dir}/\`` : "the vault root";
+}
+
+/** Where a `Specific folder` row's new files go, and why when a reserved
+ *  folder sends them to the primary location instead. */
+function specificFolderOutcome(
+  folder: string | undefined,
+  settings: VaultSettings,
+  files: string,
+): string {
+  const where = specificFolderDestinationLabel(folder, settings);
+  const reserved = reservedCreateFolderTop(folder, settings);
+  if (!reserved) return `New ${files} go to ${where}.`;
+  const why = reserved.startsWith(".") ? "is hidden" : "holds attachments";
+  return `\`${reserved}/\` ${why}, so new ${files} go to ${where}.`;
 }
 
 function resolveVaultTextSearchBackend(
@@ -690,6 +723,7 @@ export function SettingsModal(): JSX.Element {
   const supportsCloudSync = !!zenBridge.getCapabilities().supportsCloudSync;
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
   const openHelpView = useStore((s) => s.openHelpView);
+  const selectNote = useStore((s) => s.selectNote);
   const vimMode = useStore((s) => s.vimMode);
   const setVimMode = useStore((s) => s.setVimMode);
   const vimInsertEscape = useStore((s) => s.vimInsertEscape);
@@ -741,6 +775,15 @@ export function SettingsModal(): JSX.Element {
   const showArchivedTasks = useStore((s) => s.showArchivedTasks);
   const kanbanCardSort = useStore((s) => s.kanbanCardSort);
   const setKanbanCardSort = useStore((s) => s.setKanbanCardSort);
+  const kanbanLanes = useStore((s) => s.kanbanLanes);
+  const setKanbanLanes = useStore((s) => s.setKanbanLanes);
+  const hideEmptyTasks = useStore((s) => s.hideEmptyTasks);
+  const setHideEmptyTasks = useStore((s) => s.setHideEmptyTasks);
+  const taskReminders = useStore((s) => s.taskReminders);
+  const setTaskReminders = useStore((s) => s.setTaskReminders);
+  const taskReminderTime = useStore((s) => s.taskReminderTime);
+  const setTaskReminderTime = useStore((s) => s.setTaskReminderTime);
+  const [reminderTimeIssue, setReminderTimeIssue] = useState<string | null>(null);
   const tasksListOrder = useStore((s) => s.tasksListOrder);
   const setTasksListOrder = useStore((s) => s.setTasksListOrder);
   const setShowArchivedTasks = useStore((s) => s.setShowArchivedTasks);
@@ -837,6 +880,13 @@ export function SettingsModal(): JSX.Element {
       remoteWorkspaceInfo?.capabilities?.supportsSharesLocation === true);
   const remoteWorkspaceProfiles = useStore((s) => s.remoteWorkspaceProfiles);
   const vaultSettings = useStore((s) => s.vaultSettings);
+  const folders = useStore((s) => s.folders);
+  // The `Specific folder` rows name a folder inside the primary notes area,
+  // so their pickers offer exactly those (#1033).
+  const primaryFolders = useMemo(
+    () => primaryFolderChoices(folders, vaultSettings),
+    [folders, vaultSettings],
+  );
   const persistVaultSettings = useStore((s) => s.setVaultSettings);
   const openVaultPicker = useStore((s) => s.openVaultPicker);
   const connectRemoteWorkspace = useStore((s) => s.connectRemoteWorkspace);
@@ -886,11 +936,29 @@ export function SettingsModal(): JSX.Element {
     workspaceMode === "remote"
       ? remoteWorkspaceInfo?.capabilities?.supportsCustomTemplates === true
       : zenBridge.getCapabilities().supportsCustomTemplates === true;
+  // The template folder lives in vault.json (#1024). A self-hosted server
+  // keeps it from 2.80 and an older one drops it on every settings save, so
+  // the row stays hidden there; the web client asks its server the same way.
+  const supportsTemplateFolder =
+    workspaceMode === "remote"
+      ? remoteWorkspaceInfo?.capabilities?.supportsTemplateFolder === true
+      : zenBridge.getCapabilities().supportsTemplateFolder !== false;
+  // A template-folder template is an ordinary note: it is edited in the
+  // editor, not in the template editor, which writes to .zennotes/templates.
+  const openTemplateNote = (template: NoteTemplate): void => {
+    if (!template.sourcePath) return;
+    setSettingsOpen(false);
+    void selectNote(template.sourcePath);
+  };
   const supportsCustomCodeLanguages =
     !!zenBridge.getCapabilities().supportsCustomCodeLanguages;
   // Undo history between launches needs somewhere machine-local that is not
   // the vault, which only the desktop app has. (#793)
   const supportsUndoFile = !!zenBridge.getCapabilities().supportsUndoFile;
+  // Reminders fire from the desktop app's main process, the only host that
+  // takes the schedule (the same check as task-reminders-runtime), so the
+  // phones and the web app leave out a setting that would do nothing there.
+  const supportsTaskReminders = !!window.zen.setTaskReminders;
   const [templateEditor, setTemplateEditor] = useState<{
     initialRaw?: string;
     sourcePath?: string;
@@ -1876,7 +1944,7 @@ export function SettingsModal(): JSX.Element {
                               </span>
                             </button>
                           )}
-                          <div className="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-0.5 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100">
+                          <div className="zn-hover-reveal absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-0.5 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100">
                             <button
                               type="button"
                               onClick={() => revealCustomTheme(theme)}
@@ -2069,7 +2137,7 @@ export function SettingsModal(): JSX.Element {
                             </span>
                           )}
                         </label>
-                        <div className="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-0.5 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100">
+                        <div className="zn-hover-reveal absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-0.5 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100">
                           <button
                             type="button"
                             onClick={() => revealOverride(override)}
@@ -3681,6 +3749,62 @@ export function SettingsModal(): JSX.Element {
           ],
         },
         {
+          id: "kanban-lanes",
+          title: "Kanban lanes",
+          description: "Split the board into rows by a second field.",
+          keywords: [
+            "kanban",
+            "lanes",
+            "swimlanes",
+            "rows",
+            "priority",
+            "folder",
+            "tag",
+            "split",
+          ],
+        },
+        ...(supportsTaskReminders
+          ? [
+              {
+                id: "task-reminders",
+                title: "Task reminders",
+                description: "Notify for tasks with @remind.",
+                keywords: [
+                  "remind",
+                  "reminder",
+                  "notification",
+                  "notify",
+                  "alert",
+                  "alarm",
+                  "due",
+                  "repeat",
+                  "recurring",
+                ],
+              },
+              {
+                id: "task-reminder-time",
+                title: "Reminder time",
+                description: "For day-before reminders.",
+                keywords: ["remind", "reminder", "time", "morning", "default", "notification"],
+              },
+            ]
+          : []),
+        {
+          id: "hide-empty-tasks",
+          title: "Hide empty tasks",
+          description: "Leave blank checkboxes out of the Tasks views, Calendar, Timeline and home view.",
+          keywords: [
+            "empty",
+            "empty task",
+            "blank",
+            "placeholder",
+            "template",
+            "daily note",
+            "kanban",
+            "hide",
+          ],
+        },
+        {
           id: "show-archived-tasks",
           title: "Show tasks from archived notes",
           description:
@@ -3759,6 +3883,25 @@ export function SettingsModal(): JSX.Element {
               onChange={(next) => setKanbanCardSort(next)}
             />
           </Section>
+          <Section title="Lanes">
+            <SegmentedRow<KanbanLaneBy>
+              label="Kanban lanes"
+              description="Split the board into rows by a second field."
+              value={kanbanLanes}
+              settingId="kanban-lanes"
+              options={[
+                { value: "none", label: "None" },
+                { value: "priority", label: "Priority" },
+                { value: "folder", label: "Folder" },
+                { value: "tag", label: "Tag" },
+                // An @field chosen on the board shows here too.
+                ...(kanbanLanes.startsWith("field:")
+                  ? [{ value: kanbanLanes, label: laneFieldLabel(kanbanLanes) }]
+                  : []),
+              ]}
+              onChange={(next) => setKanbanLanes(next)}
+            />
+          </Section>
           <Section
             title="List order"
             description="How the tasks inside each group of the Tasks list are ordered."
@@ -3773,6 +3916,41 @@ export function SettingsModal(): JSX.Element {
                 { value: "priority", label: "Priority" },
               ]}
               onChange={(next) => setTasksListOrder(next)}
+            />
+          </Section>
+          {supportsTaskReminders && (
+            <Section title="Reminders">
+              <ToggleRow
+                label="Task reminders"
+                description="Notify for tasks with @remind."
+                value={taskReminders}
+                settingId="task-reminders"
+                onChange={setTaskReminders}
+              />
+              <TextInputRow
+                label="Reminder time"
+                description="For day-before reminders."
+                value={taskReminderTime}
+                placeholder="09:00"
+                settingId="task-reminder-time"
+                commitOnBlur
+                issue={reminderTimeIssue}
+                onChange={(next) => {
+                  const m = /^(\d{1,2}):([0-5]\d)$/.exec(next ?? "");
+                  const ok = m != null && Number(m[1]) <= 23;
+                  setReminderTimeIssue(ok ? null : "Use HH:MM, like 09:00 or 18:30.");
+                  if (ok) setTaskReminderTime(next ?? "");
+                }}
+              />
+            </Section>
+          )}
+          <Section title="Empty tasks">
+            <ToggleRow
+              label="Hide empty tasks"
+              description="Leave blank checkboxes out of the Tasks views, Calendar, Timeline and home view."
+              value={hideEmptyTasks}
+              settingId="hide-empty-tasks"
+              onChange={setHideEmptyTasks}
             />
           </Section>
           <Section
@@ -4135,14 +4313,14 @@ export function SettingsModal(): JSX.Element {
       title: "Vault",
       description:
         "Vault location, note organization, periodic notes, and folder labels.",
-      keywords: ["folder", "root", "location", "open vault", "change"],
+      keywords: ["folder", "root", "location", "open vault", "change", "finder", "explorer", "file manager", "reveal"],
       searchItems: [
         {
           id: "vault-location",
           title: "Vault location",
           description:
             "ZenNotes reads markdown directly from the selected vault folder.",
-          keywords: ["folder", "root", "location", "open vault", "change"],
+          keywords: ["folder", "root", "location", "open vault", "change", "finder", "explorer", "file manager", "reveal"],
         },
         {
           id: "vault-name",
@@ -4183,7 +4361,7 @@ export function SettingsModal(): JSX.Element {
           id: "databases-location",
           title: "Default databases location",
           description:
-            "Where new databases are created: your primary notes area, the active note's folder, or a folder you name.",
+            "Where new databases and Kanban boards are created: your primary notes area, the active note's folder, or a folder you name.",
           keywords: [
             "databases",
             "database folder",
@@ -4649,6 +4827,14 @@ export function SettingsModal(): JSX.Element {
                       )}
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
+                    {vault && canOpenCurrentVaultFolder({ vault, workspaceMode }) && (
+                      <button
+                        onClick={() => void openVaultFolder(vault.root)}
+                        className="shrink-0 rounded-xl border border-paper-300/70 bg-paper-100/80 px-3.5 py-2 text-xs font-medium text-ink-800 transition-colors hover:bg-paper-200"
+                      >
+                        Open in {fileManagerName()}
+                      </button>
+                    )}
                     <button
                       onClick={() =>
                         void (workspaceMode === "remote"
@@ -4842,8 +5028,8 @@ export function SettingsModal(): JSX.Element {
                 />
               </Section>
               <Section
-                title="New Drawings, Databases & Tasks"
-                description="Where new Excalidraw drawings, databases, and task files are created, so they don't clutter the root of your vault."
+                title="Default Locations"
+                description="Where new files are created, so they don't clutter the root of your vault."
               >
                 <SegmentedRow
                   label="Default drawings location"
@@ -4868,10 +5054,11 @@ export function SettingsModal(): JSX.Element {
                 {vaultSettings.drawingsLocation?.mode === "folder" && (
                   <TextInputRow
                     label="Drawings folder"
-                    description={`A folder inside your primary notes area, e.g. \`assets/drawings\`. New drawings go to ${specificFolderDestinationLabel(vaultSettings.drawingsLocation?.folder, vaultSettings)}.`}
+                    description={`A folder inside your primary notes area, e.g. \`Drawings\`. ${specificFolderOutcome(vaultSettings.drawingsLocation?.folder, vaultSettings, "drawings")}`}
                     value={vaultSettings.drawingsLocation?.folder ?? ""}
-                    placeholder="assets/drawings"
+                    placeholder="Drawings"
                     settingId="drawings-folder"
+                    folderChoices={primaryFolders}
                     commitOnBlur
                     onChange={(next) =>
                       void persistVaultSettings({
@@ -4886,7 +5073,7 @@ export function SettingsModal(): JSX.Element {
                 )}
                 <SegmentedRow
                   label="Default databases location"
-                  description="Same options as drawings, applied to new databases."
+                  description="Where new databases and Kanban boards are created."
                   value={vaultSettings.databasesLocation?.mode ?? "primary"}
                   settingId="databases-location"
                   options={[
@@ -4907,10 +5094,11 @@ export function SettingsModal(): JSX.Element {
                 {vaultSettings.databasesLocation?.mode === "folder" && (
                   <TextInputRow
                     label="Databases folder"
-                    description={`A folder inside your primary notes area, e.g. \`assets/databases\`. New databases go to ${specificFolderDestinationLabel(vaultSettings.databasesLocation?.folder, vaultSettings)}.`}
+                    description={`A folder inside your primary notes area, e.g. \`Databases\`. ${specificFolderOutcome(vaultSettings.databasesLocation?.folder, vaultSettings, "databases")}`}
                     value={vaultSettings.databasesLocation?.folder ?? ""}
-                    placeholder="assets/databases"
+                    placeholder="Databases"
                     settingId="databases-folder"
+                    folderChoices={primaryFolders}
                     commitOnBlur
                     onChange={(next) =>
                       void persistVaultSettings({
@@ -4925,7 +5113,7 @@ export function SettingsModal(): JSX.Element {
                 )}
                 <SegmentedRow
                   label="Default tasks location"
-                  description="Where new task files (from `+ New task`, the `a` key, `:newtask`, or the command palette) are created. `New Task in Folder…` and `:newtask <folder>` still override this per task."
+                  description="Where new task files are created."
                   value={vaultSettings.tasksLocation?.mode ?? "primary"}
                   settingId="tasks-location"
                   options={[
@@ -4943,10 +5131,11 @@ export function SettingsModal(): JSX.Element {
                 {vaultSettings.tasksLocation?.mode === "folder" && (
                   <TextInputRow
                     label="Tasks folder"
-                    description={`A folder inside your primary notes area, e.g. \`Tasks\` or \`Projects/Inbox\`. New task files go to ${specificFolderDestinationLabel(vaultSettings.tasksLocation?.folder, vaultSettings)}.`}
+                    description={`A folder inside your primary notes area, e.g. \`Tasks\` or \`Projects/Inbox\`. ${specificFolderOutcome(vaultSettings.tasksLocation?.folder, vaultSettings, "task files")}`}
                     value={vaultSettings.tasksLocation?.folder ?? ""}
                     placeholder="Tasks"
                     settingId="tasks-folder"
+                    folderChoices={primaryFolders}
                     commitOnBlur
                     onChange={(next) =>
                       void persistVaultSettings({
@@ -4983,6 +5172,7 @@ export function SettingsModal(): JSX.Element {
                       value={vaultSettings.sharesLocation?.folder ?? ""}
                       placeholder="Clippings"
                       settingId="shares-folder"
+                      folderChoices={primaryFolders}
                       commitOnBlur
                       onChange={(next) =>
                         void persistVaultSettings({
@@ -5745,8 +5935,24 @@ export function SettingsModal(): JSX.Element {
         "custom",
         "scaffold",
         "boilerplate",
+        "folder",
+        "obsidian",
       ],
       searchItems: [
+        {
+          id: "templates-folder",
+          title: "Template folder",
+          description: "Notes in a folder become templates.",
+          keywords: [
+            "template folder",
+            "templates folder",
+            "folder",
+            "obsidian",
+            "notes as templates",
+            "placeholder",
+          ],
+          available: supportsTemplateFolder,
+        },
         {
           id: "templates-list",
           title: "Template library",
@@ -5763,6 +5969,11 @@ export function SettingsModal(): JSX.Element {
       ],
       content: (
         <div className="space-y-6">
+          {supportsTemplateFolder && (
+            <Section title="Template folder">
+              <TemplateFolderRow settingId="templates-folder" />
+            </Section>
+          )}
           <Section
             title="Templates"
             description="Pick any of these from the template picker (`Space t`, `:template`). Built-in templates are read-only; your custom ones can be edited or deleted."
@@ -5827,6 +6038,7 @@ export function SettingsModal(): JSX.Element {
             {allTemplates.map((template) => (
               <div
                 key={template.id}
+                data-template-source={templateSource(template)}
                 className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3 px-5 py-3"
               >
                 <div className="min-w-0 flex-1 basis-56">
@@ -5834,47 +6046,69 @@ export function SettingsModal(): JSX.Element {
                     {template.name}
                   </div>
                   <div className="mt-0.5 truncate text-xs text-ink-500">
-                    {template.category}
+                    {templateSource(template) === "folder"
+                      ? template.sourcePath
+                      : template.category}
                     {template.description ? ` · ${template.description}` : ""}
                   </div>
                 </div>
                 <div className="flex max-w-full flex-wrap items-center gap-2">
-                  {template.builtin && (
-                    <span className="rounded-md bg-paper-200 px-2 py-1 text-xs uppercase tracking-wide text-ink-400">
-                      Built-in
-                    </span>
-                  )}
-                  {!template.builtin && template.builtinId && (
-                    <span className="rounded-md bg-paper-200 px-2 py-1 text-xs uppercase tracking-wide text-ink-400">
-                      Customized
-                    </span>
-                  )}
-                  {template.builtin ? (
-                    supportsCustomTemplates && (
+                  {templateSource(template) === "folder" ? (
+                    <>
+                      <span
+                        className="max-w-xs truncate rounded-md bg-paper-200 px-2 py-1 text-xs text-ink-500"
+                        title="Template folder"
+                      >
+                        {templateSourceLabel(template)}
+                      </span>
                       <button
                         type="button"
-                        onClick={() => editBuiltinTemplate(template)}
+                        onClick={() => openTemplateNote(template)}
                         className="rounded-lg border border-paper-300/70 bg-paper-100/80 px-3 py-1.5 text-xs font-medium text-ink-800 hover:bg-paper-200"
                       >
-                        Edit
+                        Open
                       </button>
-                    )
+                    </>
                   ) : (
                     <>
-                      <button
-                        type="button"
-                        onClick={() => void openTemplateEditor(template)}
-                        className="rounded-lg border border-paper-300/70 bg-paper-100/80 px-3 py-1.5 text-xs font-medium text-ink-800 hover:bg-paper-200"
-                      >
-                        Edit
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => void removeTemplate(template)}
-                        className="rounded-lg border border-red-500/30 bg-paper-100/80 px-3 py-1.5 text-xs font-medium text-[rgb(var(--z-red))] hover:bg-red-500/10"
-                      >
-                        {template.builtinId ? "Reset" : "Delete"}
-                      </button>
+                      {template.builtin && (
+                        <span className="rounded-md bg-paper-200 px-2 py-1 text-xs uppercase tracking-wide text-ink-400">
+                          Built-in
+                        </span>
+                      )}
+                      {!template.builtin && template.builtinId && (
+                        <span className="rounded-md bg-paper-200 px-2 py-1 text-xs uppercase tracking-wide text-ink-400">
+                          Customized
+                        </span>
+                      )}
+                      {template.builtin ? (
+                        supportsCustomTemplates && (
+                          <button
+                            type="button"
+                            onClick={() => editBuiltinTemplate(template)}
+                            className="rounded-lg border border-paper-300/70 bg-paper-100/80 px-3 py-1.5 text-xs font-medium text-ink-800 hover:bg-paper-200"
+                          >
+                            Edit
+                          </button>
+                        )
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => void openTemplateEditor(template)}
+                            className="rounded-lg border border-paper-300/70 bg-paper-100/80 px-3 py-1.5 text-xs font-medium text-ink-800 hover:bg-paper-200"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void removeTemplate(template)}
+                            className="rounded-lg border border-red-500/30 bg-paper-100/80 px-3 py-1.5 text-xs font-medium text-[rgb(var(--z-red))] hover:bg-red-500/10"
+                          >
+                            {template.builtinId ? "Reset" : "Delete"}
+                          </button>
+                        </>
+                      )}
                     </>
                   )}
                 </div>
@@ -6183,9 +6417,7 @@ export function SettingsModal(): JSX.Element {
     if (result.type === "setting") {
       // If the target lives on a sub-tab, open that sub-tab first
       // so the element is mounted before we scroll to it.
-      const subTabId = result.category.subTabs?.find(
-        (tab) => tab.searchIds?.includes(result.targetId),
-      )?.id;
+      const subTabId = settingsResultSubTab(result);
       if (subTabId) {
         setActiveSubTabByCategory((prev) => ({
           ...prev,
@@ -6219,9 +6451,7 @@ export function SettingsModal(): JSX.Element {
   useEffect(() => {
     if (visibleSearchResult?.type !== "setting" || !visibleCategory?.subTabs)
       return;
-    const subTabId = visibleCategory.subTabs.find((tab) =>
-      tab.searchIds?.includes(visibleSearchResult.targetId),
-    )?.id;
+    const subTabId = settingsResultSubTab(visibleSearchResult);
     if (!subTabId) return;
     const categoryId = visibleCategory.id;
     setActiveSubTabByCategory((prev) =>
@@ -6382,9 +6612,11 @@ export function SettingsModal(): JSX.Element {
                         ref={selected ? selectedResultRef : undefined}
                         type="button"
                         // The phone shells hide whole sections (MCP, CLI,
-                        // and Keymap on a phone); this lets them hide the
-                        // search results that would open one.
+                        // and Keymap on a phone) and some sub-tabs; these
+                        // let them hide the search results that would open
+                        // one.
                         data-settings-result-category={result.category.id}
+                        data-settings-result-tab={settingsResultSubTab(result) ?? undefined}
                         onClick={() => openSearchResult(result)}
                         className={[
                           "w-full rounded-xl px-3 py-2.5 text-left transition-colors",
@@ -7132,6 +7364,9 @@ function CategorySubTabs({
               key={tab.id}
               type="button"
               role="tab"
+              // The id a search result names (data-settings-result-tab), so a
+              // host that hides this sub-tab can hide its results too.
+              data-settings-tab={tab.id}
               aria-selected={selected}
               onClick={() => onSelect(tab.id)}
               className={[
@@ -7218,14 +7453,6 @@ function ConfigFileSection(): JSX.Element {
     };
   }, []);
 
-  const platform = window.zen.platformSync();
-  const revealLabel =
-    platform === "darwin"
-      ? "Finder"
-      : platform === "win32"
-        ? "File Explorer"
-        : "file manager";
-
   return (
     <Section
       title="Configuration file"
@@ -7235,7 +7462,7 @@ function ConfigFileSection(): JSX.Element {
       <div className="flex flex-col gap-3 px-5 py-4">
         <div className="flex flex-wrap items-center gap-2">
           <Button onClick={() => void window.zen.revealConfigFile()}>
-            Reveal in {revealLabel}
+            Reveal in {fileManagerName()}
           </Button>
           {configPath && (
             <Button
@@ -7595,6 +7822,9 @@ function QuickCaptureHotkeyRow({
   );
 }
 
+const TEXT_INPUT_ROW_FIELD_CLASS =
+  "w-[23rem] max-w-full shrink-0 rounded-xl border border-paper-300/70 bg-paper-100/80 px-3 py-2 text-sm text-ink-900 outline-none placeholder:text-ink-400 focus:border-accent/45";
+
 function TextInputRow({
   label,
   description,
@@ -7603,6 +7833,7 @@ function TextInputRow({
   settingId,
   commitOnBlur = false,
   issue,
+  folderChoices,
   onChange,
 }: {
   label: string;
@@ -7614,6 +7845,9 @@ function TextInputRow({
   /** Why the last value was refused. Shown under the description, in place of
    *  the field quietly reverting and leaving the user to guess. */
   issue?: string | null;
+  /** The vault's folders, listed under the field for a row that names one
+   *  (#1033). A pick saves at once; a typed path saves as before. */
+  folderChoices?: readonly FolderChoice[];
   onChange: (next: string | null) => void;
 }): JSX.Element {
   const [draft, setDraft] = useState(value);
@@ -7632,6 +7866,15 @@ function TextInputRow({
     const next = raw.trim();
     if (commitOnBlur && next === value) return;
     onChange(next ? next : null);
+  };
+
+  const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>): void => {
+    if (!commitOnBlur) return;
+    if (e.key === "Enter" && !isImeComposing(e)) e.currentTarget.blur();
+    if (e.key === "Escape") {
+      setDraft(value);
+      e.currentTarget.blur();
+    }
   };
 
   // The field wraps under the label when the row is too narrow, as the Vault
@@ -7659,28 +7902,46 @@ function TextInputRow({
           </div>
         )}
       </div>
-      <input
-        value={draft}
-        onFocus={() => setFocused(true)}
-        onChange={(e) => {
-          setDraft(e.target.value);
-          if (!commitOnBlur) commit(e.target.value);
-        }}
-        onBlur={(e) => {
-          setFocused(false);
-          if (commitOnBlur) commit(e.target.value);
-        }}
-        onKeyDown={(e) => {
-          if (!commitOnBlur) return;
-          if (e.key === "Enter" && !isImeComposing(e)) e.currentTarget.blur();
-          if (e.key === "Escape") {
-            setDraft(value);
-            e.currentTarget.blur();
-          }
-        }}
-        placeholder={placeholder}
-        className="w-[23rem] max-w-full shrink-0 rounded-xl border border-paper-300/70 bg-paper-100/80 px-3 py-2 text-sm text-ink-900 outline-none placeholder:text-ink-400 focus:border-accent/45"
-      />
+      {folderChoices ? (
+        <FolderPickerInput
+          value={draft}
+          choices={folderChoices}
+          current={value}
+          aria-label={label}
+          onFocus={() => setFocused(true)}
+          onChange={(next) => {
+            setDraft(next);
+            if (!commitOnBlur) commit(next);
+          }}
+          onPick={(next) => {
+            setDraft(next);
+            commit(next);
+          }}
+          onBlur={(e) => {
+            setFocused(false);
+            if (commitOnBlur) commit(e.target.value);
+          }}
+          onKeyDown={onKeyDown}
+          placeholder={placeholder}
+          className={TEXT_INPUT_ROW_FIELD_CLASS}
+        />
+      ) : (
+        <input
+          value={draft}
+          onFocus={() => setFocused(true)}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            if (!commitOnBlur) commit(e.target.value);
+          }}
+          onBlur={(e) => {
+            setFocused(false);
+            if (commitOnBlur) commit(e.target.value);
+          }}
+          onKeyDown={onKeyDown}
+          placeholder={placeholder}
+          className={TEXT_INPUT_ROW_FIELD_CLASS}
+        />
+      )}
     </div>
   );
 }
@@ -7708,7 +7969,7 @@ function TemplateSelectRow({
   const triggerLabel = missing
     ? "[Missing template]"
     : selected
-      ? `${selected.category} · ${selected.name}`
+      ? `${templateSourceLabel(selected)} · ${selected.name}`
       : "None (blank note)";
 
   // Custom dropdown (not a native <select>): native popups don't reliably
@@ -7877,7 +8138,7 @@ function TemplateSelectRow({
               {items.map((tpl, idx) => {
                 const isSelected = tpl ? tpl === selected : !value && !missing;
                 const text = tpl
-                  ? `${tpl.category} · ${tpl.name}`
+                  ? `${templateSourceLabel(tpl)} · ${tpl.name}`
                   : "None (blank note)";
                 return (
                   <button
@@ -7905,6 +8166,96 @@ function TemplateSelectRow({
           </div>,
           document.body,
         )}
+    </div>
+  );
+}
+
+/**
+ * Settings editor for the vault's template folder (#1024): a folder picker
+ * over the vault's folders, by their path on disk, which is what vault.json
+ * stores (#1033). An empty field is None. The sidebar folder menu ("Use as
+ * Template Folder", `m` in Vim mode) is the other way in. Saved to vault.json,
+ * so it travels with the vault and every runtime agrees on which notes are
+ * templates.
+ */
+function TemplateFolderRow({ settingId }: { settingId?: string }): JSX.Element {
+  const vaultSettings = useStore((s) => s.vaultSettings);
+  const folders = useStore((s) => s.folders);
+  const folderTemplates = useStore((s) => s.folderTemplates);
+  const setTemplateFolder = useStore((s) => s.setTemplateFolder);
+  const current = resolveTemplateFolder(vaultSettings);
+  const saved = current ?? "";
+
+  // Every folder inside an area, as its path on disk. The areas themselves
+  // (a whole Inbox or Archive of templates) and the Trash are not offered.
+  const choices = useMemo(
+    () => vaultFolderPathChoices(folders, vaultSettings, { areaRoots: false }),
+    [folders, vaultSettings],
+  );
+  const missing = !!current && !choices.some((c) => c.value === current);
+
+  const [draft, setDraft] = useState(saved);
+  const [focused, setFocused] = useState(false);
+  // Escape puts the saved folder back; the blur it ends with must not then
+  // save what was typed.
+  const discarding = useRef(false);
+  useEffect(() => {
+    if (!focused) setDraft(saved);
+  }, [focused, saved]);
+
+  // An empty field is no template folder.
+  const commit = (raw: string): void => {
+    const next = raw.trim();
+    if (next === saved) return;
+    void setTemplateFolder(next ? next : null);
+  };
+
+  const count = folderTemplates.length;
+  return (
+    <div
+      className="flex flex-wrap items-center justify-between gap-x-5 gap-y-3 px-5 py-4"
+      {...settingsSearchTargetProps(settingId)}
+    >
+      <div className="min-w-0 flex-1 basis-56">
+        <div className="text-sm font-medium text-ink-900">Template folder</div>
+        <div className="mt-1 text-xs leading-5 text-ink-500">
+          Notes in this folder become templates. They stay out of Tasks, Tags
+          and search.
+        </div>
+        {current && (
+          <div className="mt-1 text-xs leading-5 text-ink-500" data-template-folder-count={count}>
+            {missing ? "Folder not found." : count === 1 ? "1 template" : `${count} templates`}
+          </div>
+        )}
+      </div>
+      <FolderPickerInput
+        value={draft}
+        choices={choices}
+        current={current}
+        aria-label="Template folder"
+        data-template-folder-picker=""
+        placeholder="None"
+        onFocus={() => setFocused(true)}
+        onChange={setDraft}
+        onPick={(next) => {
+          setDraft(next);
+          commit(next);
+        }}
+        onBlur={(e) => {
+          setFocused(false);
+          if (discarding.current) discarding.current = false;
+          else commit(e.target.value);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !isImeComposing(e)) e.currentTarget.blur();
+          if (e.key === "Escape") {
+            discarding.current = true;
+            setDraft(saved);
+            e.currentTarget.blur();
+          }
+        }}
+        className={TEXT_INPUT_ROW_FIELD_CLASS}
+      />
     </div>
   );
 }
@@ -8362,6 +8713,13 @@ function slugifyStatus(name: string): string {
 function KanbanFolderRootRow({ settingId }: { settingId?: string }): JSX.Element {
   const root = useStore((s) => s.kanbanFolderRoot);
   const setKanbanFolderRoot = useStore((s) => s.setKanbanFolderRoot);
+  const folders = useStore((s) => s.folders);
+  const vaultSettings = useStore((s) => s.vaultSettings);
+  // The root is a folder inside the primary notes area, like `Specific folder`.
+  const choices = useMemo(
+    () => primaryFolderChoices(folders, vaultSettings),
+    [folders, vaultSettings],
+  );
   const [draft, setDraft] = useState(root);
   useEffect(() => {
     setDraft(root);
@@ -8381,13 +8739,18 @@ function KanbanFolderRootRow({ settingId }: { settingId?: string }): JSX.Element
         file-level key.
       </div>
       <div className="mt-3 flex items-center gap-2">
-        <input
+        <FolderPickerInput
           type="text"
           value={draft}
+          choices={choices}
+          current={root}
+          aria-label="Group by the folders inside"
           placeholder="Projects"
-          spellCheck={false}
-          autoComplete="off"
-          onChange={(e) => setDraft(e.target.value)}
+          onChange={setDraft}
+          onPick={(next) => {
+            setDraft(next);
+            setKanbanFolderRoot(next);
+          }}
           onBlur={commit}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
@@ -8555,15 +8918,28 @@ function TasksFolderListRow({
       ? s.toggleTasksIncludedFolder
       : s.toggleTasksExcludedFolder,
   );
+  const vaultFolders = useStore((s) => s.folders);
+  const vaultSettings = useStore((s) => s.vaultSettings);
   const [draft, setDraft] = useState("");
   const included = list === "includedFolders";
+  // Both lists store paths from the vault root, and an area itself is a fair
+  // pick (the sidebar offers its menu items on an area too). Folders already
+  // listed are not offered again.
+  const choices = useMemo(
+    () =>
+      vaultFolderPathChoices(vaultFolders, vaultSettings, {
+        areaRoots: true,
+      }).filter((choice) => !folders.includes(choice.value)),
+    [vaultFolders, vaultSettings, folders],
+  );
 
-  const addDraft = (): void => {
-    const cleaned = normalizeTasksExcludedFolder(draft);
+  const add = (raw: string): void => {
+    const cleaned = normalizeTasksExcludedFolder(raw);
     if (!cleaned || folders.includes(cleaned)) return;
     setDraft("");
     void toggle(cleaned);
   };
+  const addDraft = (): void => add(draft);
 
   return (
     <div className="px-5 py-4" {...settingsSearchTargetProps(settingId)}>
@@ -8619,25 +8995,24 @@ function TasksFolderListRow({
         ))}
       </div>
       <div className="mt-3 flex items-center gap-2">
-        <input
+        <FolderPickerInput
           value={draft}
-          onChange={(e) => setDraft(e.target.value)}
+          choices={choices}
+          onChange={setDraft}
+          onPick={add}
           onKeyDown={(e) => {
-            if (e.key === "Enter") {
+            if (e.key === "Enter" && !isImeComposing(e)) {
               e.preventDefault();
               addDraft();
             }
           }}
-          placeholder={
-            included
-              ? "Folder path, e.g. Tasks"
-              : "Folder path, e.g. inbox/Books"
-          }
+          placeholder="Pick a folder or type its path"
           aria-label={
             included
-              ? "Folder path to use as a Task folder"
-              : "Folder path to exclude from Tasks"
+              ? "Folder to use as a Task folder"
+              : "Folder to exclude from Tasks"
           }
+          data-tasks-folder-picker={list}
           className="min-w-0 flex-1 rounded-md border border-paper-300 bg-paper-100 px-2.5 py-1.5 text-sm text-ink-900 outline-none focus:border-accent/60"
         />
         <button
@@ -8666,6 +9041,10 @@ function TypstPreambleFolderRow({
 }): JSX.Element {
   const stored = useStore((s) => s.vaultSettings.typstPreambles?.folder);
   const setTypstPreambleFolder = useStore((s) => s.setTypstPreambleFolder);
+  const folders = useStore((s) => s.folders);
+  // The setting is one folder name matched at any depth, so the picker
+  // offers the vault's folder names rather than paths.
+  const choices = useMemo(() => folderNameChoices(folders), [folders]);
   const effective = resolveTypstPreambleFolder(stored);
   const [draft, setDraft] = useState(effective);
   // Someone else (another window, a hand edit of vault.json) can move the
@@ -8697,9 +9076,15 @@ function TypstPreambleFolderRow({
         and the self-hosted server agree.
       </div>
       <div className="mt-3 flex items-center gap-2">
-        <input
+        <FolderPickerInput
           value={draft}
-          onChange={(e) => setDraft(e.target.value)}
+          choices={choices}
+          current={effective}
+          onChange={setDraft}
+          onPick={(next) => {
+            setDraft(next);
+            void setTypstPreambleFolder(next);
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               e.preventDefault();

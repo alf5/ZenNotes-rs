@@ -13,7 +13,10 @@
 import { invoke } from './ipc'
 import type { NoteFolder, VaultSettings } from '@zennotes/bridge-contract/ipc'
 import { parseTaskFile, parseTasksFromBody, type VaultTask } from '@zennotes/shared-domain/tasks'
-import { isPathExcludedFromTasks } from '@zennotes/shared-domain/tasks-excluded-folders'
+import {
+  isPathExcludedFromTasks,
+  tasksFolderListsForSettings
+} from '@zennotes/shared-domain/tasks-excluded-folders'
 
 interface TaskSource {
   path: string
@@ -31,17 +34,14 @@ function parseAllTasks(body: string, ctx: TaskSource): VaultTask[] {
 }
 
 async function taskFolderLists(): Promise<{ excluded: string[]; included: string[] }> {
-  const settings = await invoke<VaultSettings>('vault_get_settings')
-  return {
-    excluded: settings.tasks?.excludedFolders ?? [],
-    included: settings.tasks?.includedFolders ?? []
-  }
+  return tasksFolderListsForSettings(await invoke<VaultSettings>('vault_get_settings'))
 }
 
 /** Every task in every live (non-trash) note. Folders on the vault's
- *  `tasks.excludedFolders` list (#458), and every folder outside its Task
- *  folders once `tasks.includedFolders` names any (#962), are skipped before
- *  any file is read. */
+ *  `tasks.excludedFolders` list (#458), every folder outside its Task folders
+ *  once `tasks.includedFolders` names any (#962), and the template folder,
+ *  whose checkboxes are placeholders (#1024), are skipped before any file is
+ *  read. */
 export async function scanTasks(): Promise<VaultTask[]> {
   const [{ excluded, included }, sources] = await Promise.all([
     taskFolderLists(),

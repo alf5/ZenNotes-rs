@@ -1,12 +1,13 @@
 {
   "name": "@zennotes/bridge-contract",
   "private": true,
-  "version": "2.79.0",
+  "version": "2.85.0",
   "type": "module",
   "exports": {
     "./bridge": "./src/bridge.ts",
     "./cloud-sync": "./src/cloud-sync.ts",
     "./ipc": "./src/ipc.ts",
+    "./clip": "./src/clip.ts",
     "./templates": "./src/templates.ts",
     "./workflows": "./src/workflows.ts",
     "./tasks": "./src/tasks.ts",
@@ -18,7 +19,8 @@
     "./custom-code-languages": "./src/custom-code-languages.ts",
     "./app-config": "./src/app-config.ts",
     "./platform": "./src/platform.ts",
-    "./unsplash": "./src/unsplash.ts"
+    "./unsplash": "./src/unsplash.ts",
+    "./notion-import": "./src/notion-import.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",

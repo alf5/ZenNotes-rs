@@ -33,6 +33,9 @@ import { CloseIcon } from './components/icons'
 import { ExcalidrawEmbedMenuHost } from './components/ExcalidrawEmbedMenuHost'
 import { resolveQuickNoteTitle } from './lib/quick-note-title'
 import { escapeEmbedFrame } from './lib/embed-renderers'
+import { enqueueClip } from './lib/clip-apply'
+import { useToastStore } from './lib/toast'
+import type { ClipApplyRequest } from '@zennotes/bridge-contract/clip'
 import {
   eventMatchesUserOverride,
   isMacPlatform,
@@ -47,8 +50,11 @@ import { recordRendererPerf } from './lib/perf'
 import {
   focusEditorAfterPaletteClose,
   focusEditorAfterReadOpen,
+  focusEditorAfterSidebarClose,
   focusEditorNormalMode
 } from './lib/editor-focus'
+import { hostOpensNotesToRead } from './lib/editor-host'
+import { createFocusHealGate } from './lib/focus-heal'
 import { isAppOverlayOpen, isOverlayOrDialogOpen } from './lib/overlay-open'
 import { installMarkdownFileDropHandler } from './lib/markdown-file-drop'
 import {
@@ -63,6 +69,7 @@ import {
 } from './lib/app-update-state'
 import { ensureCloudAutoSyncStarted, stopCloudAutoSync } from './lib/cloud-auto-sync'
 import { loadKeepRunningInTray, startTraySyncStatusReporter } from './lib/tray-runtime'
+import { listenForTaskReminderOpen, startTaskReminderReporter } from './lib/task-reminders-runtime'
 import { installHarperRuntime } from './lib/harper-runtime'
 import { installIgnoredKeysGuard } from './lib/ignored-keys'
 import { installCommandKeymapDispatcher, isMainAppWindow } from './lib/command-keymap-dispatch'
@@ -235,6 +242,10 @@ const EmbedDrawingPalette = lazy(async () => {
   const module = await import('./components/EmbedDrawingPalette')
   return { default: module.EmbedDrawingPalette }
 })
+const ImportModal = lazy(async () => {
+  const module = await import('./components/ImportModal')
+  return { default: module.ImportModal }
+})
 const NoteCoverPicker = lazy(async () => {
   const module = await import('./components/NoteCoverPicker')
   return { default: module.NoteCoverPicker }
@@ -333,6 +344,7 @@ function App(): JSX.Element {
   const workspaceReadyLoggedRef = useRef(false)
   const searchPaletteWarmupCleanupRef = useRef<(() => void) | null>(null)
   const pendingOpenNoteRequestsRef = useRef<Array<{ path: string; vault: ReturnType<typeof useStore.getState>['vault'] }>>([])
+  const pendingClipRequestsRef = useRef<ClipApplyRequest[]>([])
   const vault = useStore((s) => s.vault)
   const init = useStore((s) => s.init)
   const workspaceRestored = useStore((s) => s.workspaceRestored && !s.workspaceTransitioning)
@@ -351,6 +363,7 @@ function App(): JSX.Element {
   const setTemplatePaletteOpen = useStore((s) => s.setTemplatePaletteOpen)
   const embedDrawingPaletteOpen = useStore((s) => s.embedDrawingPaletteOpen)
   const noteCoverPickerPath = useStore((s) => s.noteCoverPickerPath)
+  const importDialog = useStore((s) => s.importDialog)
   const setEmbedDrawingPaletteOpen = useStore((s) => s.setEmbedDrawingPaletteOpen)
   const sidebarOpen = useStore((s) => s.sidebarOpen)
   const noteListOpen = useStore((s) => s.noteListOpen)
@@ -430,6 +443,15 @@ function App(): JSX.Element {
     }
   }, [])
   useEffect(() => installHarperRuntime(), [])
+  // Task reminders (#1036): the schedule goes to the host, clicks come back.
+  useEffect(() => {
+    const stopReporting = startTaskReminderReporter()
+    const stopListening = listenForTaskReminderOpen()
+    return () => {
+      stopReporting()
+      stopListening()
+    }
+  }, [])
 
   useEffect(() => {
     if (!vault) return undefined
@@ -457,13 +479,15 @@ function App(): JSX.Element {
   // Closing the sidebar while it holds keyboard focus (⌘1, Leader E, etc.) used
   // to strand focus on the now-hidden pane; hand it back to the editor. Only
   // fires on the open→closed transition when the sidebar was the focused panel,
-  // so hiding it mid-edit never steals focus from the editor. (#353)
+  // so hiding it mid-edit never steals focus from the editor. (#353) A host
+  // that opens notes to read (a phone) keeps its keyboard down; the editor's
+  // panel takes the keys there too (focusEditorAfterSidebarClose).
   const prevSidebarOpenRef = useRef(sidebarOpen)
   useEffect(() => {
     const wasOpen = prevSidebarOpenRef.current
     prevSidebarOpenRef.current = sidebarOpen
     if (wasOpen && !sidebarOpen && useStore.getState().focusedPanel === 'sidebar') {
-      focusEditorNormalMode({ attempts: 10, delayMs: 24 })
+      focusEditorAfterSidebarClose()
     }
   }, [sidebarOpen])
 
@@ -494,6 +518,27 @@ function App(): JSX.Element {
       }
       pendingOpenNoteRequestsRef.current.push({ path: relPath, vault: state.vault })
     })
+  }, [])
+
+  // Web clipper links (`zennotes://new`, `zennotes://daily`) main handed to
+  // this window. Like a note-open request, one that arrives while the vault
+  // is still loading waits for it.
+  useEffect(() => {
+    const offClip = window.zen.onClipRequested?.((request) => {
+      const state = useStore.getState()
+      if (state.vault && state.workspaceRestored && !state.workspaceTransitioning) {
+        enqueueClip(request)
+        return
+      }
+      pendingClipRequestsRef.current.push(request)
+    })
+    const offNotice = window.zen.onClipNotice?.((notice) => {
+      useToastStore.getState().addToast(notice.message, 'error')
+    })
+    return () => {
+      offClip?.()
+      offNotice?.()
+    }
   }, [])
 
   // Escape inside an embedded video player never reaches the page; desktop
@@ -557,6 +602,12 @@ function App(): JSX.Element {
       if (request.vault && request.vault !== vault) continue
       void useStore.getState().openNoteInTab(request.path)
     }
+  }, [vault, workspaceRestored])
+
+  useEffect(() => {
+    if (!vault || !workspaceRestored || pendingClipRequestsRef.current.length === 0) return
+    // applyClip refuses a clip meant for another vault itself.
+    for (const request of pendingClipRequestsRef.current.splice(0)) enqueueClip(request)
   }, [vault, workspaceRestored])
 
   useEffect(() => {
@@ -1164,9 +1215,20 @@ function App(): JSX.Element {
   // is re-established. When the window regains focus (or becomes visible again)
   // and the editor was the active surface with no overlay open, re-grab it so
   // the user doesn't have to open Settings + Escape to recover. Pairs with the
-  // main-process `backgroundThrottling: false`. (#350)
+  // main-process `backgroundThrottling: false`. (#350) A host that opens notes
+  // to read heals only for someone who was typing as the app was left
+  // (lib/focus-heal.ts), or every return raised its keyboard over a note
+  // being read.
   useEffect(() => {
+    const gate = createFocusHealGate()
+    const editorFocused = (): boolean => {
+      const view = useStore.getState().editorViewRef
+      const active = document.activeElement
+      return !!view && !!active && (active === view.dom || view.dom.contains(active))
+    }
+    const leave = (): void => gate.left(editorFocused())
     const heal = (): void => {
+      if (!gate.returned(hostOpensNotesToRead())) return
       const state = useStore.getState()
       if (state.focusedPanel !== 'editor') return
       if (
@@ -1192,11 +1254,16 @@ function App(): JSX.Element {
     }
     const onVisibility = (): void => {
       if (document.visibilityState === 'visible') heal()
+      else if (document.visibilityState === 'hidden') leave()
     }
     window.addEventListener('focus', heal)
+    window.addEventListener('blur', leave)
+    window.addEventListener('pagehide', leave)
     document.addEventListener('visibilitychange', onVisibility)
     return () => {
       window.removeEventListener('focus', heal)
+      window.removeEventListener('blur', leave)
+      window.removeEventListener('pagehide', leave)
       document.removeEventListener('visibilitychange', onVisibility)
     }
   }, [])
@@ -1204,11 +1271,20 @@ function App(): JSX.Element {
   // A window-drag strip belongs to the window, not the page, so a tab or note
   // dragged inside the app may not be able to drop on one (the blank end of a
   // tab strip with the title bar off). Nothing moves the window mid-drag, so
-  // the strips stand down until the drag ends.
+  // the strips stand down until the drag ends. A dragstart that something
+  // cancels later in its dispatch (the image resize handle does, and so do
+  // the phones' long-press guards) never sends a dragend, which left the
+  // strips down and the title bar no longer moving the window, so once the
+  // dispatch is over a cancelled start ends the drag here.
   useEffect(() => {
     const root = document.documentElement
-    const start = (): void => root.classList.add('zn-app-dragging')
     const end = (): void => root.classList.remove('zn-app-dragging')
+    const start = (event: DragEvent): void => {
+      root.classList.add('zn-app-dragging')
+      window.setTimeout(() => {
+        if (event.defaultPrevented) end()
+      }, 0)
+    }
     window.addEventListener('dragstart', start, true)
     window.addEventListener('dragend', end, true)
     window.addEventListener('drop', end, true)
@@ -1226,6 +1302,7 @@ function App(): JSX.Element {
         {!zenMode && <TitleBar standalone />}
         <Suspense fallback={<div className="flex-1" />}>
           <OnboardingWizard />
+          {importDialog && <ImportModal />}
         </Suspense>
         <PromptHost />
         <ConfirmHost />
@@ -1313,6 +1390,11 @@ function App(): JSX.Element {
       {embedDrawingPaletteOpen && (
         <Suspense fallback={null}>
           <EmbedDrawingPalette />
+        </Suspense>
+      )}
+      {importDialog && (
+        <Suspense fallback={null}>
+          <ImportModal />
         </Suspense>
       )}
       {noteCoverPickerPath && (
